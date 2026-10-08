@@ -5118,6 +5118,9 @@ mod tests {
             served: BTreeMap<u8, BTreeMap<u8, usize>>,
             /// Why the group of a node stopped.
             stopped: BTreeMap<u8, Stopped>,
+            /// What a new open of the log of a node gave at its stop, while the
+            /// mesh that stopped lived.
+            reopened: BTreeMap<u8, Result<(), Error>>,
             /// The leader a node knew at its last tick.
             leaders: BTreeMap<u8, Option<node::Key>>,
             /// The homes the watch of a node gave.
@@ -5188,13 +5191,13 @@ mod tests {
                 entries,
                 commit,
             } = opening;
-            let base = config_at(&own, &tasks, id, PORT, &MEMBERS, &voters);
-            let transport = Rc::clone(&base.transport);
-            let config = Config {
+            let config = |tasks: &Tasks, port| Config {
                 members: MEMBERS.map(create_voter).into(),
-                ..base
+                ..config_at(&own, tasks, id, port, &MEMBERS, &voters)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let first = config(&tasks, PORT);
+            let transport = Rc::clone(&first.transport);
+            let mesh = Mesh::open(first).await.unwrap();
             if !entries.is_empty() {
                 let append = Body::Append {
                     prev: Position::default(),
@@ -5244,6 +5247,10 @@ mod tests {
                         .push(home),
                     Err(stopped) => {
                         record.lock().unwrap().stopped.insert(id, stopped);
+                        // The stop ends the group's task at once, which frees the
+                        // log before any tick.
+                        let again = Mesh::start(config(&tasks, 0)).await.map(drop);
+                        record.lock().unwrap().reopened.insert(id, again);
                         return pending().await;
                     }
                 }
@@ -5327,9 +5334,8 @@ mod tests {
             let entries = changes(1, &sets);
             run.start(opening(3, &entries, 1, 1), false);
             run.start(opening(4, &entries, 2, 1), false);
-            while run.refused(3, 4).is_empty() {
-                run.run(seconds(1));
-            }
+            run.run(seconds(10));
+            assert!(!run.refused(3, 4).is_empty(), "node 3 refused nothing");
             run.start(opening(2, &entries, 2, 1), true);
             run.run(seconds(10));
             let refused = run.refused(3, 4);
@@ -5357,6 +5363,7 @@ mod tests {
             run.run(seconds(10));
             let stopped = Stopped::Removed { by: key(2) };
             assert_eq!(run.record().stopped, [(3, stopped.clone())].into());
+            assert_eq!(run.record().reopened, [(3, Ok(()))].into());
             assert_eq!(
                 stopped.to_string(),
                 format!(

@@ -2233,9 +2233,11 @@ How to read this record:
   answers `removed` only to a sender that a configuration in its own log held, when its
   committed configuration lacks the sender and the request proves no newer configuration
   that holds it. Each other sender that is not a voter gets `Error::NotVoter`, and does
-  not stop. The person chose A on 2026-10-06
+  not stop. The person chose A, 2026-10-07T04:49:33Z
   (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
   text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
+  Supersedes the first version, which the person approved on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638).
   #1105 builds the `removed` answer and the held rule, #1106 the configuration that a
   chain proves, and #1107 the key binding. Until #1106, a request proves no newer
   configuration. A node answers `removed` only to a sender that `Start.voters` or a
@@ -2251,12 +2253,12 @@ How to read this record:
   counts a configuration entry only once its commit index covers it, so a node that
   opened again answers `NotVoter` until a leader gives it the commit index. A request is
   a PreVote, a Vote, a heartbeat, or an append. The rule covers requests only, and
-  `raft` decides which replies count (RAFT SURFACE). The person approved the first
-  version on 2026-10-06, and the coordinator gives the person's words in its comment on
-  #647. The removed node takes that answer only from a voter of its own region, and
-  stops its `raft` group for that region. A voter of its region is a voter of the newest
-  configuration in its log, and an answer from any other node drops the stream, as any
-  refusal does (decided by `laptop.architect`, 2026-10-08T02:59:07Z:
+  `raft` decides which replies count (RAFT SURFACE). The coordinator gives the person's
+  words on the first version in its comment on #647, linked above. The removed node
+  takes that answer only from a voter of its own region, and stops its `raft` group for
+  that region. A voter of its region is a voter of the newest configuration in its log,
+  and an answer from any other node drops the stream, as any refusal does (decided by
+  `laptop.architect`, 2026-10-08T02:59:07Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). `raft`
   sends such a node no entries, only answers. A voter with a lease drops its campaign or
   refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's term. In `raft`
@@ -2425,19 +2427,19 @@ How to read this record:
   that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
   stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
   a reply half with the same code. A request from a node that a committed configuration
-  removed, when a committed one held it (RAFT VOTERS), gets code 17 instead
-  (`Error::Removed`). A group that stopped gives code 16 on a one-way stream. On a
-  stream that goes both ways it gives no mesh code: it can stop in the write of the
-  entry, which then applies after a new open. A `raft` message that finds no block in
-  the pool is not a refusal: the receiver drops it, the stream goes on, and `raft` sends
-  it again. The receiver holds no block while the group writes the entry: it drops the
-  block of the proposal before it gives the change to the group, and takes the block of
-  the answer after the answer. With no block for the answer, the peer gets no answer:
-  the group can hold the entry of the proposal. The reply half ends with no answer and
-  no mesh code. A reply half that ends with no answer and with no code 2 or 16 says
-  nothing about the change, and the peer forwards it again. Lost: the block of the
-  answer first, because a block held while the group writes can take the room that the
-  write needs, and only the end of the write frees it (decided by the architect,
+  removed, when `Start.voters` or a committed `Voters` entry held it (RAFT VOTERS), gets
+  code 17 instead (`Error::Removed`). A group that stopped gives code 16 on a one-way
+  stream. On a stream that goes both ways it gives no mesh code: it can stop in the
+  write of the entry, which then applies after a new open. A `raft` message that finds
+  no block in the pool is not a refusal: the receiver drops it, the stream goes on, and
+  `raft` sends it again. The receiver holds no block while the group writes the entry:
+  it drops the block of the proposal before it gives the change to the group, and takes
+  the block of the answer after the answer. With no block for the answer, the peer gets
+  no answer: the group can hold the entry of the proposal. The reply half ends with no
+  answer and no mesh code. A reply half that ends with no answer and with no code 2 or
+  16 says nothing about the change, and the peer forwards it again. Lost: the block of
+  the answer first, because a block held while the group writes can take the room that
+  the write needs, and only the end of the write frees it (decided by the architect,
   2026-10-07T13:07:00Z:
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038576823). The
   sentences on a group that stopped and on an answer with no block are from a later
