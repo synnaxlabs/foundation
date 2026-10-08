@@ -46,7 +46,8 @@ const CLOSED: Error = Error::PeerClosed { code: Code(0) };
 /// many more chunks.
 const SIZES: [usize; 3] = [1 << 10, 56 << 10, 1 << 20];
 const MESSAGE_BYTES_MAX: usize = 1 << 20;
-/// The reads, each over every size.
+/// The reads. Each size runs in each mode in turn, so neither mode runs only after
+/// the other.
 const MODES: [Mode; 2] = [Mode::Recv, Mode::Into];
 
 #[derive(Clone, Copy, Debug)]
@@ -74,7 +75,7 @@ fn main() {
             .await
             .expect("a session");
         let clock = node.clock();
-        for bytes in MODES.iter().flat_map(|_| SIZES) {
+        for bytes in SIZES.iter().flat_map(|&bytes| MODES.map(|_| bytes)) {
             let mut sender = session
                 .open_sender(Class::Complete)
                 .await
@@ -108,7 +109,7 @@ fn serve(node: &Node) -> Results {
         let transport = Transport::new(config, part(&own, PORT)).expect("a transport");
         let session = transport.accept().await.expect("a session");
         let mut buffer = vec![0; MESSAGE_BYTES_MAX];
-        for mode in MODES.iter().flat_map(|&mode| SIZES.map(|_| mode)) {
+        for mode in SIZES.iter().flat_map(|_| MODES) {
             let mut receiver = match session.accept().await {
                 Ok(incoming) => incoming.receiver,
                 Err(error) => panic!("accept: {error}"),
@@ -168,9 +169,9 @@ fn print(results: &[(Vec<f64>, u64, u64)]) {
         "mode", "bytes", "p10", "p50", "p90", "polls/msg", "allocs/msg"
     );
     let messages = per((WARMUP + ROUNDS) * MESSAGES);
-    let cases = MODES
+    let cases = SIZES
         .iter()
-        .flat_map(|mode| SIZES.map(|bytes| (mode, bytes)));
+        .flat_map(|&bytes| MODES.map(|mode| (mode, bytes)));
     for ((mode, bytes), (nanos, polls, allocations)) in cases.zip(results) {
         let mut nanos = nanos[WARMUP..].to_vec();
         nanos.sort_unstable_by(f64::total_cmp);
