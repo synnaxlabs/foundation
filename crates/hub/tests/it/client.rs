@@ -538,13 +538,14 @@ fn refuses_a_hello_stream_finished_with_no_challenge() {
     );
 }
 
-/// A challenge that `wire` refuses ends the renewal, closes the session with
-/// `MALFORMED`, and each later request gives the error.
+/// The renewal comes 5 minutes, half of `LIFE`, after the admission. A challenge that
+/// `wire` refuses ends the renewal, closes the session with `MALFORMED`, and each later
+/// request gives the error.
 #[test]
 fn closes_the_session_on_a_challenge_that_is_not_valid() {
     raw(
         135,
-        |session, mut hello, _| async move {
+        |session, mut hello, node| async move {
             let sender = hello.sender.as_mut().expect("two-way");
             let pool = own_pool();
             let mut challenge = [0; Challenge::LEN];
@@ -556,7 +557,9 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
                 },
             }
             .encode(&mut challenge);
+            let mut came = Vec::new();
             for _ in 0..2 {
+                let sent = node.clock().now();
                 sender
                     .send(pool.copy(&challenge).expect("room"))
                     .await
@@ -567,7 +570,20 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
                     .await
                     .expect("a hello")
                     .expect("not finished");
+                came.push(node.clock().now() - sent);
             }
+            let half = Span::from_nanos(5 * Span::MINUTE.nanos());
+            assert!(
+                came[0] < Span::SECOND,
+                "the hello comes at once: {:?}",
+                came[0]
+            );
+            assert!(
+                came[1] >= half
+                    && came[1].nanos() < half.nanos() + Span::SECOND.nanos(),
+                "the renewal comes at half of LIFE: {:?}",
+                came[1]
+            );
             let refused = pool.copy(&[0xff]).expect("room");
             sender.send(refused).await.expect("sends");
             assert_eq!(
