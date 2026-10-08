@@ -48,8 +48,8 @@ pub struct Config {
     pub entropy: env::entropy::Entropy,
     /// Where the client spawns the task that renews the hello.
     pub tasks: env::tasks::Tasks,
-    /// The pool of the program's transport. Each message that the client sends takes
-    /// a block from it.
+    /// The pool that the client sends from. It can be the pool of the program's
+    /// transport. Each message that the client sends takes a block from it.
     pub pool: Rc<block::Pool>,
 }
 
