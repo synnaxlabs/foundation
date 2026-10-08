@@ -3807,8 +3807,8 @@ How to read this record:
   `name` in it is `document.unknown-attribute`. Connector names are unique (CONNECTOR
   BLOCK), so two connectors never share a reader, and plan needs no check for it.
   `kind::Context::reader` (#1731) opens the reader under the connector's name. Lost:
-  keep `name` and refuse a repeated reader name at plan, a new surface for a choice
-  that nobody uses (`laptop.architect-2`,
+  keep `name` and refuse a repeated reader name at plan, a new surface for a choice that
+  nobody uses (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444,
   2026-10-08T09:49:27Z). Supersedes `name: Option<Name>` of `reader::Settings` in
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152, and the
