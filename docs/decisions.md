@@ -3523,18 +3523,19 @@ How to read this record:
   attribute, as a file does, the fix of an attribute is to move it into one of those
   blocks. `read::missing` reports a body with none of some keys, and panics on an
   empty list, which is a defect of the caller. `read::required` reads one key or gives
-  that diagnostic. `config` and every kind use them, also at the top level of a file,
-  so one mistake has one code: `document.unknown-attribute`, `document.unknown-block`,
-  and `document.missing-attribute`. Decided by `laptop.architect-2` on #1153
+  that diagnostic. `config` uses them, also at the top level of a file, and so does
+  each kind, so one mistake has one code: `document.unknown-attribute`,
+  `document.unknown-block`, and `document.missing-attribute`. Decided by
+  `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
   2026-10-08 03:05 UTC) and on #1772
   (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
   2026-10-08 03:27 UTC, and
   https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
-  2026-10-08 03:29 UTC). Lost: a
-  `Body` value that records each key read and reports the rest at `finish`, which
-  drops the diagnostics when a caller returns early; `unknown_attributes` and
-  `unknown_blocks` as two functions.
+  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports
+  the rest at `finish`, which drops the diagnostics when a caller returns early;
+  `unknown_attributes` and `unknown_blocks` as two functions; a public
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
