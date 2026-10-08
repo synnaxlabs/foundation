@@ -3226,12 +3226,17 @@ mod port {
             );
         }
 
-        /// Takes the lock of `host` as soon as it is free, then opens the mesh's log
-        /// to write. Gives whether the lock was held, and the open of the log.
+        /// Takes the lock of `host` as soon as it is free, then binds the node's port
+        /// and opens the mesh's log to write. Gives whether the lock was held, the
+        /// bind, and the open of the log.
         fn probe(
             sim: &mut sim::Sim,
             host: &sim::node::Node,
-        ) -> (bool, Result<(), env::files::Error>) {
+        ) -> (
+            bool,
+            Result<(), env::net::Error>,
+            Result<(), env::files::Error>,
+        ) {
             sim.run_on(host, |host, _| async move {
                 let files = host.files();
                 let clock = host.clock();
@@ -3246,17 +3251,24 @@ mod port {
                         opened => break opened.expect("the lock opens"),
                     }
                 };
+                let udp = env::net::udp::Config {
+                    local: listen(&host),
+                    send_buffer_bytes: 1 << 16,
+                    recv_buffer_bytes: 1 << 16,
+                };
+                let port = host.net().udp(&udp).map(drop);
                 let mode = env::files::Mode::Write;
                 let log = files.open(Path::new(LOG), mode).await.map(drop);
                 drop(lock);
-                (waited, log)
+                (waited, port, log)
             })
             .expect("the probe ends")
         }
 
         /// A stop at any point of the start and the run of a node whose mesh writes
         /// its log for each home that the peer sets, then a probe that takes the
-        /// lock as soon as it is free: the mesh's log is never busy then. The order
+        /// lock as soon as it is free: the mesh's log is never busy then, and the port
+        /// of a node that ran binds, so the transport drops before the lock. The order
         /// of the two closes waits on #1835. The peer ends once a set waits [`TEN`],
         /// so the probe's run ends.
         #[test]
@@ -3289,7 +3301,7 @@ mod port {
                 let after = Span::from_nanos(after);
                 assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
                 node.stop();
-                let (waited, log) = probe(&mut sim, &hosts[0]);
+                let (waited, port, log) = probe(&mut sim, &hosts[0]);
                 held |= waited;
                 logged |= log.is_ok();
                 let busy = matches!(log, Err(env::files::Error::Busy { .. }));
@@ -3300,8 +3312,27 @@ mod port {
                 });
                 let joined = node.join();
                 assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
+                if joined == Ok(()) {
+                    assert_eq!(port, Ok(()), "at {after:?}");
+                }
             }
             assert!(held && logged);
+        }
+
+        /// The transport drops before the lock also when the mesh's group stops
+        /// before the node: a probe that takes the lock as soon as it is free binds
+        /// the port.
+        #[test]
+        fn the_port_is_free_once_the_lock_is_after_the_group_stops() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run_for(Span::from_nanos(WRITE - 1_000_000)), Ok(()));
+            let (waited, port, _) = probe(&mut sim, &host);
+            assert_eq!((waited, port), (true, Ok(())));
+            assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
 
         /// A node started with a region with founding definitions puts the chunks of
