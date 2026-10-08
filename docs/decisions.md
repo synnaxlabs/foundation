@@ -3955,6 +3955,15 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
   2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260.
+  Our change makes the random state `UA_rng` of `src/util/ua_util.c` one per thread
+  (`UA_THREAD_LOCAL`), so each test server that sets its start value on its own thread
+  gets the same values in each run. A test in `cargo test -p xtask` links the objects
+  of the check with a C driver in `xtask/`: the main thread sets the start value 1,
+  joins a thread that sets 2 and draws, then draws, and its values must equal those of
+  a thread that sets 1 alone. The driver defines each clock function to call
+  `abort()`, and the test asserts its exact output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
+  2026-10-08 12:03 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
