@@ -298,7 +298,7 @@ fn the_copy_links_the_timer() {
 /// Each symbol outside the copy and `shim.c` that they may name, in glibc on x86-64
 /// and 64-bit Arm, at each optimization level. None gives or takes a heap block, so no
 /// block crosses between the allocator of libc and `src/alloc.rs`.
-const OUTSIDE: [&str; 40] = [
+const OUTSIDE: [&str; 41] = [
     "_GLOBAL_OFFSET_TABLE_",
     "__ctype_b_loc",
     "__errno_location",
@@ -339,6 +339,7 @@ const OUTSIDE: [&str; 40] = [
     "strncmp",
     "strtod",
     "syslog",
+    "write",
 ];
 
 /// The symbols that `nm` with `flag` gives for the archives of this build.

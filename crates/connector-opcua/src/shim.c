@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The global clocks give a fixed time, so no OS clock enters through the C code.
  * `cargo xtask open62541` lists each call site. */
@@ -254,22 +255,30 @@ static void el_remove_delayed(UA_EventLoop *el, UA_DelayedCallback *dc) {
 static const char *const LEVELS[] = {"trace", "debug", "info", "warning", "error",
                                      "fatal"};
 
-/* The bytes of a log message, with its NUL. */
+/* The bytes of a log line, with its newline. */
 #define LOG_BYTES 512
 
-/* Writes each message of level warning and up to stderr, cut to `LOG_BYTES - 1` bytes.
- * It allocates nothing. */
+/* Writes each message of level warning and up to fd 2, in one `write`, so a line takes
+ * no `stdio` lock and does not mix with a line of another thread. A line longer than
+ * `LOG_BYTES` is cut. It allocates nothing. */
 static void log_message(void *context, UA_LogLevel level, UA_LogCategory category,
                         const char *msg, va_list args) {
     (void)context;
     (void)category;
     if(level < UA_LOGLEVEL_WARNING)
         return;
-    char text[LOG_BYTES];
+    char line[LOG_BYTES];
     /* `mp_vsnprintf`, not `vsnprintf`: open62541 formats `%S` and `%N`. */
-    mp_vsnprintf(text, sizeof(text), msg, args);
-    fprintf(stderr, "connector-opcua: open62541 %s: %s\n", LEVELS[level / 100 - 1],
-            text);
+    int prefix = mp_snprintf(line, sizeof(line), "connector-opcua: open62541 %s: ",
+                             LEVELS[level / 100 - 1]);
+    int text = mp_vsnprintf(line + prefix, sizeof(line) - (size_t)prefix, msg, args);
+    size_t length = (size_t)prefix + (size_t)text;
+    if(length > LOG_BYTES - 1)
+        length = LOG_BYTES - 1;
+    line[length] = '\n';
+    /* A failed write of a log line has nowhere to go. */
+    ssize_t written = write(STDERR_FILENO, line, length + 1);
+    (void)written;
 }
 
 /* Gives a fresh loop whose time is `now(clock)`, or NULL when out of memory. */
