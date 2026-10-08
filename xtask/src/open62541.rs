@@ -84,7 +84,7 @@ const SYSTEM_HEADERS: [&str; 18] = [
 /// that they include, `LICENSE`, `sources.txt` (each `.c` file), `flags.txt` (the
 /// `-D`, `-I`, and `-std` flags of each compile), and `VERSION` (tag and commit).
 /// Then it gives what [`check`] gives for the new copy. Needs Linux, `git`, `cmake`,
-/// Python 3, a C compiler `cc`, and GNU `objdump`.
+/// Python 3, GCC as `cc`, and GNU `objdump`.
 ///
 /// # Errors
 ///
@@ -100,7 +100,7 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
     let commit = compile(&work, &trees, url, tag).map_err(|e| vec![e])?;
     let found = collect(&trees).map_err(|e| vec![e])?;
     write(&stage, &src, &found, &format!("{tag}\n{commit}")).map_err(|e| vec![e])?;
-    inspect(&stage, &work.join("check"))?;
+    inspect(&stage, &work.join("check"), Path::new("cc"))?;
     let dest = root.join(DEST);
     remove(&dest)
         .and_then(|()| {
@@ -126,7 +126,8 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// through which any code can call it, each inlined function, an `#include_next`,
 /// and a `#line` directive or line marker in a `.c` or `.h` file of the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
-    inspect(&root.join(DEST), &root.join("target/open62541/check"))
+    let out = root.join("target/open62541/check");
+    inspect(&root.join(DEST), &out, Path::new("cc"))
 }
 
 /// Clones and builds `tag` of `url` in `work`, and gives its commit.
@@ -305,8 +306,9 @@ fn arguments(command: &str) -> Vec<String> {
     arguments
 }
 
-/// Builds the copy in `copy` into `out`, and gives each error of [`check`].
-fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
+/// Builds the copy in `copy` into `out` with the compiler `cc`, a name that `PATH`
+/// finds or an absolute path, and gives each error of [`check`].
+fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     let read = |name: &str| {
         std::fs::read_to_string(copy.join(name))
             .map_err(|e| vec![format!("{}: {e}", copy.join(name).display())])
@@ -332,10 +334,13 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
     remove(out)
         .and_then(|()| std::fs::create_dir_all(out).map_err(|e| format!("{e}")))
         .map_err(|e| vec![e])?;
-    let mut cc = Command::new("cc");
-    let verbose = spawn(cc.args(["-xc", "-E", "-v", "/dev/null"])).and_then(wait);
-    let dirs = system_dirs(&verbose.map_err(|e| vec![e])?.1);
-    let objects = build(copy, &sources, &flags, out).map_err(|e| vec![e])?;
+    let (macros, verbose) =
+        spawn(Command::new(cc).args(["-xc", "-E", "-dM", "-v", "/dev/null"]))
+            .and_then(wait)
+            .map_err(|e| vec![e])?;
+    gcc(&macros).map_err(|e| vec![e])?;
+    let dirs = system_dirs(&verbose);
+    let objects = build(copy, &sources, &flags, out, cc).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
     let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
     for (source, object, preprocessed) in objects {
@@ -509,6 +514,20 @@ fn includes(
     problems
 }
 
+/// Refuses a `cc` that is not GCC, from `macros`, the output of `cc -dM -E`. The
+/// check passes GCC's `-dumpbase`, whose value clang reads as a source file.
+fn gcc(macros: &str) -> Result<(), String> {
+    let defined = |name: &str| {
+        let prefix = format!("#define {name} ");
+        macros.lines().any(|line| line.starts_with(&prefix))
+    };
+    if defined("__GNUC__") && !defined("__clang__") {
+        Ok(())
+    } else {
+        Err("cc is not GCC, which the check needs".to_owned())
+    }
+}
+
 /// The directories of `#include <...>` in `verbose`, the standard error of
 /// `cc -E -v`.
 fn system_dirs(verbose: &str) -> Vec<PathBuf> {
@@ -521,19 +540,20 @@ fn system_dirs(verbose: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Compiles and preprocesses each source of `sources` in `copy` into `out` at once,
-/// and gives each (source, object, the output of `cc -E -dI`).
+/// Compiles and preprocesses each source of `sources` in `copy` into `out` at once
+/// with `cc`, and gives each (source, object, the output of `cc -E -dI`).
 fn build<'a>(
     copy: &Path,
     sources: &'a str,
     flags: &str,
     out: &Path,
+    cc: &Path,
 ) -> Result<Vec<(&'a str, PathBuf, String)>, String> {
     let mut children = Vec::new();
     for (index, source) in sources.lines().enumerate() {
         let object = out.join(format!("{index}.o"));
-        let cc = |mode: &[&str]| {
-            let mut cc = Command::new("cc");
+        let compiler = |mode: &[&str]| {
+            let mut cc = Command::new(cc);
             // `./` keeps a source such as `-x.c` or `@x.c` from being an option. Else
             // GCC gives cc1 the base name as `-dumpbase`, which cc1 reads as a
             // response file when it starts with `@`.
@@ -543,8 +563,8 @@ fn build<'a>(
                 .args(mode);
             spawn(cc.arg(Path::new(".").join(source)))
         };
-        let compile = cc(&["-c", "-o", &object.to_string_lossy()])?;
-        children.push((source, object, compile, cc(&["-E", "-dI"])?));
+        let compile = compiler(&["-c", "-o", &object.to_string_lossy()])?;
+        children.push((source, object, compile, compiler(&["-E", "-dI"])?));
     }
     children
         .into_iter()
@@ -1000,6 +1020,50 @@ OFFSET           TYPE              VALUE
     <c9>   DW_AT_name        : y
 ";
         assert_eq!(inlined(info), ["helper", "d0"]);
+    }
+
+    #[test]
+    fn gcc_refuses_a_cc_that_is_not_gcc() {
+        let gnu = "#define __STDC__ 1\n#define __GNUC__ 13\n";
+        assert_eq!(gcc(gnu), Ok(()));
+        let refused = Err("cc is not GCC, which the check needs".to_owned());
+        assert_eq!(gcc(&format!("{gnu}#define __clang__ 1\n")), refused);
+        assert_eq!(
+            gcc("#define __STDC__ 1\n#define __GNUC_MINOR__ 2\n"),
+            refused
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_refuses_a_cc_that_is_not_gcc() {
+        let dir = temp("clang");
+        create_files(
+            &dir,
+            &[("copy/sources.txt", "a.c\n"), ("copy/flags.txt", "")],
+        );
+        // GCC's macros on standard error make a check that reads the wrong stream
+        // pass.
+        let script = "#!/bin/sh\n\
+                      echo '#define __GNUC__ 4'\n\
+                      echo '#define __clang__ 1'\n\
+                      echo '#define __GNUC__ 13' >&2\n";
+        let cc = dir.join("cc");
+        // A child writes it: while this process holds it open for writing, a process
+        // that another test forks holds it open too, and running it fails with
+        // ETXTBSY.
+        exec(
+            Command::new("sh")
+                .args(["-c", r#"printf %s "$1" > "$0" && chmod 755 "$0""#])
+                .arg(&cc)
+                .arg(script),
+        )
+        .unwrap();
+        assert_eq!(
+            inspect(&dir.join("copy"), &dir.join("out"), &cc),
+            Err(vec!["cc is not GCC, which the check needs".to_owned()])
+        );
+        remove(&dir).unwrap();
     }
 
     #[test]
@@ -1615,6 +1679,18 @@ End of search list.
             ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn check_passes_on_the_committed_copy() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        // A root of its own: `cargo xtask open62541 <tag>` removes `target/open62541/`.
+        let root = temp("committed");
+        std::os::unix::fs::symlink(workspace.join("patches"), root.join("patches"))
+            .unwrap();
+        assert_eq!(check(&root), Ok(()));
+        remove(&root).unwrap();
     }
 
     #[test]

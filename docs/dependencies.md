@@ -35,6 +35,7 @@ approval; pin the version you build against there.
 | `http` | `connector` (`http`); `connector-influx` (feature `sim`) | The request and response types of `hyper`, which the client's surface uses (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466), and of the simulated HTTP servers | MIT or Apache-2.0 | 1.5.0 | 2026-10-06 |
 | `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.1.0 | 2026-10-06 |
 | `rustc-hash` | `types` (`types::hash::Map` and `Set`) | The fixed, fast hasher of every hash map (R16-7, #1321): SipHash cost 8.5 ns of 131 ns per 64 B `transport` write (#1308, #1399). Already in the build through `noq-proto`. The person: "Yeah I approve" (https://github.com/synnaxlabs/foundation/issues/1321#issuecomment-6039851114) | MIT or Apache-2.0 | 2.1.3 | 2026-10-07 |
+| `open62541` (C library, the upstream source files in `patches/open62541/`, not a crate) | `connector-opcua` (from #435 PR 4) | The OPC UA client, with a passive event loop that Rust drives under `sim` (#435). `cargo deny` checks only crates, so `deny.toml` has no entry for it | MPL-2.0; CC0-1.0 in `plugins/`; in `deps/`, MIT (`itoa`, `libc_time`, `mp_printf`, `musl_inet_pton`, `parse_num`), BSL-1.0 (`dtoa`), BSD (`base64`, `open62541_queue.h`), and Apache-2.0 (`pcg_basic`) | 1.5.9 | 2026-10-08 (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544) |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
@@ -48,9 +49,11 @@ exception when the patch lands (#55).
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 `fuzz/Cargo.toml`, keep the change small, and list it here with its reason. The
-patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
-Searches skip `patches/` (`.ignore`): to search a copy, give its path or use
-`rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables equal (#1867).
+patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`). A C
+library that we patch (open62541) has no `[patch.crates-io]`: its `build.rs` reads
+`patches/open62541/`. Searches skip `patches/` (`.ignore`): to search a copy, give its
+path or use `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables
+equal (#1867).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
@@ -77,12 +80,14 @@ https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059938562.
 The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
 the empty-list sentence of
-https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy is a
-path package, so `cargo deny` does not check it against advisories (#1867).
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy of
+a Rust crate is a path package, so `cargo deny` does not check it against advisories
+(#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `open62541` (C library) | 1.5.9 | None yet | The random state `UA_rng` is one per process, so the values of a test server depend on the draws of other threads (#435) |
 
 ## Tests, benchmarks, and tools
 
