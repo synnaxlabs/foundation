@@ -425,6 +425,44 @@ fn refuses_a_response_whose_body_ends_early() {
     );
 }
 
+/// A request that fails once its response began gives the turn at once, as the node
+/// freed it, also when the node holds the stream open.
+#[test]
+fn gives_the_turn_after_a_response_that_is_not_valid() {
+    by_hand(
+        151,
+        |session, node| async move {
+            let mut first = read_request(&session).await;
+            let bad = own_pool().copy(&[0xff]).expect("room");
+            let sender = first.sender.as_mut().expect("two-way");
+            sender.send(bad).await.expect("sends");
+            let mut second = read_request(&session).await;
+            let sender = second.sender.as_mut().expect("two-way");
+            let mut response = [0; Response::LEN];
+            Response { length: 2 }.encode(&mut response);
+            for message in [&response[..], b"dc"] {
+                sender
+                    .send(own_pool().copy(message).expect("room"))
+                    .await
+                    .expect("sends");
+            }
+            sender.finish().expect("finishes");
+            node.clock().sleep(QUIET).await;
+            drop(first);
+        },
+        |client, node| {
+            Box::pin(async move {
+                assert_eq!(
+                    client.request(b"ab").await,
+                    Err(Error::Message(wire::hub::Error::Kind { kind: 0xff }))
+                );
+                let next = within(&node.clock(), QUIET, client.request(b"cd")).await;
+                assert_eq!(next, Some(Ok(b"dc".to_vec())));
+            })
+        },
+    );
+}
+
 /// `request` gives the reply once its body ends, and does not wait for the node to
 /// finish the stream.
 #[test]

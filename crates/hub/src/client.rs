@@ -169,6 +169,7 @@ impl Client {
         let mut open = Open {
             taken: Some(shared.turn.take().await),
             receiver: None,
+            begun: false,
             tasks: &shared.tasks,
         };
         if let Some(error) = shared.ended.borrow().clone() {
@@ -190,7 +191,9 @@ impl Client {
             shared.send(&mut sender, chunk).await?;
         }
         sender.finish()?;
-        let Some(message) = receiver.recv().await? else {
+        let first = receiver.recv().await;
+        open.begun = true;
+        let Some(message) = first? else {
             return Err(Error::Unanswered);
         };
         let mut rest = Response::decode(&message)?.body();
@@ -202,7 +205,6 @@ impl Client {
             reply.extend_from_slice(rest.take(&message)?);
         }
         rest.end()?;
-        open.receiver = None;
         Ok(reply)
     }
 }
@@ -294,10 +296,12 @@ async fn renew(
 struct Open<'a> {
     /// `Some` until the drop.
     taken: Option<Taken>,
-    /// The receiver of a request whose response has not ended. The node holds the
-    /// request open until its response begins, so a drop gives the turn only once
-    /// the next message or the end of the stream comes.
+    /// The receiver of the request once it opens. Until its response begins, the
+    /// node holds the request open, so a drop gives the turn only once the first
+    /// message or the end of the stream comes.
     receiver: Option<Receiver>,
+    /// Whether the response began, so the node freed the request.
+    begun: bool,
     tasks: &'a env::tasks::Tasks,
 }
 
@@ -305,11 +309,11 @@ impl Drop for Open<'_> {
     fn drop(&mut self) {
         let taken = self.taken.take();
         match self.receiver.take() {
-            None => drop(taken),
-            Some(mut receiver) => self.tasks.spawn(async move {
+            Some(mut receiver) if !self.begun => self.tasks.spawn(async move {
                 drop(receiver.recv().await);
                 drop(taken);
             }),
+            _ => drop(taken),
         }
     }
 }
