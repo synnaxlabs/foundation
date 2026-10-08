@@ -1181,9 +1181,9 @@ How to read this record:
   each stream of a remote reader when it adds that driver (laptop.architect,
   2026-10-08T01:01:26Z,
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049988923).
-  Amended (2026-10-08T16:41:41Z, #1917): `Hub::define` takes each channel of a spec as a name
-  and a `spec::channel::Channel` in one call, and defines the indexes first, so a data
-  channel may come before its index. A known key or name panics. The hub keeps the
+  Amended (2026-10-08T16:41:41Z, #1917): `Hub::define` takes each channel of a spec as
+  a name and a `spec::channel::Channel` in one call, and defines the indexes first, so a
+  data channel may come before its index. A known key or name panics. The hub keeps the
   key, the sample type, and the index of each, and reads no quality, error, or control
   edge: the issue that first serves one of these edges reads it in `define`. The PR
   that defines channels at each new spec decides what a known, renamed, or removed
