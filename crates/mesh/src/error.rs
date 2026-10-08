@@ -99,7 +99,7 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
-    /// A file call on the file that names the spec in use failed.
+    /// A file call on the directory of the spec in use, or on a file in it, failed.
     Files(files::Error),
     /// A file in the directory of the spec in use does not name a pointer.
     Stray {

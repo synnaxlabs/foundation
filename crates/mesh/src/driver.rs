@@ -148,7 +148,8 @@ impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
     /// its task on `config.tasks`. Homes are known again when this node applies the
     /// log, after it hears the leader. It puts each chunk of the founding tree in
-    /// `config.store`.
+    /// `config.store`. It reads the spec that the file in `<config.dir>/spec` names,
+    /// or the founding spec when there is no file, and removes each other file there.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the
@@ -165,6 +166,9 @@ impl Mesh {
     ///   when a call of the store fails.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
+    /// - [`Error::Files`] when a call on `<config.dir>/spec` or its files fails, and
+    ///   [`Error::Stray`] when that directory holds a file that does not name a
+    ///   pointer.
     ///
     /// # Panics
     ///
@@ -1285,7 +1289,8 @@ mod tests {
         pointer: Option<Pointer>,
         definitions: BTreeMap<Name, Definition>,
         behind: Option<Behind>,
-        /// The newest committed pointer that the task did not use.
+        /// The newest committed pointer that the task did not use. No public call
+        /// shows it.
         newest: Option<Pointer>,
         /// The chunks of the tree in use, as `Debug` gives them: `Chunks` has no `Eq`.
         chunks: String,
