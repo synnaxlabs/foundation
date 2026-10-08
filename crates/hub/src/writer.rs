@@ -39,8 +39,8 @@ pub enum Error {
     Home(::home::writer::Error),
     /// The writer names no channel.
     Empty,
-    /// The home of an index of the writer is another node. Remote writers are not
-    /// built yet.
+    /// The home of an index of the writer is `home`, another node. A writer writes
+    /// only at the home of each of its indexes.
     Remote {
         /// The home.
         home: types::node::Key,
