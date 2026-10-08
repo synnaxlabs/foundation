@@ -848,12 +848,31 @@ fn udp_panics() {
     drop(net().udp(&config));
 }
 
+/// A lookup needs no I/O driver.
 #[test]
-#[should_panic(expected = "os::net has no resolver yet")]
-fn resolve_of_a_host_name_panics() {
-    runtime().block_on(async {
-        drop(net().resolve("localhost", 80).await);
-    });
+fn localhost_resolves_to_loopback_addresses_with_the_port() {
+    let found = runtime_with_no_io().block_on(net().resolve("localhost", 80));
+    let found = found.unwrap();
+    assert!(!found.is_empty());
+    for address in found {
+        assert!(address.ip().is_loopback(), "{address}");
+        assert_eq!(address.port(), 80, "{address}");
+    }
+}
+
+/// No resolver finds a name under `invalid` (RFC 6761).
+#[test]
+fn an_unknown_name_is_not_found() {
+    let found = runtime().block_on(net().resolve("foundation.invalid", 80));
+    let host = "foundation.invalid".into();
+    assert_eq!(found, Err(Error::NotFound { host }));
+}
+
+#[test]
+fn a_name_with_a_nul_byte_is_not_found() {
+    let found = runtime().block_on(net().resolve("local\0host", 80));
+    let host = "local\0host".into();
+    assert_eq!(found, Err(Error::NotFound { host }));
 }
 
 #[test]

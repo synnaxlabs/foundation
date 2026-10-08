@@ -20,6 +20,11 @@ mod listener;
     reason = "`TCP_NOTSENT_LOWAT` is a `setsockopt` rustix lacks"
 )]
 mod lowat;
+#[expect(
+    unsafe_code,
+    reason = "`getaddrinfo` is the name service of the system, and rustix lacks it"
+)]
+mod resolve;
 mod socket;
 mod stream;
 
@@ -42,8 +47,8 @@ impl env::net::Driver for Driver {
         Ok(Box::new(Listener::listen(config)?))
     }
 
-    fn resolve<'a>(&'a self, _: &'a str, _: u16) -> Resolve<'a> {
-        panic!("os::net has no resolver yet")
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Resolve<'a> {
+        Box::pin(resolve::lookup(host, port))
     }
 }
 

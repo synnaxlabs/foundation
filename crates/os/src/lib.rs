@@ -117,8 +117,7 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 ///
 /// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener,
 ///   on a thread with no Tokio runtime or with no I/O driver.
-/// - [`env::net::Net::udp`], and [`env::net::Net::resolve`] of a host name: this
-///   driver has no UDP and no resolver yet.
+/// - [`env::net::Net::udp`]: this driver has no UDP yet.
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
 pub fn net() -> env::net::Net {
