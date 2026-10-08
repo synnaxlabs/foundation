@@ -171,23 +171,63 @@ fn places_the_problems_of_the_kind_in_source_order() {
 }
 
 #[test]
-fn refuses_a_connector_and_a_channel_of_one_name() {
-    let text = "channel \"edge.time\" {\n  kind = \"index\"\n}\n\
-                connector \"Edge.Time\" {\n  kind = \"influx\"\n  node = \"cloud\"\n  \
-                address = \"http://influx:8086\"\n  select = \"edge.*\"\n}\n";
-    let diagnostics = config::check(&[read(text)], &kinds()).expect_err("problems");
-    let [diagnostic] = diagnostics.as_slice() else {
-        panic!("one problem: {diagnostics:?}");
-    };
-    assert_eq!(diagnostic.code.as_str(), "config.duplicate-name");
-    assert_eq!(
-        diagnostic.message,
-        "the name \"Edge.Time\" repeats the earlier `connector` name \"edge.time\""
-    );
-    assert_eq!(
-        diagnostic.fix,
-        "Give each `connector` block a name that differs by more than case"
-    );
+fn refuses_a_connector_and_a_channel_of_one_name_in_either_order() {
+    let channel = "channel \"edge.time\" {\n  kind = \"index\"\n}\n";
+    let connector = "connector \"Edge.Time\" {\n  kind = \"influx\"\n  node = \"cloud\"\n  \
+                     address = \"http://influx:8086\"\n  select = \"edge.*\"\n}\n";
+    for (text, first, second, earlier, repeat) in [
+        (
+            format!("{channel}{connector}"),
+            "channel",
+            "connector",
+            "edge.time",
+            "Edge.Time",
+        ),
+        (
+            format!("{connector}{channel}"),
+            "connector",
+            "channel",
+            "Edge.Time",
+            "edge.time",
+        ),
+    ] {
+        let diagnostics =
+            config::check(&[read(&text)], &kinds()).expect_err("problems");
+        let [diagnostic] = diagnostics.as_slice() else {
+            panic!("one problem: {diagnostics:?}");
+        };
+        assert_eq!(diagnostic.code.as_str(), "config.duplicate-name");
+        assert_eq!(
+            diagnostic.message,
+            format!(
+                "the name {repeat:?} repeats the earlier `{first}` name {earlier:?}"
+            )
+        );
+        assert_eq!(
+            diagnostic.fix,
+            format!(
+                "Give each `{first}` and `{second}` block a name that differs by more \
+                 than case"
+            )
+        );
+        let offset = |label: &str| {
+            text.find(&format!("{label:?}"))
+                .and_then(|at| u32::try_from(at).ok())
+        };
+        assert_eq!(
+            diagnostic.span.map(|span| span.start().offset),
+            offset(repeat)
+        );
+        let notes: Vec<_> = diagnostic
+            .notes
+            .iter()
+            .map(|note| (note.span.start().offset, note.text.as_str()))
+            .collect();
+        assert_eq!(
+            notes,
+            [(offset(earlier).expect("a note"), "the earlier name")]
+        );
+    }
 }
 
 /// A front end other than HCL can give a config that nests too deep.

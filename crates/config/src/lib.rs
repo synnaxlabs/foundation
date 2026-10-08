@@ -145,9 +145,9 @@ fn written(value: &Value) -> Option<&str> {
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// The label of each tree key so far, by the key in lowercase, so that keys that
-    /// differ only in case collide.
-    labels: BTreeMap<Box<str>, &'a Label>,
+    /// The label of each tree key so far and the kind of its block, by the key in
+    /// lowercase, so that keys that differ only in case collide.
+    labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The kinds that check each `connector` block's config.
@@ -197,23 +197,28 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        let first = match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
-            btree_map::Entry::Occupied(first) => *first.get(),
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert(label);
-                return Some((key, label.span));
-            }
+        let (first, earlier) =
+            match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
+                btree_map::Entry::Occupied(first) => *first.get(),
+                btree_map::Entry::Vacant(entry) => {
+                    entry.insert((label, kind));
+                    return Some((key, label.span));
+                }
+            };
+        let earlier = earlier.as_str();
+        let blocks = if earlier == keyword {
+            format!("`{keyword}`")
+        } else {
+            format!("`{earlier}` and `{keyword}`")
         };
         let mut diagnostic = Diagnostic::new(
             DUPLICATE_NAME,
             label.span,
             format!(
-                "the name {:?} repeats the earlier `{keyword}` name {:?}",
+                "the name {:?} repeats the earlier `{earlier}` name {:?}",
                 label.text, first.text
             ),
-            format!(
-                "Give each `{keyword}` block a name that differs by more than case"
-            ),
+            format!("Give each {blocks} block a name that differs by more than case"),
         );
         diagnostic.notes.extend(first.span.map(|span| Note {
             span,
