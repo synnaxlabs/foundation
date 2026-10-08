@@ -1059,6 +1059,26 @@ mod tests {
             .unwrap();
         }
 
+        // A failed sync of the directory leaves the digest not held, so each put
+        // after it writes and syncs again.
+        #[test]
+        fn whose_directory_sync_fails_gives_io_and_the_next_put_writes_again() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                let expected = io(Path::new(DIR), Operation::SyncDir);
+                for _ in 0..2 {
+                    node.fail_file(Path::new(DIR), Operation::SyncDir);
+                    assert_eq!(store.put(digest, &block).await.unwrap_err(), expected);
+                }
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
         #[test]
         fn whose_write_fails_gives_io() {
             let (mut sim, node) = create_default_node(0);

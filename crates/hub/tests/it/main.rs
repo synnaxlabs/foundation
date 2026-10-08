@@ -1370,3 +1370,39 @@ fn keeps_no_waker_of_a_dropped_reader() {
         assert_eq!(Arc::strong_count(&flag), 1, "the hub keeps the waker");
     });
 }
+
+/// A local complete reader spends the whole frame, not only its channels.
+#[test]
+fn charges_a_local_complete_reader_on_some_channels_for_the_whole_frame() {
+    const SAMPLES: i64 = 1000;
+    run(16, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        let frames = 100;
+        for n in 0..frames {
+            let stamps: Vec<_> = (now + n * SAMPLES..now + (n + 1) * SAMPLES).collect();
+            let values: Vec<_> = stamps
+                .iter()
+                .map(|&s| {
+                    let x = s.wrapping_mul(6_364_136_223_846_793_005);
+                    x ^ (x >> 29)
+                })
+                .collect();
+            write_series(&mut writer, &[(1, &stamps), (2, &values), (5, &values)]);
+            test.clock.sleep(SETTLE).await;
+        }
+        let mut got = 0;
+        loop {
+            match poll_once(reader.next()) {
+                Poll::Ready(Ok(_)) => got += 1,
+                Poll::Ready(Err(ended)) => {
+                    assert_behind(&ended);
+                    assert!(got < frames, "{got} frames before the end");
+                    break;
+                }
+                Poll::Pending => panic!("the reader took all {got} frames and waits"),
+            }
+        }
+    });
+}

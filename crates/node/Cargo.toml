@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes `Scope` to the `scope` bench. Off by default.
+sim = []
+
 [[bin]]
 name = "foundation"
 path = "src/main.rs"
@@ -23,8 +27,17 @@ types = { path = "../types" }
 
 [dev-dependencies]
 codec = { path = "../codec" }
+counting = { path = "../counting" }
+divan = { workspace = true }
+# Turns on `sim` for the bench, since the bench host runs no features.
+node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
+
+[[bench]]
+name = "scope"
+harness = false
+test = true
 
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
