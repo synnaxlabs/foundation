@@ -194,6 +194,9 @@ impl tcp::Driver for Stream {
         cx: &mut Context<'_>,
         buffers: &[IoSlice<'_>],
     ) -> Poll<Result<usize, Error>> {
+        if buffers.iter().all(|buffer| buffer.is_empty()) {
+            return Poll::Ready(Ok(0));
+        }
         self.owner.check(&self.node);
         let key = self.key;
         (self.node).tcp(|tcp, now| tcp.write(now, key, cx.waker(), buffers))
