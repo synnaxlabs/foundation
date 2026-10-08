@@ -87,7 +87,7 @@ a Rust crate is a path package, so `cargo deny` does not check it against adviso
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
-| `open62541` (C library) | 1.5.9 | None yet | `connector-opcua` builds the OPC UA client from this copy, with the flags of `flags.txt` (#435) |
+| `open62541` (C library) | 1.5.9 | None yet | The random state `UA_rng` is one per process, so the values of a test server depend on the draws of other threads (#435) |
 
 ## Tests, benchmarks, and tools
 
