@@ -3,18 +3,19 @@ use std::slice;
 use base64ct::{Base64, Encoding};
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::{Kind, Value};
-use document::{Block, Span};
+use document::{Block, Span, read};
 use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
 
-use crate::{Definition, Found};
+use crate::{Definition, Found, Reported};
 
 const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
 const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
 const PRIVATE_KEY: Code = Code::new("config.private-key");
 const NO_PUBLIC_KEYS: Code = Code::new("config.no-public-keys");
 const DUPLICATE_PUBLIC_KEY: Code = Code::new("config.duplicate-public-key");
+const SUBJECT_IS_CONNECTOR: Code = Code::new("config.subject-is-connector");
 /// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, and a
 /// `.ppk` file of `PuTTYgen`.
 const PRIVATE_MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
@@ -57,10 +58,37 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     let fix = "Add a `keys` attribute with the line of a `.pub` file, such as \
                \"ssh-ed25519 AAAA... alice@laptop\"";
     let subject = found.required(block, "keys", subject, fix.into());
-    let (Ok(()), Ok(subject)) = (unknown, subject) else {
+    let connector = not_connector(found, block);
+    let (Ok(()), Ok(subject), Ok(())) = (unknown, subject, connector) else {
         return None;
     };
     Some(Definition::Spec(definition::Definition::Subject(subject)))
+}
+
+/// Refuses a subject at the name of a connector, since a connector is a subject that
+/// its node vouches for.
+fn not_connector(found: &mut Found<'_>, block: &Block) -> Result<(), Reported> {
+    let [label] = block.labels.as_slice() else {
+        return Ok(());
+    };
+    let Some(connector) = read::label(label)
+        .ok()
+        .and_then(|name| found.connectors.get(&name))
+    else {
+        return Ok(());
+    };
+    let mut diagnostic = Diagnostic::new(
+        SUBJECT_IS_CONNECTOR,
+        label.span,
+        format!("the subject {:?} has the name of a connector", label.text),
+        "Rename the subject or the connector".into(),
+    );
+    diagnostic.notes.extend(connector.span.map(|span| Note {
+        span,
+        text: "the connector".into(),
+    }));
+    found.diagnostics.push(diagnostic);
+    Err(Reported)
 }
 
 /// Reads one public key or a list of them as a subject.

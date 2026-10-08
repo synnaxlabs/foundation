@@ -4170,9 +4170,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085). The
   ruling at 2026-10-08T05:49:53Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142)
-  decided the PEM rule, and that `config.subject-is-connector` and its test go in the
-  PR that merges second: #1823, or the #1153 PR that adds `connector` blocks to
-  `config::check`. The read moves to `ssh-key` if the person approves it
+  decided the PEM rule. `config` refuses a `subject` at the name of a `connector`
+  (`config.subject-is-connector`)
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217),
+  with a note at the connector. The read moves to `ssh-key` if the person approves it
   (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
   PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
   2026-10-08T06:42:17Z

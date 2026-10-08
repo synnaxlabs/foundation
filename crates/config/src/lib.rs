@@ -85,7 +85,10 @@ pub fn check(
         entries: BTreeMap::new(),
         diagnostics: Vec::new(),
         labels: BTreeMap::new(),
-        channels: channels(documents),
+        channels: names(documents, Kind::Channel)
+            .map(|(name, _)| name)
+            .collect(),
+        connectors: names(documents, Kind::Connector).collect(),
         kinds,
     };
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
@@ -122,17 +125,16 @@ pub fn check(
     }
 }
 
-/// The name of each `channel` block in `documents` whose one label reads as a name.
-/// `check` reports each other label.
-fn channels(documents: &[Document]) -> BTreeSet<Name> {
+/// The name and the label of each block of `kind` in `documents` whose one label
+/// reads as a name. `check` reports each other label.
+fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Label)> {
     let blocks = documents.iter().flat_map(|document| &document.blocks);
     blocks
-        .filter(|block| &*block.keyword == Kind::Channel.as_str())
+        .filter(move |block| &*block.keyword == kind.as_str())
         .filter_map(|block| match block.labels.as_slice() {
-            [label] => read::label(label).ok(),
+            [label] => Some((read::label(label).ok()?, label)),
             _ => None,
         })
-        .collect()
 }
 
 /// The text of a string or a reference, as the file wrote it.
@@ -155,6 +157,9 @@ struct Found<'a> {
     labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
+    /// The label of each connector that a `connector` block in any Document defines,
+    /// by its name.
+    connectors: BTreeMap<Name, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
 }
