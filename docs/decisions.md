@@ -3881,7 +3881,13 @@ How to read this record:
   and cancels it. `ctx` gives hub sessions, status, run commands, secrets, and cancel.
   `hub` and `home` enforce the rules. `connector` is a library of components plus
   ready-made compositions built only from public parts. Supersedes: r8 Q5 actor with
-  device hooks.
+  device hooks. `kind::Context` gives a run its name, config, cancel, clock,
+  randomness, network (`net`), and tasks, and `writer`, `reader`, and `status` come
+  with #1731 (`laptop.architect-2`, 2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677). It is
+  not `Send`: a kind's own thread takes clones of the parts it needs
+  (`laptop.architect-2`, 2026-10-08T18:07:05Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6066078510).
 - **C5 + KINDS OWN THEIR CONFIG** Each kind owns parse, check, discover, and run, built
   on shared components. `config` never knows a kind's fields. A kind returns diagnostics
   with positions plus the channels it reads and writes. Calculations are a kind. The
@@ -3890,7 +3896,13 @@ How to read this record:
   check, resource isolation (own threads with a budget, or another node), determinism
   (time only from samples and ctx), and outputs on the calculation's own index.
   Supersedes: r3 single-expression language, r3 first-input index, r8 JSON Schema
-  check in `config`.
+  check in `config`. The channels of a kind's `check` are from the mesh's side:
+  `reads` are the channels it reads from the mesh (commands for the device, or samples
+  it sends out), and `writes` the channels it writes to the mesh (samples from the
+  device) (`laptop.architect-2`, 2026-10-07T15:17:11Z:
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688; item on
+  #1731, 2026-10-08T06:24:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6053789750).
 - **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
   methods. `kind::Table` erases it inside `connector` with a private trait that takes
   the `Document` and parses again, so callers see one concrete type with no `Any` and
@@ -3957,9 +3969,22 @@ How to read this record:
   7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
-  the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
-  (1 s first, 60 s cap, constants). The waits start again from 1 s after a run that
-  lasted at least 60 s. `Ok` from `run` ends the connector.
+  the caller's token, which the supervisor cancels once the run returns or its future
+  drops, so each task that the run spawned to wait on it ends with the run
+  (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
+  supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
+  entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
+  2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
+  `hub` field lands after #1941 (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789, item 4),
+  as the tests that need a hub wait on #1941 (`laptop.architect`,
+  2026-10-08T17:50:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
+  `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
+  constants). The waits start again from 1 s after a run that lasted at least 60 s.
+  `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
   changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
   `connector` builder in the plan on #338, after `/eb-review`; approved by the
@@ -4105,11 +4130,12 @@ How to read this record:
   and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
-  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and each thread with none draws the same fixed values. So
-  `connector-opcua` (PR 4 of #435) sets the start value with
-  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
-  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  2026-10-08 12:03 UTC). A draw on a thread with no start value aborts
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Nothing in the library sets a start value, also in
+  production. So `connector-opcua` (PR 4 of #435) sets the start value
+  with `UA_random_seed_deterministic`, taken from the randomness of `env`, and never
+  calls `UA_random_seed`, which reads the clock. It does so on each thread before that
   thread calls open62541, and runs each server and each client on one thread. Its
   test server sets the start value of the test at start, and its end-to-end check
   asserts the same run for the same value. A state for each `UA_Server` and
@@ -4118,6 +4144,21 @@ How to read this record:
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  A second change of `src/util/ua_util.c` keeps a flag for each thread, which
+  `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
+  `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
+  calls each of the two draws on a thread with none, and the test asserts the abort
+  and its exact output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Supersedes the record text "each thread with none draws the
+  same fixed values", which cited
+  https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. The
+  line of `UA_random_seed` that sets the flag has no test: no path of our build
+  reaches it, and a test needs a driver whose clock does not abort. Approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC). This change and its driver test ship in a PR of their own,
+  apart from the connector code (same comment).
   The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
   with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
   clock functions give 0, and the 5 POSIX constructors print their name and abort,
@@ -5235,47 +5276,66 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181), one
   decoder for each side that takes the kind of the stream from its first message.
 - **HUB LINK (2026-10-08)** `Hub::link(session)` gives a `hub::Link` for one transport
-  session, and `node` calls `Link::serve` for each hub stream in accept order. `serve`
-  takes the role of the stream at the call: the first stream of a client session is
-  its hello stream, and each later one a request stream. `hub::Config` gets `node`
-  (the `via` that `admit` checks), `time` (`clock::Reader`), and `entropy` (the
-  nonces). The link waits for a hello's expiry with `clock::Reader::reach` (CLOCK
-  REACH), so `hub` knows nothing of how mesh time moves against the monotonic clock,
-  and gets no second clock. A link has one open request: it frees the request when
-  `Reply::send` is called or the `Reply` drops, before the first byte of the response,
-  so a client that sends its next request when a reply ends never gets `MALFORMED`.
-  `Reply::send` panics on a body over `BODY_BYTES_MAX`, a precondition that the maker of
-  the body checks. Each order error names its cause, though both stop with
-  `MALFORMED`: `serve::Error::Unadmitted` (a request stream before an admitted hello)
-  and `Pending` (a request while one waits for its reply). A message of the wrong kind
-  for its stream, such as a hello on a request stream, is `serve::Error::Message` with
-  `wire::hub::Error::Kind` (`laptop.architect`, 2026-10-08T15:38:46Z,
+  session. `node` calls `Link::serve` for each hub stream once it reads its header. On
+  a client link, the first stream given to `serve` is its hello stream, and each later
+  one a request stream; `serve` takes the role at the call (`laptop.architect`,
+  2026-10-08T18:56:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  `hub::Config` gets `node` (the `via` that `admit` checks), `time` (`clock::Reader`),
+  and `entropy` (the nonces). The link waits for a hello's expiry with
+  `clock::Reader::reach` (CLOCK REACH), so `hub` knows nothing of how mesh time moves
+  against the monotonic clock, and gets no second clock. A link has one open request:
+  it frees the request when `Reply::send` is called or the `Reply` drops, before the
+  first byte of the response, so a client that sends its next request when a reply
+  ends never gets `MALFORMED`. `Reply::send` panics on a body over `BODY_BYTES_MAX`, a
+  precondition that the maker of the body checks. Each order error names its cause,
+  though both stop with `MALFORMED`: `serve::Error::Unadmitted` (a request stream
+  before an admitted hello) and `Pending` (a request while one waits for its reply).
+  A message of the wrong kind for its stream, such as a hello on a request stream, is
+  `serve::Error::Message` with `wire::hub::Error::Kind` (`laptop.architect`,
+  2026-10-08T15:38:46Z,
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704), and a
   body that ends early is `Message` with `Unfinished` (`laptop.architect`,
   2026-10-08T16:52:55Z,
   https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697).
   Supersedes item 5 (`serve::Error::Hello`) of
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738.
-  `Link` is not `Clone`. Lost: a `Config::clock` beside `time`, with a loop in `hub`
-  that knows the slew; more than one open request, which no wire needs now. Decided
-  by `laptop.architect` at 2026-10-08T11:24:07Z
+  Lost: a `Config::clock` beside `time`, with a loop in `hub` that knows the slew;
+  more than one open request, which no wire needs now. Decided by `laptop.architect`
+  at 2026-10-08T11:24:07Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
-  `Hub::rules` sets the `access::Rules` that each later hello and request is checked
+  `Link` is `Clone`, and a clone is the same link, so the future of each stream holds
+  one (NODE PORT) (`laptop.architect`, 2026-10-08T18:56:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  Supersedes item 6 (`Link` needs no `Clone`) of
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738.
+  `Hub::set_rules` sets the `access::Rules` that each later hello and request is checked
   against, and `node` calls it with the rules of each spec (#1951). Until then, a hub
   has `access::Rules::default()`, which knows no subject, so it refuses each hello
   with `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, because the
   rules change at run time through `Mesh::apply`. Decided by `laptop.architect`
   (2026-10-08T18:05:25Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140).
-  A rule of the client wire, which each SDK follows: a program sends its first request
-  once the challenge after its hello comes, because the node sends it only after it
-  admits the hello. `Session::accept` gives streams by class, not in open order, so
-  this rule also makes the hello stream the first that the node takes. A program that
-  breaks it gets `Unadmitted` or `Message` with `Kind`. Lost: a node that holds each
-  request stream until it admits a hello, which adds a queue, its bound, and its
-  timeout to `hub` to save one round trip for each session. Decided by
-  `laptop.architect` (2026-10-08T18:16:38Z,
-  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
+  The name `set_rules`: `laptop.architect`, 2026-10-08T18:56:15Z
+  (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  Supersedes the name `Hub::rules` of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140.
+  A rule of the client wire, which each SDK follows: a program sends the header of its
+  first request stream once the challenge after its hello comes. The node sends it
+  only after it admits the hello, so this rule also makes the hello stream the first
+  that `Link::serve` gets, in any order of the headers. A program that breaks it gets
+  `Unadmitted` or `Message` with `Kind`, also when it sends its request after that
+  challenge. Lost: a node that holds each request stream until it admits a hello,
+  which adds a queue, its bound, and its timeout to `hub` to save one round trip for
+  each session. Decided by `laptop.architect` (2026-10-08T18:16:38Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520). The
+  sentence on the hello stream is by `laptop.architect` (2026-10-08T18:56:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418),
+  and supersedes the `Session::accept` sentence of that comment. The rule by the
+  header of the first request stream is by `laptop.architect` (2026-10-08T19:14:04Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067215617).
+  Supersedes the rule by the send of the first request of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520.
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
   transport and the mesh, and never a zero key. #1660 changes only where `node` gets
   the key. The test waits on #1744, whose client hello is the first that a `node` test

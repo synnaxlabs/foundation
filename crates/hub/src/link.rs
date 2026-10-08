@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use transport::Peer;
 use transport::stream::Incoming;
 
 use crate::State;
@@ -11,9 +10,9 @@ use crate::serve::{self, Request, client};
 
 /// The hub's part of one transport session. For a client session, it holds the
 /// admitted hello, so the hello is checked once for the connection, and it closes the
-/// session when the hello expires.
-#[derive(Debug)]
-pub struct Link(Rc<Session>);
+/// session when the hello expires. A clone is the same link.
+#[derive(Clone, Debug)]
+pub struct Link(Peer);
 
 /// What [`Link::serve`] ended with.
 #[derive(Debug)]
@@ -25,20 +24,26 @@ pub enum Served {
     Request(Box<Request>),
 }
 
-/// The session that each stream of a [`Link`] serves.
+/// The peer of a link's session, decided once at [`Link::new`].
+#[derive(Clone, Debug)]
+enum Peer {
+    Node(Rc<RefCell<State>>),
+    Client(Rc<Session>),
+}
+
+/// A client session of a [`Link`].
 #[derive(Debug)]
 pub(crate) struct Session {
     pub(crate) state: Rc<RefCell<State>>,
     pub(crate) transport: transport::Session,
-    /// Unused for a node peer.
     pub(crate) client: client::Gate,
 }
 
 /// What a stream of the link carries, taken when [`Link::serve`] is called.
 enum Role {
-    Reader,
-    Hello,
-    Request,
+    Reader(Rc<RefCell<State>>),
+    Hello(Rc<Session>),
+    Request(Rc<Session>),
 }
 
 impl Link {
@@ -46,22 +51,24 @@ impl Link {
         state: Rc<RefCell<State>>,
         transport: transport::Session,
     ) -> Self {
-        Self(Rc::new(Session {
-            state,
-            transport,
-            client: client::Gate::default(),
-        }))
+        Self(match transport.peer() {
+            transport::Peer::Node(_) => Peer::Node(state),
+            transport::Peer::Client => Peer::Client(Rc::new(Session {
+                state,
+                transport,
+                client: client::Gate::default(),
+            })),
+        })
     }
 
     /// Serves `incoming`, a hub stream of the link's session whose header the caller
-    /// read. Call it in the order that `Session::accept` gives the streams: the first
-    /// stream of a client session is its hello stream, and the role is taken at the
-    /// call, not at the first poll. `accept` gives streams by class, not in open
-    /// order, so this holds because a program opens no request stream before the
-    /// challenge after its hello. From a node, it serves a reader session. From a
-    /// client, the hello stream lives as long as the session, and closes it when it
-    /// ends; a request stream gives [`Served::Request`] once its body is read and
-    /// verified.
+    /// read, in the role that it takes at the call, not at the first poll. From a node,
+    /// it serves a reader session. From a client, the first stream given to `serve` is
+    /// its hello stream, which lives as long as the session and closes it when it
+    /// ends. Each later stream is a request stream, which gives [`Served::Request`]
+    /// once its body is read and verified. A program sends the header of a request
+    /// stream only after the challenge after its hello, so the hello stream comes
+    /// first in any order of the headers.
     ///
     /// # Errors
     ///
@@ -72,19 +79,20 @@ impl Link {
         &self,
         incoming: Incoming,
     ) -> impl Future<Output = Result<Served, serve::Error>> + use<> {
-        let session = Rc::clone(&self.0);
-        let role = match session.transport.peer() {
-            Peer::Node(_) => Role::Reader,
-            Peer::Client if session.client.first() => Role::Hello,
-            Peer::Client => Role::Request,
+        let role = match &self.0 {
+            Peer::Node(state) => Role::Reader(Rc::clone(state)),
+            Peer::Client(session) if session.client.first() => {
+                Role::Hello(Rc::clone(session))
+            }
+            Peer::Client(session) => Role::Request(Rc::clone(session)),
         };
         async move {
             match role {
-                Role::Reader => serve::run(&session.state, incoming)
-                    .await
-                    .map(|()| Served::Ended),
-                Role::Hello => client::hello(&session, incoming).await,
-                Role::Request => client::request(&session, incoming).await,
+                Role::Reader(state) => {
+                    serve::run(&state, incoming).await.map(|()| Served::Ended)
+                }
+                Role::Hello(session) => client::hello(&session, incoming).await,
+                Role::Request(session) => client::request(&session, incoming).await,
             }
         }
     }

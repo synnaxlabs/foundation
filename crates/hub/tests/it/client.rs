@@ -10,7 +10,7 @@ use access::proof::{Error as Refusal, Field};
 use hub::{Served, serve};
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
-use transport::stream::{Receiver, Sender};
+use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code, Port, Session};
 use types::connection;
 use types::ed25519::{Pair, PrivateKey};
@@ -70,7 +70,8 @@ struct Home {
 }
 
 /// Runs one client session: the home's node makes a [`Test`] hub, with mesh time when
-/// `synced`, and serves each hub stream of the session on one `hub::Link`. It replies
+/// `synced`, and serves each hub stream of the session on one `hub::Link`, once it
+/// reads the stream's header in the stream's own future, as `node` does. It replies
 /// to each request with its body reversed, after [`HOLD`]. The program's node gives
 /// its end to `program`.
 fn session<P>(
@@ -84,8 +85,8 @@ where
     session_with(seed, synced, POOL, Some(rules()), program)
 }
 
-/// As [`session`], with a home pool of `pool` bytes, and `rules` given to `Hub::rules`
-/// unless `None`.
+/// As [`session`], with a home pool of `pool` bytes, and `rules` given to
+/// `Hub::set_rules` unless `None`.
 fn session_with<P>(
     seed: u64,
     synced: bool,
@@ -94,6 +95,62 @@ fn session_with<P>(
     program: impl FnOnce(Agent) -> P + Send + 'static,
 ) -> Home
 where
+    P: Future<Output = ()> + 'static,
+{
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let closed = Arc::new(Mutex::new(None));
+    let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, pool, synced).await;
+        if let Some(rules) = rules {
+            test.hub.set_rules(rules);
+        }
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        while let Ok(mut incoming) = session.accept().await {
+            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
+            tasks.spawn(async move {
+                header(&mut incoming).await;
+                let got = answer(link.serve(incoming), &clock).await;
+                kept.lock().expect("not poisoned").push(got);
+            });
+        }
+        *ended.lock().expect("not poisoned") = Some(session.closed().await);
+        drop((link, test));
+    };
+    run(seed, home, program);
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let closed = closed.lock().expect("not poisoned").take();
+    Home {
+        served,
+        closed: closed.expect("the session closed"),
+    }
+}
+
+/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
+async fn home(
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    pool: usize,
+    synced: bool,
+) -> Test {
+    let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
+    let mut test = Test::new(node.clone(), tasks.clone(), layout, pool, None).await;
+    if synced {
+        test.sync().await;
+    }
+    test
+}
+
+/// Runs `home` on one simulated node, and `program` on another, which dials the
+/// first as a program.
+fn run<H, P>(
+    seed: u64,
+    home: impl FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
     P: Future<Output = ()> + 'static,
 {
     let mut sim = sim::Sim::new(sim::Config {
@@ -106,37 +163,8 @@ where
         name: name.into(),
         core: None,
     };
-    let served = Arc::new(Mutex::new(Vec::new()));
-    let closed = Arc::new(Mutex::new(None));
-    let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let node = nodes[0].clone();
-    let main = move |tasks: env::tasks::Tasks| async move {
-        let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout, pool, None).await;
-        if synced {
-            test.sync().await;
-        }
-        if let Some(rules) = rules {
-            test.hub.rules(rules);
-        }
-        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let session = transport.accept().await.expect("a session");
-        let link = test.hub.link(session.clone());
-        while let Ok(mut incoming) = session.accept().await {
-            let header = incoming.receiver.recv().await.expect("a header");
-            let header = header.expect("the header comes before the finish");
-            assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
-            drop(header);
-            let serve = link.serve(incoming);
-            let (kept, clock) = (Arc::clone(&kept), node.clock());
-            tasks.spawn(async move {
-                let got = answer(serve, &clock).await;
-                kept.lock().expect("not poisoned").push(got);
-            });
-        }
-        *ended.lock().expect("not poisoned") = Some(session.closed().await);
-        drop((link, test));
-    };
+    let main = move |tasks: env::tasks::Tasks| home(node, tasks);
     drop(
         nodes[0]
             .shards()
@@ -158,12 +186,13 @@ where
             .expect("starts"),
     );
     sim.run().expect("the run ends");
-    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
-    let closed = closed.lock().expect("not poisoned").take();
-    Home {
-        served,
-        closed: closed.expect("the session closed"),
-    }
+}
+
+/// Reads the header of `incoming`, and checks that it names the hub.
+async fn header(incoming: &mut Incoming) {
+    let header = incoming.receiver.recv().await.expect("a header");
+    let header = header.expect("the header comes before the finish");
+    assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
 }
 
 /// What `serve` gave for one stream, once it replied to a request with its body
@@ -196,6 +225,22 @@ impl Stream {
         let mut block = self.pool.alloc(bytes.len()).expect("the pool has room");
         block.copy_from_slice(bytes);
         self.sender.send(block.freeze()).await.expect("sends");
+    }
+
+    /// Sends a request of `length` bytes, signed over `body`, and `body` in messages
+    /// of at most 64 KiB.
+    async fn request(&mut self, length: u64, body: &[u8]) {
+        let signed = access::proof::request(CONNECTION, body);
+        let request = Request {
+            length,
+            signature: Pair::new(&AGENT).sign(&signed),
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        self.send(&out).await;
+        for chunk in body.chunks(1 << 16) {
+            self.send(chunk).await;
+        }
     }
 
     /// The next message from the node, `None` once it finished.
@@ -296,15 +341,20 @@ impl Agent {
 
     /// Opens a request stream and sends its header.
     async fn open(&self) -> Stream {
+        let mut stream = self.silent().await;
+        stream.send(&wire::header::encode(Protocol::Hub)).await;
+        stream
+    }
+
+    /// Opens a stream and sends nothing, so the node does not see it yet.
+    async fn silent(&self) -> Stream {
         let (sender, receiver) =
             self.session.open(Class::Complete).await.expect("opens");
-        let mut stream = Stream {
+        Stream {
             pool: std::rc::Rc::clone(&self.pool),
             sender,
             receiver,
-        };
-        stream.send(&wire::header::encode(Protocol::Hub)).await;
-        stream
+        }
     }
 
     /// Sends a request of `length` bytes, signed over `body`, and `body` in messages
@@ -318,17 +368,7 @@ impl Agent {
     /// As [`Agent::request`], but leaves the stream open.
     async fn unfinished(&self, length: u64, body: &[u8]) -> Stream {
         let mut stream = self.open().await;
-        let signed = access::proof::request(CONNECTION, body);
-        let request = Request {
-            length,
-            signature: Pair::new(&AGENT).sign(&signed),
-        };
-        let mut out = [0; Request::LEN];
-        request.encode(&mut out);
-        stream.send(&out).await;
-        for chunk in body.chunks(1 << 16) {
-            stream.send(chunk).await;
-        }
+        stream.request(length, body).await;
         stream
     }
 
@@ -933,5 +973,60 @@ fn refuses_a_hello_that_expired_before_it_came() {
         ),
         "{:?}",
         home.served
+    );
+}
+
+/// `serve` takes the role of a stream at the call: the second stream given to it is a
+/// request stream, also when its future runs first. This program breaks the client
+/// wire rule, with a request stream before its hello.
+#[test]
+fn takes_the_role_of_a_stream_at_the_call() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, POOL, true).await;
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut first = session.accept().await.expect("a stream");
+        let mut second = session.accept().await.expect("a stream");
+        header(&mut first).await;
+        header(&mut second).await;
+        let hello = link.serve(first);
+        let request = link.serve(second);
+        let served = answer(request, &node.clock()).await;
+        *kept.lock().expect("not poisoned") = Some(served);
+        drop((hello, link, test));
+    };
+    run(107, home, |agent| async move {
+        let _request = agent.open().await;
+        agent.sleep(QUIET).await;
+    });
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Err(serve::Error::Unadmitted)));
+}
+
+/// The node sees a stream at its header, so a request stream that the program opens
+/// before its hello, and whose header it sends after the challenge that follows the
+/// hello, is a request stream.
+#[test]
+fn answers_a_request_on_a_stream_opened_before_the_hello() {
+    let home = session(108, true, |mut agent| async move {
+        let mut stream = agent.silent().await;
+        agent.sleep(QUIET).await;
+        agent.admit().await;
+        stream.send(&wire::header::encode(Protocol::Hub)).await;
+        stream.request(4, b"ping").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.response().await, b"gnip");
+        agent.hello.sender.finish().expect("finishes");
+        agent.sleep(QUIET).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Ok(Got::Request(name(SUBJECT), b"ping".to_vec())),
+            Ok(Got::Ended)
+        ]
     );
 }
