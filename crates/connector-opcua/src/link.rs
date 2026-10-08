@@ -236,6 +236,29 @@ fn the_shim_check_uses_the_compiler_of_cc() {
     assert!(stdout.contains("No such file or directory"), "{stdout}");
 }
 
+unsafe extern "C" {
+    fn UA_Timer_init(timer: *mut std::ffi::c_void);
+    fn UA_Timer_next(timer: *mut std::ffi::c_void) -> i64;
+    fn UA_Timer_process(timer: *mut std::ffi::c_void, now: i64) -> i64;
+    fn UA_Timer_remove(timer: *mut std::ffi::c_void, key: u64);
+    fn UA_Timer_clear(timer: *mut std::ffi::c_void);
+}
+
+/// The library does not compile `timer.c`, and the archive drops an object that
+/// nothing names. So this test links only when `sources.txt` holds it.
+#[test]
+fn the_copy_links_the_timer() {
+    let functions = std::hint::black_box([
+        UA_Timer_init as *const (),
+        UA_Timer_next as *const (),
+        UA_Timer_process as *const (),
+        UA_Timer_remove as *const (),
+        UA_Timer_clear as *const (),
+    ]);
+    let distinct: std::collections::BTreeSet<_> = functions.iter().collect();
+    assert_eq!(distinct.len(), functions.len());
+}
+
 /// Each symbol outside the copy and `shim.c` that they may name, in glibc on x86-64
 /// and 64-bit Arm, at each optimization level. None gives or takes a heap block, so no
 /// block crosses between the allocator of libc and `src/alloc.rs`.
