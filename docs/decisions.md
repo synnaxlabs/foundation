@@ -4120,8 +4120,9 @@ How to read this record:
   `.pub` line whose comment holds `PRIVATE KEY` gets that alarm too, because a missed
   private key costs more. A PEM or RFC 4716 public key gives `config.bad-public-key`.
   A message quotes at most the first word of a value: an algorithm name from a closed
-  table of OpenSSH key types, with `{:?}`. The one-line form, the first-word rule, and
-  the marks of a private key are from `laptop.architect-2` at 2026-10-08T06:42:17Z
+  table of OpenSSH key types, with `{:?}`. The form of one line or a list, the
+  first-word rule, and the marks of a private key are from `laptop.architect-2` at
+  2026-10-08T06:42:17Z
   (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085). The
   ruling at 2026-10-08T05:49:53Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142)
@@ -4129,7 +4130,9 @@ How to read this record:
   PR that merges second: #1823, or the #1153 PR that adds `connector` blocks to
   `config::check`. The read moves to `ssh-key` if the person approves it
   (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
-  PR of #337 that first prints a key's fingerprint.
+  PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
+  2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies and connectors itself. A policy reaches a name when

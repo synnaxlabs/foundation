@@ -2928,11 +2928,22 @@ mod tests {
         fn refuses_a_key_of_another_algorithm_by_its_name() {
             let cases = [
                 "ssh-rsa",
+                "ssh-dss",
                 "ecdsa-sha2-nistp256",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521",
+                "sk-ecdsa-sha2-nistp256@openssh.com",
                 "sk-ssh-ed25519@openssh.com",
+                "ssh-rsa-cert-v01@openssh.com",
+                "ssh-dss-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+                "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
                 "ssh-ed25519-cert-v01@openssh.com",
                 "sk-ssh-ed25519-cert-v01@openssh.com",
                 "ssh-xmss@openssh.com",
+                "ssh-xmss-cert-v01@openssh.com",
             ];
             for algorithm in cases {
                 let keys = string(&line(algorithm, &[0; 51]));
