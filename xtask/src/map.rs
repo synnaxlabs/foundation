@@ -22,8 +22,13 @@ pub(crate) enum Deps {
 pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 
 /// Edges, each as `(user, dep)`, that `user` may take only as a dev-dependency.
-pub(crate) const TEST_EDGES: &[(&str, &str)] =
-    &[("connector-ni", "daqmx-stub"), ("hub", "buffer")];
+pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
+    ("connector-ni", "daqmx-stub"),
+    ("hub", "buffer"),
+    ("access", "document"),
+    ("config", "config-hcl"),
+    ("config", "connector-influx"),
+];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
@@ -317,30 +322,19 @@ mod tests {
     }
 
     #[test]
-    fn allows_buffer_to_hub_only_as_a_dev_dependency() {
+    fn allows_a_test_edge_only_to_its_user_as_a_dev_dependency() {
         for (name, dep, kind, expected) in [
             ("hub", "buffer", Some("dev"), true),
             ("hub", "buffer", None, false),
             ("hub", "buffer", Some("build"), false),
             ("connector-modbus", "buffer", Some("dev"), false),
-        ] {
-            assert_eq!(
-                allowed(name, dep, kind),
-                expected,
-                "{name} -> {dep} {kind:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn allows_a_crate_on_itself_only_as_a_dev_dependency() {
-        assert!(allowed("home", "home", Some("dev")));
-        assert!(!allowed("home", "home", None));
-    }
-
-    #[test]
-    fn allows_a_stub_only_to_its_user_as_a_dev_dependency() {
-        for (name, dep, kind, expected) in [
+            ("access", "document", Some("dev"), true),
+            ("access", "document", None, false),
+            ("access", "document", Some("build"), false),
+            ("codec", "document", Some("dev"), false),
+            ("access", "buffer", Some("dev"), false),
+            ("hub", "connector-modbus", Some("dev"), false),
+            ("buffer", "hub", Some("dev"), false),
             ("connector-ni", "daqmx-stub", Some("dev"), true),
             ("connector-ni", "daqmx-stub", None, false),
             ("connector-ni", "daqmx-stub", Some("build"), false),
@@ -355,6 +349,12 @@ mod tests {
                 "{name} -> {dep} {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn allows_a_crate_on_itself_only_as_a_dev_dependency() {
+        assert!(allowed("home", "home", Some("dev")));
+        assert!(!allowed("home", "home", None));
     }
 
     #[test]

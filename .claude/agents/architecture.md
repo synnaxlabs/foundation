@@ -15,7 +15,10 @@ You check that code keeps Foundation's architecture. Read `docs/claude/design.md
 Your worktree starts at `main`. For a PR, put its head in it first:
 `gh pr checkout <n> --detach`. Run each command in this worktree, from its root: never
 `cd`, and never use a path outside it, even one that you were given. Run each Bash
-command alone, with no `&&` chain and no shell variable.
+command alone, with no `&&` chain and no shell variable. After the checkout, change no
+file that git tracks: a test of a change is the work of `reviewer` and `breaker`. Auto
+mode blocks some edits in place in Bash (`sed -i`, `perl -pi`), and three blocks in a
+row stop the session.
 
 Check:
 

@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use block::{Block, Pool};
 use raft::{Change, Grant, Position, Proof, Signature, Term, Voters};
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Name;
-use types::node::{self, PublicKey};
+use types::node;
 use types::time::{Span, Stamp};
 
 /// A block of `pool` that holds `bytes`.

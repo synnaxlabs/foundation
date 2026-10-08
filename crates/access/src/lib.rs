@@ -4,6 +4,7 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use spec::access::{Action, Actions, Policy};
+use spec::definition::Definition;
 use types::authority::Authority;
 use types::hash::Set;
 use types::name::{Name, Prefix};
@@ -17,17 +18,39 @@ pub struct Rules {
 }
 
 impl Rules {
-    /// Builds the rules. Each policy comes with the prefix of the region whose spec
-    /// tree holds it; [`Prefix::ROOT`] is the root region. `connectors` are the names
-    /// of the connector definitions.
-    pub fn new(
-        policies: impl IntoIterator<Item = (Prefix, Policy)>,
-        connectors: impl IntoIterator<Item = Name>,
-    ) -> Self {
-        Self {
-            policies: policies.into_iter().collect(),
-            connectors: connectors.into_iter().collect(),
+    /// Builds the rules from the region trees that the owner reads. Each item is the
+    /// prefix of a region, with [`Prefix::ROOT`] for the root region, and the
+    /// definitions of its tree by name. Access keeps the access policies and the
+    /// connectors, and ignores each other kind.
+    pub fn new<'a, T>(trees: impl IntoIterator<Item = (Prefix, T)>) -> Self
+    where
+        T: IntoIterator<Item = (&'a Name, &'a Definition)>,
+    {
+        let mut rules = Self {
+            policies: Vec::new(),
+            connectors: Set::default(),
+        };
+        for (region, tree) in trees {
+            for (name, definition) in tree {
+                match definition {
+                    Definition::Access(policy) => {
+                        rules.policies.push((region.clone(), policy.clone()));
+                    }
+                    Definition::Connector(_) => {
+                        rules.connectors.insert(name.clone());
+                    }
+                    Definition::Region(_)
+                    | Definition::NodeSettings(_)
+                    | Definition::Compression(_)
+                    | Definition::Placement(_)
+                    | Definition::Time(_)
+                    | Definition::Channel(_)
+                    | Definition::Retention(_)
+                    | Definition::Subject(_) => {}
+                }
+            }
         }
+        rules
     }
 
     /// What `subject` may do on `name`: the union of the policies that match both,

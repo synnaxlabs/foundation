@@ -11,7 +11,7 @@ use aws_lc_rs::hkdf::{HKDF_SHA256, KeyType, Prk};
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256;
 use rustls::crypto::aws_lc_rs::default_provider;
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
 use super::cid;
 use crate::{tls, varint};

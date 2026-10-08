@@ -8,6 +8,7 @@
     clippy::string_slice
 )]
 
+pub mod blob;
 pub mod clock;
 mod common;
 pub mod header;

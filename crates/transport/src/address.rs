@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
 /// Where a node accepts sessions. Addresses come from the mesh and from join tickets,
 /// never from DNS. The transport chooses the carrier for each.

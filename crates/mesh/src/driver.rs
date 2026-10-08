@@ -11,15 +11,16 @@ use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use block::{Block, Pool};
-use env::clock::Clock;
+use env::clock::{Clock, Sleep};
 use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
-use transport::{Session, Transport};
+use transport::{Code, Session, Transport};
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Prefix;
-use types::node::{self, PrivateKey, PublicKey};
+use types::node::{self, PrivateKey};
 use types::time::{Span, Stamp};
 use wire::Protocol;
 
@@ -35,7 +36,7 @@ use crate::message::Message;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
 pub use end::Ended;
-use end::{Live, Running};
+use end::Spawner;
 use send::Senders;
 
 mod end;
@@ -56,6 +57,11 @@ const HEARTBEAT_TICKS: u32 = 1;
 const QUEUE_MAX: usize = 64;
 /// The directory of the log, in [`Config::dir`].
 const LOG: &str = "log";
+/// The code of a stream with a message that the mesh refused.
+const REFUSED: Code = Code(16);
+/// The code of a stream with a request from a node that a committed configuration
+/// removed.
+const REMOVED: Code = Code(17);
 
 /// What a [`Mesh`] is built from.
 #[derive(Debug)]
@@ -100,13 +106,14 @@ pub struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory gives [`Error::Log`]. Each task that sends ends at its
-/// next poll: a dial or a send in progress stops, and does not wait for its timeout.
-/// [`Mesh::ended`] tells when each task has ended.
+/// open of the same directory gives [`Error::Log`]. Once the group stops or the
+/// last clone drops, each task that sends ends at once: a dial or a send in
+/// progress stops, and does not wait for its timeout. [`Mesh::ended`] tells when
+/// each task has ended.
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
-    running: Rc<Running>,
+    spawner: Spawner,
     pool: Rc<Pool>,
     clock: Clock,
     #[cfg_attr(
@@ -153,16 +160,15 @@ impl Mesh {
             "invariant: the transport of a mesh proves the public half of its private \
              key: it proves {proved}, not {own}"
         );
-        let (transport, tasks) = (Rc::clone(&config.transport), config.tasks.clone());
+        let transport = Rc::clone(&config.transport);
         let mesh = Self::start(config).await?;
         let senders = Senders {
             group: Rc::downgrade(&mesh.group),
             transport,
             pool: Rc::clone(&mesh.pool),
-            tasks: tasks.clone(),
-            _live: Live::new(&mesh.running),
+            spawner: mesh.spawner.clone(),
         };
-        tasks.spawn(senders.run());
+        mesh.spawner.spawn(senders.run());
         Ok(mesh)
     }
 
@@ -218,10 +224,9 @@ impl Mesh {
             calls: BTreeMap::new(),
         }));
         let weak = Rc::downgrade(&group);
-        let running = Rc::default();
-        config.tasks.spawn(run(
+        let spawner = Spawner::new(config.tasks);
+        spawner.spawn(run(
             weak,
-            Live::new(&running),
             log,
             signer,
             config.clock.clone(),
@@ -229,7 +234,7 @@ impl Mesh {
         ));
         Ok(Self {
             group,
-            running,
+            spawner,
             pool,
             clock: config.clock,
             entropy: config.entropy,
@@ -248,7 +253,7 @@ impl Mesh {
     /// its directory can take the log.
     #[must_use]
     pub fn ended(&self) -> Ended {
-        Ended(Rc::clone(&self.running))
+        self.spawner.ended()
     }
 
     /// A watch of the home of `index`.
@@ -285,8 +290,11 @@ impl Mesh {
     ///   ends.
     /// - [`Error::Spoofed`] when `peer` is not the key of the member that the message
     ///   names as its sender.
+    /// - [`Error::Removed`] when the message is a request and a committed
+    ///   configuration removed its sender.
     /// - [`Error::NotVoter`] when the message is a request and its sender is not a
-    ///   voter of this node's configuration.
+    ///   voter of this node's configuration, and no committed configuration removed
+    ///   it.
     /// - [`Error::Claim`] when a claim of a known signer in the message does not
     ///   hold. A claim of a signer with no key at this node is not an error: a voter
     ///   of the proof with no key is removed, and an append is cut before the first
@@ -313,7 +321,11 @@ impl Mesh {
             return Err(Error::Spoofed { from });
         }
         if request(&message.body) && !group.voter(from) {
-            return Err(Error::NotVoter { from });
+            return Err(if group.raft.removed(from) {
+                Error::Removed { from }
+            } else {
+                Error::NotVoter { from }
+            });
         }
         claim::check(&group.raft, &mut message, |key| group.public_key(key))?;
         group.input(|raft| raft.step(message))?;
@@ -430,11 +442,10 @@ impl Mesh {
         {
             let group = self.group.borrow();
             group.taking()?;
-            let Voters { incoming, outgoing } = group.raft.voters();
-            let holds = |voter: &node::Key| {
-                group.public_key(*voter).map(Known::public_key) == Some(peer)
+            let holds = |voter: node::Key| {
+                group.public_key(voter).map(Known::public_key) == Some(peer)
             };
-            if !incoming.iter().chain(outgoing).any(holds) {
+            if !group.raft.voters().nodes().any(holds) {
                 return Err(Error::PeerNotVoter { peer });
             }
         }
@@ -709,8 +720,7 @@ impl Group {
 
     // Whether `key` votes in one half of the configuration, at least.
     fn voter(&self, key: node::Key) -> bool {
-        let Voters { incoming, outgoing } = self.raft.voters();
-        incoming.contains(&key) || outgoing.contains(&key)
+        self.raft.voters().contains(key)
     }
 
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
@@ -806,6 +816,7 @@ impl Group {
 
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
+        self.wake();
         self.end_senders();
         self.wake_watches();
         self.wake_calls();
@@ -935,7 +946,7 @@ fn request(body: &Body) -> bool {
     }
 }
 
-// Opens the log in `dir`, and makes `dir` when it is not there.
+// Makes `dir`, durable in its parent, and opens the log in `LOG` in it.
 async fn open_log(
     files: Files,
     dir: &Path,
@@ -953,7 +964,6 @@ async fn open_log(
 // It is the only caller of `Raft::ready`, so the writes keep their order.
 async fn run(
     group: Weak<RefCell<Group>>,
-    _live: Live,
     mut log: Log,
     signer: Signer,
     clock: Clock,
@@ -967,6 +977,9 @@ async fn run(
                 return Poll::Ready(None);
             };
             let mut group = group.borrow_mut();
+            if group.running().is_err() {
+                return Poll::Ready(None);
+            }
             // A tick that a slow write hides is lost, so the group's time only
             // slows.
             while Pin::new(&mut tick).poll(cx).is_ready() {
@@ -984,27 +997,13 @@ async fn run(
             return;
         };
         signer.sign(&mut ready);
-        // The pool may give the blocks later, so the write runs again at each tick.
-        let written = loop {
-            let cause = match log.write(ready.hard.clone(), &ready.entries).await {
-                Err(log::Error::Pool(
-                    cause @ (block::Error::Exhausted { .. }
-                    | block::Error::Refused { .. }),
-                )) => cause,
-                written => break written,
-            };
-            if let Some(group) = group.upgrade() {
-                group.borrow_mut().waits = Some(cause);
-            }
-            (&mut tick).await;
-            tick = clock.sleep(TICK);
-            if group.strong_count() == 0 {
-                return;
-            }
+        let Some(written) = write(&group, &mut log, &clock, &mut tick, &ready).await
+        else {
+            wake_each(&proposals);
+            return;
         };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
-        group.waits = None;
         let Ready {
             entries,
             messages,
@@ -1018,13 +1017,49 @@ async fn run(
             group.send(messages);
             group.apply(committed)
         });
-        for proposal in &proposals {
-            proposal.wake();
-        }
+        wake_each(&proposals);
         if let Err(stopped) = applied {
             group.stop(stopped);
             return;
         }
+    }
+}
+
+// Writes the hard state and the entries of `ready`, and tries again at each tick
+// while the pool gives no block. `None` when the last handle of the group drops, or a
+// sender stops the group, before the write ends: `run` then sends and applies none
+// of them.
+async fn write(
+    group: &Weak<RefCell<Group>>,
+    log: &mut Log,
+    clock: &Clock,
+    tick: &mut Sleep,
+    ready: &Ready,
+) -> Option<Result<(), log::Error>> {
+    loop {
+        let cause = match log.write(ready.hard.clone(), &ready.entries).await {
+            Err(log::Error::Pool(
+                cause @ (block::Error::Exhausted { .. } | block::Error::Refused { .. }),
+            )) => cause,
+            written => {
+                let group = group.upgrade()?;
+                let mut group = group.borrow_mut();
+                group.waits = None;
+                return group.running().is_ok().then_some(written);
+            }
+        };
+        group.upgrade()?.borrow_mut().waits = Some(cause);
+        (&mut *tick).await;
+        *tick = clock.sleep(TICK);
+        if group.upgrade()?.borrow().running().is_err() {
+            return None;
+        }
+    }
+}
+
+fn wake_each(proposals: &[Rc<Proposal>]) {
+    for proposal in proposals {
+        proposal.wake();
     }
 }
 
@@ -1044,6 +1079,7 @@ mod tests {
     use sim::{Crash, Sim, link};
     use transport::{Address, Peer, Port};
     use types::node::SealKey;
+    use types::time::Monotonic;
     use wire::Protocol;
 
     use super::*;
@@ -1231,6 +1267,24 @@ mod tests {
             card: card::Signed::sign(key(id), card, &private(signer)),
             ..common::member(id)
         }
+    }
+
+    /// The configuration entries that `leader` wrote at `TERM` from index 1: one for
+    /// each of `sets`, as its incoming and outgoing voters.
+    fn changes(leader: u8, sets: &[(&[u8], &[u8])]) -> Vec<Entry> {
+        let keys = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
+        let change = |(index, &(incoming, outgoing))| {
+            let at = Position {
+                term: common::TERM,
+                index,
+            };
+            let voters = Voters {
+                incoming: keys(incoming),
+                outgoing: keys(outgoing),
+            };
+            common::change(leader, at, voters)
+        };
+        (1..).zip(sets).map(change).collect()
     }
 
     /// A pool of one page.
@@ -1710,17 +1764,39 @@ mod tests {
     fn solo<F: Future<Output = ()> + 'static>(
         body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
     ) {
-        let mut sim = Sim::new(sim::Config::default());
+        solo_at(0, body);
+    }
+
+    /// As [`solo`], with the run at `seed`.
+    fn solo_at<F: Future<Output = ()> + 'static>(
+        seed: u64,
+        body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+    ) {
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
         let node = sim.node(sim::node::Config::default());
         sim.run_on(&node, body).unwrap();
     }
 
     /// Proposes `change` once per tick until this node leads.
     async fn lead(mesh: &Mesh, clock: &Clock, change: Change) -> Position {
+        lead_at(mesh, clock, change).await.1
+    }
+
+    /// As [`lead`], and also gives the time at which it asked the proposal that
+    /// succeeded.
+    async fn lead_at(
+        mesh: &Mesh,
+        clock: &Clock,
+        change: Change,
+    ) -> (Monotonic, Position) {
         let follower = Error::Raft(raft::Error::NotLeader { leader: None });
         loop {
+            let asked = clock.now();
             match mesh.propose(change.clone()).await {
-                Ok(at) => return at,
+                Ok(at) => return (asked, at),
                 Err(error) => assert_eq!(error, follower),
             }
             clock.sleep(TICK).await;
@@ -1801,33 +1877,43 @@ mod tests {
         }
     }
 
+    // Both proposals enter before the group's write, which then waits for a block.
+    // The group refuses a proposal that comes while it waits. Each call then runs on
+    // its own task, so each needs its own wake.
     #[test]
     fn each_proposal_returns_after_the_write_of_its_entry() {
-        solo(|node, tasks| async move {
-            let pool = small_pool();
-            let config = Config {
-                pool: Rc::clone(&pool),
-                ..config(&node, &tasks, 1, &[1], &[1])
-            };
-            let mesh = Mesh::start(config).await.unwrap();
-            let first = lead(&mesh, &node.clock(), home(1)).await;
-            let held = fill(&pool);
-            let results = Rc::new(RefCell::new(Vec::new()));
-            for id in [2, 3] {
-                let (other, results) = (mesh.clone(), Rc::clone(&results));
-                tasks.spawn(async move {
-                    let proposed = other.propose(home(id)).await;
-                    results.borrow_mut().push(proposed.unwrap());
+        for seed in 0..16 {
+            solo_at(seed, move |node, tasks| async move {
+                let pool = small_pool();
+                let config = Config {
+                    pool: Rc::clone(&pool),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::start(config).await.unwrap();
+                let first = lead(&mesh, &node.clock(), home(1)).await;
+                let held = fill(&pool);
+                let mut calls = [2, 3].map(|id| {
+                    let other = mesh.clone();
+                    Box::pin(async move { other.propose(home(id)).await })
                 });
-            }
-            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-            assert_eq!(*results.borrow(), []);
-            drop(held);
-            node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
-            let mut positions = results.take();
-            positions.sort_by_key(|at| at.index);
-            assert_eq!(positions, [after(first, 1), after(first, 2)]);
-        });
+                let polled = poll_each(&mut calls).await;
+                assert_eq!(polled, [Poll::Pending, Poll::Pending], "run {seed}");
+                let results = Rc::new(RefCell::new([None, None]));
+                for (slot, call) in calls.into_iter().enumerate() {
+                    let given = Rc::clone(&results);
+                    tasks.spawn(async move {
+                        let result = call.await;
+                        given.borrow_mut()[slot] = Some(result);
+                    });
+                }
+                node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+                assert_eq!(*results.borrow(), [None, None], "run {seed}");
+                drop(held);
+                node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
+                let positions = [after(first, 1), after(first, 2)].map(Ok).map(Some);
+                assert_eq!(*results.borrow(), positions, "run {seed}");
+            });
+        }
     }
 
     // The second proposal comes while the write of the first one is in a disk call.
@@ -1913,6 +1999,61 @@ mod tests {
         });
     }
 
+    // One `Ready` holds the entry of the second proposal and commits the first home.
+    // Its write is in a disk call when voter 2 stops the group, as a sender task does
+    // on a code 17. The write ends, and the group sends and applies none of it.
+    #[test]
+    fn a_proposal_whose_write_is_in_a_disk_call_gives_a_removed_stop() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let first = elect(&mesh).await;
+            assert_eq!(mesh.propose(home(1)).await, Ok(after(first, 1)));
+            let mut proposal = pin!(mesh.propose(home(2)));
+            assert!(now(proposal.as_mut()).await.is_pending());
+            let last = first.index + 1;
+            let reply = raft::Message {
+                term: first.term,
+                ..message(2, 1, Body::AppendReply { last })
+            };
+            assert_eq!(mesh.receive(public(2), reply), Ok(()));
+            node.clock().sleep(Span::NANOSECOND).await;
+            let removed = Stopped::Removed { by: key(2) };
+            mesh.group.borrow_mut().stop(removed.clone());
+            node.clock().sleep(TICK).await;
+            assert_eq!(proposal.await, Err(Error::Stopped(removed.clone())));
+            assert_eq!(watch.next().await, Err(removed));
+            // No call shows the home after the stop.
+            assert_eq!(mesh.group.borrow().state.home(INDEX), None);
+        });
+    }
+
+    // The pool stays full, so only the end of the group's task frees the log for a
+    // new open, which takes its own pool.
+    #[test]
+    fn a_stop_while_a_write_waits_for_a_block_frees_the_log_at_the_next_tick() {
+        solo(|node, tasks| async move {
+            let pool = small_pool();
+            let small = Config {
+                pool: Rc::clone(&pool),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::start(small).await.unwrap();
+            lead(&mesh, &node.clock(), home(1)).await;
+            let _held = fill(&pool);
+            let mut proposal = pin!(mesh.propose(home(2)));
+            assert!(now(proposal.as_mut()).await.is_pending());
+            node.clock().sleep(TICK).await;
+            let removed = Stopped::Removed { by: key(2) };
+            mesh.group.borrow_mut().stop(removed.clone());
+            assert_eq!(proposal.await, Err(Error::Stopped(removed)));
+            node.clock().sleep(TICK).await;
+            let again = Mesh::start(config(&node, &tasks, 1, &[1], &[1])).await;
+            assert_eq!(again.map(drop), Ok(()));
+        });
+    }
+
     // One `Ready` replaces the entry of the proposal and commits an entry that is
     // not a change.
     #[test]
@@ -1952,6 +2093,17 @@ mod tests {
             assert_eq!(format!("{mesh:?}"), "Mesh { .. }");
             let watch = mesh.watch(INDEX);
             assert_eq!(format!("{watch:?}"), "Watch { index: Key(7), .. }");
+        });
+    }
+
+    #[test]
+    fn the_debug_text_of_ended_holds_nothing() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut ended = mesh.ended();
+            let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut ended).poll(cx))).await;
+            assert_eq!(polled, Poll::Pending);
+            assert_eq!(format!("{ended:?}"), "Ended { .. }");
         });
     }
 
@@ -2304,6 +2456,166 @@ mod tests {
                     let received = mesh.receive(public(4), message(4, 1, body));
                     assert_eq!(received, Ok(()));
                 }
+            });
+        }
+
+        /// Takes `entries` on `mesh` in one append from leader 2 that commits up to
+        /// `commit`, and waits for the group to write them.
+        async fn take(
+            node: &sim::node::Node,
+            mesh: &Mesh,
+            entries: Vec<Entry>,
+            commit: u64,
+        ) {
+            let append = Body::Append {
+                prev: Position::default(),
+                entries,
+                commit,
+            };
+            assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+            node.clock().sleep(TICK).await;
+        }
+
+        /// Commits up to `commit` on `mesh` with a heartbeat from leader 2, and waits
+        /// for the group to apply.
+        async fn commit(node: &sim::node::Node, mesh: &Mesh, commit: u64) {
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            node.clock().sleep(TICK).await;
+        }
+
+        /// What `mesh` answers to each request from node `from`, when each answer is
+        /// the same.
+        fn answered(mesh: &Mesh, from: u8) -> Result<(), Error> {
+            let mut answers = requests()
+                .map(|body| mesh.receive(public(from), message(from, 1, body)))
+                .into_iter();
+            let first = answers.next().unwrap();
+            assert!(answers.all(|answer| answer == first));
+            first
+        }
+
+        // Node 3 is a voter at the start, and the committed leave lacks it.
+        #[test]
+        fn answers_removed_to_a_node_that_a_committed_configuration_removed() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+                take(&node, &mesh, changes(2, &sets), 2).await;
+                let removed = Error::Removed { from: key(3) };
+                assert_eq!(answered(&mesh, 3), Err(removed.clone()));
+                assert_eq!(
+                    removed.to_string(),
+                    format!(
+                        "node {} sent a request, but a committed configuration \
+                         removed it",
+                        key(3)
+                    )
+                );
+                for body in replies() {
+                    let received = mesh.receive(public(3), message(3, 1, body));
+                    assert_eq!(received, Ok(()));
+                }
+                assert!(quiet(&mesh, 3).await);
+            });
+        }
+
+        // Only the outgoing set of the committed joint entry held node 3, as for a
+        // wiped voter whose first entry is a joint entry.
+        #[test]
+        fn answers_removed_to_a_node_that_only_an_outgoing_set_held() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
+                let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+                take(&node, &mesh, changes(2, &sets), 2).await;
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
+            });
+        }
+
+        // Node 4 is a member that no configuration in the log held.
+        #[test]
+        fn answers_not_voter_to_a_request_from_a_node_that_no_configuration_held() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
+                let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+                take(&node, &mesh, changes(2, &sets), 2).await;
+                assert_eq!(answered(&mesh, 4), Err(Error::NotVoter { from: key(4) }));
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
+            });
+        }
+
+        // The joint entry still holds node 3 in its outgoing set.
+        #[test]
+        fn answers_not_voter_until_a_configuration_without_the_sender_commits() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+                take(&node, &mesh, changes(2, &sets), 0).await;
+                let not_voter = Error::NotVoter { from: key(3) };
+                assert_eq!(answered(&mesh, 3), Err(not_voter.clone()));
+                commit(&node, &mesh, 1).await;
+                assert_eq!(answered(&mesh, 3), Err(not_voter));
+                commit(&node, &mesh, 2).await;
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
+            });
+        }
+
+        // Only committed entries hold node 3: it joins and leaves after the start.
+        #[test]
+        fn answers_removed_to_a_node_that_only_a_committed_entry_held() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
+                let sets = [
+                    (&[1, 2, 3][..], &[1, 2][..]),
+                    (&[1, 2, 3], &[]),
+                    (&[1, 2], &[1, 2, 3]),
+                    (&[1, 2], &[]),
+                ];
+                take(&node, &mesh, changes(2, &sets), 4).await;
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
+            });
+        }
+
+        // The commit lags at the first entry, as after a restart. The entries that
+        // add node 4 and remove it again can still be truncated, so node 4 is not
+        // removed until they commit.
+        #[test]
+        fn answers_not_voter_to_a_node_that_only_an_entry_past_the_commit_held() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
+                let sets = [
+                    (&[1, 2, 3][..], &[][..]),
+                    (&[1, 2, 3, 4], &[1, 2, 3]),
+                    (&[1, 2, 3, 4], &[]),
+                    (&[1, 2, 3], &[1, 2, 3, 4]),
+                    (&[1, 2, 3], &[]),
+                ];
+                take(&node, &mesh, changes(2, &sets), 1).await;
+                assert_eq!(answered(&mesh, 4), Err(Error::NotVoter { from: key(4) }));
+                commit(&node, &mesh, 5).await;
+                assert_eq!(answered(&mesh, 4), Err(Error::Removed { from: key(4) }));
+            });
+        }
+
+        // After a new open, the log on disk holds node 3, and no configuration is
+        // committed until the leader says so.
+        #[test]
+        fn answers_removed_to_a_node_that_the_log_on_disk_held_once_it_commits() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
+                let sets = [
+                    (&[1, 2, 3][..], &[1, 2][..]),
+                    (&[1, 2, 3], &[]),
+                    (&[1, 2], &[1, 2, 3]),
+                    (&[1, 2], &[]),
+                ];
+                take(&node, &mesh, changes(2, &sets), 0).await;
+                drop(mesh);
+                node.clock().sleep(TICK).await;
+                let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
+                assert_eq!(answered(&mesh, 3), Err(Error::NotVoter { from: key(3) }));
+                commit(&node, &mesh, 4).await;
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
             });
         }
 
@@ -3572,16 +3884,18 @@ mod tests {
 
     #[test]
     fn a_lone_voter_leads_after_one_election_timeout() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-            let clock = node.clock();
-            let opened = clock.now();
-            lead(&mesh, &clock, home(1)).await;
-            let waited = clock.now() - opened;
-            // The timeout is 10 to 19 ticks, and `lead` proposes once per tick.
-            let timeout = seconds(1)..=seconds(2);
-            assert!(timeout.contains(&waited), "it led after {waited}");
-        });
+        for seed in 0..16 {
+            solo_at(seed, move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let clock = node.clock();
+                let opened = clock.now();
+                let (asked, _) = lead_at(&mesh, &clock, home(1)).await;
+                let asked = asked - opened;
+                // The timeout is 10 to 19 ticks, and `lead_at` asks once per tick.
+                let timeout = seconds(1)..=seconds(2);
+                assert!(timeout.contains(&asked), "run {seed}: it led at {asked}");
+            });
+        }
     }
 
     #[test]
@@ -4766,11 +5080,141 @@ mod tests {
         solo(|node, tasks| async move {
             let _first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
             let busy = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
-            let path = Path::new(LOG).join("log-0");
-            let cause = log::Error::Files(files::Error::Busy { path });
-            assert_eq!(busy.to_string(), cause.to_string());
-            assert_eq!(busy, Error::Log(cause));
+            assert_eq!(busy.to_string(), locked().to_string());
+            assert_eq!(busy, locked());
         });
+    }
+
+    /// What an open gives while a group holds the directory of the log.
+    fn locked() -> Error {
+        let path = Path::new(LOG).join("lock");
+        Error::Log(log::Error::Files(files::Error::Busy { path }))
+    }
+
+    fn create_sim(run: u64) -> (Sim, sim::node::Node) {
+        let mut sim = Sim::new(sim::Config {
+            seed: run,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        (sim, node)
+    }
+
+    /// Writes one record that fills `log-0`, so the next write starts `log-1`.
+    async fn fill_first_file(node: &sim::node::Node) {
+        let opened = Log::open(node.files(), LOG.into(), create_pool()).await;
+        let (mut log, _) = opened.unwrap();
+        let entries: Vec<Entry> = (1..=20_000)
+            .map(|index| Entry {
+                at: Position {
+                    term: Term(1),
+                    index,
+                },
+                data: Data::Bytes(encoded(&home(1))),
+            })
+            .collect();
+        log.write(None, &entries).await.unwrap();
+    }
+
+    /// Opens node 1 again and again for 1 ms while its first mesh lives, in each of
+    /// 64 runs. Gives each run in which an open did not give `locked`, with what
+    /// each such open gave. With `full`, the first write of the group starts `log-1`.
+    fn opens_of_a_held_log(full: bool) -> Vec<(u64, Vec<String>)> {
+        let mut runs = Vec::new();
+        for run in 0..64 {
+            let (mut sim, node) = create_sim(run);
+            let opens = sim.run_on(&node, move |node, tasks| async move {
+                if full {
+                    fill_first_file(&node).await;
+                }
+                let first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let clock = node.clock();
+                let end = clock.now().checked_add(Span::MILLISECOND).unwrap();
+                let mut opens = Vec::new();
+                while clock.now() < end {
+                    match open(&node, &tasks, 1, &[1], &[1]).await {
+                        Err(error) if error == locked() => {}
+                        Err(error) => opens.push(error.to_string()),
+                        Ok(second) => {
+                            let names = node.files().list(Path::new(LOG)).await;
+                            clock.sleep(TICK).await;
+                            let proposed = second.propose(home(3)).await;
+                            opens.push(format!("Ok with {names:?}, then {proposed:?}"));
+                        }
+                    }
+                }
+                drop(first);
+                opens
+            });
+            let opens = opens.unwrap();
+            if !opens.is_empty() {
+                runs.push((run, opens));
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn open_gives_busy_on_the_lock_while_a_mesh_lives() {
+        assert_eq!(opens_of_a_held_log(false), []);
+    }
+
+    // The first write of the group starts `log-1` and frees `log-0`.
+    #[test]
+    fn open_gives_busy_on_the_lock_while_a_write_starts_a_file() {
+        assert_eq!(opens_of_a_held_log(true), []);
+    }
+
+    // The record of the changes does not fit in `log-0`, so its write makes `log-1`.
+    // The mesh drops while that write is in progress, and a new open starts at once.
+    #[test]
+    fn an_open_after_a_drop_does_not_share_the_log_with_a_write_that_makes_a_file() {
+        let mut wrong = Vec::new();
+        let mut busy = 0_usize;
+        for run in 0..48 {
+            let (mut sim, node) = create_sim(run);
+            let first = sim.run_on(&node, |node, tasks| async move {
+                let clock = node.clock();
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                lead(&mesh, &clock, home(1)).await;
+                clock.sleep(TICK).await;
+                for _ in 0..20_000 {
+                    assert!(started(&mesh, home(2)).await.is_pending());
+                }
+                clock.sleep(Span::from_nanos(1)).await;
+                drop(mesh);
+                let again = open(&node, &tasks, 1, &[1], &[1]).await;
+                let first = again.as_ref().err().cloned();
+                let mesh = if let Ok(mesh) = again {
+                    mesh
+                } else {
+                    clock.sleep(TICK).await;
+                    open(&node, &tasks, 1, &[1], &[1]).await.unwrap()
+                };
+                let mut watch = mesh.watch(INDEX);
+                lead(&mesh, &clock, home(3)).await;
+                while watch.next().await.unwrap() != Some(key(3)) {}
+                first
+            });
+            let first = first.unwrap();
+            if let Some(error) = &first {
+                assert_eq!(*error, locked(), "run {run}");
+                busy = busy.saturating_add(1);
+            }
+            sim.crash(&node, Crash::Process);
+            let again = sim.run_on(&node, |node, tasks| async move {
+                open(&node, &tasks, 1, &[1], &[1]).await.err()
+            });
+            if let Some(error) = again.unwrap() {
+                wrong.push((run, first, error.to_string()));
+            }
+        }
+        assert_eq!(
+            wrong,
+            [],
+            "(run, the open after the drop, the open after a crash)"
+        );
+        assert_ne!(busy, 0, "no open after the drop met the old task");
     }
 
     #[test]
@@ -4823,10 +5267,19 @@ mod tests {
         });
     }
 
+    /// The config of node 1 of `IDS`, through `Mesh::open`. No node serves the
+    /// address of another member, so each dial waits for [`IDLE`].
+    fn dialing(node: &sim::node::Node, tasks: &Tasks) -> Config {
+        Config {
+            members: IDS.iter().map(|&id| create_voter(id)).collect(),
+            ..config(node, tasks, 1, &IDS, &IDS)
+        }
+    }
+
     #[test]
     fn ended_waits_for_the_last_mesh_and_the_log() {
         solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mesh = Mesh::open(dialing(&node, &tasks)).await.unwrap();
             let (mut first, second) = (mesh.ended(), mesh.ended());
             node.clock().sleep(Span::SECOND).await;
             let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut first).poll(cx))).await;
@@ -4834,7 +5287,7 @@ mod tests {
             drop(mesh);
             first.await;
             second.await;
-            assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
+            assert_eq!(Mesh::open(dialing(&node, &tasks)).await.err(), None);
         });
     }
 
@@ -4857,31 +5310,36 @@ mod tests {
         });
     }
 
-    /// The other members never answer, so each dial waits for [`IDLE`]. The drop of
-    /// the last mesh stops each dial, and `ended` does not wait for it.
+    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
     #[test]
     fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
-        solo(|node, tasks| async move {
-            let config = config(&node, &tasks, 1, &IDS, &IDS);
-            let transport = Rc::clone(&config.transport);
-            let mesh = Mesh::open(config).await.unwrap();
-            let clock = node.clock();
-            clock.sleep(seconds(5)).await;
-            assert!(Rc::strong_count(&transport) > 2);
-            let ended = mesh.ended();
-            let dropped = clock.now();
-            drop(mesh);
-            ended.await;
-            let waited = clock.now() - dropped;
-            assert!(waited <= TICK, "it ended after {waited}");
-            assert_eq!(Rc::strong_count(&transport), 1);
-        });
+        for seed in 0..32 {
+            solo_at(seed, move |node, tasks| async move {
+                let config = dialing(&node, &tasks);
+                let transport = Rc::clone(&config.transport);
+                let mesh = Mesh::open(config).await.unwrap();
+                let clock = node.clock();
+                clock.sleep(seconds(5)).await;
+                assert!(Rc::strong_count(&transport) > 2);
+                let ended = mesh.ended();
+                let dropped = clock.now();
+                drop(mesh);
+                ended.await;
+                let waited = clock.now() - dropped;
+                assert!(waited <= TICK, "it ended after {waited}");
+                assert_eq!(Rc::strong_count(&transport), 1, "seed {seed}");
+            });
+        }
     }
 
     #[test]
     fn ended_resolves_when_the_group_stops() {
         solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let config = Config {
+                voters: [key(1)].into_iter().collect(),
+                ..dialing(&node, &tasks)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
             let cause = fail_sync(&node);
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(None));
@@ -4892,28 +5350,67 @@ mod tests {
 
     #[test]
     fn a_power_cut_right_after_the_open_keeps_the_directory_and_its_log() {
-        let mut sim = Sim::new(sim::Config::default());
-        let node = sim.node(sim::node::Config::default());
-        sim.run_on(&node, |node, tasks| async move {
+        let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
+        for seed in 0..32 {
+            let mut sim = Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let node = sim.node(sim::node::Config::default());
+            sim.run_on(&node, |node, tasks| async move {
+                let config = Config {
+                    dir: "region".into(),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                Mesh::start(config).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            let listed = sim
+                .run_on(&node, |node, _| async move {
+                    let files = node.files();
+                    (
+                        files.list(Path::new("")).await,
+                        files.list(Path::new("region")).await,
+                    )
+                })
+                .unwrap();
+            let kept = (names(&["region"]), names(&[LOG]));
+            assert_eq!(listed, kept, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn an_open_gives_a_failed_sync_of_the_parent_of_its_directory() {
+        solo(|node, tasks| async move {
+            node.fail_file(Path::new(""), Operation::SyncDir);
             let config = Config {
                 dir: "region".into(),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            Mesh::start(config).await.unwrap();
-        })
-        .unwrap();
-        sim.crash(&node, Crash::Power);
-        let listed = sim
-            .run_on(&node, |node, _| async move {
-                let files = node.files();
-                (
-                    files.list(Path::new("")).await,
-                    files.list(Path::new("region")).await,
-                )
-            })
-            .unwrap();
-        let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
-        assert_eq!(listed, (names(&["region"]), names(&[LOG])));
+            let cause = files::Error::Io {
+                path: "".into(),
+                operation: Operation::SyncDir,
+                code: 5,
+            };
+            let failed = Error::Log(log::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
+        });
+    }
+
+    #[test]
+    fn an_open_fails_when_the_parent_of_its_directory_is_not_there() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                dir: "gone/region".into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let cause = files::Error::NotFound {
+                path: "gone/region".into(),
+            };
+            let failed = Error::Log(log::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
+        });
     }
 
     #[test]
@@ -4926,7 +5423,7 @@ mod tests {
             };
             let _mesh = Mesh::start(at()).await.unwrap();
             let busy = Mesh::start(at()).await.err();
-            let path = dir.join(LOG).join("log-0");
+            let path = dir.join(LOG).join("lock");
             let cause = log::Error::Files(files::Error::Busy { path });
             assert_eq!(busy, Some(Error::Log(cause)));
             assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
@@ -4939,6 +5436,39 @@ mod tests {
     #[expect(clippy::manual_noop_waker, reason = "a test counts its clones")]
     impl Wake for Idle {
         fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn an_ended_polled_twice_holds_one_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut ended = mesh.ended();
+            for _ in 0..2 {
+                assert!(Pin::new(&mut ended).poll(&mut cx).is_pending());
+            }
+            drop(waker);
+            assert_eq!(Arc::strong_count(&held), 2);
+            drop(mesh);
+        });
+    }
+
+    #[test]
+    fn a_dropped_ended_leaves_no_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut ended = mesh.ended();
+            assert!(Pin::new(&mut ended).poll(&mut cx).is_pending());
+            drop(ended);
+            drop(waker);
+            assert_eq!(Arc::strong_count(&held), 1);
+            drop(mesh);
+        });
     }
 
     #[test]
@@ -5091,6 +5621,393 @@ mod tests {
                 let replies = replies(&mesh, &node.clock(), 1..=65).await;
                 assert_eq!(replies, (2..=65).map(Term).collect::<Vec<_>>());
             });
+        }
+    }
+
+    /// The `removed` answer between nodes. Node 1 led at `TERM` and never starts:
+    /// each node that starts takes one append from it before it serves.
+    mod removal {
+        use std::future::pending;
+        use std::sync::MutexGuard;
+
+        use super::*;
+
+        const MEMBERS: [u8; 4] = [1, 2, 3, 4];
+
+        /// How a node starts: its voters, and the entries it takes from node 1 in one
+        /// append with `commit`.
+        struct Opening {
+            id: u8,
+            voters: Vec<u8>,
+            entries: Vec<Entry>,
+            commit: u64,
+        }
+
+        /// What each node did, by node.
+        #[derive(Default)]
+        struct Record {
+            /// Each message a node refused, by the node of the peer that sent it.
+            refused: BTreeMap<u8, BTreeMap<u8, Vec<Error>>>,
+            /// The count of streams a node served, by the node of their peer.
+            served: BTreeMap<u8, BTreeMap<u8, usize>>,
+            /// Why the group of a node stopped.
+            stopped: BTreeMap<u8, Stopped>,
+            /// What a new open of the log of a node gave at its stop, while the
+            /// mesh that stopped lived.
+            reopened: BTreeMap<u8, Result<(), Error>>,
+            /// The leader a node knew at its last tick.
+            leaders: BTreeMap<u8, Option<node::Key>>,
+            /// The homes the watch of a node gave.
+            homes: BTreeMap<u8, Vec<Option<node::Key>>>,
+        }
+
+        struct Run {
+            sim: Sim,
+            nodes: Vec<sim::node::Node>,
+            record: Arc<Mutex<Record>>,
+        }
+
+        impl Run {
+            fn new() -> Self {
+                let mut sim = Sim::new(sim::Config::default());
+                let node = |_| sim.node(sim::node::Config::default());
+                Self {
+                    nodes: MEMBERS.map(node).into(),
+                    sim,
+                    record: Arc::default(),
+                }
+            }
+
+            /// Starts a node as `opening` says. With `proposes`, it proposes itself
+            /// as the home once per tick until the group takes it.
+            fn start(&self, opening: Opening, proposes: bool) {
+                let at = MEMBERS.iter().position(|&id| id == opening.id).unwrap();
+                let own = self.nodes[at].clone();
+                let (node, record) = (own.clone(), Arc::clone(&self.record));
+                let config = env::shards::Config {
+                    name: format!("node-{}", opening.id),
+                    core: None,
+                };
+                let main = move |tasks| async move {
+                    serve(own, tasks, opening, proposes, record).await;
+                };
+                drop(node.shards().start(config, main).unwrap());
+            }
+
+            fn run(&mut self, span: Span) {
+                self.sim.run_for(span).unwrap();
+            }
+
+            fn record(&self) -> MutexGuard<'_, Record> {
+                self.record.lock().unwrap()
+            }
+
+            /// What node `on` refused from node `from`.
+            fn refused(&self, on: u8, from: u8) -> Vec<Error> {
+                let record = self.record();
+                let refused = record.refused.get(&on).and_then(|by| by.get(&from));
+                refused.cloned().unwrap_or_default()
+            }
+        }
+
+        /// Opens the mesh of a node as `opening` says and serves it, as `voter`
+        /// does, and records what it does.
+        async fn serve(
+            own: sim::node::Node,
+            tasks: Tasks,
+            opening: Opening,
+            proposes: bool,
+            record: Arc<Mutex<Record>>,
+        ) {
+            let Opening {
+                id,
+                voters,
+                entries,
+                commit,
+            } = opening;
+            let config = |tasks: &Tasks, port| Config {
+                members: MEMBERS.map(create_voter).into(),
+                ..config_at(&own, tasks, id, port, &MEMBERS, &voters)
+            };
+            let first = config(&tasks, PORT);
+            let transport = Rc::clone(&first.transport);
+            let mesh = Mesh::open(first).await.unwrap();
+            if !entries.is_empty() {
+                let append = Body::Append {
+                    prev: Position::default(),
+                    entries,
+                    commit,
+                };
+                mesh.receive(public(1), proven(1, id, append)).unwrap();
+            }
+            let (serving, streams, refused) =
+                (mesh.clone(), tasks.clone(), Arc::clone(&record));
+            tasks.spawn(async move {
+                accept(serving, transport, streams, id, refused).await;
+            });
+            if proposes {
+                let (proposing, clock) = (mesh.clone(), own.clock());
+                tasks.spawn(async move {
+                    // Unlike `lead`, the node can know the failed leader, node 1.
+                    loop {
+                        match proposing.propose(home(id)).await {
+                            Ok(_) => return,
+                            Err(Error::Raft(raft::Error::NotLeader { .. })) => {}
+                            Err(error) => panic!("the proposal failed: {error}"),
+                        }
+                        clock.sleep(TICK).await;
+                    }
+                });
+            }
+            let (ticking, clock, leaders) =
+                (mesh.clone(), own.clock(), Arc::clone(&record));
+            tasks.spawn(async move {
+                loop {
+                    clock.sleep(TICK).await;
+                    // No call of `Mesh` gives the leader.
+                    let leader = ticking.group.borrow().raft.leader();
+                    leaders.lock().unwrap().leaders.insert(id, leader);
+                }
+            });
+            let mut watch = mesh.watch(INDEX);
+            loop {
+                match watch.next().await {
+                    Ok(home) => record
+                        .lock()
+                        .unwrap()
+                        .homes
+                        .entry(id)
+                        .or_default()
+                        .push(home),
+                    Err(stopped) => {
+                        record.lock().unwrap().stopped.insert(id, stopped);
+                        // The stop ends the group's task at once, which frees the
+                        // log before any tick.
+                        let again = Mesh::start(config(&tasks, 0)).await.map(drop);
+                        record.lock().unwrap().reopened.insert(id, again);
+                        return pending().await;
+                    }
+                }
+            }
+        }
+
+        /// Serves each stream of each session that a peer opens to `transport`, as
+        /// node `id`, and records each message that the group refuses.
+        async fn accept(
+            mesh: Mesh,
+            transport: Rc<Transport>,
+            tasks: Tasks,
+            id: u8,
+            record: Arc<Mutex<Record>>,
+        ) -> ! {
+            loop {
+                let session = transport.accept().await.unwrap();
+                let Peer::Node(peer) = session.peer() else {
+                    panic!("a peer with no node key opened a session");
+                };
+                let from = MEMBERS.into_iter().find(|&of| public(of) == peer).unwrap();
+                let (mesh, streams, record) =
+                    (mesh.clone(), tasks.clone(), Arc::clone(&record));
+                tasks.spawn(async move {
+                    while let Ok(mut incoming) = session.accept().await {
+                        let (mesh, record) = (mesh.clone(), Arc::clone(&record));
+                        streams.spawn(async move {
+                            let Ok(Some(header)) = incoming.receiver.recv().await
+                            else {
+                                return;
+                            };
+                            let protocol = wire::header::decode(&header).unwrap();
+                            assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                            {
+                                let served = &mut record.lock().unwrap().served;
+                                let count: &mut usize = served
+                                    .entry(id)
+                                    .or_default()
+                                    .entry(from)
+                                    .or_default();
+                                *count = count.saturating_add(1);
+                            }
+                            match mesh.serve(peer, incoming).await {
+                                Ok(()) | Err(Error::Stream(_)) => {}
+                                Err(error) => {
+                                    let refused = &mut record.lock().unwrap().refused;
+                                    refused
+                                        .entry(id)
+                                        .or_default()
+                                        .entry(from)
+                                        .or_default()
+                                        .push(error);
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+        }
+
+        /// A node that starts with voters 1, 2, and 3, and takes the first `count`
+        /// of `entries` with `commit`.
+        fn opening(id: u8, entries: &[Entry], count: usize, commit: u64) -> Opening {
+            Opening {
+                id,
+                voters: vec![1, 2, 3],
+                entries: entries[..count].to_vec(),
+                commit,
+            }
+        }
+
+        // The five steps of #1054. Node 1 led with voters 1, 2, and 3, wrote the joint
+        // entry that adds node 4, and failed. Node 3 missed that entry, and node 4
+        // campaigns before node 2 is up. Node 3 refuses node 4, which goes on, and
+        // node 2 wins with 2, 3, and 4: its proposal commits on each, so node 3
+        // catches up.
+        #[test]
+        fn a_voter_that_missed_a_change_does_not_stop_the_voter_it_added() {
+            let mut run = Run::new();
+            let sets = [(&[1, 2, 3][..], &[][..]), (&[1, 2, 3, 4], &[1, 2, 3])];
+            let entries = changes(1, &sets);
+            run.start(opening(3, &entries, 1, 1), false);
+            run.start(opening(4, &entries, 2, 1), false);
+            run.run(seconds(10));
+            assert!(!run.refused(3, 4).is_empty(), "node 3 refused nothing");
+            run.start(opening(2, &entries, 2, 1), true);
+            run.run(seconds(10));
+            let refused = run.refused(3, 4);
+            let not_voter = Error::NotVoter { from: key(4) };
+            assert!(
+                refused.iter().all(|error| *error == not_voter),
+                "{refused:?}"
+            );
+            let record = run.record();
+            assert_eq!(record.stopped, BTreeMap::new());
+            let leader = Some(key(2));
+            assert_eq!(record.leaders, [2, 3, 4].map(|id| (id, leader)).into());
+            let homes = [2, 3, 4].map(|id| (id, vec![None, leader]));
+            assert_eq!(record.homes, homes.into());
+        }
+
+        // Node 2 holds the committed leave that removes node 3, which missed it.
+        #[test]
+        fn a_removed_node_that_missed_its_release_stops_at_its_campaign() {
+            let mut run = Run::new();
+            let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+            let entries = changes(1, &sets);
+            run.start(opening(2, &entries, 2, 2), false);
+            run.start(opening(3, &entries, 0, 0), false);
+            run.run(seconds(10));
+            let stopped = Stopped::Removed { by: key(2) };
+            assert_eq!(run.record().stopped, [(3, stopped.clone())].into());
+            assert_eq!(run.record().reopened, [(3, Ok(()))].into());
+            assert_eq!(
+                stopped.to_string(),
+                format!(
+                    "voter {} answered removed: a committed configuration lacks this \
+                     node",
+                    key(2)
+                )
+            );
+            let refused = run.refused(2, 3);
+            let removed = Error::Removed { from: key(3) };
+            assert!(!refused.is_empty());
+            assert!(refused.iter().all(|error| *error == removed), "{refused:?}");
+            let served = run.record().served[&2][&3];
+            run.run(seconds(10));
+            assert_eq!(run.record().served[&2][&3], served);
+            assert_eq!(run.refused(2, 3).len(), refused.len());
+        }
+
+        // Node 4 is a member that no configuration in the log of node 2 held, and
+        // node 2 has a committed configuration that lacks it.
+        #[test]
+        fn a_node_that_no_configuration_held_keeps_its_group() {
+            let mut run = Run::new();
+            let entries = changes(1, &[(&[1, 2, 3][..], &[][..])]);
+            run.start(opening(2, &entries, 1, 1), false);
+            let stranger = Opening {
+                voters: vec![1, 2, 3, 4],
+                ..opening(4, &entries, 0, 0)
+            };
+            run.start(stranger, false);
+            run.run(seconds(10));
+            let refused = run.refused(2, 4);
+            let not_voter = Error::NotVoter { from: key(4) };
+            assert!(!refused.is_empty());
+            assert!(
+                refused.iter().all(|error| *error == not_voter),
+                "{refused:?}"
+            );
+            run.run(seconds(10));
+            assert!(run.refused(2, 4).len() > refused.len());
+            assert_eq!(run.record().stopped, BTreeMap::new());
+        }
+
+        // Node 2 holds the entries that add node 4 and remove it again, past its
+        // commit, which lags at the first entry. Node 4 joined with the voters of
+        // the entry that added it.
+        #[test]
+        fn a_node_that_only_an_entry_past_the_commit_held_keeps_its_group() {
+            let mut run = Run::new();
+            let sets = [
+                (&[1, 2, 3][..], &[][..]),
+                (&[1, 2, 3, 4], &[1, 2, 3]),
+                (&[1, 2, 3, 4], &[]),
+                (&[1, 2, 3], &[1, 2, 3, 4]),
+                (&[1, 2, 3], &[]),
+            ];
+            let entries = changes(1, &sets);
+            run.start(opening(2, &entries, 5, 1), false);
+            let added = Opening {
+                voters: vec![1, 2, 3, 4],
+                ..opening(4, &entries, 0, 0)
+            };
+            run.start(added, false);
+            run.run(seconds(10));
+            let refused = run.refused(2, 4);
+            let not_voter = Error::NotVoter { from: key(4) };
+            assert!(!refused.is_empty());
+            assert!(
+                refused.iter().all(|error| *error == not_voter),
+                "{refused:?}"
+            );
+            run.run(seconds(10));
+            assert!(run.refused(2, 4).len() > refused.len());
+            assert_eq!(run.record().stopped, BTreeMap::new());
+        }
+
+        // Node 2 holds the joint entry and the leave that remove node 4, neither
+        // committed, so node 4 is a peer and not a voter. Node 4 holds a committed
+        // configuration that lacks node 2. Node 2 wins with node 3.
+        #[test]
+        fn a_removed_answer_from_a_node_that_is_not_a_voter_changes_nothing() {
+            let mut run = Run::new();
+            let all = [1, 2, 3, 4];
+            let leaving = changes(1, &[(&[1, 2, 3][..], &all[..]), (&[1, 2, 3], &[])]);
+            let leader = Opening {
+                voters: all.to_vec(),
+                ..opening(2, &leaving, 2, 0)
+            };
+            run.start(leader, false);
+            let voter = Opening {
+                voters: all.to_vec(),
+                ..opening(3, &leaving, 0, 0)
+            };
+            run.start(voter, false);
+            let alone = changes(1, &[(&[1, 4][..], &all[..]), (&[1, 4], &[])]);
+            let liar = Opening {
+                voters: all.to_vec(),
+                ..opening(4, &alone, 2, 2)
+            };
+            run.start(liar, false);
+            run.run(seconds(10));
+            let refused = run.refused(4, 2);
+            let removed = Error::Removed { from: key(2) };
+            assert!(!refused.is_empty());
+            assert!(refused.iter().all(|error| *error == removed), "{refused:?}");
+            let record = run.record();
+            assert_eq!(record.stopped, BTreeMap::new());
+            let leader = Some(key(2));
+            assert_eq!(record.leaders[&2], leader);
+            assert_eq!(record.leaders[&3], leader);
         }
     }
 
