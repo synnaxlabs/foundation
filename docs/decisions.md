@@ -5895,8 +5895,8 @@ How to read this record:
   peer that proved a node key goes to `Mesh::serve`, which checks each message against
   the region; the error of `serve` ends only its stream. A mesh stream of a client, or
   of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
-  4 of #585). Shard 0 opens the mesh with no founding definitions
-  (`mesh::Config::founding`). From PR 1 of #1744, it gives the root region the
+  4 of #585). Shard 0 opens the mesh with the founding definitions of
+  `Config::region`, and no caller gives definitions yet. From PR 1 of #1744, it gives the root region the
   definitions that `spec::founding::create` gives, and each other region an empty map.
   Decided by `laptop.architect` at 2026-10-08T06:11:30Z
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).

@@ -3060,7 +3060,6 @@ mod port {
                         home = watch.next().await;
                     }
                     out.lock().unwrap().push((mesh.pointer(), home));
-                    drop(watch);
                     let ended = mesh.ended();
                     drop(mesh);
                     ended.await;
