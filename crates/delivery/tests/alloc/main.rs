@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use delivery::{Position, Reader, Readers, Start, complete, latest};
+use delivery::{Next, Position, Reader, Readers, Start, complete, latest};
 
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
@@ -81,7 +81,10 @@ fn latest(frame: &impl Fn() -> Frame) {
     let closed = keys[0];
     readers.close(closed.into());
     let ((), allocations) = ALLOCATOR.count(|| {
-        assert!(readers.take(closed.into()).is_none(), "a closed key takes");
+        assert!(
+            matches!(readers.take(closed.into()), Next::Empty),
+            "a closed key takes"
+        );
         readers.close(closed.into());
     });
     assert_eq!(allocations, 0, "a call on a closed latest key allocated");
@@ -135,7 +138,10 @@ fn complete(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
         }
         readers.grant(closed, u64::MAX);
         assert_eq!(readers.ack(closed, position), Ok(()), "a closed key acks");
-        assert!(readers.take(closed.into()).is_none(), "a closed key takes");
+        assert!(
+            matches!(readers.take(closed.into()), Next::Empty),
+            "a closed key takes"
+        );
         readers.close(closed.into());
         readers.close_named(closed, Stamp::from_nanos(0));
     });
@@ -209,8 +215,15 @@ fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
         SESSIONS + 3,
         "the warm session takes two frames, and the release wakes each session"
     );
+    let behind = |readers: &mut Readers, key: complete::Key| loop {
+        match readers.take(key.into()) {
+            Next::Frame(_) => {}
+            Next::Behind => break true,
+            Next::Empty => break false,
+        }
+    };
     assert!(
-        keys.iter().all(|&key| readers.behind(key)),
+        keys.iter().all(|&key| behind(&mut readers, key)),
         "each session missed"
     );
 }
@@ -226,13 +239,21 @@ fn flow(
 ) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| std::iter::from_fn(|| readers.take(key.into())).count())
+        .map(|&key| std::iter::from_fn(|| held(readers.take(key.into()))).count())
         .sum();
     for _ in 0..2 {
         readers.queue(&frame(), set, *seq..*seq + 1);
         *seq += 1;
     }
     taken + readers.release(*seq).len()
+}
+
+/// The frame that `next` holds, if any.
+fn held(next: Next) -> Option<Frame> {
+    match next {
+        Next::Frame(frame) => Some(frame),
+        Next::Empty | Next::Behind => None,
+    }
 }
 
 /// Takes each session's frame, then puts two frames. Returns the frames taken plus the
@@ -244,7 +265,7 @@ fn round(
 ) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| usize::from(readers.take(key.into()).is_some()))
+        .map(|&key| usize::from(matches!(readers.take(key.into()), Next::Frame(_))))
         .sum();
     taken + readers.put(frame()).len() + readers.put(frame()).len()
 }
@@ -292,7 +313,7 @@ fn alternating() {
         readers.queue(&fb, &b, *seq + 1..*seq + 2);
         *seq += 2;
         let woken = readers.release(*seq).len();
-        let taken = std::iter::from_fn(|| readers.take(key.into())).count();
+        let taken = std::iter::from_fn(|| held(readers.take(key.into()))).count();
         woken + taken
     };
     for _ in 0..2 {

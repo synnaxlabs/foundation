@@ -72,7 +72,7 @@ use crate::{handoff, order, split, stored};
 /// #     while clock.now().mesh.is_none() {
 /// #         node.clock().sleep(Span::from_nanos(1)).await;
 /// #     }
-/// use home::{Config, Outcome, Shard, order, writer};
+/// use home::{Config, Outcome, Shard, order, reader::Next, writer};
 /// use types::authority::Authority;
 /// use types::frame::{Draft, Form, Label, Path, Range};
 /// use types::time::{Span, Stamp};
@@ -111,7 +111,9 @@ use crate::{handoff, order, split, stored};
 /// let mut woken = Vec::new();
 /// shard.woken(&mut woken);
 /// assert_eq!(woken, [reader.into()]);
-/// let taken = shard.take(reader.into()).expect("a frame waits");
+/// let Next::Frame(taken) = shard.take(reader.into()) else {
+///     panic!("a frame waits");
+/// };
 /// assert_eq!(taken.range(0), Some(range));
 /// #     Ok(())
 /// # }
@@ -502,7 +504,8 @@ impl Shard {
     /// samples after the commit that holds it, while the bytes it has spent are
     /// below its credit: a frame spends what `charge` says. The first such frame
     /// that finds the credit spent is a miss: the reader gets neither it nor a later
-    /// frame, no grant changes that, and [`behind`](Self::behind) reports it.
+    /// frame, no grant changes that, and [`take`](Self::take) then gives
+    /// [`Next::Behind`](reader::Next::Behind).
     /// [`woken`](Self::woken) names the reader once for a miss with no frame waiting,
     /// and not for a miss while frames wait. The home does not read a missed frame
     /// back from disk yet. Close the reader and open a new one. The new one starts at
@@ -550,28 +553,17 @@ impl Shard {
         self.readers.grant(place, key.session, limit_bytes);
     }
 
-    /// Takes the next frame of the reader `key`, or `None` when none waits or the
-    /// reader is closed. A complete reader that misses a frame
-    /// ([`open_complete`](Self::open_complete)) gets the frames before it, and then
-    /// `None`.
-    ///
-    /// # Panics
-    ///
-    /// If the shard never gave `key`.
-    pub fn take(&mut self, key: reader::Key) -> Option<Frame> {
-        self.readers.take(self.place(key.slot), key.session)
-    }
-
-    /// Whether the complete reader `key` missed a live frame, so it gets no later
-    /// one, as it had no credit for the frame. [`woken`](Self::woken) names it once
-    /// when it misses one with no frame waiting. `false` for a closed reader.
+    /// Takes the next frame of the reader `key`. [`Next::Empty`](reader::Next::Empty)
+    /// when none waits or the reader is closed. A complete reader that misses a frame
+    /// ([`open_complete`](Self::open_complete)) gets the frames before it, then
+    /// [`Next::Behind`](reader::Next::Behind).
     ///
     /// # Panics
     ///
     /// If the shard never gave `key`.
     #[must_use]
-    pub fn behind(&self, key: reader::complete::Key) -> bool {
-        self.readers.behind(self.place(key.slot), key.session)
+    pub fn take(&mut self, key: reader::Key) -> reader::Next {
+        self.readers.take(self.place(key.slot), key.session)
     }
 
     /// Closes the reader `key`. Its waiting frames do not go out, and
@@ -589,14 +581,12 @@ impl Shard {
     /// order and with the latest readers of an index first. Call it after each write,
     /// since a latest reader gets a frame before its commit, and after each commit.
     /// Complete readers first get the live frames now on disk. A key is a hint: take
-    /// from each until [`take`](Self::take) gives `None`, then check
-    /// [`behind`](Self::behind) of a complete reader before it waits: one named only
-    /// for a miss ([`open_complete`](Self::open_complete)) has no frame to take. When a
-    /// commit ended since the last call, it reads each index with live frames queued
-    /// for complete readers; else it reads none. Called so, with the same `keys` each
-    /// time, a call allocates only when it gives more keys than each call before, or
-    /// when more frames wait for one complete reader than have waited for that reader
-    /// before.
+    /// from each until [`take`](Self::take) gives [`Next::Empty`](reader::Next::Empty)
+    /// or [`Next::Behind`](reader::Next::Behind). When a commit ended since the last
+    /// call, it reads each index with live frames queued for complete readers; else it
+    /// reads none. Called so, with the same `keys` each time, a call allocates only
+    /// when it gives more keys than each call before, or when more frames wait for one
+    /// complete reader than have waited for that reader before.
     pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
@@ -1317,9 +1307,31 @@ mod tests {
 
     /// The seq of the index group `group` of each frame `reader` takes now.
     fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
-        iter::from_fn(|| shard.take(reader))
+        iter::from_fn(|| held(shard.take(reader)))
             .map(|frame| frame.range(group).expect("the index is present"))
             .collect()
+    }
+
+    /// The frame that `next` holds, if any.
+    fn held(next: reader::Next) -> Option<Frame> {
+        match next {
+            reader::Next::Frame(frame) => Some(frame),
+            reader::Next::Empty | reader::Next::Behind => None,
+        }
+    }
+
+    /// Whether `take` gives `reader` [`reader::Next::Behind`], not
+    /// [`reader::Next::Empty`].
+    ///
+    /// # Panics
+    ///
+    /// If a frame waits for `reader`.
+    fn behind(shard: &mut Shard, reader: impl Into<reader::Key>) -> bool {
+        match shard.take(reader.into()) {
+            reader::Next::Frame(frame) => panic!("a frame waits: {:?}", frame.range(0)),
+            reader::Next::Behind => true,
+            reader::Next::Empty => false,
+        }
     }
 
     fn seq(seq: u64, count: u32) -> Range {
@@ -3033,16 +3045,16 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
-                assert!(!shard.behind(session));
+                assert!(!behind(&mut shard, session));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert!(shard.behind(session));
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert!(behind(&mut shard, session));
                 shard.grant(session, CREDIT);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(taken(&mut shard, reader, 0), []);
+                assert!(behind(&mut shard, session));
             });
         }
 
@@ -3058,10 +3070,10 @@ mod tests {
                 write(&test, &mut shard, a, &stamps(0));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe]);
-                let frame = shard.take(probe).expect("a frame");
-                let (_, index) = frame.ends().next().expect("the index is present");
+                let probed = held(shard.take(probe)).expect("a frame");
+                let (_, index) = probed.ends().next().expect("the index is present");
                 let index = types::frame::charge(1, index);
-                assert!(frame.charge() > index + 1);
+                assert!(probed.charge() > index + 1);
                 let places = Charge::Places([Slot::new(0)].into());
                 let session = shard.open_complete(Slot::new(0), index + 1, places);
                 let reader = reader::Key::from(session);
@@ -3072,10 +3084,10 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe, reader, data.into()]);
-                assert_eq!(iter::from_fn(|| shard.take(reader)).count(), 2);
-                assert!(shard.behind(session));
-                assert_eq!(iter::from_fn(|| shard.take(data.into())).count(), 2);
-                assert!(shard.behind(data));
+                assert_eq!(iter::from_fn(|| held(shard.take(reader))).count(), 2);
+                assert!(behind(&mut shard, session));
+                assert_eq!(iter::from_fn(|| held(shard.take(data.into()))).count(), 2);
+                assert!(behind(&mut shard, data));
             });
         }
 
@@ -3093,11 +3105,11 @@ mod tests {
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert_eq!(taken(&mut shard, reader, 0), []);
+                assert!(behind(&mut shard, reader));
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(taken(&mut shard, reader, 0), []);
+                assert!(behind(&mut shard, reader));
             });
         }
 

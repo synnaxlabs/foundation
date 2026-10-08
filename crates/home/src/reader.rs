@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use buffer::Buffer;
+pub use delivery::Next;
 use delivery::{Position, Reader, Readers, Start};
 use types::channel::Slot;
 use types::frame::key_set::KeySet;
@@ -123,31 +124,13 @@ impl Set {
         self.entries[place].readers.grant(session, limit_bytes);
     }
 
-    /// Takes the next frame of the reader `session` on the index at `place`, or `None`
-    /// when none waits or the reader is closed.
+    /// Takes the next frame of the reader `session` on the index at `place`.
     ///
     /// # Panics
     ///
     /// If the index never gave `session`.
-    pub(crate) fn take(
-        &mut self,
-        place: usize,
-        session: delivery::Key,
-    ) -> Option<Frame> {
+    pub(crate) fn take(&mut self, place: usize, session: delivery::Key) -> Next {
         self.entries[place].readers.take(session)
-    }
-
-    /// Whether the complete reader `session` on the index at `place` missed a frame.
-    ///
-    /// # Panics
-    ///
-    /// If the index never gave `session`.
-    pub(crate) fn behind(
-        &self,
-        place: usize,
-        session: delivery::complete::Key,
-    ) -> bool {
-        self.entries[place].readers.behind(session)
     }
 
     /// Closes the reader `session` on the index at `place`. Its waiting frames do not
@@ -318,9 +301,12 @@ mod tests {
         session: impl Into<delivery::Key>,
     ) -> Vec<frame::Range> {
         let session = session.into();
-        iter::from_fn(|| set.take(place, session))
-            .map(|frame| frame.range(0).expect("the index is present"))
-            .collect()
+        iter::from_fn(|| match set.take(place, session) {
+            Next::Frame(frame) => Some(frame),
+            Next::Empty | Next::Behind => None,
+        })
+        .map(|frame| frame.range(0).expect("the index is present"))
+        .collect()
     }
 
     fn reader(place: u32, session: impl Into<delivery::Key>) -> Key {

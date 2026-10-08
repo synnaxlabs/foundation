@@ -996,17 +996,24 @@ How to read this record:
   error (2026-10-07T06:01:39Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
   `delivery::Readers::release` also names a session that missed a frame and has none
-  waiting, and `Readers::behind` says whether it missed one. `home::Shard::behind`
-  forwards it until #274 removes it. `next` gives a waiting frame, then `Ended::Behind`,
-  then `Ended::Buffer`. Lost: an error from `take`, which every caller, latest readers
-  too, then handles; a `behind` list beside the woken keys, a second list to drain for
-  an event that happens once per session. A `delivery` model property test and a 32-seed
-  `sim` test stand in for loom and shuttle: the wake never crosses a thread. Decided by
-  `laptop.architect` (2026-10-07T06:36:57Z:
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). A waiting
-  hub reader has given back every frame, as it grants at each `next` call, so no hub
-  test reaches the wake of a session that missed a frame with none waiting. The
-  `delivery` tests and the home `sim` test
+  waiting, and `Readers::take` gives `Next::Behind` after the frames before the miss.
+  `home::Shard::take` gives `Next::Behind` until #274. `next` gives a waiting frame,
+  then `Ended::Behind`, then `Ended::Buffer`. Lost: an error from `take`, which every
+  caller, latest readers too, then handles; a `behind` list beside the woken keys, a
+  second list to drain for an event that happens once per session. A `delivery` model
+  property test and a 32-seed `sim` test stand in for loom and shuttle: the wake never
+  crosses a thread. Decided by `laptop.architect` (2026-10-07T06:36:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901).
+  `take` gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind`
+  and `Shard::behind` go. This supersedes the lost design "an error from `take`": a
+  third case is not an error, each caller of `take` uses one path for both modes, and
+  #274 may give a gap from `take`. Lost: `woken` names a reader that is behind in a
+  second list, which keeps the two steps and moves the state into the hub. Decided by
+  `laptop.architect` (2026-10-08T01:43:19Z:
+  https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671).
+  A waiting hub reader has given back every frame, as it grants at each `next` call,
+  so no hub test reaches the wake of a session that missed a frame with none waiting.
+  The `delivery` tests and the home `sim` test
   `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
   `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
   miss while a frame waits gives no wake. The hub `sim` test is
