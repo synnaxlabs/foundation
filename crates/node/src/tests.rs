@@ -2806,7 +2806,8 @@ mod port {
                 Err(sim::Error::Panicked {
                     thread: "shard-0".into(),
                     message: format!(
-                        "the index {index} of channel plant.value is not a known index"
+                        "the index {index} of channel plant.value is not an index of the \
+                         definitions"
                     ),
                     seed: 0,
                 })

@@ -41,6 +41,8 @@ pub enum Error {
     NoIndex,
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
+    /// A channel of the open was removed from the definitions. Code `UNKNOWN`.
+    Removed(channel::Key),
     /// The home's buffer failed. Code `FAILED`.
     Buffer(env::files::Error),
     /// The home's pool had no block for a reply (`Exhausted` or `Refused`). Code
@@ -75,7 +77,7 @@ impl Error {
             | Self::Pending => Some(Code(MALFORMED)),
             Self::Access(error) => Some(Code(client::code(error))),
             Self::Stale => Some(Code(STALE)),
-            Self::Unknown(_) => Some(Code(UNKNOWN)),
+            Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
             Self::Buffer(_) => Some(Code(FAILED)),
             Self::Pool(_) => Some(Code(BUSY)),
             Self::Stream(_) => None,
@@ -105,6 +107,10 @@ impl fmt::Display for Error {
                     "the open names channel {key}, which this node does not know"
                 )
             }
+            Self::Removed(key) => write!(
+                f,
+                "the open names channel {key}, which was removed from this node"
+            ),
             Self::Buffer(error) => write!(f, "the buffer of the shard failed: {error}"),
             Self::Pool(error) => {
                 write!(f, "the home's pool had no block for a reply: {error}")
@@ -224,6 +230,9 @@ async fn serve(
             Event::Frame(Err(Ended::Buffer(error))) => {
                 return Err(Error::Buffer(error));
             }
+            Event::Frame(Err(Ended::Removed(key))) => {
+                return Err(Error::Removed(key));
+            }
         }
     }
 }
@@ -260,8 +269,9 @@ struct Opened {
     layout: Layout,
 }
 
-/// Reads the open and its keys, checks each key as it arrives, and opens the session
-/// in the order of the keys. Gives `None` when the peer finishes first.
+/// Reads the open and its keys, checks each key as it arrives and again at the open,
+/// and opens the session in the order of the keys. Gives `None` when the peer
+/// finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -281,48 +291,71 @@ async fn open(
     if class != wanted {
         return Err(Error::Class(class));
     }
-    let (mut slots, mut index) = (Vec::new(), None);
+    let (mut keys, mut index) = (Vec::new(), None);
     loop {
         let Some(message) = receiver.recv().await? else {
             return Ok(None);
         };
-        let FromReader::Keys { keys, last } = home.decode(&message)? else {
+        let FromReader::Keys { keys: run, last } = home.decode(&message)? else {
             unreachable!("invariant: Home gives the keys run after the open");
         };
-        let mut state = state.borrow_mut();
-        let state = &mut *state;
-        for key in keys {
-            let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
-            let (first, slot) = index.get_or_insert((of, None));
-            if *first != of {
-                return Err(Error::ManyIndexes);
-            }
-            let assigned = state.interner.slots().assign(key);
-            if key == of {
-                *slot = Some(assigned);
-            }
-            slots.push(assigned);
-        }
+        let start = keys.len();
+        keys.extend(run);
+        check(&state.borrow(), &keys[start..], &mut index)?;
         if last {
             break;
         }
     }
-    let index = index.and_then(|(_, slot)| slot).ok_or(Error::NoIndex)?;
-    let slots: Box<[Slot]> = slots.into();
+    // A call of `set_definitions` between two messages can remove a key.
+    let mut index = None;
+    check(&state.borrow(), &keys, &mut index)?;
+    let at = index
+        .and_then(|index| keys.iter().position(|&key| key == index))
+        .ok_or(Error::NoIndex)?;
+    let slots: Box<[Slot]> = {
+        let interner = &mut state.borrow_mut().interner;
+        keys.iter()
+            .map(|&key| interner.slots().assign(key))
+            .collect()
+    };
+    let index = slots[at];
+    let keys: Box<[channel::Key]> = keys.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
             let charge = ::home::reader::complete::Charge::Places(slots.clone());
-            let (session, credit) =
-                Session::complete(state, slots.clone(), index, limit_bytes, charge);
+            let (session, credit) = Session::complete(
+                state,
+                keys,
+                slots.clone(),
+                index,
+                limit_bytes,
+                charge,
+            );
             (session, Some(credit))
         }
-        Mode::Latest => (Session::latest(state, slots.clone(), index), None),
+        Mode::Latest => (Session::latest(state, keys, slots.clone(), index), None),
     };
     Ok(Some(Opened {
         session,
         credit,
         layout: Layout::new(slots, index),
     }))
+}
+
+/// Checks that each of `keys` is known and on `index`, which the first key sets when
+/// it is `None`.
+fn check(
+    state: &State,
+    keys: &[channel::Key],
+    index: &mut Option<channel::Key>,
+) -> Result<(), Error> {
+    for &key in keys {
+        let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
+        if *index.get_or_insert(of) != of {
+            return Err(Error::ManyIndexes);
+        }
+    }
+    Ok(())
 }
 
 /// A block of the home's pool that holds `reply`.

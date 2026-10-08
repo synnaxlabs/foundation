@@ -8,12 +8,14 @@ pub mod reader;
 pub mod serve;
 pub mod writer;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::hash::Hash;
 use std::rc::Rc;
 use std::task::Waker;
 
 use spec::channel::Kind;
 use spec::definition::Definition;
+use types::channel::Key;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
@@ -71,7 +73,11 @@ struct State {
     interner: Interner,
     channels: hash::Map<Name, Channel>,
     /// The index of each channel in `channels`, by key.
-    indexes: hash::Map<types::channel::Key, types::channel::Key>,
+    indexes: hash::Map<Key, Key>,
+    /// Each open writer, by its home key.
+    writers: hash::Map<::home::writer::Key, Open>,
+    /// Each open reader session, by its home key.
+    readers: hash::Map<::home::reader::Key, Open>,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// The readers that [`::home::Shard::woken`] gave last.
@@ -108,6 +114,8 @@ impl Hub {
             interner,
             channels: hash::Map::default(),
             indexes: hash::Map::default(),
+            writers: hash::Map::default(),
+            readers: hash::Map::default(),
             wakers: hash::Map::default(),
             woken: Vec::new(),
             commit: commit::Signal::default(),
@@ -121,30 +129,30 @@ impl Hub {
         Self(state)
     }
 
-    /// Makes each channel of `definitions` known to sessions, the indexes first, so
-    /// their order does not matter. It skips each definition that is not a channel. The
-    /// home carries each index at once.
+    /// Makes the channels of `definitions` the channels that sessions may name. It
+    /// skips each definition that is not a channel. A known channel whose key, name,
+    /// and definition stay keeps its sessions. Each other known channel is removed,
+    /// and each session on it ends at once: [`writer::Failure::Removed`],
+    /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. Then each new
+    /// channel is defined. The home carries each new index at once, and stops
+    /// carrying each index whose key is not an index of `definitions`.
     ///
     /// # Panics
     ///
-    /// When a channel has the key or name of a known channel or of another channel of
-    /// `definitions`, or the index of a data channel is neither known nor an index of
-    /// `definitions`.
+    /// Before any change, when two channels of `definitions` have one key or one
+    /// name, or the index of a data channel is not an index of `definitions`.
     pub fn set_definitions<'d>(
         &self,
         definitions: impl IntoIterator<Item = (&'d Name, &'d Definition)>,
     ) {
-        let (indexes, data): (Vec<_>, Vec<_>) = definitions
+        let channels: Vec<_> = definitions
             .into_iter()
             .filter_map(|(name, definition)| match definition {
                 Definition::Channel(channel) => Some((name, channel)),
                 _ => None,
             })
-            .partition(|(_, channel)| matches!(channel.kind, Kind::Index { .. }));
-        let mut state = self.0.borrow_mut();
-        for (name, channel) in indexes.into_iter().chain(data) {
-            state.define(name, channel);
-        }
+            .collect();
+        self.0.borrow_mut().set(&checked(&channels));
     }
 
     /// Opens a writer session on `config.channels` and the index of each. It opens at
@@ -206,35 +214,161 @@ impl Hub {
     }
 }
 
-impl State {
-    /// Makes `channel` known to sessions as `name`, with the panics of
-    /// [`Hub::set_definitions`].
-    fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
+/// The channels of `channels`, by name.
+///
+/// # Panics
+///
+/// As [`Hub::set_definitions`].
+fn checked<'d>(
+    channels: &[(&'d Name, &'d spec::channel::Channel)],
+) -> hash::Map<&'d Name, &'d spec::channel::Channel> {
+    let mut named = hash::Map::default();
+    let mut kinds = hash::Map::default();
+    for &(name, channel) in channels {
         let key = channel.key;
         assert!(
-            !self.indexes.contains_key(&key) && !self.channels.contains_key(name),
-            "a channel with key {key} or name {name} is known already"
+            named.insert(name, channel).is_none(),
+            "two channels are named {name}"
         );
+        assert!(
+            kinds.insert(key, &channel.kind).is_none(),
+            "two channels have key {key}"
+        );
+    }
+    for &(name, channel) in channels {
+        if let Kind::Data(data) = &channel.kind {
+            let index = *data.index();
+            assert!(
+                matches!(kinds.get(&index), Some(Kind::Index { .. })),
+                "the index {index} of channel {name} is not an index of the definitions"
+            );
+        }
+    }
+    named
+}
+
+/// The channels of an open session, and the cell where the hub puts the first of
+/// them that it removes. The session reads the cell, so its check costs the same
+/// while other sessions end.
+#[derive(Debug)]
+struct Open {
+    keys: Box<[Key]>,
+    removed: Rc<Cell<Option<Key>>>,
+}
+
+impl Open {
+    /// Makes the session `key` on `keys` known in `sessions`, so that a removal of one
+    /// of them ends it. Returns the cell that names the removed channel.
+    fn add<K: Eq + Hash>(
+        sessions: &mut hash::Map<K, Self>,
+        key: K,
+        keys: Box<[Key]>,
+    ) -> Rc<Cell<Option<Key>>> {
+        let removed = Rc::default();
+        let open = Self {
+            keys,
+            removed: Rc::clone(&removed),
+        };
+        let added = sessions.insert(key, open);
+        assert!(added.is_none(), "invariant: the home gives each key once");
+        removed
+    }
+
+    /// Ends the session when one of its channels is in `removed`: the cell names the
+    /// first. Returns whether it ended.
+    fn end(&self, removed: &hash::Set<Key>) -> bool {
+        let first = self.keys.iter().find(|key| removed.contains(key));
+        self.removed.set(first.copied());
+        first.is_some()
+    }
+}
+
+impl State {
+    /// Makes `channels` the known channels, as [`Hub::set_definitions`] says.
+    fn set(&mut self, channels: &hash::Map<&Name, &spec::channel::Channel>) {
+        let removed: hash::Set<Key> = self
+            .channels
+            .iter()
+            .filter(|&(name, known)| channels.get(name) != Some(&&known.definition))
+            .map(|(_, known)| known.key)
+            .collect();
+        let index = |channel: &spec::channel::Channel| {
+            matches!(channel.kind, Kind::Index { .. }).then_some(channel.key)
+        };
+        let before: hash::Set<Key> = self
+            .channels
+            .values()
+            .filter_map(|known| index(&known.definition))
+            .collect();
+        let after: hash::Set<Key> = channels
+            .values()
+            .filter_map(|channel| index(channel))
+            .collect();
+        self.end(&removed);
+        let mut shed: Vec<Key> = before.difference(&after).copied().collect();
+        shed.sort_unstable();
+        for key in shed {
+            let slot = self.interner.slots().assign(key);
+            self.home.shed(slot);
+        }
+        self.channels
+            .retain(|_, known| !removed.contains(&known.key));
+        self.indexes.retain(|key, _| !removed.contains(key));
+        let mut carried: Vec<Key> = after.difference(&before).copied().collect();
+        carried.sort_unstable();
+        for key in carried {
+            let slot = self.interner.slots().assign(key);
+            self.home.carry(slot);
+        }
+        let mut new: Vec<_> = channels
+            .iter()
+            .filter(|&(name, _)| !self.channels.contains_key(*name))
+            .collect();
+        new.sort_unstable_by_key(|&(name, _)| *name);
+        for (name, channel) in new {
+            self.define(name, channel);
+        }
+    }
+
+    /// Ends each session on a channel of `removed`, and closes it at the home.
+    fn end(&mut self, removed: &hash::Set<Key>) {
+        if removed.is_empty() {
+            return;
+        }
+        let ended: Vec<_> = self
+            .writers
+            .extract_if(|_, open| open.end(removed))
+            .collect();
+        for (key, _) in ended {
+            self.home.close_writer(key);
+        }
+        self.commit.appended();
+        let mut ended: Vec<_> = self
+            .readers
+            .extract_if(|_, open| open.end(removed))
+            .collect();
+        ended.sort_unstable_by_key(|&(key, _)| key);
+        for (key, _) in ended {
+            self.home.close_reader(key);
+            if let Some(waker) = self.wakers.remove(&key) {
+                waker.wake();
+            }
+        }
+    }
+
+    /// Makes `channel` known to sessions as `name`.
+    fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
+        let key = channel.key;
         let (data_type, index) = match &channel.kind {
-            Kind::Index { .. } => {
-                let slot = self.interner.slots().assign(key);
-                self.home.carry(slot);
-                (Type::Scalar(Scalar::Stamp), key)
-            }
-            Kind::Data(data) => {
-                let index = *data.index();
-                assert!(
-                    self.indexes.get(&index) == Some(&index),
-                    "the index {index} of channel {name} is not a known index"
-                );
-                (data.data_type().sample(), index)
-            }
+            Kind::Index { .. } => (Type::Scalar(Scalar::Stamp), key),
+            Kind::Data(data) => (data.data_type().sample(), *data.index()),
         };
         self.indexes.insert(key, index);
         let channel = Channel {
             key,
             data_type,
             index,
+            definition: channel.clone(),
         };
         self.channels.insert(name.clone(), channel);
     }

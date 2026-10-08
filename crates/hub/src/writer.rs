@@ -1,6 +1,6 @@
 //! Writer sessions: what one opens with, why one does not open, and the session.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::State;
+use crate::{Open, State};
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -53,11 +53,36 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Why a write failed. No seq moves for either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The home refused the frame.
+    Home(::home::Error),
+    /// A channel of the writer was removed from the definitions. The writer takes no
+    /// more frames: open a new writer.
+    Removed(channel::Key),
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Home(error) => error.fmt(f),
+            Self::Removed(key) => {
+                write!(f, "channel {key} was removed: open a new writer")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
     state: Rc<RefCell<State>>,
     key: ::home::writer::Key,
+    /// The channel whose removal ended the writer.
+    removed: Rc<Cell<Option<channel::Key>>>,
     set: Arc<KeySet>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
@@ -83,11 +108,13 @@ impl Writer {
         let mut groups: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = Vec::new();
         let mut positions = hash::Map::default();
         let mut data = hash::Set::default();
+        let mut keys = Vec::with_capacity(channels.len());
         for name in &channels {
             let channel = borrowed
                 .channels
                 .get(name)
                 .ok_or_else(|| Error::Unknown(name.clone()))?;
+            keys.push(channel.key);
             let at = *positions.entry(channel.index).or_insert_with(|| {
                 groups.push((channel.index, Vec::new()));
                 groups.len() - 1
@@ -112,9 +139,12 @@ impl Writer {
         };
         let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
         borrowed.commit.appended();
+        keys.extend(groups.iter().map(|group| group.index));
+        let removed = Open::add(&mut borrowed.writers, key, keys.into());
         Ok(Self {
             state: Rc::clone(state),
             key,
+            removed,
             set,
             outcomes: Vec::new(),
         })
@@ -148,8 +178,9 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// No seq moves for any error. [`Error::Resend`](crate::home::Error::Resend) for a
-    /// frame labeled resend. [`Error::Full`](crate::home::Error::Full) for a backfill
+    /// [`Failure::Removed`] once a channel of the writer is removed, on this and every
+    /// later call. Else [`Failure::Home`] with the home's error.
+    /// [`Error::Resend`](crate::home::Error::Resend) for a frame labeled resend. [`Error::Full`](crate::home::Error::Full) for a backfill
     /// frame with no room: write it again on a timer.
     /// [`Error::Large`](crate::home::Error::Large) for a frame too large for one write:
     /// split it. [`Error::Disk`](crate::home::Error::Disk) after a failed commit: the
@@ -162,12 +193,15 @@ impl Writer {
         &mut self,
         label: Label,
         frame: Draft,
-    ) -> Result<&[::home::Outcome], ::home::Error> {
+    ) -> Result<&[::home::Outcome], Failure> {
+        if let Some(key) = self.removed.get() {
+            return Err(Failure::Removed(key));
+        }
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
         let written = state.home.write(self.key, label, frame);
         state.commit.appended();
-        let outcomes = written?;
+        let outcomes = written.map_err(Failure::Home)?;
         self.outcomes.clear();
         self.outcomes.extend_from_slice(outcomes);
         state.wake();
@@ -177,7 +211,11 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        if self.removed.get().is_some() {
+            return;
+        }
         let mut state = self.state.borrow_mut();
+        state.writers.remove(&self.key);
         state.home.close_writer(self.key);
         state.commit.appended();
     }

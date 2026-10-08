@@ -1,6 +1,6 @@
 //! Reader sessions: which frames one gets, why one does not open, and the session.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::future::poll_fn;
 use std::rc::Rc;
@@ -13,7 +13,7 @@ use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
-use crate::State;
+use crate::{Open, State};
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -53,6 +53,8 @@ pub enum Ended {
     Buffer(env::files::Error),
     /// A complete reader missed a frame ([`Mode::Complete`]).
     Behind,
+    /// A channel of the reader was removed from the definitions.
+    Removed(channel::Key),
 }
 
 impl fmt::Display for Ended {
@@ -62,6 +64,9 @@ impl fmt::Display for Ended {
             Self::Behind => f.write_str(
                 "the reader missed a frame and gets no later one: open a new reader",
             ),
+            Self::Removed(key) => {
+                write!(f, "channel {key} was removed: open a new reader")
+            }
         }
     }
 }
@@ -113,6 +118,7 @@ impl Reader {
         mode: Mode,
     ) -> Result<Self, Error> {
         let mut slots = Vec::with_capacity(channels.len());
+        let mut keys = Vec::with_capacity(channels.len() + 1);
         let slot = {
             let mut borrowed = state.borrow_mut();
             let borrowed = &mut *borrowed;
@@ -126,17 +132,20 @@ impl Reader {
                     return Err(Error::ManyIndexes);
                 }
                 slots.push(borrowed.interner.slots().assign(channel.key));
+                keys.push(channel.key);
             }
             let index = index.ok_or(Error::Empty)?;
+            keys.push(index);
             borrowed.interner.slots().assign(index)
         };
         // A frame without the reader's channels still shows that time moved.
         slots.push(slot);
-        let slots = slots.into();
+        let (slots, keys) = (slots.into(), keys.into());
         let (session, credit) = match mode {
             Mode::Complete => {
                 let (session, credit) = Session::complete(
                     state,
+                    keys,
                     slots,
                     slot,
                     WINDOW,
@@ -144,7 +153,7 @@ impl Reader {
                 );
                 (session, Some((credit, 0)))
             }
-            Mode::Latest => (Session::latest(state, slots, slot), None),
+            Mode::Latest => (Session::latest(state, keys, slots, slot), None),
         };
         Ok(Self {
             session,
@@ -160,8 +169,10 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// [`Ended`] once no frame waits and the session can give no more, on this and
-    /// every later call: [`Ended::Behind`] before [`Ended::Buffer`].
+    /// [`Ended::Removed`] once a channel of the reader is removed, before any frame
+    /// that waits. Else [`Ended`] once no frame waits and the session can give no
+    /// more. Either on this and every later call: [`Ended::Behind`] before
+    /// [`Ended::Buffer`].
     #[expect(
         clippy::should_implement_trait,
         reason = "it gives a future, which `Iterator::next` cannot"
@@ -191,6 +202,8 @@ impl Reader {
 pub(crate) struct Session {
     state: Rc<RefCell<State>>,
     key: ::home::reader::Key,
+    /// The channel whose removal ended the session.
+    removed: Rc<Cell<Option<channel::Key>>>,
     /// The slots of the reader's channels.
     slots: Box<[channel::Slot]>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
@@ -200,11 +213,12 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Opens a complete session through `slots` on the index of `index`, with a grant
-    /// of `limit_bytes` that each frame spends as `charge` says. Returns the session
-    /// and the credit that raises its grant.
+    /// Opens a complete session on `keys` through their `slots` on the index of
+    /// `index`, with a grant of `limit_bytes` that each frame spends as `charge` says.
+    /// Returns the session and the credit that raises its grant.
     pub(crate) fn complete(
         state: &Rc<RefCell<State>>,
+        keys: Box<[channel::Key]>,
         slots: Box<[channel::Slot]>,
         index: channel::Slot,
         limit_bytes: u64,
@@ -214,31 +228,37 @@ impl Session {
             .borrow_mut()
             .home
             .open_complete(index, limit_bytes, charge);
+        let session = Self::new(state, key.into(), keys, slots);
         let credit = Credit {
             state: Rc::clone(state),
             key,
+            removed: Rc::clone(&session.removed),
         };
-        (Self::new(state, key.into(), slots), credit)
+        (session, credit)
     }
 
-    /// Opens a latest session through `slots` on the index of `index`.
+    /// Opens a latest session on `keys` through their `slots` on the index of `index`.
     pub(crate) fn latest(
         state: &Rc<RefCell<State>>,
+        keys: Box<[channel::Key]>,
         slots: Box<[channel::Slot]>,
         index: channel::Slot,
     ) -> Self {
         let key = state.borrow_mut().home.open_latest(index);
-        Self::new(state, key, slots)
+        Self::new(state, key, keys, slots)
     }
 
     fn new(
         state: &Rc<RefCell<State>>,
         key: ::home::reader::Key,
+        keys: Box<[channel::Key]>,
         slots: Box<[channel::Slot]>,
     ) -> Self {
+        let removed = Open::add(&mut state.borrow_mut().readers, key, keys);
         Self {
             state: Rc::clone(state),
             key,
+            removed,
             slots,
             mask: None,
             streak: 0,
@@ -250,8 +270,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`Ended`] once no frame waits and the session can give no more, on this and
-    /// every later call: [`Ended::Behind`] before [`Ended::Buffer`].
+    /// As [`Reader::next`].
     ///
     /// # Panics
     ///
@@ -259,6 +278,9 @@ impl Session {
     /// this hub made.
     pub(crate) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Ended> {
         let frame = poll_fn(|cx| {
+            if let Some(key) = self.removed.get() {
+                return Poll::Ready(Err(Ended::Removed(key)));
+            }
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
             if self.streak == STREAK {
@@ -303,18 +325,26 @@ impl Session {
 pub(crate) struct Credit {
     state: Rc<RefCell<State>>,
     key: ::home::reader::complete::Key,
+    removed: Rc<Cell<Option<channel::Key>>>,
 }
 
 impl Credit {
-    /// Raises the grant of the session to `limit_bytes` since the open.
+    /// Raises the grant of the session to `limit_bytes` since the open. Changes
+    /// nothing once the session ended on a removed channel.
     pub(crate) fn grant(&self, limit_bytes: u64) {
-        self.state.borrow_mut().home.grant(self.key, limit_bytes);
+        if self.removed.get().is_none() {
+            self.state.borrow_mut().home.grant(self.key, limit_bytes);
+        }
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if self.removed.get().is_some() {
+            return;
+        }
         let mut state = self.state.borrow_mut();
+        state.readers.remove(&self.key);
         state.wakers.remove(&self.key);
         state.home.close_reader(self.key);
     }

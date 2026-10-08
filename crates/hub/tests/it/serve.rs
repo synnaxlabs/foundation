@@ -28,8 +28,8 @@ use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, scrambled, write,
-    write_series, write_wide,
+    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, scrambled,
+    without, write, write_series, write_wide,
 };
 
 /// The UDP port of each transport.
@@ -310,6 +310,78 @@ fn stops_an_open_of_an_unknown_key_with_unknown() {
         "the open names channel 00000000-0000-0000-0000-000000000009, which this \
          node does not know"
     );
+}
+
+/// Runs a session whose home removes the channel `value` (key 2) once `SETTLE` passes,
+/// and gives what `serve` returned, or `None` when it did not return.
+fn removed<P>(
+    seed: u64,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Option<Result<(), serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
+    let result = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&result);
+    let home = move |test: Test, link: Link, incoming| async move {
+        let (hub, clock) = (test.hub.clone(), test.clock.clone());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            hub.set_definitions(&without(&["value"]));
+        });
+        *kept.lock().expect("not poisoned") =
+            Some(link.serve(incoming).await.map(drop));
+    };
+    session(seed, Class::Complete, false, home, peer);
+    result.lock().expect("not poisoned").take()
+}
+
+/// The peer of a session that the home stops with `UNKNOWN`.
+async fn stopped_as_unknown(peer: &mut Peer) {
+    let code = Code(wire::hub::UNKNOWN);
+    assert_eq!(peer.recv().await, Err(transport::Error::Reset { code }));
+    assert_eq!(stopped(peer).await, transport::Error::Stopped { code });
+}
+
+#[test]
+fn stops_an_open_session_with_unknown_when_its_channel_is_removed() {
+    let served = removed(70, |mut peer| async move {
+        let _reader = open_complete(&mut peer, &[1, 2], 1 << 20).await;
+        stopped_as_unknown(&mut peer).await;
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed.clone())));
+    assert_eq!(
+        removed.to_string(),
+        "the open names channel 00000000-0000-0000-0000-000000000002, which was \
+         removed from this node"
+    );
+}
+
+/// The removal comes after the home checked the first message of the keys run.
+#[test]
+fn stops_an_open_whose_keys_run_spans_a_removal_with_unknown() {
+    let served = removed(71, |mut peer| async move {
+        let open = Open {
+            mode: Mode::Complete {
+                limit_bytes: 1 << 20,
+            },
+            channels: 2,
+        };
+        let mut out = vec![0; open.encoded_len()];
+        open.encode(&mut out);
+        peer.send(&out).await.expect("sends the open");
+        for key in [2, 1] {
+            let mut out = vec![0; keys::LEN];
+            keys::encode(&[channel::Key::from_u128(key)], &mut out);
+            peer.send(&out).await.expect("sends a key");
+            peer.sleep(SETTLE).await;
+            peer.sleep(SETTLE).await;
+        }
+        stopped_as_unknown(&mut peer).await;
+    });
+    let unknown = serve::Error::Unknown(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(unknown)));
 }
 
 /// Runs a session whose peer opens `keys` in a complete session, and gives what
@@ -691,12 +763,10 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
     const KEYS: std::ops::Range<u128> = 10..200;
     let home = |test: Test, link: Link, incoming| async move {
         let names: Vec<_> = KEYS.map(|key| format!("v{key}")).collect();
-        for (key, name) in KEYS.zip(&names) {
-            test.hub.set_definitions([(
-                &super::name(name),
-                &super::definition(key, DataType::Sample(I64), 1),
-            )]);
-        }
+        test.define(
+            KEYS.zip(&names)
+                .map(|(key, name)| (key, name.as_str(), DataType::Sample(I64), 1)),
+        );
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let mut writer = test.writer("a", &names).await;
         let (clock, now) = (test.clock.clone(), test.now());
@@ -742,10 +812,7 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
     let written = raw.clone();
     let home = |test: Test, link: Link, incoming| async move {
-        test.hub.set_definitions([(
-            &super::name("text"),
-            &super::definition(6, DataType::Sample(Type::String), 1),
-        )]);
+        test.define([(6, "text", DataType::Sample(Type::String), 1)]);
         let mut writer = test.writer("a", &["text", "value"]).await;
         let (clock, now) = (test.clock.clone(), test.now());
         test.tasks.spawn(async move {
@@ -809,12 +876,10 @@ fn sends_no_message_for_a_last_series_of_no_bytes() {
             len: 0,
         };
         let types = KEYS.map(|_| I64).chain([empty]);
-        for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
-            test.hub.set_definitions([(
-                &super::name(name),
-                &super::definition(key, DataType::Sample(data_type), 1),
-            )]);
-        }
+        let channels = KEYS.chain([EMPTY]).zip(&names).zip(types);
+        test.define(channels.map(|((key, name), data_type)| {
+            (key, name.as_str(), DataType::Sample(data_type), 1)
+        }));
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let mut writer = test.writer("a", &names).await;
         let (clock, now) = (test.clock.clone(), test.now());
@@ -1039,12 +1104,10 @@ fn stops_a_session_whose_ends_find_the_pool_empty_with_busy() {
     let kept = Arc::clone(&result);
     let home = move |test: Test, link: Link, incoming| async move {
         let names: Vec<_> = WIDE[1..].iter().map(|key| format!("v{key}")).collect();
-        for (&key, name) in WIDE[3..].iter().zip(&names[2..]) {
-            test.hub.set_definitions([(
-                &super::name(name),
-                &super::definition(key, DataType::Sample(I64), 1),
-            )]);
-        }
+        let channels = WIDE[3..].iter().zip(&names[2..]);
+        test.define(
+            channels.map(|(&key, name)| (key, name.as_str(), DataType::Sample(I64), 1)),
+        );
         let names = [
             &["value", "value-c"][..],
             &names[2..].iter().map(String::as_str).collect::<Vec<_>>(),
