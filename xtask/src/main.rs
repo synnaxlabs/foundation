@@ -81,7 +81,7 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
             problems.push(format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
                  with its layer, its job, and its allowed dependencies, matching the \
-                 crate map in docs/decisions.md."
+                 crate map in docs/decisions/crate-map.md."
             ));
             continue;
         };
@@ -158,7 +158,7 @@ mod tests {
             format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
                  with its layer, its job, and its allowed dependencies, matching the \
-                 crate map in docs/decisions.md."
+                 crate map in docs/decisions/crate-map.md."
             )
         };
         assert_eq!(
