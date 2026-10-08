@@ -4117,7 +4117,13 @@ How to read this record:
   clock functions give 0, and the 5 POSIX constructors print their name and abort,
   since our config always has an event loop. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
-  2026-10-08 02:27 UTC).
+  2026-10-08 02:27 UTC). A test asserts the pragmas of `shim.c` after the
+  preprocessor. It stands against honest code. A `#line` directive in `shim.c` has no
+  honest use, since the file is written by hand, so review of `shim.c` covers it, and
+  the `#line` rule of the copy check does not apply to it. If `shim.c` is ever
+  generated, that rule applies to it. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1947#issuecomment-6067031461,
+  2026-10-08 19:03 UTC).
   The copy also holds `arch/common/timer.c` and `timer.h`, which the build with
   `UA_ARCHITECTURE=none` does not compile. `cargo xtask open62541` takes them from a
   closed list of extra release files, with the reason of each, and compiles them with
