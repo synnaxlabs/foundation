@@ -134,15 +134,21 @@ impl Problem {
 /// A place that a problem names, and what is there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Note {
+    /// What is at the place.
     pub(crate) text: String,
+    /// The place.
     pub(crate) place: Place,
 }
 
-/// A file, and a line and a column in it, each from 1.
+/// A file, and a line and a column in it, each from 1. The column counts Unicode
+/// scalar values, as rustc does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Place {
+    /// The path of the file, as the user or a directory listing gave it.
     pub(crate) file: String,
+    /// The line, from 1.
     pub(crate) line: u32,
+    /// The column, from 1, in Unicode scalar values.
     pub(crate) column: u32,
 }
 

@@ -84,8 +84,11 @@ pub(crate) struct Output {
     pub(crate) changes: Vec<Change>,
     /// The home node of each index that has none before the apply, by index name.
     pub(crate) homes: BTreeMap<String, String>,
+    /// The count of changes with this action.
     pub(crate) added: usize,
+    /// The count of changes with this action.
     pub(crate) changed: usize,
+    /// The count of changes with this action.
     pub(crate) removed: usize,
 }
 
@@ -113,19 +116,22 @@ impl Output {
 /// The version of a spec, and the root of its tree in lower-case hex.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Base {
+    /// The version of the spec: 0 before its first apply.
     pub(crate) version: u64,
+    /// The root of the spec's tree, in lower-case hex.
     pub(crate) root: String,
 }
 
 /// One change of a plan.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Change {
+    /// What the apply does to the definition.
     pub(crate) action: Action,
     /// The kind of the definition, such as `channel`.
     pub(crate) kind: String,
     /// The label of the definition in the files.
     pub(crate) name: String,
-    /// The label in the files. A removal has none.
+    /// Where the label is in the files. A removal has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) place: Option<Place>,
 }
