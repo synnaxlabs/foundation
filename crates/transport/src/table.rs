@@ -636,8 +636,9 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The server closes the client's session, and once it drained, dials the client. The
-    // new connection takes the handle of the old one, and a dial gives the new session.
+    // The server closes the client's session, and once it drained, dials the client.
+    // The new connection takes the handle of the old one, and a dial gives the new
+    // session.
     #[test]
     fn a_dial_gives_the_new_session_on_the_handle_of_an_ended_one() {
         let (mut sim, client, server) = testing::nodes(0);
