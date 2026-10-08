@@ -1,0 +1,252 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use connector::cancel;
+use connector::kind::{self, Channels, Context, Table};
+use document::diagnostic::Diagnostic;
+use document::{Document, Source};
+use spec::channel::{self, Channel, Data};
+use spec::data_type::DataType;
+use spec::definition::Definition;
+use types::channel::Key;
+use types::name::Name;
+use types::sample;
+
+use super::{File, FrontEnd, Planned, Problems, plan};
+
+const PLANT: &str = include_str!("../../../node/tests/it/one_node/plant.hcl");
+const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
+
+/// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
+/// each attribute, so it stands in for each kind of the fixtures.
+struct Reader;
+
+impl kind::Kind for Reader {
+    type Config = Vec<Name>;
+
+    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
+        let reads = config
+            .blocks
+            .iter()
+            .filter(|block| &*block.keyword == "read");
+        Ok(reads
+            .map(|block| block.labels[0].text.parse().expect("a name"))
+            .collect())
+    }
+
+    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels {
+            reads: Vec::new(),
+            writes: writes.clone(),
+        })
+    }
+
+    fn discover(
+        &self,
+        _: &cancel::Token,
+    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn run(
+        &self,
+        _: Context<Vec<Name>>,
+    ) -> impl Future<Output = Result<(), kind::Error>> {
+        std::future::ready(Ok(()))
+    }
+}
+
+fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
+    config_hcl::read(source, text)
+        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
+}
+
+fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
+    BTreeMap::from([("hcl", FrontEnd { read: hcl })])
+}
+
+fn name(text: &str) -> Name {
+    text.parse().expect("a name")
+}
+
+fn files(files: &[(&str, &str)]) -> Vec<File> {
+    files
+        .iter()
+        .map(|(path, text)| File {
+            path: PathBuf::from(path),
+            text: (*text).to_owned(),
+        })
+        .collect()
+}
+
+fn empty() -> spec::Pointer {
+    spec::Pointer {
+        version: 0,
+        root: spec::tree::empty(),
+    }
+}
+
+fn run(
+    texts: &[(&str, &str)],
+    applied: &BTreeMap<Name, Definition>,
+) -> Result<Planned, Problems> {
+    let kinds = Table::new().with("influx", Reader).with("opcua", Reader);
+    let members = BTreeSet::from([name("edge")]);
+    plan(
+        &files(texts),
+        empty(),
+        applied,
+        &members,
+        &front_ends(),
+        &kinds,
+    )
+}
+
+fn problems(texts: &[(&str, &str)]) -> Problems {
+    run(texts, &BTreeMap::new()).expect_err("problems")
+}
+
+fn channel(key: u128, kind: channel::Kind) -> Definition {
+    Definition::Channel(Channel {
+        key: Key::from_u128(key),
+        kind,
+    })
+}
+
+const INDEX: channel::Kind = channel::Kind::Index {
+    error: None,
+    control: None,
+};
+
+#[test]
+fn shows_each_definition_in_file_order_then_the_counts() {
+    let planned = run(&[("plant.hcl", PLANT)], &BTreeMap::new()).expect("a plan");
+    assert_eq!(
+        planned.to_string(),
+        "\
++ channel plant.time
++ channel plant.spike
++ channel plant.dip
++ channel plant.trend
++ connector plc
++ connector influx
+6 to add, 0 to change, 0 to remove.
+"
+    );
+}
+
+#[test]
+fn follows_the_order_of_the_files() {
+    let a = "channel \"a.time\" { kind = \"index\" }\n";
+    let b = "channel \"b.time\" { kind = \"index\" }\nplacement \"p\" {\n  select = \"*.time\"\n  home = \"edge\"\n}\n";
+    let planned = run(&[("b.hcl", b), ("a.hcl", a)], &BTreeMap::new()).expect("a plan");
+    assert_eq!(
+        planned.to_string(),
+        "\
++ channel b.time
++ placement p
++ channel a.time
+3 to add, 0 to change, 0 to remove.
+"
+    );
+}
+
+#[test]
+fn shows_a_change_then_a_removal() {
+    let i64 = Data::new(
+        Key::from_u128(1),
+        None,
+        DataType::Sample(sample::Type::Scalar(sample::Scalar::I64)),
+        None,
+    )
+    .expect("a data channel");
+    let applied = BTreeMap::from([
+        (name("site.time"), channel(1, INDEX)),
+        (name("site.temp"), channel(2, channel::Kind::Data(i64))),
+        (name("gone.time"), channel(3, INDEX)),
+    ]);
+    let placed = format!(
+        "{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n"
+    );
+    let planned = run(&[("site.hcl", &placed)], &applied).expect("a plan");
+    assert_eq!(
+        planned.to_string(),
+        "\
+~ channel site.temp
++ placement p
+- channel gone.time
+1 to add, 1 to change, 1 to remove.
+"
+    );
+}
+
+#[test]
+fn gives_the_json_of_the_site_plan() {
+    let placed = format!(
+        "{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n"
+    );
+    let planned = run(&[("site.hcl", &placed)], &BTreeMap::new()).expect("a plan");
+    let json = serde_json::to_string_pretty(&planned.json()).expect("JSON");
+    assert_eq!(format!("{json}\n"), include_str!("site.golden.json"));
+}
+
+#[test]
+fn gives_each_problem_with_its_place_and_fix() {
+    let wrong = PLANT.replacen("data_type", "datatype", 1);
+    assert_eq!(
+        problems(&[("plant.hcl", &wrong)]).to_string(),
+        "\
+error[document.missing-attribute]: the `channel` block has no `data_type`
+  --> plant.hcl:5:1
+fix: Add a `data_type` attribute such as \"f64\"
+
+error[document.unknown-attribute]: `datatype` is not an attribute of the `channel` block
+  --> plant.hcl:6:3
+fix: Use `kind`, `data_type`, `index`, `quality`, or `unit`, or remove it
+"
+    );
+}
+
+#[test]
+fn refuses_a_file_that_no_front_end_reads() {
+    let problems = problems(&[("plant.yaml", ""), ("site.hcl", SITE), ("plant", "")]);
+    assert_eq!(
+        problems.to_string(),
+        "\
+error[ops.unknown-extension]: no config syntax reads `plant.yaml`
+fix: Use a file that ends in `.hcl`
+
+error[ops.unknown-extension]: no config syntax reads `plant`
+fix: Use a file that ends in `.hcl`
+"
+    );
+    assert_eq!(
+        problems.json(),
+        serde_json::json!({ "errors": [
+            {
+                "code": "ops.unknown-extension",
+                "message": "no config syntax reads `plant.yaml`",
+                "fix": "Use a file that ends in `.hcl`",
+                "notes": [],
+            },
+            {
+                "code": "ops.unknown-extension",
+                "message": "no config syntax reads `plant`",
+                "fix": "Use a file that ends in `.hcl`",
+                "notes": [],
+            },
+        ]})
+    );
+}
+
+#[test]
+fn names_each_extension_of_the_table_in_the_fix() {
+    let mut front_ends = front_ends();
+    front_ends.insert("toml", FrontEnd { read: hcl });
+    front_ends.insert("yaml", FrontEnd { read: hcl });
+    let diagnostic = super::unknown(&PathBuf::from("plant.json"), &front_ends);
+    assert_eq!(
+        diagnostic.fix,
+        "Use a file that ends in `.hcl`, `.toml`, or `.yaml`"
+    );
+}

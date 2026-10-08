@@ -9,11 +9,17 @@ use serde_json::{Value, json};
 mod error;
 mod mcp;
 mod operation;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table entries of #1744 call it")
+)]
+mod plan;
 #[cfg(test)]
 mod tests;
 
 use error::Error;
 use operation::Parsed;
+pub use plan::FrontEnd;
 
 /// Runs one command line, such as `["foundation", "version", "--json"]`, and returns
 /// the exit status: 0 on success, 1 when a stream fails, and 2 for a bad argument or

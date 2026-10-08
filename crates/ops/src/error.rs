@@ -96,7 +96,8 @@ impl fmt::Display for Error {
     }
 }
 
-fn escape(text: &str) -> String {
+/// `text` escaped as `char::escape_debug` does, with quotes kept, so it stays one line.
+pub(crate) fn escape(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '"' | '\'' => c.to_string(),

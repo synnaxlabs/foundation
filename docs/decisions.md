@@ -6826,7 +6826,8 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927), and
    `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
    with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
-   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152). A crate
+   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152), and
+   `ops` may take `config-hcl`, so its plan tests read a real file (#337). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The

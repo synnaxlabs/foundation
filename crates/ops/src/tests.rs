@@ -1,11 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
+use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use crate::FrontEnd;
 use crate::error::Error;
 use crate::operation::{self, Response, TABLE};
+use crate::plan;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Exit {
@@ -459,10 +462,18 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Output { .. } => {}
         }
     }
-    let lines: Vec<_> = every
+    let mut lines: Vec<_> = every
         .iter()
         .map(|error| format!("{}\t{}\n", error.code(), error.fix()))
         .collect();
+    let front_ends = BTreeMap::from([(
+        "hcl",
+        FrontEnd {
+            read: |_, _| Err(Vec::new()),
+        },
+    )]);
+    let unknown = plan::unknown(Path::new("plant.yaml"), &front_ends);
+    lines.push(format!("{}\t{}\n", unknown.code, unknown.fix));
     assert_eq!(lines.concat(), include_str!("codes.golden"));
 }
 
