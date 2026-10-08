@@ -2210,7 +2210,7 @@ How to read this record:
   compare sees that protocol or none, which the handshake tests cover. Approved by
   `laptop.architect-2` at 2026-10-08T15:11:07Z
   (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892). The
-  reason was changed by `laptop.architect-2` at 2026-10-08T15:33:49Z
+  reason was changed by `laptop.architect-2` at 2026-10-08T15:31:46Z
   (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063367399).
 
 ### 1.8 Consensus, regions, and the spec
