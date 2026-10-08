@@ -1432,10 +1432,13 @@ How to read this record:
   it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
   the ends, so the reader holds no more ends than it has places. The ends and the body
   are in place order: the home writes the series of each place it has, from 0, each from
-  the frame's block as a slice, with ends it computes in that order. At the open it
-  makes the list of each place and its home entry, sorted by place, and writes each ends
-  message from it with `wire::hub::ends::encode`, which sizes the message by its buffer,
-  so no scratch buffer holds the ends (the architect, #1146,
+  the frame's block as a slice, with ends it computes in that order. It cuts each series
+  from `Frame::body` by `View::bounds` (the architect, 2026-10-07T22:35:41Z,
+  https://github.com/synnaxlabs/foundation/issues/1639#issuecomment-6048265226; lost:
+  `View::ends`, which gives no start, and `Frame::bounds`, a search for each place). At
+  the open it makes the list of each place and its home entry, sorted by place, and
+  writes each ends message from it with `wire::hub::ends::encode`, which sizes the
+  message by its buffer, so no scratch buffer holds the ends (the architect, #1146,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
   takes exactly the ends the buffer holds and no more, so one iterator passed with
   `by_ref()` splits a run into messages; the caller owns the count of the run (the
