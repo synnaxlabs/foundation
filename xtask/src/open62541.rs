@@ -1,5 +1,6 @@
 //! Copies a release of open62541 into `patches/open62541/`, and checks a copy: each
-//! C file that our options compile and each header that it includes.
+//! C file that our options compile, each header that it includes, and each file of
+//! [`EXTRA`].
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -62,7 +63,7 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
 const EXTRA: [&str; 2] = [
     // The timer of the event loop, which takes the time as an input.
     "arch/common/timer.c",
-    // Its header.
+    // The shim includes it to hold a `UA_Timer` in the loop.
     "arch/common/timer.h",
 ];
 
@@ -124,9 +125,8 @@ const SYSTEM_HEADERS: [&str; 18] = [
 /// # Errors
 ///
 /// A step that fails, a flag of a compile that is neither [`kept`] nor [`left_out`],
-/// a file of [`EXTRA`] that the release does not have, and each error of [`check`].
-/// On an error,
-/// `patches/open62541/` does not change.
+/// a file of [`EXTRA`] that the release does not have or the library holds, and each
+/// error of [`check`]. On an error, `patches/open62541/` does not change.
 pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
     let work = root.join("target/open62541");
     let (src, build, stage) = (work.join("src"), work.join("build"), work.join("copy"));
@@ -199,8 +199,8 @@ fn compile(
 /// What a built clone gives to the copy.
 struct Found {
     /// Each (from, to): each source of the library, each header in the clone that
-    /// it includes, and each file of [`EXTRA`]. A header outside the clone is left out, and [`check`] fails on
-    /// one that a source needs.
+    /// it includes, and each file of [`EXTRA`]. A header outside the clone is left
+    /// out, and [`check`] fails on one that a source needs.
     files: BTreeSet<(PathBuf, PathBuf)>,
     /// The `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each compile, with
     /// each `-I` relative to the copy.
@@ -235,6 +235,11 @@ fn collect(trees: &Trees<'_>) -> Result<Found, String> {
     }
     for extra in EXTRA {
         let from = trees.src.join(extra);
+        if files.iter().any(|(_, to)| to == Path::new(extra)) {
+            return Err(format!(
+                "{extra}: EXTRA lists it, and the library already holds it"
+            ));
+        }
         if !from.is_file() {
             return Err(format!(
                 "{extra}: EXTRA lists it, and the release has no such file"
@@ -1563,6 +1568,26 @@ End of search list.
             Err(vec![
                 "arch/common/timer.h: EXTRA lists it, and the release has no such \
                  file"
+                    .to_owned()
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_refuses_a_file_of_extra_that_the_library_holds() {
+        let (root, repo, result) = run_on("stale", |repo| {
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap()
+                + "target_sources(open62541-plugins PRIVATE arch/common/timer.c)\n";
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "arch/common/timer.c: EXTRA lists it, and the library already holds it"
                     .to_owned()
             ])
         );
