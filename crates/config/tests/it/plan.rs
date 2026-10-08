@@ -606,7 +606,7 @@ fn takes_the_first_writer_in_source_order_in_any_order_of_the_files() {
         "{PLANT}\
 connector \"w1\" {{
   kind = \"writer\"
-  node = \"n1\"
+  node = \"n2\"
   writes = [\"a.value\"]
 }}
 "
@@ -614,7 +614,7 @@ connector \"w1\" {{
     let second = "\
 connector \"w2\" {
   kind = \"writer\"
-  node = \"n2\"
+  node = \"n1\"
   writes = [\"a.time\"]
 }
 ";
@@ -622,8 +622,8 @@ connector \"w2\" {
     let spec = Spec::create_empty();
     let expected = [problem(
         "config.writer-nodes",
-        (1, value(second, "node", "\"n2\"")),
-        "connectors on the nodes `n1` and `n2` write the index `a.time`, so it has no \
+        (1, value(second, "node", "\"n1\"")),
+        "connectors on the nodes `n2` and `n1` write the index `a.time`, so it has no \
          one home",
         "Run each connector that writes `a.time` on one node",
     )];
