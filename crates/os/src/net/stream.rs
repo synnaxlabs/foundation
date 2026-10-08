@@ -223,6 +223,7 @@ mod tests {
     use std::future::poll_fn;
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener};
+    use std::num::NonZeroUsize;
     use std::os::fd::OwnedFd;
 
     use tcp::Driver as _;
@@ -233,7 +234,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 16,
             recv_buffer_bytes: 1 << 15,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: true,
         }
     }
@@ -437,7 +438,7 @@ mod tests {
             ..options()
         };
         let (held, _) = held_at_the_stall(&options, 1 << 20);
-        assert!(held <= 2 * options.unsent_bytes_max, "{held}");
+        assert!(held <= 2 * options.unsent_bytes_max.get(), "{held}");
     }
 
     /// With `delayed`, XNU also posts the write event under one segment, whatever
@@ -447,12 +448,12 @@ mod tests {
     fn delayed_unsent_bytes_stay_at_most_the_bound_plus_one_segment() {
         let options = tcp::Options {
             send_buffer_bytes: 1 << 20,
-            unsent_bytes_max: 1 << 13,
+            unsent_bytes_max: NonZeroUsize::new(1 << 13).unwrap(),
             delayed: true,
             ..options()
         };
         let (held, segment) = held_at_the_stall(&options, 64);
-        let max = options.unsent_bytes_max;
+        let max = options.unsent_bytes_max.get();
         assert!(segment > max, "the bound is below one segment: {segment}");
         assert!(held <= max + segment, "{held}, segment {segment}");
     }

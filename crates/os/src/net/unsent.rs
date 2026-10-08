@@ -3,6 +3,7 @@
 
 use std::io;
 use std::io::IoSlice;
+use std::num::NonZeroUsize;
 use std::task::{Context, Poll, ready};
 
 use rustix::io::Errno;
@@ -20,10 +21,9 @@ pub(super) struct Bound {
 
 impl Bound {
     /// A bound of `max` unsent bytes.
-    pub(super) fn new(max: usize) -> Self {
+    pub(super) fn new(max: NonZeroUsize) -> Self {
         Self {
-            // A bound of 0 would write nothing, and wait for no event.
-            max: max.max(1),
+            max: max.get(),
             written: 0,
         }
     }

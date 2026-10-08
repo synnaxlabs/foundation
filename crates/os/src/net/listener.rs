@@ -124,6 +124,7 @@ impl listener::Driver for Listener {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::num::NonZeroUsize;
 
     use super::*;
 
@@ -135,7 +136,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 16,
             recv_buffer_bytes: 1 << 15,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: true,
         }
     }

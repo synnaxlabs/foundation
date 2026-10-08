@@ -9,6 +9,7 @@
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::mpsc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -27,7 +28,7 @@ fn options() -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: 1 << 16,
         recv_buffer_bytes: 1 << 16,
-        unsent_bytes_max: 1 << 14,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
         delayed: false,
     }
 }
@@ -74,7 +75,7 @@ async fn read(tcp: &mut Tcp) -> u64 {
 /// Writes a block larger than the unsent bound until a write waits, then one write
 /// more, which the peer's reads let through, with the allocations the polls made.
 async fn write_past_the_bound(tcp: &mut Tcp, peer: &mut Tcp) -> u64 {
-    let block = vec![7; options().unsent_bytes_max * 2];
+    let block = vec![7; options().unsent_bytes_max.get() * 2];
     let parts = [IoSlice::new(&block)];
     let mut buffer = vec![0; 1 << 20];
     let mut cx = Context::from_waker(std::task::Waker::noop());
