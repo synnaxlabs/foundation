@@ -3250,7 +3250,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
-  7).
+  7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff

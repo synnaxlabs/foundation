@@ -243,8 +243,7 @@ state on `main`.
   `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
   it must come before); the `block_before_kept` inputs hold it. `config::check`
   reads the documents into definitions, and the influx kind reads the config of each
-  `connector` block (`connector::reader::read`, `connector::http::uri`, and
-  `connector_influx::Kind::parse`). Fuzzed: `config_check`.
+  `connector` block of kind `influx`. Fuzzed: `config_check`.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -381,4 +380,7 @@ No target yet, because the decoder is private, not built, or not reached from a 
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the header and
 hard state of a mesh log record (#1711), the names of a mesh log directory
-(`mesh::log::sequence`, #1746), and each connector's protocol parser.
+(`mesh::log::sequence`, #1746), each connector's protocol parser, and
+`connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
+which `config_check` reaches only from an input with a `connector` block of kind
+`influx`, and no input holds one yet (#1817).
