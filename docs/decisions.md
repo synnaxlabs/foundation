@@ -2199,8 +2199,10 @@ How to read this record:
   the directory gives `Error::Log` with `Busy` on the lock, at each time, whatever log
   file the first log holds (#1360, decided by `laptop.architect`, 2026-10-07T12:07:03Z:
   https://github.com/synnaxlabs/foundation/issues/1360#issuecomment-6037555764). Any
-  other file there is `Error::Stray`. One write of `raft` is one record: a header, then
-  the body. The header is an 8-byte check of the rest of the header (the first bytes of
+  other file there is `Error::Stray`. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/549 in its clause that each file but
+  `log-<n>` is `Error::Stray`. One write of `raft` is one record: a header, then the
+  body. The header is an 8-byte check of the rest of the header (the first bytes of
   `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
   body length, and an 8-byte check of the body. The body holds the hard state, when it
   changed, and the entries, so one sync makes both durable; two slots for the hard state
