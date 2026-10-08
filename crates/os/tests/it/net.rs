@@ -273,8 +273,8 @@ fn a_drop_after_close_delivers_the_bytes_the_kernel_still_holds() {
 
 /// With a peer that reads nothing, the kernel sends until the peer's receive buffer
 /// is full. The write then waits at the unsent bound, with most of the send buffer
-/// still free. macOS waits for the write event after each write, so the next poll
-/// that no event preceded waits.
+/// still free. macOS waits for the write event once the bytes written since the last
+/// wait reach the bound, so the next poll that no event preceded waits.
 #[test]
 fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
     on_thread("net-unsent", || async {
@@ -298,6 +298,20 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
                 written > 1 << 16,
                 "the peer's buffer fills first: {written}"
             );
+        }
+    });
+}
+
+/// Writes of 64 bytes that total less than the unsent bound each go at once, with no
+/// read on the peer: macOS waits for the write event only once the bound is reached.
+#[test]
+fn small_writes_below_the_unsent_bound_wait_for_no_event() {
+    on_thread("net-small", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
+        for _ in 2..options().unsent_bytes_max / 64 {
+            assert_eq!(write_once(&mut client, &[7; 64]), Poll::Ready(64));
         }
     });
 }

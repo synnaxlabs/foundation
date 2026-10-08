@@ -28,9 +28,14 @@ pub(super) struct Stream {
     socket: Socket<std::net::TcpStream, TcpStream>,
     local: SocketAddr,
     peer: SocketAddr,
-    /// The bound that a write keeps on macOS, whose kernel applies it only to the
-    /// write event.
+    /// The bound on unsent bytes. The macOS kernel applies it only to the write event,
+    /// so a write waits for that event each `unsent_bytes_max` bytes.
+    #[cfg(target_os = "macos")]
     unsent_bytes_max: usize,
+    /// The bytes written since the last wait for the write event, below
+    /// `unsent_bytes_max`.
+    #[cfg(target_os = "macos")]
+    written: usize,
     /// `poll_close` ran: the FIN is queued.
     closed: bool,
     /// The error that ended the stream. The kernel reports a reset once and then an
@@ -68,7 +73,11 @@ impl Stream {
             socket: Socket::Idle(stream),
             local,
             peer,
-            unsent_bytes_max: options.unsent_bytes_max,
+            // A bound of 0 would write nothing, and wait for no event.
+            #[cfg(target_os = "macos")]
+            unsent_bytes_max: options.unsent_bytes_max.max(1),
+            #[cfg(target_os = "macos")]
+            written: 0,
             closed: false,
             failed,
         })
@@ -155,7 +164,18 @@ impl tcp::Driver for Stream {
                 None => io_error(Errno::PIPE),
             }));
         }
-        match ready!(send(stream, cx, buffers, self.unsent_bytes_max)) {
+        #[cfg(not(target_os = "macos"))]
+        let sent =
+            ready!(stream.poll_write_vectored(cx, buffers)).map_err(|e| errno(&e));
+        #[cfg(target_os = "macos")]
+        let sent = ready!(send(
+            &stream,
+            cx,
+            buffers,
+            self.unsent_bytes_max,
+            &mut self.written
+        ));
+        match sent {
             Ok(written) => Poll::Ready(Ok(written)),
             Err(code) => Poll::Ready(Err(self.fail(stream_error(code, peer)))),
         }
@@ -187,35 +207,22 @@ impl tcp::Driver for Stream {
     }
 }
 
-/// Writes from `buffers` to `stream`.
-#[cfg(not(target_os = "macos"))]
-fn send(
-    stream: Pin<&mut TcpStream>,
-    cx: &mut Context<'_>,
-    buffers: &[IoSlice<'_>],
-    _: usize,
-) -> Poll<Result<usize, Errno>> {
-    stream
-        .poll_write_vectored(cx, buffers)
-        .map_err(|e| errno(&e))
-}
-
-/// Writes at most `unsent_bytes_max` bytes from `buffers` to `stream`, and then
-/// waits for the write event, which alone honors `TCP_NOTSENT_LOWAT` on macOS. The
-/// unsent bytes so stay below twice the bound.
+/// Writes from `buffers` to `stream`, at most `max` bytes less the bytes `written`
+/// since the last wait. When `written` reaches `max`, it clears the write readiness
+/// and sets `written` to 0, so the next write waits for the write event, which alone
+/// honors `TCP_NOTSENT_LOWAT` on macOS. The unsent bytes so stay below twice `max`.
 #[cfg(target_os = "macos")]
 fn send(
-    stream: Pin<&mut TcpStream>,
+    stream: &TcpStream,
     cx: &mut Context<'_>,
     buffers: &[IoSlice<'_>],
-    unsent_bytes_max: usize,
+    max: usize,
+    written: &mut usize,
 ) -> Poll<Result<usize, Errno>> {
-    let stream = stream.into_ref().get_ref();
-    // A bound of 0 would write nothing, and wait for no event.
-    let max = unsent_bytes_max.max(1);
+    let room = max - *written;
     let (mut whole, mut len) = (0, 0);
     while let Some(buffer) = buffers.get(whole)
-        && len + buffer.len() <= max
+        && len + buffer.len() <= room
     {
         (whole, len) = (whole + 1, len + buffer.len());
     }
@@ -223,26 +230,30 @@ fn send(
     let buffers = match buffers.get(whole) {
         // The whole parts hold no bytes, so the write takes the head of the next.
         Some(next) if len == 0 => {
-            head = [IoSlice::new(&next[..max])];
+            head = [IoSlice::new(&next[..room])];
             &head[..]
         }
         _ => &buffers[..whole],
     };
     loop {
         ready!(stream.poll_write_ready(cx)).map_err(|e| errno(&e))?;
-        let mut written = Err(Errno::AGAIN);
+        let mut sent = Err(Errno::AGAIN);
         // `WouldBlock` from the closure clears the readiness, unless an event came
         // during the write.
         let _cleared = stream.try_io(Interest::WRITABLE, || {
-            written = rustix::io::writev(stream, buffers);
-            match written {
-                // No event follows a write of no bytes, so the readiness stays.
-                Ok(0) => Ok(()),
+            sent = rustix::io::writev(stream, buffers);
+            match sent {
+                Ok(n) if *written + n < max => Ok(()),
                 _ => Err(io::ErrorKind::WouldBlock.into()),
             }
         });
-        if written != Err(Errno::AGAIN) {
-            return Poll::Ready(written);
+        match sent {
+            Err(Errno::AGAIN) => {}
+            Ok(n) => {
+                *written = (*written + n) % max;
+                return Poll::Ready(Ok(n));
+            }
+            Err(code) => return Poll::Ready(Err(code)),
         }
     }
 }
