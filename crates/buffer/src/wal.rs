@@ -553,9 +553,9 @@ impl Writer {
     /// [`release`](Self::release) frees the records.
     ///
     /// The headroom is three times the larger of the largest record and the records
-    /// not yet synced, with no block that a wrap skips. The space of a trim is free
-    /// only at its release. From one trim to the release of the next, the ring takes
-    /// the records of two commits and the blocks that one wrap skips.
+    /// not yet synced. The space of a trim is free only at its release. From one trim
+    /// to the release of the next, the ring takes the records of two commits and the
+    /// blocks that one wrap skips.
     #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
     pub(crate) fn trimmed(&self, kept: Option<u64>) -> Option<Position> {
         let window = self.layout.window;
