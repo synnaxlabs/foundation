@@ -5331,7 +5331,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520). The
   sentence on the hello stream is by `laptop.architect` (2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418),
-  and supersedes the `Session::accept` sentence of that comment.
+  and supersedes the `Session::accept` sentence of that comment. The rule by the open
+  of the first request stream, in place of the send of the first request, is by
+  `laptop.architect` (2026-10-08T19:09:37Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067132090).
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
   transport and the mesh, and never a zero key. #1660 changes only where `node` gets
   the key. The test waits on #1744, whose client hello is the first that a `node` test
