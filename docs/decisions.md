@@ -431,11 +431,20 @@ How to read this record:
   key it gave, so a key it never gave is a defect of the home and panics. Complete and
   latest sessions have separate key types, so a call in the wrong mode does not compile
   (advisor, #725; the take and the key rule: architect, #1038). Only a named complete
-  session needs mesh time to close: `Readers::close_named` and
-  `Readers::open_named_latest` take a stamp, and no other open or close does, so the
-  home opens unnamed readers before the first estimate. A named complete session has a
-  `complete::Key`, and the wrong close of an open session panics; the architect decided
-  (#1024). Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+  session needs mesh time to close. One `Readers::close(key, now)` ends each session:
+  `now` is `None` before the home first has mesh time, and a close with `None` of an
+  open named complete session panics. `Readers::open_named_latest` takes a stamp, and
+  no other open does, so the home opens unnamed readers before the first estimate. A
+  named complete session has a `complete::Key` (#1024). One close replaces
+  `Readers::close_named`, so the caller never picks a close by the mode of the session
+  (`laptop.architect`,
+  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
+  One `delivery::named::Key { subject, name }` keys a named reader in `Reader::Named`,
+  `Record`, and `Readers::open_named_latest`, in place of two `Name` values (the
+  director's question,
+  [#1856](https://github.com/synnaxlabs/foundation/pull/1856#issuecomment-6058445903);
+  `laptop.architect`, the same #1863 comment). Supersedes the B3 single position.
+  Basis: A6, A8, B2, B3, S10, X14, #41.
 - **STORE TRIM (2026-10-06)** Under disk pressure, `buffer` frees its oldest records
   itself, in the commit task, whatever the floors: a ring frees space only at its tail,
   so a floor never changes which record goes (B1). The commit writes the new tail in the
