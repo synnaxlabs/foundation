@@ -60,7 +60,7 @@ pub(crate) fn plan(
             .count()
     };
     let output = Output {
-        base: Base::from(plan.base),
+        base: Pointer::from(plan.base),
         added: count(Action::Add),
         changed: count(Action::Change),
         removed: count(Action::Remove),
@@ -78,7 +78,7 @@ pub(crate) fn plan(
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Output {
     /// The spec that the plan changes.
-    pub(crate) base: Base,
+    pub(crate) base: Pointer,
     /// Each change: the adds and changes in file order, then the removals.
     pub(crate) changes: Vec<Change>,
     /// The home node of each index that has none before the apply, by index name.
@@ -120,14 +120,14 @@ impl Output {
 
 /// The version of a spec, and the root of its tree in lower-case hex.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub(crate) struct Base {
+pub(crate) struct Pointer {
     /// The version of the spec: 0 before its first apply.
     pub(crate) version: u64,
     /// The root of the spec's tree, in lower-case hex.
     pub(crate) root: String,
 }
 
-impl From<spec::Pointer> for Base {
+impl From<spec::Pointer> for Pointer {
     fn from(pointer: spec::Pointer) -> Self {
         Self {
             version: pointer.version,

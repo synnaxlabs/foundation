@@ -32,7 +32,7 @@ use types::time::Span;
 use super::{Applied, apply};
 use crate::error::Error;
 use crate::plan::tests::{PLANT, Reader, files, front_ends, name, placed_site};
-use crate::plan::{Base, Output, plan};
+use crate::plan::{self, Output, plan};
 
 const NODE: node::Key = node::Key::from_u128(1);
 const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
@@ -161,7 +161,7 @@ fn applies_a_plan_and_then_plans_no_change() {
             applied,
             Applied {
                 file: "site.plan".to_owned(),
-                pointer: Base::from(pointer),
+                pointer: plan::Pointer::from(pointer),
                 added: 3,
                 changed: 0,
                 removed: 0,
@@ -251,7 +251,7 @@ fn gives_a_stale_plan_when_another_apply_commits_first() {
             (Ok(won), lost) | (lost, Ok(won)) => (won, lost),
             ends => panic!("no apply in {ends:?}"),
         };
-        assert_eq!(won.pointer, Base::from(pointer));
+        assert_eq!(won.pointer, plan::Pointer::from(pointer));
         assert_eq!(lost, Err(stale));
     });
 }
@@ -412,7 +412,7 @@ fn leaves_out_each_count_of_zero() {
         };
         let applied = Applied {
             file: "a\n.plan".to_owned(),
-            pointer: Base::from(pointer),
+            pointer: plan::Pointer::from(pointer),
             added,
             changed,
             removed,

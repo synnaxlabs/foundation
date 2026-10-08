@@ -8,7 +8,7 @@ use types::channel;
 
 use crate::error::{self, Error};
 use crate::front_end;
-use crate::plan::{self, Action, Base};
+use crate::plan::{self, Action};
 
 #[cfg(test)]
 mod tests;
@@ -77,7 +77,7 @@ pub(crate) async fn apply(
         })?;
     Ok(Applied {
         file: file.to_owned(),
-        pointer: Base::from(pointer),
+        pointer: plan::Pointer::from(pointer),
         added,
         changed,
         removed,
@@ -90,7 +90,7 @@ pub(crate) struct Applied {
     /// The plan file, as the user gave its path.
     pub(crate) file: String,
     /// The spec after the apply.
-    pub(crate) pointer: Base,
+    pub(crate) pointer: plan::Pointer,
     /// The count of changes with this action.
     pub(crate) added: usize,
     /// The count of changes with this action.
