@@ -170,6 +170,12 @@ mod tests {
         };
         let nodes: Vec<node::Key> = voters.nodes().collect();
         assert_eq!(nodes, [key(1), key(2), key(3)]);
+        let voters = Voters {
+            incoming: BTreeSet::from([key(2)]),
+            outgoing: BTreeSet::from([key(1)]),
+        };
+        let nodes: Vec<node::Key> = voters.nodes().collect();
+        assert_eq!(nodes, [key(1), key(2)]);
     }
 
     #[test]

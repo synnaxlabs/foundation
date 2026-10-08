@@ -504,6 +504,71 @@ fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
     assert_eq!(removed(&nodes[&key(2)]), [false, true, false]);
 }
 
+// Node 2 leads {1, 2, 3}, adds node 4, then removes it. No `Start.voters` holds node
+// 4, so only the committed join holds it. From node 2's disk, a start at a commit
+// below the join holds nothing about node 4, a start at the join holds it as a
+// voter, and a start at the second leave holds it as removed.
+#[test]
+fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
+    let mut nodes: BTreeMap<node::Key, Raft> =
+        (1..=4).map(|id| (key(id), node(id, &[1, 2, 3]))).collect();
+    nodes.get_mut(&key(2)).unwrap().campaign();
+    let (mut committed, _) = run(&mut nodes);
+    let mut propose = |nodes: &mut BTreeMap<node::Key, Raft>, voters: &[u8]| {
+        nodes
+            .get_mut(&key(2))
+            .unwrap()
+            .propose_voters(set(voters))
+            .unwrap();
+        let (more, _) = run(nodes);
+        committed
+            .get_mut(&key(2))
+            .unwrap()
+            .extend(more[&key(2)].iter().cloned());
+    };
+    propose(&mut nodes, &[1, 2, 3, 4]);
+    let removed = |raft: &Raft| [1, 4].map(|id| raft.removed(key(id)));
+    for id in 1..=4 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, false], "node {id}");
+    }
+    propose(&mut nodes, &[1, 2, 3]);
+    for id in 1..=4 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, true], "node {id}");
+    }
+
+    let disk = committed.remove(&key(2)).unwrap();
+    let at: Vec<u64> = disk
+        .iter()
+        .filter(|entry| matches!(entry.data, Data::Voters(_)))
+        .map(|entry| entry.at.index)
+        .collect();
+    assert_eq!(at.len(), 4);
+    let cases = [
+        (0, false),
+        (at[0] - 1, false),
+        (at[1], false),
+        (at[3], true),
+    ];
+    for (applied, want) in cases {
+        let start = Start {
+            hard: nodes[&key(2)].hard(),
+            voters: Voters {
+                incoming: set(&[1, 2, 3]),
+                outgoing: BTreeSet::new(),
+            },
+            entries: disk.clone(),
+            applied,
+        };
+        let config = Config {
+            key: key(2),
+            election_ticks: ELECTION,
+            heartbeat_ticks: 1,
+        };
+        let raft = Raft::new(config, start).unwrap();
+        assert_eq!(removed(&raft), [false, want], "applied {applied}");
+    }
+}
+
 // Whether a message crosses between the sides {1, 4} and {2, 3}.
 fn crosses(message: &Message) -> bool {
     let side = |at: node::Key| at == key(1) || at == key(4);
