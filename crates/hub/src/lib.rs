@@ -75,9 +75,8 @@ struct State {
     /// The index of each channel in `channels`, by key.
     indexes: hash::Map<Key, Key>,
     /// Each open writer, by its home key.
-    writers: hash::Map<::home::writer::Key, Open>,
-    /// Each open reader session, by its home key.
-    readers: hash::Map<::home::reader::Key, Open>,
+    writers: Sessions<::home::writer::Key>,
+    readers: Sessions<::home::reader::Key>,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// The readers that [`::home::Shard::woken`] gave last.
@@ -114,8 +113,8 @@ impl Hub {
             interner,
             channels: hash::Map::default(),
             indexes: hash::Map::default(),
-            writers: hash::Map::default(),
-            readers: hash::Map::default(),
+            writers: Sessions::default(),
+            readers: Sessions::default(),
             wakers: hash::Map::default(),
             woken: Vec::new(),
             commit: commit::Signal::default(),
@@ -247,6 +246,11 @@ fn checked<'d>(
     named
 }
 
+/// The open sessions of one kind, by home key, with the channels of each. A session
+/// is open while it is here.
+#[derive(Debug)]
+struct Sessions<K>(hash::Map<K, Open>);
+
 /// The channels of an open session, and the cell where the hub puts the first of
 /// them that it removes. The session reads the cell, so its check costs the same
 /// while other sessions end.
@@ -256,30 +260,42 @@ struct Open {
     removed: Rc<Cell<Option<Key>>>,
 }
 
-impl Open {
-    /// Makes the session `key` on `keys` known in `sessions`, so that a removal of one
-    /// of them ends it. Returns the cell that names the removed channel.
-    fn add<K: Eq + Hash>(
-        sessions: &mut hash::Map<K, Self>,
-        key: K,
-        keys: Box<[Key]>,
-    ) -> Rc<Cell<Option<Key>>> {
+impl<K> Default for Sessions<K> {
+    fn default() -> Self {
+        Self(hash::Map::default())
+    }
+}
+
+impl<K: Copy + Eq + Hash> Sessions<K> {
+    /// Opens the session `key` on `keys`, so that a removal of one of them ends it.
+    /// Returns the cell that names the removed channel.
+    fn add(&mut self, key: K, keys: Box<[Key]>) -> Rc<Cell<Option<Key>>> {
         let removed = Rc::default();
-        let open = Self {
+        let open = Open {
             keys,
             removed: Rc::clone(&removed),
         };
-        let added = sessions.insert(key, open);
+        let added = self.0.insert(key, open);
         assert!(added.is_none(), "invariant: the home gives each key once");
         removed
     }
 
-    /// Ends the session when one of its channels is in `removed`: the cell names the
-    /// first. Returns whether it ended.
-    fn end(&self, removed: &hash::Set<Key>) -> bool {
-        let first = self.keys.iter().find(|key| removed.contains(key));
-        self.removed.set(first.copied());
-        first.is_some()
+    /// Returns whether the session `key` was open, and makes it not open.
+    fn remove(&mut self, key: K) -> bool {
+        self.0.remove(&key).is_some()
+    }
+
+    /// Puts the first channel of `removed` in the cell of each session on one of them.
+    /// Returns their keys, to close.
+    fn end(&self, removed: &hash::Set<Key>) -> Vec<K> {
+        self.0
+            .iter()
+            .filter_map(|(&key, open)| {
+                let first = open.keys.iter().find(|key| removed.contains(key));
+                open.removed.set(first.copied());
+                first.map(|_| key)
+            })
+            .collect()
     }
 }
 
@@ -335,25 +351,34 @@ impl State {
         if removed.is_empty() {
             return;
         }
-        let ended: Vec<_> = self
-            .writers
-            .extract_if(|_, open| open.end(removed))
-            .collect();
-        for (key, _) in ended {
-            self.home.close_writer(key);
+        for key in self.writers.end(removed) {
+            self.close_writer(key);
         }
-        self.commit.appended();
-        let mut ended: Vec<_> = self
-            .readers
-            .extract_if(|_, open| open.end(removed))
-            .collect();
-        ended.sort_unstable_by_key(|&(key, _)| key);
-        for (key, _) in ended {
-            self.home.close_reader(key);
-            if let Some(waker) = self.wakers.remove(&key) {
+        let mut ended = self.readers.end(removed);
+        ended.sort_unstable();
+        for key in ended {
+            if let Some(waker) = self.close_reader(key) {
                 waker.wake();
             }
         }
+    }
+
+    /// Closes the writer `key` at the home, unless a removal closed it.
+    fn close_writer(&mut self, key: ::home::writer::Key) {
+        if self.writers.remove(key) {
+            self.home.close_writer(key);
+            self.commit.appended();
+        }
+    }
+
+    /// Closes the reader session `key` at the home, unless a removal closed it.
+    /// Returns its waker, when it waits for a frame.
+    fn close_reader(&mut self, key: ::home::reader::Key) -> Option<Waker> {
+        let waker = self.wakers.remove(&key);
+        if self.readers.remove(key) {
+            self.home.close_reader(key);
+        }
+        waker
     }
 
     /// Makes `channel` known to sessions as `name`.

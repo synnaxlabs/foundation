@@ -13,7 +13,7 @@ use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
-use crate::{Open, State};
+use crate::State;
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -254,7 +254,7 @@ impl Session {
         keys: Box<[channel::Key]>,
         slots: Box<[channel::Slot]>,
     ) -> Self {
-        let removed = Open::add(&mut state.borrow_mut().readers, key, keys);
+        let removed = state.borrow_mut().readers.add(key, keys);
         Self {
             state: Rc::clone(state),
             key,
@@ -340,12 +340,6 @@ impl Credit {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if self.removed.get().is_some() {
-            return;
-        }
-        let mut state = self.state.borrow_mut();
-        state.readers.remove(&self.key);
-        state.wakers.remove(&self.key);
-        state.home.close_reader(self.key);
+        self.state.borrow_mut().close_reader(self.key);
     }
 }

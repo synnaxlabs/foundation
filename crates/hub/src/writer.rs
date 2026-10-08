@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::{Open, State};
+use crate::State;
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -140,7 +140,7 @@ impl Writer {
         let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
         borrowed.commit.appended();
         keys.extend(groups.iter().map(|group| group.index));
-        let removed = Open::add(&mut borrowed.writers, key, keys.into());
+        let removed = borrowed.writers.add(key, keys.into());
         Ok(Self {
             state: Rc::clone(state),
             key,
@@ -212,12 +212,6 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        if self.removed.get().is_some() {
-            return;
-        }
-        let mut state = self.state.borrow_mut();
-        state.writers.remove(&self.key);
-        state.home.close_writer(self.key);
-        state.commit.appended();
+        self.state.borrow_mut().close_writer(self.key);
     }
 }
