@@ -61,6 +61,7 @@ mod tests {
         Answer, Body, Data, Entry, Grant, Hard, Link, Position, Proof, Signature, Term,
         Voters,
     };
+    use spec::Pointer;
 
     use super::*;
     use types::digest::Digest;
@@ -68,7 +69,6 @@ mod tests {
     use crate::bytes::{put_change, put_position};
     use crate::change::{CHUNKS_MAX, Malformed};
     use crate::common::key;
-    use spec::Pointer;
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {

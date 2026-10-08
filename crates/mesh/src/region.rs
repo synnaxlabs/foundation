@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use spec::Pointer;
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::PublicKey;
@@ -16,7 +17,6 @@ use crate::change::{Change, Join, Malformed};
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
-use spec::Pointer;
 
 /// The region state that this node holds: its members, its tickets, the homes that it
 /// applied, and its spec pointer.

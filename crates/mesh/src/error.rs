@@ -1,13 +1,13 @@
 use std::fmt;
 
 use raft::Position;
+use spec::Pointer;
 use types::ed25519::PublicKey;
 use types::node;
 
 use crate::change::Unknown;
 use crate::region::Unfit;
 use crate::{claim, log};
-use spec::Pointer;
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]

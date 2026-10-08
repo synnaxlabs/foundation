@@ -8,6 +8,7 @@ use raft::{
     Answer, Body, Data, Entry, Grant, Message, Position, Proof, Ready, Signature, Term,
     Voters,
 };
+use spec::Pointer;
 use transport::Address;
 use types::channel;
 use types::digest::Digest;
@@ -23,7 +24,6 @@ use crate::claim::Signer;
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{Options, Ticket, Voter};
-use spec::Pointer;
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);

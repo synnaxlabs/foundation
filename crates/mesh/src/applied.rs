@@ -130,10 +130,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use proptest::prelude::*;
+    use spec::Pointer;
     use types::digest::Digest;
 
     use super::*;
-    use spec::Pointer;
 
     fn at(index: u64, term: u64) -> Position {
         Position {

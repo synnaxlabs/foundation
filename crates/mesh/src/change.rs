@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use spec::Pointer;
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::PublicKey;
@@ -16,7 +17,6 @@ use crate::bytes::{
 use crate::card;
 use crate::status::Status;
 use crate::ticket::Options;
-use spec::Pointer;
 
 /// A change record: the data of one log entry.
 #[derive(Clone, Debug, PartialEq, Eq)]

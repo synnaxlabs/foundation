@@ -16,6 +16,7 @@ use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
+use spec::Pointer;
 use spec::definition::Definition;
 use spec::tree::Chunks;
 use transport::{Code, Session, Transport};
@@ -40,7 +41,6 @@ use crate::status::{self, Status};
 pub use end::Ended;
 use end::Spawner;
 use send::Senders;
-use spec::Pointer;
 
 mod apply;
 mod end;
