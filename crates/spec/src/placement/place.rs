@@ -37,7 +37,7 @@ pub struct Placed<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`Tie`] when the two most specific placements tie. A winner with no home is
+/// Returns [`Tie`] when the two most specific placements tie. A name with no home is
 /// not an error: [`Placed::home`] gives [`Homeless`].
 pub fn place<'a>(
     name: &Name,
@@ -171,8 +171,6 @@ impl fmt::Display for Homeless<'_> {
         }
     }
 }
-
-impl std::error::Error for Homeless<'_> {}
 
 /// The label of the placement at tree key `key`, or `key` when it has no label form.
 fn label(key: &Name) -> Name {
@@ -397,6 +395,11 @@ mod tests {
             assert_eq!(placed.placement, Some(&p));
             assert_eq!(placed.home, Err(overlap));
             assert_eq!(
+                placed.standby,
+                placements[0].1.standby(),
+                "the winner stays whole"
+            );
+            assert_eq!(
                 placed.copies,
                 placements[0].1.copies(),
                 "the winner stays whole"
@@ -415,10 +418,25 @@ mod tests {
     }
 
     #[test]
-    fn labels_a_placement_key_and_gives_another_name_as_is() {
-        assert_eq!(label(&key("edge")), name("edge"));
-        assert_eq!(label(&name("edge")), name("edge"));
-        assert_eq!(label(&name("a.time")), name("a.time"));
+    fn shows_a_homeless_placement_with_no_label_form_as_given() {
+        let (node, keyless) = (name("n_1"), name("p"));
+        let unset = Homeless::Unset {
+            placement: Some(&keyless),
+        };
+        assert_eq!(
+            unset.to_string(),
+            "the placement `p` wins for the index and names no home, and no connector \
+             writes the index"
+        );
+        let overlap = Homeless::Overlap {
+            node: &node,
+            placement: &keyless,
+        };
+        assert_eq!(
+            overlap.to_string(),
+            "the node `n_1` of a connector is the home and has another role in the \
+             placement `p`"
+        );
     }
 
     fn pattern() -> impl Strategy<Value = String> {

@@ -24,10 +24,10 @@
   at the label of the index, with each placement by its label.
   `place` gives `Result<Placed, Tie>`, and `Placed::home` is `Result<&Name,
   Homeless>`, so `config` takes the winner from `Placed::placement` also when there is
-  no home. `config` and `place` each keep a private `label`: the one in `config` fails
-  loud on its own keys, and the `Display` of `Tie` and `Homeless` falls back to the key
-  (`laptop.architect-2`, 2026-10-08T21:10:14Z,
-  https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623).
+  no home. `config` and `spec::placement` each keep a private `label`: the one in
+  `config` fails loud on its own keys, and the `Display` of `Tie` and `Homeless` falls
+  back to the key. Both rules: `laptop.architect-2`, 2026-10-08T21:10:14Z,
+  https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
   `config.writer-nodes` is at the `node` of the first connector on a second node that
