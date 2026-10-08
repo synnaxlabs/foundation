@@ -1,9 +1,9 @@
 //! The receiver of a stream that this node opens keeps a list of at most 64 chunks
 //! after a whole message of many packets, as an accepted one does. It reads with a
-//! reader that starts with no byte of the stream and an empty list, and it polls from
-//! the open, so its first read waits for the prefix of the reply. The count covers
-//! each thread, so this binary has no test harness. The sim runs on one thread, so
-//! the count is exact.
+//! reader that starts with no byte of the stream and an empty list, in one poll once
+//! the reply is in, and also with one poll each millisecond from the open, which
+//! waits for the prefix of the reply. The count covers each thread, so this binary
+//! has no test harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -36,6 +36,8 @@ const KEPT_MAX: usize = 2 << 10;
 const SHORT: usize = 1000;
 /// When the server replies after it reads the client's message.
 const REPLY: Span = Span::from_nanos(1_000_000_000);
+/// When the client reads in one poll after its send: past the reply.
+const READ: Span = Span::from_nanos(1_300_000_000);
 /// When the server resets the stream after its reply: past the client's read.
 const END: Span = Span::from_nanos(1_500_000_000);
 /// How long the client waits after its read before it drops the receiver: past the
@@ -43,6 +45,15 @@ const END: Span = Span::from_nanos(1_500_000_000);
 const DROP: Span = Span::from_nanos(2_000_000_000);
 /// How long each side lives after its last step: past the other side's.
 const LIVE: Span = Span::from_nanos(4_000_000_000);
+
+/// How the client reads the reply.
+#[derive(Clone, Copy, Debug)]
+enum Reading {
+    /// In one poll, once the reply is in.
+    Whole,
+    /// Each millisecond from the open, until the reply is in.
+    Parts,
+}
 
 /// What the client's read gives.
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,25 +67,29 @@ struct Out {
 }
 
 fn main() {
-    for len in [60_000, 100_000, 240_000, 1 << 18] {
-        let out = run(len);
-        assert_eq!(out.len, Some(len), "{len} bytes: the read");
-        assert!(
-            out.pending > 0,
-            "{len} bytes: the read gives `Pending` {} times",
-            out.pending
-        );
-        assert!(
-            out.kept <= KEPT_MAX,
-            "{len} bytes: the receiver keeps {} bytes after a whole message",
-            out.kept
-        );
+    for reading in [Reading::Whole, Reading::Parts] {
+        for len in [60_000, 100_000, 240_000, 1 << 18] {
+            let out = run(reading, len);
+            assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
+            assert_eq!(
+                out.pending > 0,
+                matches!(reading, Reading::Parts),
+                "{reading:?}, {len} bytes: the read gives `Pending` {} times",
+                out.pending
+            );
+            assert!(
+                out.kept <= KEPT_MAX,
+                "{reading:?}, {len} bytes: the receiver keeps {} bytes after a whole \
+                 message",
+                out.kept
+            );
+        }
     }
 }
 
-/// The [`Out`] of the client's read of a reply of `len` bytes on a stream that it
-/// opens.
-fn run(len: usize) -> Out {
+/// The [`Out`] of the client's read of a reply of `len` bytes, in the way of
+/// `reading`, on a stream that it opens.
+fn run(reading: Reading, len: usize) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
@@ -94,6 +109,9 @@ fn run(len: usize) -> Out {
             session.open(Class::Complete).await.expect("a stream");
         sender.send(filled(&pool, SHORT)).await.expect("sent");
         let clock = node.clock();
+        if matches!(reading, Reading::Whole) {
+            clock.sleep(READ).await;
+        }
         let mut pending = 0;
         let read = {
             let mut recv = pin!(receiver.recv());
