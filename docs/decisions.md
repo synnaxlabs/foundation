@@ -4516,7 +4516,10 @@ How to read this record:
   the rule and its lost option at 2026-10-08T10:56:38Z
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6058336549); no
   authority decided by `laptop.architect` (2026-10-08T06:11:30Z,
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101). The
+  removal of `spec::key::reserved` and the public `Definition::kind` approved by
+  `laptop.architect` (2026-10-08T11:11:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907).
 
 ### 1.13 Operations, agents, and the factory
 
