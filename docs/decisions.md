@@ -2261,13 +2261,15 @@ How to read this record:
   committed spec with problems moves the pointer, and the node keeps the last spec it
   used (#1741). The pointer before the first change is version 0 at the root of the tree
   of `Config::founding`. No BQ12 signature check on the change in this milestone
-  (#1213). Trigger: `mesh::Pointer` moves to a layer 1 crate in a refactor PR before a
-  `wire` message carries it. `Mesh::open` runs no check of `Config::founding`: the
-  founding is agreed region state, and a check at each open stops a node on a later
-  build whose checks find more problems. The node that founds the region checks the
-  founding with the `spec` function of #1841, and does not found a region whose founding
-  has problems (#1744). A founding with problems at a later build follows the rule of a
-  committed spec with problems (#1741). Decided by `laptop.architect`: chunks through
+  (#1213). Trigger: #1887 moves `mesh::Pointer` to `spec::Pointer` before a `wire`
+  message carries it (`laptop.architect`, 2026-10-08T13:26:52Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
+  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region
+  state, and a check at each open stops a node on a later build whose checks find more
+  problems. The node that founds the region checks the founding with the `spec`
+  function of #1841, and does not found a region whose founding has problems (#1744).
+  A founding with problems at a later build follows the rule of a committed spec with
+  problems (#1741). Decided by `laptop.architect`: chunks through
   `blob` and no BQ12 check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
@@ -4559,10 +4561,16 @@ How to read this record:
   whose edges are names until `plan` gives each channel its key. `Definition::Spec`
   holds each other definition. Each edge must name a channel that a `channel` block of
   the Documents defines, or `check` gives `config.unknown-channel`, at the span of the
-  edge, in source order. An edge to a channel that only the stored spec has (X28) gives
-  it too, until #1082. Lost: `spec::definition::Definition<C = Channel>`, because `plan`
-  would then wrap each of the eight variants again to change one. Decided by
-  `laptop.architect-2` (#1152, 2026-10-07T11:17:44Z,
+  edge, in source order. An edge to a channel that only the stored spec has gives it
+  too, until open folders (X28) land: the files list each channel (A2), so the plan
+  removes a stored channel that no file has. Decided by `laptop.architect`
+  (2026-10-08T13:38:09Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061116209).
+  Supersedes the clause "until #1082" of
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927. Lost:
+  `spec::definition::Definition<C = Channel>`, because `plan` would then wrap each of
+  the eight variants again to change one. Decided by `laptop.architect-2` (#1152,
+  2026-10-07T11:17:44Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
@@ -4614,6 +4622,55 @@ How to read this record:
   not have is `connector.unknown-kind` there. Decided by `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC).
+- **PLAN SURFACE (#1082, 2026-10-08)** `config::plan(documents, base, applied,
+  members, kinds)` gives a `config::Plan { base, changes, homes }`, or diagnostics.
+  `base` is the `spec::Pointer { version, root }` of the applied spec. `version` is 0
+  before the first apply, and one more at each apply. `applied` is the definitions of
+  the spec at `base`, by tree key, with no problem from `spec::region::check`: the
+  spec that a node uses (#1741). Each `config::Change { name, old, new }` holds the
+  tree key, the digest of the stored bytes, and the `Entry` of the files. The stored
+  bytes are the `encode` of each applied definition: `decode` takes only canonical
+  bytes, so they are the bytes of the tree. The plan holds no channel key (A4). `homes`
+  gives the home of each index that the stored spec has no index at. A channel keeps the
+  stored key at its name, and a new name gets `Key::from_u128(n)`, a key that no stored
+  channel holds. A definition changes when its encoded bytes differ from the stored
+  bytes. A stored definition that no file holds is removed (A2), except one whose label
+  is reserved (FIRST ADMIN). An edge that `check` cannot resolve stays
+  `config.unknown-channel` (CHANNEL BLOCK). An edge to a channel of the wrong kind is
+  `config.wrong-channel`. `place` runs for each index, with the node of its first
+  writer: a connector whose `writes` holds the index or a channel on it. Its `Unplaced`
+  is `config.unplaced` at the label of the index, with each placement by its label.
+  `config.unknown-node` is at each node that a connector or a placement names and that
+  `members` does not hold, and the fix names a member that is equal to it without case.
+  `config.writer-nodes` is at the `node` of the first connector on a second node that
+  writes one index. The first writer, the first of the names of one key, and the first
+  connector of a name come first by `Source`, then in source order, so the order of
+  `documents` changes no problem (#1886 round 2, 2026-10-08T14:14:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). A tie,
+  with no span or with one `Source` in two Documents, has no defined choice (#1886 round
+  4, 2026-10-08T14:35:32Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090). The
+  problems come in `Source` order, then in source order, as the problems of `check` do.
+  `config.connector-home` (X22) and `config.split-placement` (BQ10) follow in a second
+  PR of #1082. The region check and the region of each key (REGION CHECK) come with
+  #1029. Lost: a `Planned` with keys (A4), a home on each change, a `config::Error` for
+  a lazy fetch of chunks, a provisional tree and `tree::diff`, which writes chunks that
+  the plan drops, and the chunks of the applied tree as an input, with which `ops` reads
+  the tree a second time and a missing chunk panics in `config`, though #1741 names that
+  case (`Cause::Tree`). Supersedes the `chunks` input and its panic of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
+  provisional tree of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
+  "which no stored v7 key can be". Decided by `laptop.architect-2`
+  (2026-10-07T15:17:11Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688, and
+  2026-10-08T06:24:09Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187). The
+  `version` doc and the `Hash` derive: `laptop.architect` (2026-10-08T06:35:18Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053976538).
+  `applied` in place of chunks, the key that no stored channel holds, and one sort:
+  `laptop.architect` (2026-10-08T13:26:52Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
 
 ### 1.12 Access, identity, and secrets
 
@@ -4648,7 +4705,26 @@ How to read this record:
   OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a `.ppk` file) gives
   `config.private-key`, whose message quotes none of the value. A `.pub` line whose
   comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
-  more. `config::check` first looks at each string of each Document, in any block
+  more. A base64 body with no header lines gets it too: `b3BlbnNzaC1rZXktdjEA` starts
+  each OpenSSH body, and `BQYDK2VwBCIE`, `MAUGAytlcAQi`, and `BgMrZXAEIgQg` are the
+  algorithm and key header (`30 05 06 03 2B 65 70 04 22 04 20`) of each Ed25519 PKCS #8
+  body, v1 and v2, at each of its offsets modulo 3, which the length of the body moves
+  (#1886 round 1, 2026-10-08T13:34:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061047969, and round
+  2, 2026-10-08T14:14:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143, under the
+  rule of `laptop.architect-2` at 2026-10-08T12:06:26Z that the marks are text that only
+  a private key holds,
+  https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219).
+  Supersedes the mark `MC4CAQAwBQYDK2VwBCIE` of that rule. Each is whole 3-byte groups
+  at an offset of whole groups, so the bytes around it do not change it. An Ed25519
+  public key (`MCowBQYDK2VwAyEA`) does not hold it. Lost: a mark for the body of another
+  algorithm, such as RSA (`MIIE...`), whose start is also the start of a certificate. As
+  OpenSSH reads a `.pub` line, the comment is the rest of the line, so a line with a
+  second key in its comment gives the first key. Decided by `laptop.architect-2` at
+  2026-10-08T12:06:26Z
+  (https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219).
+  `config::check` first looks at each string of each Document, in any block
   (keywords, labels, keys, and values at any depth). When one holds a private key, it
   gives only these alarms, one for each such string, and runs no other check, so no
   other problem can quote the key. Lost: the alarm only in the `subject` block, which

@@ -70,7 +70,8 @@ impl fmt::Display for Error {
 }
 
 /// Reads the line of an OpenSSH `.pub` file of an Ed25519 key: `ssh-ed25519`, the
-/// base64 of the key, and a comment, which is optional and not kept.
+/// base64 of the key, and a comment, which is optional and not kept. As OpenSSH reads
+/// it, the comment is the rest of the line, so it may hold another key.
 pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
     let mut words = text.split_ascii_whitespace();
     let (Some(algorithm), Some(encoded)) = (words.next(), words.next()) else {
