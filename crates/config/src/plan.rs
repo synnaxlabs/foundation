@@ -148,11 +148,13 @@ fn channels(
         let Definition::Channel(kind) = &entry.definition else {
             continue;
         };
-        let kind = kind.clone().try_map(|to| keys.get(&to).copied().ok_or(to));
-        let kind = kind.unwrap_or_else(|to| {
-            panic!(
-                "invariant: `check` refuses the edge to `{to}`, which no block defines"
-            )
+        let kind = kind.clone().map(|to| {
+            *keys.get(&to).unwrap_or_else(|| {
+                panic!(
+                    "invariant: `check` refuses the edge to `{to}`, which no block \
+                     defines"
+                )
+            })
         });
         channels.insert(
             name.clone(),

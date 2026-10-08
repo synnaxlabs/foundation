@@ -159,10 +159,9 @@ fn encode(name: &Name, entry: &Entry, keys: &BTreeMap<Name, Key>) -> Vec<u8> {
     match &entry.definition {
         Definition::Spec(definition) => definition.encode(),
         Definition::Channel(kind) => {
-            let kind = kind.clone().try_map(|to| keys.get(&to).copied().ok_or(to));
             let channel = Channel {
                 key: keys[name],
-                kind: kind.expect("each edge has a key"),
+                kind: kind.clone().map(|to| keys[&to]),
             };
             Stored::Channel(channel).encode()
         }
