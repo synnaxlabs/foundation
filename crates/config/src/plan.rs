@@ -257,10 +257,10 @@ fn connectors<'f>(
             _ => None,
         })
         .collect();
-    let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
-    for (_, _, node, placed) in &connectors {
+    let mut wins = BTreeMap::<_, Vec<_>>::new();
+    for (name, _, node, placed) in &connectors {
         if let Ok(Some(placement)) = winner(placed) {
-            nodes.entry(placement).or_default().insert(*node);
+            wins.entry(placement).or_default().push((*name, *node));
         }
     }
     for (name, entry, node, placed) in &connectors {
@@ -270,9 +270,9 @@ fn connectors<'f>(
                 home,
                 ..
             }) if home != node => {
-                let shared = nodes[placement].iter().any(|other| other != node);
+                let wins = &wins[placement];
                 diagnostics
-                    .push(connector_home(found, placement, home, name, node, shared));
+                    .push(connector_home(found, placement, home, name, node, wins));
             }
             Ok(_) => {}
             Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
@@ -290,17 +290,30 @@ fn connectors<'f>(
 }
 
 /// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
-/// `placement` names `home`. `shared` is true when `placement` also wins for a
-/// connector on another node, which a new `home` would move the problem to.
+/// `placement` names `home`. `wins` holds each connector that `placement` wins for,
+/// with its node. A new `home` moves the problem to a connector on another node, and a
+/// more specific placement splits two nested connectors, so the fix depends on them.
 fn connector_home(
     found: &Found<'_>,
     placement: &Name,
     home: &Name,
     connector: &Name,
     node: &Name,
-    shared: bool,
+    wins: &[(&Name, &Name)],
 ) -> Diagnostic {
-    let fix = if shared {
+    let mut apart = wins
+        .iter()
+        .filter(|(_, other)| *other != node)
+        .map(|(other, _)| *other);
+    let nested = apart
+        .clone()
+        .find(|other| other.starts_with(connector) || connector.starts_with(other));
+    let fix = if let Some(other) = nested {
+        format!(
+            "Leave out `home`. The connectors `{connector}` and `{other}` share one \
+             placement and run on two nodes"
+        )
+    } else if apart.next().is_some() {
         format!(
             "Select the connector `{connector}` and each index under its name with a \
              more specific placement whose `home` is `{node}`"

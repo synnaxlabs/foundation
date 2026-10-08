@@ -734,6 +734,42 @@ placement \"c\" {
 }
 
 #[test]
+fn plans_nested_connectors_on_two_nodes_after_the_connector_home_fix() {
+    let text = |home: &str| {
+        format!(
+            "\
+channel \"d.e.time\" {{
+  kind = \"index\"
+}}
+connector \"d\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+connector \"d.e\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = [\"d.e.time\"]
+}}
+placement \"d\" {{
+  select = \"d.**\"
+{home}  standby = \"k\"
+}}
+"
+        )
+    };
+    let fix = |a: &str, b: &str| {
+        format!(
+            "Leave out `home`. The connectors `{a}` and `{b}` share one placement and \
+             run on two nodes"
+        )
+    };
+    let fixed = text("");
+    plans_after_connector_home(&text("  home = \"n\"\n"), &[fix("d.e", "d")], &fixed);
+    plans_after_connector_home(&text("  home = \"m\"\n"), &[fix("d", "d.e")], &fixed);
+}
+
+#[test]
 fn places_a_connector_at_its_node_with_its_placement() {
     let text = "\
 channel \"a.time\" {

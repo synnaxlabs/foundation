@@ -4640,22 +4640,27 @@ How to read this record:
   problems come in `Source` order, then in source order, as the problems of `check` do.
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
   `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
-  (X22) is at the `home` of a placement that wins for a connector and names a node other
-  than the connector's `node`. Its fix is "Name `n` as the `home`, and keep `n` out of
-  `standby` and `copies`" when the placement wins for no connector on another node, and
-  else "Select the connector `a` and each index under its name with a more specific
-  placement whose `home` is `n`", which changes no other connector of the placement
+  (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
+  `n` and names another node. Its fix has three cases: "Name `n` as the `home`, and keep
+  `n` out of `standby` and `copies`" when `p` wins for no connector on another node;
+  "Leave out `home`. The connectors `a` and `b` share one placement and run on two
+  nodes" when `p` wins for a connector `b` on another node, and one of the two names is
+  under the other; else "Select the connector `a` and each index under its name with a
+  more specific placement whose `home` is `n`", which changes no other connector of `p`
   (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556).
-  `config.split-placement` (BQ10) is at each index under
-  the name of a connector (`Name::starts_with`) when the placement that wins for the
-  index is not the one that wins for the connector: at the label of the index's
-  placement, or of the connector's when no placement selects the index. A tie for the
-  index or the connector gives no `config.split-placement`. An index under the names of
-  two connectors is checked against each, so it needs the placement of the outer
-  connector too, as BQ10 says (`laptop.architect-2`, #1901 round 1,
-  2026-10-08T15:04:38Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062797589). The
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556, and
+  2026-10-08T15:16:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478).
+  `config.split-placement` (BQ10) is at each index under the name of a connector
+  (`Name::starts_with`) when the placement that wins for the index is not the one that
+  wins for the connector: at the label of the index's placement, or of the connector's
+  when no placement selects the index. Its fix is "Make the placement `p` win for the
+  connector `c` and each name under it", where `p` wins for the connector, or for the
+  index when no placement selects the connector (same comment of 15:16:31Z). A tie for
+  the index or the connector gives no `config.split-placement`. An index under the
+  names of two connectors is checked against each, so it needs the placement of the
+  outer connector too, as BQ10 says (`laptop.architect`, same comment of 15:16:31Z).
+  So two nested connectors on two nodes share a placement with no `home`. The
   region check and the region of each key (REGION CHECK) come with #1029. Lost: a
   `Planned` with keys (A4), a home on each change, a `config::Error` for a lazy fetch of
   chunks, a provisional tree and `tree::diff`, which writes chunks that the plan drops,
@@ -4664,7 +4669,8 @@ How to read this record:
   (`Cause::Tree`), and, for checks 2 and 3, a `spec::placement::check` over the whole
   spec, a second text in `config`, no report for the `Unplaced` of a connector, a
   check against only the nearest connector, which lets the indexes of a connector under
-  the name of another have their own placement, and one `config.connector-home` fix:
+  the name of another have their own placement (a change of BQ10, which goes to the
+  person), and one `config.connector-home` fix:
   "leave out `home`" leaves an empty placement, and "Name `n` as the `home`" moves the
   problem between two connectors of one placement. Supersedes the `chunks` input and its
   panic of
