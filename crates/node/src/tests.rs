@@ -2235,6 +2235,16 @@ mod port {
         tasks: env::tasks::Tasks,
         key: PrivateKey,
     ) -> (Transport, Rc<block::Pool>) {
+        transport_at(host, tasks, key, 0)
+    }
+
+    /// A transport on `host` with `key`, at port `number`, with its pool.
+    fn transport_at(
+        host: &sim::node::Node,
+        tasks: env::tasks::Tasks,
+        key: PrivateKey,
+        number: u16,
+    ) -> (Transport, Rc<block::Pool>) {
         let pool = block::Config { budget: 1 << 20 };
         let memory = block::Heap::new(pool.reservation());
         let pool = Rc::new(block::Pool::new(pool, memory));
@@ -2249,7 +2259,7 @@ mod port {
             tasks,
             pool: Rc::clone(&pool),
         };
-        let at = SocketAddr::new(host.addresses()[0], 0);
+        let at = SocketAddr::new(host.addresses()[0], number);
         let bound = transport::Port::bind(&host.net(), at).expect("a port");
         let part = bound.split(NonZeroUsize::MIN).pop().expect("one part");
         (Transport::new(config, part).expect("a transport"), pool)
@@ -2629,22 +2639,27 @@ mod port {
         use ::mesh::card::addresses::Addresses;
         use ::mesh::card::{self, Card};
         use ::mesh::status::Status;
-        use ::mesh::{Member, Stopped};
+        use std::future::poll_fn;
+        use std::pin::pin;
+
+        use ::mesh::Member;
         use types::channel;
         use types::node::SealKey;
 
         use super::*;
-        use crate::Region;
+        use crate::{Region, route};
 
         /// The key and private key of a second node.
         const OTHER: (types::node::Key, PrivateKey) =
             (types::node::Key::from_u128(2), PrivateKey([3; 32]));
         const INDEX: channel::Key = channel::Key::from_u128(7);
+        /// A channel whose home the peer sets after the node starts again.
+        const AFTER: channel::Key = channel::Key::from_u128(8);
+        const TEN: Span = Span::from_nanos(10 * Span::SECOND.nanos());
+        const TWENTY: Span = Span::from_nanos(20 * Span::SECOND.nanos());
 
         /// The first file of the mesh's log.
         const LOG: &str = "mesh/log/log-0";
-
-        type Home = Arc<Mutex<Option<Result<Option<types::node::Key>, Stopped>>>>;
 
         /// The public half of `private_key`, from a transport made with it.
         fn public_key(private_key: PrivateKey) -> types::ed25519::PublicKey {
@@ -2705,69 +2720,76 @@ mod port {
             start(host, (OWN, KEY), region(&[member(OWN, &KEY, host)]))
         }
 
-        /// Gives `node` a task that waits for a home of [`INDEX`], and gives what the
-        /// watch gave.
-        fn watch(node: &Node) -> Home {
-            let home = Arc::new(Mutex::new(None));
-            let out = Arc::clone(&home);
-            node.spawn_input(move |input| async move {
-                let mut watch = input.mesh.expect("a mesh").watch(INDEX);
-                let mut given = watch.next().await;
-                while given == Ok(None) {
-                    given = watch.next().await;
-                }
-                *out.lock().unwrap() = Some(given);
+        /// Starts the member [`OTHER`] of `members` on `host`: a mesh with no node,
+        /// whose port serves each mesh stream as a node's does. Runs `act` with the
+        /// mesh, then drops the mesh and its port.
+        fn peer<F: Future<Output = ()> + 'static>(
+            host: &sim::node::Node,
+            members: Vec<Member>,
+            act: impl FnOnce(::mesh::Mesh, sim::node::Node) -> F + Send + 'static,
+        ) {
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = host.clone();
+            let started = host.shards().start(shard, move |tasks| async move {
+                let (transport, pool) =
+                    transport_at(&own, tasks.clone(), OTHER.1, listen(&own).port());
+                let transport = Rc::new(transport);
+                let config = ::mesh::Config {
+                    key: OTHER.0,
+                    private_key: OTHER.1,
+                    region: "plant".parse().unwrap(),
+                    voters: members.iter().map(|member| member.card.key()).collect(),
+                    members,
+                    files: own.files(),
+                    dir: "mesh".into(),
+                    clock: own.clock(),
+                    entropy: own.entropy(),
+                    tasks: tasks.clone(),
+                    pool,
+                    transport: Rc::clone(&transport),
+                };
+                let mesh = ::mesh::Mesh::open(config).await.expect("the mesh opens");
+                let port = route::accept(transport, Some(mesh.clone()), tasks);
+                let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
+                poll_fn(|cx| {
+                    let stopped = port.as_mut().poll(cx);
+                    assert!(stopped.is_pending(), "the peer's transport stopped");
+                    act.as_mut().poll(cx)
+                })
+                .await;
             });
-            home
+            drop(started.expect("the peer starts"));
         }
 
-        /// A home set on one node of a region reaches the other: each node serves the
-        /// mesh streams of its port.
-        #[test]
-        fn a_home_that_one_node_sets_reaches_the_other() {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
-            let members = [
+        /// The members of the region of the node [`OWN`] on `hosts[0]` and the peer
+        /// [`OTHER`] on `hosts[1]`, which are its two voters.
+        fn pair(hosts: &[sim::node::Node; 2]) -> Vec<Member> {
+            vec![
                 member(OWN, &KEY, &hosts[0]),
                 member(OTHER.0, &OTHER.1, &hosts[1]),
-            ];
-            let nodes = [
-                start(&hosts[0], (OWN, KEY), region(&members)),
-                start(&hosts[1], OTHER, region(&members)),
-            ];
-            let set = Arc::new(Mutex::new(None));
-            let out = Arc::clone(&set);
-            nodes[1].spawn_input(move |input| async move {
-                let mesh = input.mesh.expect("a mesh");
-                *out.lock().unwrap() = Some(mesh.set_home(INDEX, OTHER.0).await);
-            });
-            let home = watch(&nodes[0]);
-            let ten = Span::from_nanos(10 * Span::SECOND.nanos());
-            assert_eq!(sim.run_for(ten), Ok(()));
-            assert_eq!(*set.lock().unwrap(), Some(Ok(())));
-            assert_eq!(*home.lock().unwrap(), Some(Ok(Some(OTHER.0))));
-            for node in &nodes {
-                node.stop();
-            }
-            assert_eq!(sim.run(), Ok(()));
-            for node in nodes {
-                assert_eq!(node.join(), Ok(()));
-            }
+            ]
         }
 
-        /// A node with no mesh has none in the input of its tasks.
+        /// A home that the peer sets commits only with the node's vote: the node
+        /// serves the mesh streams of its port, and its mesh answers on its
+        /// transport.
         #[test]
-        fn a_node_with_no_region_has_no_mesh() {
+        fn a_home_commits_with_the_vote_of_the_node() {
             let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-            let mesh = Arc::new(Mutex::new(None));
-            let out = Arc::clone(&mesh);
-            node.spawn_input(move |input| async move {
-                *out.lock().unwrap() = Some(input.mesh.is_some());
+            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let members = pair(&hosts);
+            let node = start(&hosts[0], (OWN, KEY), region(&members));
+            let set = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&set);
+            peer(&hosts[1], members, move |mesh, _| async move {
+                let set = mesh.set_home(INDEX, OTHER.0).await;
+                out.lock().unwrap().push(set);
             });
-            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
-            assert_eq!(*mesh.lock().unwrap(), Some(false));
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(*set.lock().unwrap(), [Ok(())]);
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
@@ -2835,34 +2857,36 @@ mod port {
         }
 
         /// A node that starts again with its region, at once after a stop or a power
-        /// cut, opens the log it left: the home it set before is back, and no one sets
-        /// it again.
+        /// cut, opens its mesh and votes again: a home that the peer sets after the
+        /// restart commits.
         #[test]
-        fn a_restart_opens_the_log_of_the_last_run() {
+        fn a_restart_opens_the_mesh_and_votes_again() {
             for cut in [false, true] {
                 let mut sim = sim::Sim::new(sim::Config::default());
-                let host = host(&mut sim, 2);
-                let node = start_alone(&host);
-                let set = Arc::new(Mutex::new(None));
+                let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+                let members = pair(&hosts);
+                let node = start(&hosts[0], (OWN, KEY), region(&members));
+                let set = Arc::new(Mutex::new(Vec::new()));
                 let out = Arc::clone(&set);
-                node.spawn_input(move |input| async move {
-                    let mesh = input.mesh.expect("a mesh");
-                    *out.lock().unwrap() = Some(mesh.set_home(INDEX, OWN).await);
+                peer(&hosts[1], members.clone(), move |mesh, host| async move {
+                    let set = mesh.set_home(INDEX, OTHER.0).await;
+                    out.lock().unwrap().push(set);
+                    host.clock().sleep(TEN).await;
+                    let set = mesh.set_home(AFTER, OTHER.0).await;
+                    out.lock().unwrap().push(set);
                 });
-                let ten = Span::from_nanos(10 * Span::SECOND.nanos());
-                assert_eq!(sim.run_for(ten), Ok(()), "cut {cut}");
-                assert_eq!(*set.lock().unwrap(), Some(Ok(())), "cut {cut}");
+                assert_eq!(sim.run_for(TEN), Ok(()), "cut {cut}");
+                assert_eq!(*set.lock().unwrap(), [Ok(())], "cut {cut}");
                 if cut {
-                    sim.crash(&host, sim::Crash::Power);
+                    sim.crash(&hosts[0], sim::Crash::Power);
                 } else {
                     node.stop();
-                    assert_eq!(sim.run(), Ok(()));
-                    assert_eq!(node.join(), Ok(()));
+                    assert_eq!(sim.run_for(Span::SECOND), Ok(()), "cut {cut}");
+                    assert_eq!(node.join(), Ok(()), "cut {cut}");
                 }
-                let node = start_alone(&host);
-                let home = watch(&node);
-                assert_eq!(sim.run_for(ten), Ok(()), "cut {cut}");
-                assert_eq!(*home.lock().unwrap(), Some(Ok(Some(OWN))), "cut {cut}");
+                let node = start(&hosts[0], (OWN, KEY), region(&members));
+                assert_eq!(sim.run_for(TWENTY), Ok(()), "cut {cut}");
+                assert_eq!(*set.lock().unwrap(), [Ok(()), Ok(())], "cut {cut}");
                 node.stop();
                 assert_eq!(sim.run(), Ok(()), "cut {cut}");
                 assert_eq!(node.join(), Ok(()), "cut {cut}");

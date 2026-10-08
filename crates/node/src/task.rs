@@ -12,24 +12,11 @@ use loom::sync::{Arc, Mutex, MutexGuard};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hub::Hub;
-use mesh::Mesh;
 
 use crate::scope::Scope;
 
 /// A task of [`crate::Node::spawn`], with its future boxed.
-pub(crate) type Task = Box<dyn FnOnce(Input) -> env::tasks::Task + Send>;
-
-/// What shard 0 calls each task with.
-#[derive(Clone)]
-pub(crate) struct Input {
-    pub(crate) hub: Hub,
-    /// The mesh of the node's region, if it has one.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "PR 4 of #585 is the first user")
-    )]
-    pub(crate) mesh: Option<Mesh>,
-}
+pub(crate) type Task = Box<dyn FnOnce(Hub) -> env::tasks::Task + Send>;
 
 /// The two ends of the queue of tasks for shard 0. A task is pushed once, never on a
 /// frame's path, so a mutex is fine.
@@ -112,12 +99,12 @@ impl<T> Drop for Inbox<T> {
 }
 
 impl Inbox<Task> {
-    /// Calls each task given with a clone of `input`, in the order given, and runs its
-    /// future on `tasks`, until `stop` completes. Then drops each future, `input`, and
+    /// Calls each task given with a clone of `hub`, in the order given, and runs its
+    /// future on `tasks`, until `stop` completes. Then drops each future, `hub`, and
     /// the inbox. A future that completes drops at once.
     pub(crate) async fn serve(
         self,
-        input: Input,
+        hub: Hub,
         tasks: env::tasks::Tasks,
         stop: impl Future<Output = ()>,
     ) {
@@ -133,7 +120,7 @@ impl Inbox<Task> {
                     if stop.as_mut().poll(cx).is_ready() {
                         return Poll::Ready(());
                     }
-                    running.spawn(task(input.clone()));
+                    running.spawn(task(hub.clone()));
                 }
             }
             Poll::Pending
