@@ -5460,11 +5460,9 @@ InfluxDB through `connector-influx`. Its acceptance is a simulated OPC UA server
 node, and a simulated InfluxDB. A first version may run with no OPC UA security, so the
 crypto plugin (5.1 item 2) does not block it. The developer experience on one node is
 part of the goal, and #1737 breaks it into tests. When it and STORE AND FORWARD both
-have ready issues, ONE NODE goes first. Its issues get `ready` beside those of FIRST
-SLICE, and FIRST SLICE keeps priority: an exception to "Milestones" in
-`docs/factory.md`, where only the next milestone's issues get `ready`. The plan is on
-#1737. The person decided, relayed by `laptop.monitor`: the milestone ("Yes",
-2026-10-08T01:52:14Z,
+have ready issues, ONE NODE goes first. It runs beside FIRST SLICE, which keeps
+priority. The plan is on #1737. The person decided, relayed by `laptop.monitor`: the
+milestone ("Yes", 2026-10-08T01:52:14Z,
 https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089) and the
 order ("Yes, let's do one node first. We should really prioritize a working devx that
 feels relatively good with one node. and an influxdb to opc ua connector is prime for
