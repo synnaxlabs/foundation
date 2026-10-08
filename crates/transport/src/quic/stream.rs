@@ -226,11 +226,14 @@ enum State {
 
 /// The order of the classes in turn and for room, first to last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Order {
-    classes: [Class; 4],
-    /// The class whose new messages [`Budget::admit`] starts none of. The turn
-    /// ignores it.
-    shut: Option<Class>,
+struct Order([Class; 4]);
+
+/// How the send budget admits a new message: room in `order`, and to a claim of
+/// `rationed` only while no claim of its class holds room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Admission {
+    order: Order,
+    rationed: Option<Class>,
 }
 
 /// The senders that wait for noq-proto to take more of their message. Only the
@@ -757,12 +760,13 @@ impl Budget {
         self.held[class.rank()] > 0 || !self.waiting[class.rank()].is_empty()
     }
 
-    /// Charges `bytes` to `claim`, which holds none, when they fit now, its class is
-    /// not shut in `order`, and no claim of its class or a class ahead of it waits.
-    fn admit(&mut self, bytes: usize, claim: &mut Claim, order: Order) -> bool {
-        let mut ahead = order.through(claim.class);
+    /// Charges `bytes` to `claim`, which holds none, when they fit now, its class
+    /// is open in `admission`, and no claim of its class or a class ahead of it in the
+    /// order of `admission` waits.
+    fn admit(&mut self, bytes: usize, claim: &mut Claim, admission: Admission) -> bool {
+        let mut ahead = admission.order.through(claim.class);
         let first = ahead.all(|class| self.waiting[class.rank()].is_empty());
-        let open = order.shut != Some(claim.class);
+        let open = self.open(claim.class, admission.rationed);
         let fits = first && open && bytes <= self.max - self.used;
         if fits {
             self.used += bytes;
@@ -773,7 +777,7 @@ impl Budget {
     }
 
     /// Whether `claim`, the claim of `stream`, holds its bytes. A claim that holds
-    /// none charges `bytes` when [`Budget::admit`] does in `order`, and else waits
+    /// none charges `bytes` when [`Budget::admit`] does in `admission`, and else waits
     /// for room. A claim that waits takes the room it got.
     ///
     /// # Panics
@@ -785,7 +789,7 @@ impl Budget {
         stream: Key,
         bytes: usize,
         claim: &mut Claim,
-        order: Order,
+        admission: Admission,
     ) -> bool {
         match claim.state {
             State::Held(_) => true,
@@ -802,7 +806,7 @@ impl Budget {
                     "a claim of {bytes} bytes is over the budget, {} bytes",
                     self.max
                 );
-                if self.admit(bytes, claim, order) {
+                if self.admit(bytes, claim, admission) {
                     return true;
                 }
                 let rank = claim.class.rank();
@@ -819,13 +823,20 @@ impl Budget {
         }
     }
 
+    /// Whether a new message of `class` may get room: `class` is not `rationed`, or
+    /// no claim of it holds room.
+    fn open(&self, class: Class, rationed: Option<Class>) -> bool {
+        rationed != Some(class) || !self.holds(class)
+    }
+
     /// Ends `claim`: gives back its bytes, or ends its wait. Then gives room to the
-    /// waiting claims of `classes`, in that order, until the next does not fit, and
-    /// calls `woken` with the stream of each.
+    /// waiting claims of `classes`, in that order, until the next does not fit or its
+    /// class is not open with `rationed`, and calls `woken` with the stream of each.
     fn release(
         &mut self,
         claim: &mut Claim,
         classes: impl IntoIterator<Item = Class>,
+        rationed: Option<Class>,
         mut woken: impl FnMut(Key),
     ) {
         let rank = claim.class.rank();
@@ -846,17 +857,16 @@ impl Budget {
             }
         }
         for class in classes {
-            let waiting = &mut self.waiting[class.rank()];
-            let granted = &mut self.granted[class.rank()];
-            while let Some(next) = waiting.front() {
-                if next.bytes > self.max - self.used {
+            let rank = class.rank();
+            while let Some(next) = self.waiting[rank].front() {
+                if next.bytes > self.max - self.used || !self.open(class, rationed) {
                     return;
                 }
                 self.used += next.bytes;
-                self.given[class.rank()] += 1;
-                *granted = next.ticket + 1;
+                self.given[rank] += 1;
+                self.granted[rank] = next.ticket + 1;
                 woken(next.stream);
-                waiting.pop_front();
+                self.waiting[rank].pop_front();
             }
         }
     }
@@ -864,29 +874,23 @@ impl Budget {
 
 impl Order {
     /// By rank.
-    const RANK: Self = Self {
-        classes: [
-            Class::Command,
-            Class::Latest,
-            Class::Complete,
-            Class::CatchUp,
-        ],
-        shut: None,
-    };
+    const RANK: Self = Self([
+        Class::Command,
+        Class::Latest,
+        Class::Complete,
+        Class::CatchUp,
+    ]);
     /// `Complete` ahead of `Latest`.
-    const COMPLETE_FIRST: Self = Self {
-        classes: [
-            Class::Command,
-            Class::Complete,
-            Class::Latest,
-            Class::CatchUp,
-        ],
-        shut: None,
-    };
+    const COMPLETE_FIRST: Self = Self([
+        Class::Command,
+        Class::Complete,
+        Class::Latest,
+        Class::CatchUp,
+    ]);
 
     /// `class` and the classes ahead of it.
     fn through(self, class: Class) -> impl Iterator<Item = Class> {
-        let at = self.classes.iter().position(|&other| other == class);
+        let at = self.0.iter().position(|&other| other == class);
         let at = at.expect("invariant: an order holds each class");
         self.into_iter().take(at + 1)
     }
@@ -897,7 +901,17 @@ impl IntoIterator for Order {
     type IntoIter = std::array::IntoIter<Class, 4>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.classes.into_iter()
+        self.0.into_iter()
+    }
+}
+
+impl From<Order> for Admission {
+    /// Room in `order`, with no class rationed.
+    fn from(order: Order) -> Self {
+        Self {
+            order,
+            rationed: None,
+        }
     }
 }
 
@@ -939,6 +953,14 @@ impl Turns {
 }
 
 impl Share {
+    /// A share of a peer window of `window` bytes, owed nothing.
+    fn new(window: usize) -> Self {
+        Self {
+            window,
+            ..Self::default()
+        }
+    }
+
     /// The order of the turn and of room in the send budget.
     fn order(&self) -> Order {
         if self.owed > 0 {
@@ -948,44 +970,44 @@ impl Share {
         }
     }
 
-    /// The order of room for a new message: [`Share::order`], with `class` shut
-    /// while [`Share::withheld`] from it.
-    fn admission(&self, sending: &Budget) -> Order {
-        let mut share = [Class::Latest, Class::Complete].into_iter();
-        let shut = share.find(|&class| self.withheld(class, sending));
-        Order {
-            shut,
-            ..self.order()
+    /// How the send budget admits a new message: in [`Share::order`], with the class
+    /// [`Share::rationed`].
+    fn admission(&self, sending: &Budget) -> Admission {
+        Admission {
+            order: self.order(),
+            rationed: self.rationed(sending),
+        }
+    }
+
+    /// The class of the share that gets new room only while no claim of it holds
+    /// room: the other class is owed bytes and competes in `sending`.
+    fn rationed(&self, sending: &Budget) -> Option<Class> {
+        if self.owed > 0 && self.competes(Class::Complete, sending) {
+            Some(Class::Latest)
+        } else if self.owed < 0 && self.competes(Class::Latest, sending) {
+            Some(Class::Complete)
+        } else {
+            None
         }
     }
 
     /// The classes, in order, that get the room a message of `class` frees. Room that
-    /// a class owed bytes frees waits for its next message while it is withheld from
-    /// the other class.
+    /// a class owed bytes frees waits for its next message while a claim of the
+    /// [`Share::rationed`] class holds room, which frees room for all when it ends.
     fn room(
         &self,
         class: Class,
         sending: &Budget,
     ) -> impl Iterator<Item = Class> + use<> {
-        let kept = match class {
-            Class::Latest => self.withheld(Class::Complete, sending),
-            Class::Complete => self.withheld(Class::Latest, sending),
-            Class::Command | Class::CatchUp => false,
+        let kept = match (class, self.rationed(sending)) {
+            (Class::Latest, Some(rationed @ Class::Complete))
+            | (Class::Complete, Some(rationed @ Class::Latest)) => {
+                sending.holds(rationed)
+            }
+            _ => false,
         };
         let last = if kept { class } else { Class::CatchUp };
         self.order().through(last)
-    }
-
-    /// Whether room that frees is withheld from `class`: the other class of the share
-    /// is owed bytes, and a claim of `class` holds room in `sending`, which frees
-    /// room for all when it ends.
-    fn withheld(&self, class: Class, sending: &Budget) -> bool {
-        let other = match class {
-            Class::Latest => self.owed > 0,
-            Class::Complete => self.owed < 0,
-            Class::Command | Class::CatchUp => return false,
-        };
-        other && sending.holds(class)
     }
 
     /// Counts `bytes` of a message of `class` that noq-proto took. `paired` when
@@ -1015,7 +1037,9 @@ impl Share {
     /// Counts `class` as competing until noq-proto takes one peer window of the
     /// other class of the share: a stream of it was written or gave a message back.
     fn offered(&mut self, class: Class) {
-        self.recent[class.rank()] = self.window;
+        if matches!(class, Class::Latest | Class::Complete) {
+            self.recent[class.rank()] = self.window;
+        }
     }
 
     /// Whether `class` competes: a claim of it holds room or waits in `sending`, or
@@ -1079,12 +1103,11 @@ impl Sending {
         half: &mut Half,
         given: Option<&[Part]>,
     ) -> Poll<()> {
-        let (order, admission) =
-            (self.share.order(), self.share.admission(&self.budget));
+        let admission = self.share.admission(&self.budget);
         let charged =
             self.budget
                 .charge(half.key, half.body, &mut half.claim, admission);
-        if charged && self.turns.allows(half, order) {
+        if charged && self.turns.allows(half, admission.order) {
             let left = half.left();
             let send = &mut inner.send_stream(half.key.id);
             let written = half.write(send, &mut self.buffer, given);
@@ -1122,9 +1145,10 @@ impl Sending {
         half.chunk = Bytes::new();
         half.parts.clear();
         let room = self.share.room(half.claim.class, &self.budget);
+        let rationed = self.share.rationed(&self.budget);
         let woken = &mut self.woken;
         let wake = |stream: Key| woken.push_back(stream.id);
-        self.budget.release(&mut half.claim, room, wake);
+        self.budget.release(&mut half.claim, room, rationed, wake);
         self.turns.leave(half);
         self.wake(first);
     }
@@ -1274,7 +1298,7 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) -> Result<(), Fault> {
         self.sending.budget = Budget::new(peer.window_bytes);
-        self.sending.share.window = peer.window_bytes;
+        self.sending.share = Share::new(peer.window_bytes);
         events.push_back(Event::Available { key });
         let bi = self.take(inner, key, Dir::Bi)?;
         if self.take(inner, key, Dir::Uni)? || bi {
@@ -1449,8 +1473,8 @@ impl Streams {
             share,
             ..
         } = &mut self.sending;
-        let (order, admission) = (share.order(), share.admission(budget));
-        let allowed = turns.allows(half, order);
+        let admission = share.admission(budget);
+        let allowed = turns.allows(half, admission.order);
         let admitted =
             |_: &mut Block| allowed && budget.admit(bytes, &mut half.claim, admission);
         if let Some(taken) = message.take_if(admitted) {
@@ -1574,7 +1598,7 @@ impl Streams {
         }
         let woken = |stream| events.push_back(Event::Readable { stream });
         self.receiving
-            .release(&mut receiver.claim, Order::RANK, woken);
+            .release(&mut receiver.claim, Order::RANK, None, woken);
     }
 
     /// Ends the wait of `receiver`'s next message for room in the receive budget, and
@@ -1588,7 +1612,7 @@ impl Streams {
         if let State::Queued { .. } = receiver.claim.state {
             let woken = |stream| events.push_back(Event::Readable { stream });
             self.receiving
-                .release(&mut receiver.claim, Order::RANK, woken);
+                .release(&mut receiver.claim, Order::RANK, None, woken);
         }
     }
 
@@ -1637,7 +1661,7 @@ impl Streams {
             loop {
                 match reader.read(&mut source) {
                     Ok(Step::Room(len)) => {
-                        if !receiving.charge(*key, len, claim, Order::RANK) {
+                        if !receiving.charge(*key, len, claim, Order::RANK.into()) {
                             break (Ok(Poll::Pending), true);
                         }
                         reader.admit();
@@ -1663,7 +1687,7 @@ impl Streams {
             (result, kept) = (Err(reset_error(error)), false);
         }
         if !kept && !matches!(result, Ok(Poll::Pending)) {
-            receiving.release(claim, Order::RANK, |stream| {
+            receiving.release(claim, Order::RANK, None, |stream| {
                 events.push_back(Event::Readable { stream });
             });
         }
@@ -2871,21 +2895,46 @@ mod tests {
     /// Releases `claim` with room in `order`, and returns the streams that got room.
     fn release(budget: &mut Budget, claim: &mut Claim, order: Order) -> Vec<Key> {
         let mut woken = Vec::new();
-        budget.release(claim, order, |stream| woken.push(stream));
+        budget.release(claim, order, None, |stream| woken.push(stream));
         woken
+    }
+
+    #[test]
+    fn a_rationed_class_gets_room_only_while_no_claim_of_it_holds_room() {
+        let rationed = Admission {
+            order: Order::RANK,
+            rationed: Some(Class::Latest),
+        };
+        let mut budget = Budget::new(10);
+        let [mut held, mut a, mut b] = claims(Class::Latest);
+        let [mut after] = claims(Class::CatchUp);
+        assert!(budget.charge(stream(0), 4, &mut held, rationed));
+        assert!(!budget.admit(2, &mut a, rationed));
+        assert!(budget.admit(2, &mut a, Order::RANK.into()));
+        let mut budget = Budget::new(10);
+        let [mut held, mut a] = claims(Class::Latest);
+        assert!(budget.charge(stream(0), 10, &mut held, rationed));
+        for (key, claim) in [(1, &mut a), (2, &mut b)] {
+            assert!(!budget.charge(stream(key), 2, claim, rationed));
+        }
+        assert!(!budget.charge(stream(3), 2, &mut after, rationed));
+        let mut woken = Vec::new();
+        let room = Order::RANK;
+        budget.release(&mut held, room, rationed.rationed, |key| woken.push(key));
+        assert_eq!(woken, [stream(1)]);
     }
 
     #[test]
     fn a_budget_wakes_no_stream_until_the_room_fits_the_first_claim_that_waits() {
         let mut budget = Budget::new(10);
         let [mut a, mut b, mut c, mut d] = claims(Class::Complete);
-        assert!(budget.charge(stream(0), 9, &mut a, Order::RANK));
-        assert!(!budget.charge(stream(1), 2, &mut b, Order::RANK));
+        assert!(budget.charge(stream(0), 9, &mut a, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 2, &mut b, Order::RANK.into()));
         let woken = release(&mut budget, &mut a, Order::RANK);
         assert_eq!(woken, [stream(1)]);
-        assert!(budget.charge(stream(1), 2, &mut b, Order::RANK));
-        assert!(budget.charge(stream(2), 7, &mut c, Order::RANK));
-        assert!(!budget.charge(stream(3), 5, &mut d, Order::RANK));
+        assert!(budget.charge(stream(1), 2, &mut b, Order::RANK.into()));
+        assert!(budget.charge(stream(2), 7, &mut c, Order::RANK.into()));
+        assert!(!budget.charge(stream(3), 5, &mut d, Order::RANK.into()));
         assert_eq!(release(&mut budget, &mut b, Order::RANK), []);
         let woken = release(&mut budget, &mut c, Order::RANK);
         assert_eq!(woken, [stream(3)]);
@@ -2903,9 +2952,9 @@ mod tests {
         ];
         let mut claims = classes.map(Claim::new);
         let [a, rest @ ..] = &mut claims;
-        assert!(budget.charge(stream(0), 10, a, Order::RANK));
+        assert!(budget.charge(stream(0), 10, a, Order::RANK.into()));
         for (index, claim) in (1..).zip(rest) {
-            assert!(!budget.charge(stream(index), 3, claim, Order::RANK));
+            assert!(!budget.charge(stream(index), 3, claim, Order::RANK.into()));
         }
         let woken = release(&mut budget, a, Order::RANK);
         assert_eq!(woken, [stream(2), stream(4), stream(3)]);
@@ -2916,11 +2965,11 @@ mod tests {
         let mut budget = Budget::new(10);
         let [mut first, mut second, mut large, mut small] = claims(Class::Complete);
         let [mut catch_up] = claims(Class::CatchUp);
-        assert!(budget.charge(stream(0), 6, &mut first, Order::RANK));
-        assert!(budget.charge(stream(1), 3, &mut second, Order::RANK));
-        assert!(!budget.charge(stream(2), 5, &mut large, Order::RANK));
-        assert!(!budget.charge(stream(3), 1, &mut small, Order::RANK));
-        assert!(!budget.charge(stream(4), 1, &mut catch_up, Order::RANK));
+        assert!(budget.charge(stream(0), 6, &mut first, Order::RANK.into()));
+        assert!(budget.charge(stream(1), 3, &mut second, Order::RANK.into()));
+        assert!(!budget.charge(stream(2), 5, &mut large, Order::RANK.into()));
+        assert!(!budget.charge(stream(3), 1, &mut small, Order::RANK.into()));
+        assert!(!budget.charge(stream(4), 1, &mut catch_up, Order::RANK.into()));
         assert_eq!(release(&mut budget, &mut second, Order::RANK), []);
         let woken = release(&mut budget, &mut first, Order::RANK);
         assert_eq!(woken, [stream(2), stream(3), stream(4)]);
@@ -2930,9 +2979,9 @@ mod tests {
     fn a_budget_gives_room_past_a_waiting_claim_that_ends() {
         let mut budget = Budget::new(10);
         let [mut a, mut b, mut c] = claims(Class::Complete);
-        assert!(budget.charge(stream(0), 8, &mut a, Order::RANK));
-        assert!(!budget.charge(stream(1), 5, &mut b, Order::RANK));
-        assert!(!budget.charge(stream(2), 2, &mut c, Order::RANK));
+        assert!(budget.charge(stream(0), 8, &mut a, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 5, &mut b, Order::RANK.into()));
+        assert!(!budget.charge(stream(2), 2, &mut c, Order::RANK.into()));
         assert_eq!(release(&mut budget, &mut b, Order::RANK), [stream(2)]);
     }
 
@@ -2941,10 +2990,10 @@ mod tests {
         let mut budget = Budget::new(20);
         let [mut held, mut command] = claims(Class::Command);
         let [mut catch_up] = claims(Class::CatchUp);
-        assert!(budget.charge(stream(0), 8, &mut held, Order::RANK));
-        assert!(!budget.charge(stream(1), 15, &mut command, Order::RANK));
-        assert!(!budget.charge(stream(2), 15, &mut catch_up, Order::RANK));
-        assert!(!budget.admit(1, &mut Claim::new(Class::Latest), Order::RANK));
+        assert!(budget.charge(stream(0), 8, &mut held, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 15, &mut command, Order::RANK.into()));
+        assert!(!budget.charge(stream(2), 15, &mut catch_up, Order::RANK.into()));
+        assert!(!budget.admit(1, &mut Claim::new(Class::Latest), Order::RANK.into()));
     }
 
     #[test]
@@ -2952,16 +3001,16 @@ mod tests {
         let mut budget = Budget::new(20);
         let [mut held] = claims(Class::Command);
         let [mut waiting] = claims(Class::Latest);
-        assert!(budget.charge(stream(0), 8, &mut held, Order::RANK));
-        assert!(!budget.charge(stream(1), 15, &mut waiting, Order::RANK));
+        assert!(budget.charge(stream(0), 8, &mut held, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 15, &mut waiting, Order::RANK.into()));
         let classes = [
             Class::Command,
             Class::Latest,
             Class::Complete,
             Class::CatchUp,
         ];
-        let admitted =
-            classes.map(|class| budget.admit(1, &mut Claim::new(class), Order::RANK));
+        let admitted = classes
+            .map(|class| budget.admit(1, &mut Claim::new(class), Order::RANK.into()));
         assert_eq!(admitted, [true, false, false, false]);
     }
 
@@ -2969,16 +3018,16 @@ mod tests {
     fn a_budget_counts_room_it_gives_until_the_claim_takes_it_or_ends() {
         let mut budget = Budget::new(10);
         let [mut a, mut b, mut c] = claims(Class::Complete);
-        assert!(budget.charge(stream(0), 10, &mut a, Order::RANK));
-        assert!(!budget.charge(stream(1), 6, &mut b, Order::RANK));
-        assert!(!budget.charge(stream(2), 6, &mut c, Order::RANK));
+        assert!(budget.charge(stream(0), 10, &mut a, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 6, &mut b, Order::RANK.into()));
+        assert!(!budget.charge(stream(2), 6, &mut c, Order::RANK.into()));
         let woken = release(&mut budget, &mut a, Order::RANK);
         assert_eq!(woken, [stream(1)]);
-        assert!(!budget.admit(5, &mut Claim::new(Class::Command), Order::RANK));
+        assert!(!budget.admit(5, &mut Claim::new(Class::Command), Order::RANK.into()));
         let woken = release(&mut budget, &mut b, Order::RANK);
         assert_eq!(woken, [stream(2)]);
-        assert!(budget.charge(stream(2), 6, &mut c, Order::RANK));
-        assert!(budget.admit(4, &mut Claim::new(Class::Command), Order::RANK));
+        assert!(budget.charge(stream(2), 6, &mut c, Order::RANK.into()));
+        assert!(budget.admit(4, &mut Claim::new(Class::Command), Order::RANK.into()));
     }
 
     #[test]
@@ -2986,8 +3035,8 @@ mod tests {
     fn a_budget_refuses_a_claim_over_the_budget_before_it_waits() {
         let mut budget = Budget::new(10);
         let [mut a, mut b] = claims(Class::CatchUp);
-        assert!(budget.charge(stream(0), 10, &mut a, Order::RANK));
-        budget.charge(stream(1), 11, &mut b, Order::RANK);
+        assert!(budget.charge(stream(0), 10, &mut a, Order::RANK.into()));
+        budget.charge(stream(1), 11, &mut b, Order::RANK.into());
     }
 
     #[test]
@@ -2996,9 +3045,9 @@ mod tests {
         let [mut held] = claims(Class::Command);
         let [mut latest] = claims(Class::Latest);
         let [mut complete] = claims(Class::Complete);
-        assert!(budget.charge(stream(0), 10, &mut held, Order::RANK));
-        assert!(!budget.charge(stream(1), 5, &mut latest, Order::RANK));
-        assert!(!budget.charge(stream(2), 5, &mut complete, Order::RANK));
+        assert!(budget.charge(stream(0), 10, &mut held, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 5, &mut latest, Order::RANK.into()));
+        assert!(!budget.charge(stream(2), 5, &mut complete, Order::RANK.into()));
         let woken = release(&mut budget, &mut held, Order::COMPLETE_FIRST);
         assert_eq!(woken, [stream(2), stream(1)]);
     }
@@ -3008,11 +3057,11 @@ mod tests {
         let mut budget = Budget::new(20);
         let [mut held] = claims(Class::Command);
         let [mut waiting] = claims(Class::Complete);
-        assert!(budget.charge(stream(0), 8, &mut held, Order::RANK));
-        assert!(!budget.charge(stream(1), 15, &mut waiting, Order::RANK));
+        assert!(budget.charge(stream(0), 8, &mut held, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 15, &mut waiting, Order::RANK.into()));
         let orders = [Order::RANK, Order::COMPLETE_FIRST];
-        let admitted =
-            orders.map(|order| budget.admit(1, &mut Claim::new(Class::Latest), order));
+        let admitted = orders
+            .map(|order| budget.admit(1, &mut Claim::new(Class::Latest), order.into()));
         assert_eq!(admitted, [true, false]);
     }
 
@@ -3025,20 +3074,20 @@ mod tests {
             [Class::Latest, Class::Complete]
                 .map(|class| (budget.holds(class), budget.competes(class)))
         };
-        assert!(budget.charge(stream(0), 10, &mut latest, Order::RANK));
-        assert!(!budget.charge(stream(1), 5, &mut complete, Order::RANK));
+        assert!(budget.charge(stream(0), 10, &mut latest, Order::RANK.into()));
+        assert!(!budget.charge(stream(1), 5, &mut complete, Order::RANK.into()));
         assert_eq!(state(&budget), [(true, true), (false, true)]);
         assert_eq!(release(&mut budget, &mut latest, Order::RANK), [stream(1)]);
         // Room that its stream has not taken holds, and does not compete.
         assert_eq!(state(&budget), [(false, false), (true, false)]);
-        assert!(!budget.charge(stream(2), 6, &mut late, Order::RANK));
+        assert!(!budget.charge(stream(2), 6, &mut late, Order::RANK.into()));
         assert_eq!(state(&budget), [(false, true), (true, false)]);
         assert_eq!(
             release(&mut budget, &mut complete, Order::RANK),
             [stream(2)]
         );
         assert_eq!(state(&budget), [(true, false), (false, false)]);
-        assert!(budget.charge(stream(2), 6, &mut late, Order::RANK));
+        assert!(budget.charge(stream(2), 6, &mut late, Order::RANK.into()));
         assert_eq!(state(&budget), [(true, true), (false, false)]);
         assert_eq!(release(&mut budget, &mut late, Order::RANK), []);
         assert_eq!(state(&budget), [(false, false), (false, false)]);
@@ -3294,10 +3343,7 @@ mod tests {
 
         #[test]
         fn complete_alone_pays_what_it_is_owed_and_gains_no_credit() {
-            let mut share = Share {
-                window: 1 << 20,
-                ..Share::default()
-            };
+            let mut share = Share::new(1 << 20);
             share.took(Class::Latest, 100, true);
             share.took(Class::Complete, 299, false);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
@@ -3309,10 +3355,7 @@ mod tests {
 
         #[test]
         fn latest_alone_spends_its_credit_and_makes_no_debt() {
-            let mut share = Share {
-                window: 1 << 20,
-                ..Share::default()
-            };
+            let mut share = Share::new(1 << 20);
             share.took(Class::Complete, 300, true);
             share.took(Class::Latest, 99, false);
             assert_eq!(share.owed, -3);
@@ -3323,10 +3366,7 @@ mod tests {
 
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
-            let mut share = Share {
-                window: 100,
-                ..Share::default()
-            };
+            let mut share = Share::new(100);
             share.took(Class::Latest, 1000, true);
             assert_eq!(share.owed, LATEST_COST * 100);
             share.took(Class::Complete, 1000, true);
@@ -3335,10 +3375,7 @@ mod tests {
 
         #[test]
         fn a_class_competes_until_the_other_sends_one_peer_window() {
-            let mut share = Share {
-                window: 100,
-                ..Share::default()
-            };
+            let mut share = Share::new(100);
             let budget = Budget::new(10);
             assert!(!share.competes(Class::Latest, &budget));
             share.offered(Class::Latest);
@@ -3347,14 +3384,31 @@ mod tests {
             share.took(Class::Complete, 1, false);
             assert!(!share.competes(Class::Latest, &budget));
             assert!(share.competes(Class::Complete, &budget));
+            share.offered(Class::Command);
+            assert!(!share.competes(Class::Command, &budget));
+        }
+
+        #[test]
+        fn a_class_owed_bytes_rations_the_other_only_while_it_competes() {
+            let mut budget = Budget::new(10);
+            let [mut latest] = claims(Class::Latest);
+            assert!(budget.charge(stream(0), 5, &mut latest, Order::RANK.into()));
+            let mut share = Share::new(100);
+            share.owed = 3;
+            let open = Admission::from(Order::COMPLETE_FIRST);
+            assert_eq!(share.admission(&budget), open);
+            share.offered(Class::Complete);
+            let rationed = Some(Class::Latest);
+            assert_eq!(share.admission(&budget), Admission { rationed, ..open });
+            share.owed = -3;
+            let rationed = Some(Class::Complete);
+            let order = Order::RANK;
+            assert_eq!(share.admission(&budget), Admission { order, rationed });
         }
 
         #[test]
         fn latest_owes_three_bytes_of_complete_for_each_of_its_own() {
-            let mut share = Share {
-                window: 1 << 20,
-                ..Share::default()
-            };
+            let mut share = Share::new(1 << 20);
             share.took(Class::Latest, 10, true);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
             share.took(Class::Complete, 29, true);
@@ -3377,9 +3431,9 @@ mod tests {
             let mut budget = Budget::new(10);
             let [mut latest] = claims(Class::Latest);
             let [mut complete] = claims(Class::Complete);
-            assert!(budget.charge(stream(0), 5, &mut latest, Order::RANK));
-            assert!(budget.charge(stream(1), 5, &mut complete, Order::RANK));
-            let (rank, first) = (Order::RANK.classes, Order::COMPLETE_FIRST.classes);
+            assert!(budget.charge(stream(0), 5, &mut latest, Order::RANK.into()));
+            assert!(budget.charge(stream(1), 5, &mut complete, Order::RANK.into()));
+            let (rank, first) = (Order::RANK.0, Order::COMPLETE_FIRST.0);
             let kept = |class| [Class::Command, class];
             assert_eq!(room(-1, Class::Latest, &budget), kept(Class::Latest));
             assert_eq!(room(-1, Class::Complete, &budget), rank);
@@ -3396,10 +3450,7 @@ mod tests {
 
         #[test]
         fn other_classes_owe_nothing() {
-            let mut share = Share {
-                window: 1 << 20,
-                ..Share::default()
-            };
+            let mut share = Share::new(1 << 20);
             share.took(Class::Command, 10, true);
             share.took(Class::CatchUp, 10, true);
             assert_eq!(share.owed, 0);
@@ -3411,10 +3462,7 @@ mod tests {
                 history in vec((0..3_u8, 1..=WRITE_MAX), 0..64),
                 run in vec(1..=WRITE_MAX, 1..256),
             ) {
-                let mut share = Share {
-                window: 1 << 20,
-                ..Share::default()
-            };
+                let mut share = Share::new(1 << 20);
                 let max = isize::try_from(WRITE_MAX).expect("fits");
                 for (writer, bytes) in history {
                     match writer {
@@ -7047,6 +7095,72 @@ mod tests {
 
         // The share cannot show it: the late claims end, and the owed class then
         // takes the room, so each class sends the same bytes as with the fix.
+        #[test]
+        fn room_a_latest_frees_starts_one_late_latest_while_complete_is_owed() {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+                let mut complete = open_sender(&mut pair, Class::Complete);
+                fill(&mut pair, shard, &mut complete);
+                let mut latest =
+                    [Class::Latest; 2].map(|class| open_sender(&mut pair, class));
+                write_all(&mut pair, shard, &mut latest);
+                pair.run(RUN);
+                take(&mut pair, &mut receivers, &mut read);
+                pair.run(RUN);
+                let now = pair.now();
+                let flushed =
+                    pair::write(&mut pair.client.endpoint, now, &latest[0], &mut None);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                pair.run(RUN);
+                take(&mut pair, &mut receivers, &mut read);
+                pair.run(RUN);
+                let now = pair.now();
+                let flushed =
+                    pair::write(&mut pair.client.endpoint, now, &complete, &mut None);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                assert!(owed(&mut pair) > 0, "{}", owed(&mut pair));
+                // `latest[1]` holds room, so each late `Latest` message waits.
+                let late_message = shard.block(&vec![4; 3 * MESSAGE_MAX / 4]);
+                let mut late =
+                    [Class::Latest; 2].map(|class| open_sender(&mut pair, class));
+                for sender in &mut late {
+                    let written = pair::write(
+                        &mut pair.client.endpoint,
+                        now,
+                        sender,
+                        &mut Some(late_message.clone()),
+                    );
+                    assert_eq!(written, Ok(Poll::Pending));
+                }
+                pair.run(RUN);
+                take(&mut pair, &mut receivers, &mut read);
+                pair.run(RUN);
+                let now = pair.now();
+                let flushed =
+                    pair::write(&mut pair.client.endpoint, now, &latest[1], &mut None);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                assert!(owed(&mut pair) > 0, "{}", owed(&mut pair));
+                let next = Some(shard.block(&vec![5; MESSAGE_MAX]));
+                let now = pair.now();
+                let written =
+                    pair::write(&mut pair.client.endpoint, now, &complete, &mut {
+                        next
+                    });
+                assert!(written.is_ok(), "{written:?}");
+                let key = key(&pair.client);
+                let connection =
+                    crate::quic::find(&mut pair.client.endpoint.connections, key);
+                let budget = &connection.expect("a connection").streams.sending.budget;
+                // At most one late `Latest` message starts: once it holds room, the
+                // budget starts no new `Latest` message while `Complete` is owed.
+                assert!(
+                    budget.waiting[Class::Complete.rank()].is_empty(),
+                    "{budget:?}"
+                );
+            });
+        }
+
         #[test]
         fn room_an_owed_class_frees_waits_for_it_past_late_claims_of_the_other() {
             type Setup = fn(&Shard) -> (Pair, Sender);
