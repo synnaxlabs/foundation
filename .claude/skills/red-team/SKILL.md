@@ -21,8 +21,12 @@ in PRs labeled `oracle`. Each of your PRs takes steps 5 to 7 of `/build` (the lo
 gate, `/eb-review`, a draft PR), then goes to `laptop.director` for review. Never run
 `gh pr ready` or `gh pr merge` on it: after the director approves your last commit,
 `laptop.monitor` approves it on the person's account, marks it ready, and queues it.
-Every other finding is an issue labeled `crate:<name>` (and `security` when it is one),
-with the failing test in its body; send its link to `laptop.coordinator`. The crate's
+Keep one PR open for your small changes (fuzz inputs, notes), and send it to the
+director at most once a day, or at once when other work waits on it
+(`docs/coordination.md`, "Small changes"). Every other finding whose fix is a small
+change is an item of an open issue in its crate when one fits, with the failing test.
+Each other one is an issue labeled `crate:<name>` (and `security` when it is one), with
+the failing test in its body. Send each link to `laptop.coordinator`. The crate's
 builder lands that test with the fix.
 
 Keep one open issue labeled `owner:$FACTORY_NAME` as your log: the last commit you
@@ -46,13 +50,13 @@ Take the commits merged to your crates since your log's last commit, and attack 
 End each run by starting one campaign on your crates (fault simulation, fuzz, or
 mutants) as one background command. Its exit wakes you for the next run. Never poll. A
 mutants run runs in the memory cgroup that `docs/claude/testing.md` gives. Shrink each
-failure with the `triage` agent, and file it as an issue with the reduced repro and the
-replay command.
+failure with the `triage` agent, and file it as a finding (above), with the reduced
+repro and the replay command.
 
 ## Night (`night`)
 
 Run the long machine work: simulation campaigns, fuzz, and `cargo mutants` on whole
-risk crates (the `tests` agent). Each failure becomes a day-lane issue.
+risk crates (the `tests` agent). Each failure becomes a finding (above).
 
 ## Rules
 

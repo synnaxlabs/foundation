@@ -485,6 +485,30 @@ How to read this record:
   record panics. Decided by the architect (#1345,
   https://github.com/synnaxlabs/foundation/issues/1345#issuecomment-6036930649,
   2026-10-07T11:26:39Z).
+- **WAL BENCH (#324, 2026-10-08)** The cargo feature `sim` of `buffer`, off by default
+  (`buffer`'s dev-dependency on itself turns it on for the bench), adds
+  `#[doc(hidden)] pub mod bench` with `Ring { new, commit }` over `wal::Writer`, as
+  STORED BENCH does for `home`. Only the bench `benches/wal.rs` (`test = true`) uses it.
+  `commit` appends its records, takes `trimmed`, syncs each record, and releases to the
+  trimmed tail, so a time holds the writer's cost for each commit. The bench runs
+  commits of 1 and 8 records, in rings of 64 and 4096 blocks: 1 record gives the cost
+  for each commit (`trimmed`, `release`), 8 the cost for each record (`append`,
+  `synced`). Lost: a copy of `wal.rs` in the bench through `#[path]`, which needs
+  `entry`, `record`, and `crc32c` copied too and the workspace lints off; a time of
+  `Buffer::append` and `committed` on a simulated file system, whose file writes hide
+  the cost of the writer; and a control bench of code that a PR does not change, since
+  the bench host gives A/A. It lands before the next PR after #1698 that changes
+  `Writer::append`, `synced`, `release`, or `trimmed`. Decided by `laptop.architect`
+  (2026-10-08T01:37:51Z):
+  https://github.com/synnaxlabs/foundation/issues/324#issuecomment-6050388456. Its
+  baseline is a quiet-host run of this bench at the head of #1729, not the #1698 rerun,
+  whose scratch bench had no warm-up. The run makes two passes of one binary, and each
+  median agrees within 3%. If one does not, a `crate:buffer` issue follows, and there is
+  no baseline until it is fixed. Decided by `laptop.architect` (2026-10-08T03:12:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1729#issuecomment-6051403457.
+  Supersedes "Its head numbers are the baseline of the `wal` benchmark" in
+  https://github.com/synnaxlabs/foundation/pull/1698#issuecomment-6050306136. The
+  #1698 numbers stay the record of the P1 judgment of #1698 only.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -522,11 +546,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6049045510. The
   `hash::Map` of those states adds about 0.3 ns per place to `release` at 100k places
   (+10%); laptop.architect accepted it on 2026-10-07T23:32:22Z:
-  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185. One layout
-  type for this charge and the frame that `serve` sends, and the two `Places` costs at
-  100k places, are #1648; laptop.architect gave the OK to defer them on
-  2026-10-07T23:22:03Z:
-  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185.
+  `types::frame::Places` holds this charge and the layout of the frame that `serve`
+  sends (HUB WIRE, #1648), with laptop.architect's OK on 2026-10-07T23:22:03Z to move
+  it out of #1655:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864, and
+  its surface approved on 2026-10-07T23:34:09Z:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122. The
   charge is part of the wire contract: a change to `block`'s header or size classes
   needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
@@ -1548,9 +1574,14 @@ How to read this record:
   the ends, so the reader holds no more ends than it has places. The ends and the body
   are in place order: the home writes the series of each place it has, from 0, each from
   the frame's block as a slice, with ends it computes in that order. It cuts each series
-  from `Frame::body` by `View::bounds` (the architect, 2026-10-07T22:35:41Z,
+  from `Frame::body` by `frame::Places::lay`, which finds them with `View::bounds`
+  (the architect, 2026-10-07T22:35:41Z,
   https://github.com/synnaxlabs/foundation/issues/1639#issuecomment-6048265226; lost:
-  `View::ends`, which gives no start, and `Frame::bounds`, a search for each place). At
+  `View::ends`, which gives no start, and `Frame::bounds`, a search for each place).
+  `View::bounds` is crate-private, as no crate outside `types` calls it (the architect,
+  2026-10-08T00:49:22Z,
+  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049855032; lost: a
+  public `bounds`, a second way to lay a reader's frame beside `Places`). At
   the open it makes the list of each place and its home entry, sorted by place, and
   writes each ends message from it with `wire::hub::ends::encode`, which sizes the
   message by its buffer, so no scratch buffer holds the ends (the architect, #1146,
@@ -1631,6 +1662,41 @@ How to read this record:
   of this session yet, so its series count has no session to break. Lost: `Places`
   first. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1455#issuecomment-6040654132).
+  Amended (2026-10-07T23:34:09Z, #1648): `types::frame::Places` holds the layout of a
+  remote reader's frame for `delivery` and `serve`. `Places::lay` gives each series in
+  place order, with its bounds in the home's `Frame::body` and its end in the reader's
+  frame; `Places::charge` is the `Frame::charge` of that frame, in O(1) when the places
+  name each entry of the key set, in any order: each block payload is a multiple of 8
+  bytes, so the padding of the last series does not change the footprint (the architect,
+  2026-10-08T00:25:50Z,
+  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049589885. Supersedes
+  "in entry order" in
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122). Lost: a
+  free function that lays one frame, with each caller keeping its own state for each key
+  set, so `delivery` and `serve` each repeat it. Also lost: one `Places` for each remote
+  session, whose layout `release` keeps with each frame for `serve`: each frame in the
+  queue would hold its layout. So a remote session holds two. Decided by
+  laptop.architect:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
+  Supersedes: "At the open it makes the list of each place and its home entry, sorted by
+  place" above; `Places` makes it at the first frame of each key set. `lay` walks the
+  places for a frame with at least one series at the places for each 8 entries that
+  they name, and sorts the series of a sparser frame. Lost: walk only (10 series of 100k
+  places took 140 to 420 µs, not 0.5 to 0.7 µs), and sort only (a scattered frame of
+  100k series took 3.9 to 6.0 ms, not 1.6 to 1.7 ms). The architect accepted the cost of
+  the dense walk against 1e658b7a, up to the head numbers of #1695 (laptop.architect,
+  2026-10-08T01:36:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050376022). The cut
+  counts only the series at the places, and is 8. Lost: a count of each series of the
+  frame (`outside_lay` 56 to 69 µs, not 0.1 µs), and a cut of 16 (a frame just over it
+  cost 148 to 255 µs more than one just under). The architect also accepted
+  `narrow_lay` at +3 to +4 ns per frame (laptop.architect, 2026-10-08T02:33:03Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050982066). Each
+  dense frame first pushes ceil(m/8) series, for the m entries that the places name,
+  then moves them into the walk: the architect accepted +5.6% at `cut_lay` 12,500 and
+  +1.3% at `reversed_lay` 100k for -21.7% at `cut_lay` 12,499 (laptop.architect,
+  2026-10-08T03:07:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6051347440).
   Amended (#1631): after `Behind`, each message gives `Ended`, before the three steps
   and whatever its bytes, since the home sends nothing after `Behind`. Step 3 also
   gives `Latest` for a `Behind` in a latest session, since only a complete session
@@ -2122,7 +2188,21 @@ How to read this record:
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
   caller must keep and that shows only at a restart. The person decided on 2026-10-05
-  ("I approve long term fix on 522"), #522.
+  ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
+  configuration removed a node: the configuration before the entries or a committed
+  `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
+  ask it at a refusal and keeps no copy of the configurations (#1105, #1762).
+  `Voters::contains` and `Voters::nodes` are public. Decided by `laptop.architect`,
+  2026-10-08T03:04:33Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777. After
+  compaction, a snapshot also carries the nodes that the configurations it replaces
+  held or removed, so the answer survives a trim (#253; `laptop.architect`,
+  2026-10-08T03:41:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1775#issuecomment-6051704590).
+  Supersedes the place of `held` in `mesh` in part 2 of
+  https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747 and
+  finding 2 of
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -2255,9 +2335,17 @@ How to read this record:
   configuration in force at its index, so the configuration before the last entry
   stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
-  files `log-0`, `log-1`, and so on of one directory; any other file there is
-  `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
-  is an 8-byte check of the rest of the header (the first bytes of
+  files `log-0`, `log-1`, and so on of one directory. A log also holds the file `lock`
+  of that directory open for writing, from its open until it drops. A file call of a
+  dropped write can end after the drop, and the lock does not cover it (#1375). The file
+  has no bytes, and one with bytes fails the open (`Files(Length)`). So a second open of
+  the directory gives `Error::Log` with `Busy` on the lock, at each time, whatever log
+  file the first log holds (#1360, decided by `laptop.architect`, 2026-10-07T12:07:03Z:
+  https://github.com/synnaxlabs/foundation/issues/1360#issuecomment-6037555764). Any
+  other file there is `Error::Stray`. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/549 in its clause that each file but
+  `log-<n>` is `Error::Stray`. One write of `raft` is one record: a header, then the
+  body. The header is an 8-byte check of the rest of the header (the first bytes of
   `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
   body length, and an 8-byte check of the body. The body holds the hard state, when it
   changed, and the entries, so one sync makes both durable; two slots for the hard state
@@ -3281,16 +3369,25 @@ How to read this record:
   that InfluxDB 1, 2, and 3 each store as written, in each part (measurement name, tag
   key, tag value, field key). It refuses the rest at construction, so the error
   reaches the config diagnostic in place of a partial write that InfluxDB answers with
-  204 or drops. One set of refused characters holds for every part. Today the set is a
-  backslash, a newline, a carriage return, a tab, and NUL. #1098 will widen it to what
-  InfluxDB 1 and 2 with `validate-keys` drop, and its PR updates this list. NUL in a
-  tag value is refused, though InfluxDB 3 keeps it. No user needs it, and a user learns
-  one rule, not four. Foundation names hold only ASCII letters, digits, `_`, `-`, `.`,
-  and `@`, so the rule applies only to text that a user writes in the connector's
-  config. Lost: a rule for each part. It keeps NUL in tags for no caller, and the set
-  a user may write then depends on the part.
+  204 or drops. One set of refused characters holds for every part: a backslash, a
+  newline, a carriage return, a tab, NUL, U+FFFD, and each character outside the
+  general categories L, M, N, P, and S other than U+0020. The last two are what
+  InfluxDB 1 and 2 with `validate-keys` drop (`unicode.IsPrint` false, or
+  `unicode.ReplacementChar`). The categories come from `unicode-properties` at Unicode
+  17.0.0, which a test pins. InfluxDB reads them from the Unicode tables of the Go
+  release that built each server (Unicode 15.0.0 for Go 1.26 today), so a code point
+  assigned after that version passes here and that server drops it. No client closes
+  this gap exactly. NUL in a tag value is refused, though InfluxDB 3 keeps it. No user
+  needs it, and a user learns one rule, not four. Foundation names hold only ASCII
+  letters, digits, `_`, `-`, `.`, and `@`, so the rule applies only to text that a user
+  writes in the connector's config. Lost: a rule for each part. It keeps NUL in tags
+  for no caller, and the set a user may write then depends on the part.
   Decided by the architect (`laptop.architect-2`) on 2026-10-07T06:26:41Z
-  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177).
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177); the
+  class by the architect on 2026-10-07T20:31:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6046284871), and
+  the crate by the person on 2026-10-08T01:48:32Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6050501586).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -3531,6 +3628,26 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
+  a body that its reader does not take, with the attribute keys and the block keywords
+  apart, so a key that names an attribute never passes as a block. One function holds
+  both checks, so a kind cannot forget one half. When a body takes blocks and no
+  attribute, as a file does, the fix of an attribute is to move it into one of those
+  blocks. `read::missing` reports a body with none of some keys, and panics on an
+  empty list, which is a defect of the caller. `read::required` reads one key or gives
+  that diagnostic. `config` uses them, also at the top level of a file, and so does each
+  kind, so one mistake has one code: `document.unknown-attribute`,
+  `document.unknown-block`, and `document.missing-attribute`. Decided by
+  `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
+  2026-10-08 03:05 UTC) and on #1772
+  (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
+  2026-10-08 03:27 UTC, and
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
+  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
+  rest at `finish`, which drops the diagnostics when a caller returns early;
+  `unknown_attributes` and `unknown_blocks` as two functions; a public
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -3763,12 +3880,15 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
-- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
-  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+- **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
+  with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
+  picks out the policies and connectors itself. A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
-  applied in #1402.
+  applied in #1402. The trees in place of the policies: `laptop.architect`,
+  2026-10-08T03:01:36Z
+  ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -3957,6 +4077,48 @@ How to read this record:
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **SMALL CHANGES (2026-10-08)** A change of under about 50 lines (a fix, a test pin, a
+  doc fix, a rename, or a record) goes into the PR that its session builds in its crate
+  or its file, as its own commit, never a PR of its own. A review finding with such a
+  fix in a crate or a file that the PR changes is fixed in that PR. Else it is an item
+  of an open issue in its crate, by preference one whose PR has had no review round. It
+  goes alone only when no open issue in its crate fits, when it fixes a broken `main`,
+  or when other work waits on it. A small mechanical change, and a small refactor that a
+  fix needs, follow the same rule, as their own commit before the fix; a larger one
+  ships alone. Each architect, red-team, and `laptop.monitor` keeps one PR open for its
+  own small changes, sent to review at most once a day, or at once when other work waits
+  on it (`docs/coordination.md`, "Small changes"). Of the 252 PRs that merged in the 24
+  h to 2026-10-08T03:05Z, 65 changed 50 lines or fewer, and each paid the full fixed
+  cost of CI, review rounds, an audit, and a queue slot (#1705: 8 lines, two review
+  rounds, and an audit). The person decided to fold small fixes into open PRs, relayed
+  by `laptop.monitor`
+  (https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6051321753,
+  2026-10-08T03:05:03Z): "We should batch small optimizations/fixes into single pull
+  requests. One set of test runs, one set of reviews. Less context and less
+  infrastructure cost", and, on a proposed batch branch, "these batch branches could
+  hold up progress on the next piece. Instead they should preferrably be folded into
+  current or existing larger PRs". The rest was decided by the director at
+  2026-10-08T03:23:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051516851), with the
+  link of its item 7 corrected at 2026-10-08T03:31:23Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051596894) and its
+  item 2 widened to a file at 2026-10-08T03:39:52Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051684071).
+  Supersedes the mechanical-change and refactor sentences of `CLAUDE.md` Rule 2
+  (https://github.com/synnaxlabs/foundation/blob/8f6a0596/CLAUDE.md#L200-L202).
+- **COST TRIALS (2026-10-08)** Until 2026-10-09T04:00Z, `box1.builder-1`,
+  `box1.builder-2`, `box1.builder-4`, and `box2.builder-7` run the `reviewer` of a
+  second round that does not skip `breaker` on Sonnet. After the end time,
+  `laptop.monitor` compares the groups and reports to the person, and a new decision
+  keeps or removes the trial. The Sonnet audit trial waits until the trail checks that
+  a script can make are in `cargo xtask review` (#1467, #1211). Until then the `audit`
+  agent runs on Opus. When both issues close, a new decision starts that trial and
+  sets its end and its measure. The person (2026-10-08T01:13Z): "Let's try all 3 of
+  these and see what we get". The person dropped change 1, which closes a round with
+  commits by `Text fixes:` (2026-10-08T01:17Z, on the decline by `laptop.director`,
+  https://github.com/synnaxlabs/foundation/pull/1601#issuecomment-6050149418): "Ok
+  fine". Both are recorded in https://github.com/synnaxlabs/foundation/issues/1703.
+  Supersedes FACTORY MODELS for these runs.
 - **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
   own PR through the queue when the gate, the review rounds, and CI pass; agents may run
   `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
@@ -4103,9 +4265,7 @@ How to read this record:
   Amended (2026-10-07, #1310): a call of `Files` whose future drops can still run. A
   remove left so removes what the path names when it ends. Count the room of a
   removed file as used until `sync_dir` on its directory ends, and while a handle holds
-  the file (#1301). Lost: `File::remove`, a remove through the write handle, which the
-  handle rule would cover with `Busy`; after #1441 it had no caller. Decided by
-  `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
+  the file (#1301). Decided by `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
   (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245).
   Supersedes
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
@@ -4121,6 +4281,30 @@ How to read this record:
   sweep, and a caller already learns from its own header whether a file holds data.
   Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
+  Amended (2026-10-07, #1604): `File::remove(self)` removes the file of a write handle,
+  then closes the handle as `File::close`. It removes the file of the handle, by device
+  and inode with no follow of a link, as FILE RENAME does: `NotFound { path }` when the
+  path no longer names it, and nothing is removed. Until the remove ends, also after a
+  drop of its future, a write open of the path gives `Busy`; on `os` the descriptor
+  closes after the unlink, so the lock holds across processes until then. The race
+  sentence of FILE RENAME holds for it too. A drop of the future can stop the remove
+  before it starts, as for `Files::remove`; the file then stays, and the handle closes.
+  The removal is not durable until `sync_dir` on its directory ends. A poisoned handle
+  gives `Poisoned` and closes: a dropped rename can still move the file, so the path of
+  the handle may be stale. A read handle panics. The caller is `mesh::log` (#1314),
+  which removes a file with no record and later makes one at its path (MESH LOG). Lost:
+  a spare name in `mesh` only, which adds a second kind of file to the directory of a
+  log, a sweep of it in `Log::open`, and a change to the `Stray` rule of MESH LOG.
+  Supersedes the "Lost: `File::remove`" sentence of
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Decided
+  by `laptop.architect-2`, #1604, 2026-10-07T20:24:12Z
+  (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932). The
+  caller sentence: `laptop.architect`, 2026-10-08T02:36:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051016964). The
+  sentence that a drop can stop the remove: `laptop.architect-2`, 2026-10-08T02:32:41Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
+  `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -4273,6 +4457,35 @@ How to read this record:
   directory at 2026-10-07T19:22:31Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
   https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
+  Amended (2026-10-07, #1551): the disk keeps one log, in the order that the calls
+  ended, of the creates, removes, and renames that no `sync_dir` of their directory
+  covered. A rename is one change. A `Power` crash keeps a prefix of the log. It draws
+  the prefix from the files stream only when the log is not empty, and the digest holds
+  its length. Each file call in flight takes effect as for `Process`, and the prefix
+  decides whether its change stays, except a `sync` or `sync_dir` in flight, which has
+  no effect. A `sync_dir` makes durable only the changes of its directory. A journaled
+  file system can commit more; `sim` does not, so a missing `sync_dir` shows. A file
+  takes space while an entry, a durable entry, a change in the log, or a handle names
+  it. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508: a
+  `Power` crash undoes each rename since the last `sync_dir`, a rename in flight too.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692: the
+  commit of a create in flight. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531: a commit
+  makes the entries of the directory durable. A create that a `Power` crash cuts is
+  whole or has no bytes, and the prefix decides whether its entry stays. A cut gives a
+  state that a journaled file system can reach, or a state that only a missing
+  `sync_dir` reaches. Lost: a log for each directory, which gives states that need no
+  missing `sync_dir`.
+  Decided by `laptop.architect-2` (2026-10-07T19:20:28Z):
+  https://github.com/synnaxlabs/foundation/issues/1551#issuecomment-6045125302; the
+  calls in flight, 2026-10-08T02:39:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051056642; the text,
+  2026-10-08T02:27:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6050920514; the order
+  that the calls ended, 2026-10-08T02:43:34Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051095403.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -4490,9 +4703,7 @@ How to read this record:
   reads the key from its data directory (#1660). The node admits every peer that
   completes the handshake until the mesh states its rule. At the stop, each session and
   stream future drops, then the transport. The bound on the wait for a header is #1628.
-  A transport that stops with an error ends the routing and the node runs on with no
-  port, until #1647 stops the node. #1647 merges before the first protocol in `route`
-  gets a server. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
   datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
@@ -4502,6 +4713,13 @@ How to read this record:
   over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
   bandwidth-delay product. The number of sessions has no bound until #1628.
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
+  Amended (2026-10-08, #1647, by `laptop.architect-2`, 00:05 UTC): a transport that
+  stops with an error stops the node, and `Node::join` gives `Error::Transport`. The
+  node does not rebind the port:
+  https://github.com/synnaxlabs/foundation/issues/1647#issuecomment-6049354544.
+  Supersedes the deferral of
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048464411
+  (2026-10-07 22:50 UTC), under which the node ran on with no port until #1647.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -4708,6 +4926,7 @@ How to read this record:
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
+| NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
 
 ---
 
@@ -5395,10 +5614,13 @@ Rules:
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
 8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
-   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
-   `buffer`, so its tests build a real `home::Shard`. A crate may also take itself, so
-   its tests and benches build with its own `sim` feature (STORED BENCH;
-   `laptop.architect`, 2026-10-08T01:01:28Z:
+   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, `hub` may take
+   `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
+   so its tests build a `spec::connector::Connector` (`laptop.architect`,
+   2026-10-08T03:01:36Z:
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   may also take itself, so its tests and benches build with its own `sim` feature
+   (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
    `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
    code could call the ring), the hub tests in `node`, and a second way to build a shard
@@ -5425,7 +5647,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
-| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
+| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |

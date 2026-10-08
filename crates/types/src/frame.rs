@@ -5,11 +5,13 @@
 //! pointers.
 
 pub mod key_set;
+mod places;
 mod view;
 
 use std::{fmt, iter, mem};
 
 use key_set::KeySet;
+pub use places::{Placed, Places};
 pub use view::{Mask, View};
 
 /// Bytes of the header.
