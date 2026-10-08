@@ -7,7 +7,7 @@
 
 use types::channel::Key;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Layout, Mask, Path, Range, View};
+use types::frame::{self, Draft, Form, Layout, Mask, Path, Places, Range, View};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -33,12 +33,15 @@ fn main() {
             data: &[],
         },
     ];
-    let set = Interner::new().intern(&groups);
+    let mut interner = Interner::new();
+    let set = interner.intern(&groups);
+    let other = interner.intern(&groups[..1]);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     read_a_frame(&pool, &set);
     read_a_view(&pool, &set);
     receive_a_frame(&pool, &set);
+    lay_places(&pool, &set, &other);
 }
 
 const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];
@@ -159,4 +162,30 @@ fn receive_a_frame(pool: &block::Pool, set: &KeySet) {
     });
     assert_eq!(allocations, 0, "the receive allocated");
     assert!(received, "the frame holds the bytes the home sent");
+}
+
+fn lay_places(pool: &block::Pool, set: &KeySet, other: &KeySet) {
+    let frames = [
+        (Draft::new(pool, set, Form::Raw, &SERIES), set),
+        (Draft::new(pool, other, Form::Raw, &[(0, 8), (1, 8)]), other),
+    ]
+    .map(|(draft, set)| (draft.expect("the pool holds it").freeze(Path::Live), set));
+    // Key 3, then key 1: not every entry, so the charge lays each frame.
+    let slot = |entry: usize| set.entries()[entry].slot;
+    let mut places = Places::new([slot(2), slot(0)].into());
+    let mut charged = 0;
+    for (frame, set) in &frames {
+        places.lay(frame, set);
+        charged += places.charge(frame, set);
+    }
+    let (laid, allocations) = ALLOCATOR.count(|| {
+        let (mut laid, mut again) = (0, 0);
+        for (frame, set) in &frames {
+            laid += places.lay(frame, set).len();
+            again += places.charge(frame, set);
+        }
+        (laid, again)
+    });
+    assert_eq!(allocations, 0, "the places allocated");
+    assert_eq!(laid, (3, charged), "key 3 and key 1, then key 1");
 }

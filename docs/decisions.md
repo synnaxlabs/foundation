@@ -490,7 +490,9 @@ How to read this record:
   `types::frame::Places` holds this charge and the layout of the frame that `serve`
   sends (HUB WIRE, #1648), with laptop.architect's OK on 2026-10-07T23:22:03Z to move
   it out of #1655:
-  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864, and
+  its surface approved on 2026-10-07T23:34:09Z:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122. The
   charge is part of the wire contract: a change to `block`'s header or size classes
   needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
@@ -1518,6 +1520,8 @@ How to read this record:
   `release` keeps with each frame for `serve`: each frame in the queue would hold its
   layout. So a remote session holds two. Decided by laptop.architect:
   https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
+  Supersedes: "At the open it makes the list of each place and its home entry, sorted
+  by place" above; `Places` makes it at the first frame of each key set.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every

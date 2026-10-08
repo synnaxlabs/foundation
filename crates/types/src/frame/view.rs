@@ -256,7 +256,7 @@ impl<const N: usize> Iterator for Join<'_, N> {
 
 /// The first position in `items` where `before` is false, as `slice::partition_point`
 /// gives it, in time logarithmic in that position.
-fn gallop<T>(items: &[T], mut before: impl FnMut(&T) -> bool) -> usize {
+pub(super) fn gallop<T>(items: &[T], mut before: impl FnMut(&T) -> bool) -> usize {
     let mut high = 1;
     while items.get(high).is_some_and(&mut before) {
         high *= 2;

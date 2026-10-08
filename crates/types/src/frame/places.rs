@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use super::key_set::{self, KeySet};
+use super::view::gallop;
 use super::{Frame, Mask, View, charge, ends, padded, parts, to_u32, to_usize};
 use crate::channel::Slot;
 use crate::hash;
@@ -11,7 +12,7 @@ use crate::hash;
 /// each place, in place order, at the ends of [`ends`] (HUB WIRE). A place is one
 /// listing of a slot. A slot after its first listing, or one that a frame's key set
 /// lacks, holds no series. Keeps what it learns of each key set it lays, until it is
-/// dropped, so only the first frame of a key set allocates: about 12 bytes for each
+/// dropped, so only the first frame of a key set allocates: about 16 bytes for each
 /// place in that key set. A node builds key sets only from the spec, which bounds
 /// them.
 #[derive(Debug)]
@@ -120,11 +121,10 @@ fn each(held: &Held, frame: &Frame, mut f: impl FnMut(usize, Range<usize>)) {
     let mut at = 0;
     for (entry, range) in View::new(frame, &held.mask).bounds() {
         let entry = to_u32(entry);
-        at = gallop(&held.entries, at, entry);
+        at += gallop(&held.entries[at..], |&(held, _)| held < entry);
         // The mask adds the index of each group, which a place need not name.
         if held.entries.get(at).is_some_and(|&(held, _)| held == entry) {
             f(at, range);
-            at += 1;
         }
     }
 }
@@ -151,21 +151,6 @@ fn lay(
         bounds,
         end,
     }));
-}
-
-/// The first position from `at` in `entries` whose entry is not below `entry`. Time
-/// is logarithmic in the distance moved.
-fn gallop(entries: &[(u32, u32)], at: usize, entry: u32) -> usize {
-    let below = |n: usize| entries.get(n).is_some_and(|&(held, _)| held < entry);
-    if !below(at) {
-        return at;
-    }
-    let mut step = 2;
-    while below(at + step - 1) {
-        step *= 2;
-    }
-    let (start, end) = (at + step / 2, (at + step).min(entries.len()));
-    start + entries[start..end].partition_point(|&(held, _)| held < entry)
 }
 
 /// A place as a `u32`.
@@ -297,7 +282,6 @@ mod tests {
             let mut places = Places::new(slots);
             let charge = charge(frame.ends().count(), frame.body().len());
             prop_assert_eq!(places.charge(&frame, &set), charge);
-            prop_assert!(places.placed.is_empty(), "the charge laid the frame");
             if set.groups().len() == 1 {
                 prop_assert_eq!(charge, frame.charge());
             }
