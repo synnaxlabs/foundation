@@ -1,7 +1,6 @@
-use std::slice;
-
 use document::diagnostic::{Code, Diagnostic};
-use document::{Block, Span, read, value};
+use document::value::Value;
+use document::{Block, Span, read};
 use spec::definition;
 use spec::placement::{Error, Nodes, Policy};
 use types::name::Name;
@@ -11,29 +10,37 @@ use crate::{Definition, Found, span};
 const EMPTY_PLACEMENT: Code = Code::new("config.empty-placement");
 const ROLE_OVERLAP: Code = Code::new("config.role-overlap");
 const KEYS: [&str; 4] = ["select", "home", "standby", "copies"];
-const ROLES: [&str; 3] = ["home", "standby", "copies"];
 
 /// Checks a `placement` block and gives its policy.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown(block, &KEYS);
     let select =
         found.select(block, "connectors and indexes that it places", "site_a.*");
-    let home = found.attribute(block, "home", read::name);
-    let standby = found.attribute(block, "standby", read::name);
-    let copies = found.attribute(block, "copies", read::names);
+    let home = found.attribute(block, "home", spanned);
+    let standby = found.attribute(block, "standby", spanned);
+    let copies = found.attribute(block, "copies", |value| {
+        read::items(value)
+            .iter()
+            .map(spanned)
+            .collect::<Result<Vec<_>, _>>()
+    });
     let (Ok(()), Ok(select), Ok(home), Ok(standby), Ok(copies)) =
         (unknown, select, home, standby, copies)
     else {
         return None;
     };
+    let copies = copies.unwrap_or_default();
+    let name = |(name, _): &(Name, Option<Span>)| name.clone();
     let nodes = Nodes {
-        home,
-        standby,
-        copies: copies.unwrap_or_default(),
+        home: home.as_ref().map(name),
+        standby: standby.as_ref().map(name),
+        copies: copies.iter().map(name).collect(),
     };
     match Policy::new(select, nodes.clone()) {
         Ok(policy) => {
-            found.nodes.extend(named(block));
+            found
+                .nodes
+                .extend(home.into_iter().chain(standby).chain(copies));
             Some(Definition::Spec(definition::Definition::Placement(policy)))
         }
         Err(error) => {
@@ -77,17 +84,7 @@ fn refuse(found: &mut Found<'_>, block: &Block, nodes: &Nodes, error: &Error) {
     found.diagnostics.push(diagnostic);
 }
 
-/// Each node that `block` names, with its span. [`check`] has read each one.
-fn named(block: &Block) -> impl Iterator<Item = (Name, Option<Span>)> + '_ {
-    let values = ROLES
-        .iter()
-        .filter_map(|role| block.body.attributes.get(role))
-        .flat_map(|attribute| match &attribute.value.kind {
-            value::Kind::List(items) => items.as_slice(),
-            _ => slice::from_ref(&attribute.value),
-        });
-    values.map(|value| {
-        let node = read::name(value).expect("invariant: `check` reads each node");
-        (node, value.span)
-    })
+/// Reads a value as a node's name, with its span.
+fn spanned(value: &Value) -> Result<(Name, Option<Span>), Diagnostic> {
+    Ok((read::name(value)?, value.span))
 }

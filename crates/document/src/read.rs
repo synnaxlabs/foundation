@@ -396,7 +396,8 @@ pub fn one_of(words: &[&str]) -> String {
 
 /// The items of a value that holds one item or a list: the items of a list, or the
 /// value itself.
-fn items(value: &Value) -> &[Value] {
+#[must_use]
+pub fn items(value: &Value) -> &[Value] {
     match &value.kind {
         Kind::List(items) => items,
         _ => slice::from_ref(value),
@@ -790,6 +791,23 @@ mod tests {
                     FIX
                 ))
             );
+        }
+    }
+
+    mod items {
+        use super::*;
+
+        #[test]
+        fn gives_the_items_of_a_list_or_the_value_itself() {
+            let one = string("n_1");
+            assert_eq!(items(&one), std::slice::from_ref(&one));
+            let empty = list(Vec::new());
+            assert_eq!(items(&empty), []);
+            let nested = list(vec![text("n_1"), Kind::List(vec![string("n_2")])]);
+            let Kind::List(each) = &nested.kind else {
+                unreachable!("`list` gives a list");
+            };
+            assert_eq!(items(&nested), each.as_slice());
         }
     }
 
