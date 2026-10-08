@@ -109,6 +109,14 @@ impl State {
         self.members.get(&key)
     }
 
+    /// The key of the member whose card holds `public_key`, or `None` when none does.
+    pub(crate) fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
+        let mut members = self.members.iter();
+        let (&key, _) =
+            members.find(|(_, member)| member.public_key() == public_key)?;
+        Some(key)
+    }
+
     /// The record of the ticket with `public_key`, or `None` when none is recorded.
     #[cfg_attr(
         not(test),
@@ -284,11 +292,14 @@ impl State {
         if self.members.contains_key(&key) {
             return Err(Unfit::Duplicate { key });
         }
+        if let Some(key) = self.holder(card.card().public_key) {
+            return Err(Unfit::Held { key });
+        }
         let mut lower = Vec::with_capacity(names.len());
         for name in names {
             let folded = name.as_str().to_ascii_lowercase();
-            if let Some(&holder) = self.names.get(&folded) {
-                return Err(Unfit::Taken { name, key: holder });
+            if let Some(&taker) = self.names.get(&folded) {
+                return Err(Unfit::Taken { name, key: taker });
             }
             if lower.contains(&folded) {
                 return Err(Unfit::Taken { name, key });
@@ -465,6 +476,11 @@ pub enum Unfit {
         /// The node.
         key: node::Key,
     },
+    /// Another member's card holds the public key of the member's card.
+    Held {
+        /// The member that holds it.
+        key: node::Key,
+    },
     /// The member's name, or the name of one of its status channels, equals a name
     /// that a member holds, ignoring ASCII case.
     Taken {
@@ -497,6 +513,9 @@ impl fmt::Display for Unfit {
                 Name::MAX_BYTES
             ),
             Self::Duplicate { key } => write!(f, "node {key} is already a member"),
+            Self::Held { key } => {
+                write!(f, "the public key of the card is held by node {key}")
+            }
             Self::Taken { name, key } => {
                 write!(f, "the name {name} is taken by node {key}")
             }
@@ -516,7 +535,8 @@ mod tests {
     use super::*;
     use crate::common::{
         EPHEMERAL, EXPIRY, create_members, digest, home, index, join, key as node,
-        name, options, public, record, signed, spec, status, with_status,
+        member, name, options, private, public, record, signed, spec, status, ticket,
+        with_status,
     };
 
     const FOUNDING: Digest = Digest([1; 32]);
@@ -525,6 +545,16 @@ mod tests {
     // `FOUNDING`, and no home.
     fn create_state(prefix: Prefix, members: Vec<Member>) -> Result<State, Unfit> {
         State::new(prefix, members, FOUNDING, [node(1)].into(), BTreeMap::new())
+    }
+
+    // The card of node `id` with `name`, which holds the public key of node `holder`
+    // and which `holder` signed.
+    fn holding(id: u8, holder: u8, name: &str) -> card::Signed {
+        let card = card::Card {
+            public_key: public(holder),
+            ..signed(id, name).card().clone()
+        };
+        card::Signed::sign(node(id), card, &private(holder))
     }
 
     // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
@@ -699,6 +729,24 @@ mod tests {
     }
 
     #[test]
+    fn holder_gives_the_member_with_a_public_key() {
+        let state = state();
+        assert_eq!(state.holder(public(2)), Some(node(2)));
+        assert_eq!(state.holder(public(3)), None);
+    }
+
+    #[test]
+    fn new_refuses_two_members_with_one_public_key() {
+        let twin = Member {
+            card: holding(3, 1, "plant.node3"),
+            ..member(3)
+        };
+        let error =
+            create_state(name("plant").into(), vec![member(1), twin]).unwrap_err();
+        assert_eq!(error, Unfit::Held { key: node(1) });
+    }
+
+    #[test]
     fn new_refuses_two_members_with_one_key() {
         let error =
             create_state(name("plant").into(), create_members(&[1, 2, 1])).unwrap_err();
@@ -849,6 +897,27 @@ mod tests {
                 prefix: name("plant.edge")
             }))
         );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_join_with_the_public_key_of_a_member_is_refused() {
+        let mut state = state();
+        let before = state.clone();
+        let card = holding(3, 1, "plant.edge.a");
+        let mut join = join(7, 3, "plant.edge.a");
+        join.admission = ticket(7).admission(&card);
+        join.card = card::Unchecked {
+            key: node(3),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        };
+        let held = Unfit::Held { key: node(1) };
+        assert_eq!(
+            held.to_string(),
+            format!("the public key of the card is held by node {}", node(1))
+        );
+        assert_eq!(state.apply(Change::Join(Box::new(join))), Err(held.into()));
         assert_eq!(state, before);
     }
 
