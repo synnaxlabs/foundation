@@ -4835,6 +4835,25 @@ mod tests {
     }
 
     #[test]
+    fn ended_wakes_each_task_that_waits() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let woken = Rc::new(Cell::new(0));
+            for _ in 0..2 {
+                let (ended, woken) = (mesh.ended(), Rc::clone(&woken));
+                tasks.spawn(async move {
+                    ended.await;
+                    woken.set(woken.get() + 1);
+                });
+            }
+            node.clock().sleep(Span::MILLISECOND).await;
+            drop(mesh);
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(woken.get(), 2);
+        });
+    }
+
+    #[test]
     fn ended_waits_for_each_task_that_sends() {
         solo(|node, tasks| async move {
             let config = config(&node, &tasks, 1, &IDS, &IDS);
