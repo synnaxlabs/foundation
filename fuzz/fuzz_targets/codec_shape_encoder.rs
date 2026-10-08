@@ -65,7 +65,7 @@ fn fixed(data_type: Type, element: Scalar, len: usize, count: usize, rest: &[u8]
 
 /// Encodes `count` samples of a list, `String`, or `Bytes` `data_type`. The remainder
 /// by 3 of the first byte of `rest` keeps the values the length that their ends need,
-/// adds a third of that byte in elements, or cuts the values to that byte's share of
+/// adds a third of that byte in bytes, or cuts the values to that byte's share of
 /// 256. The signed bytes after it change the ends.
 fn variable(data_type: Type, element: Scalar, max: u32, count: usize, rest: &[u8]) {
     let [fit, rest @ ..] = rest else {
