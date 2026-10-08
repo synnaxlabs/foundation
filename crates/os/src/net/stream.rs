@@ -358,7 +358,7 @@ mod tests {
     fn new_sets_linger_zero() {
         let (client, _server) = create_pair();
         let stream = stream(client);
-        // No call of the stream reads an option, so the test reads the descriptor.
+        // The public tests see the reset; this one names the option that makes it.
         let fd = stream.socket.fd().unwrap();
         assert_eq!(sockopt::socket_linger(fd), Ok(Some(Duration::ZERO)));
     }
