@@ -59,7 +59,10 @@
   by architect-2 (#1998, 2026-10-08 21:44 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069633568. The cut
   of the credit of a class that does not wait: architect-2 (#1998, 2026-10-08 22:51
-  UTC): https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279. Who
+  UTC): https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279.
+  Supersedes the sentence on the credit of a class that does not wait of
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069633568, and
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070164489. Who
   writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
   admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC, and #1998,

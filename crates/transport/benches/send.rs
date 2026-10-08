@@ -13,7 +13,7 @@
 //! scenario. A `try_send` makes no poll.
 //!
 //! The `waiting` lines send a round on their streams at once, over a session whose peer
-//! window holds a quarter of a 1 KiB round, so the sends wait for the QUIC window and
+//! window holds at most a quarter of a round, so the sends wait for the QUIC window and
 //! for their turn. They time the polls of a send, not the sim or the peer between
 //! polls. `latest and complete 1 KiB waiting` and `latest 2 KiB and complete 4 KiB
 //! budget` time a send only when it ends while a send of the other class waits, so a
