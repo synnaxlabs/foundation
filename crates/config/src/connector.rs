@@ -13,7 +13,7 @@ const KEYS: [&str; 2] = ["kind", "node"];
 /// its config, which is the body without `kind` and `node`, also when `node` is
 /// missing.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let fix = "Add a `kind` attribute with the connector's kind, such as \"influx\"";
+    let fix = "Add a `kind` attribute with the connector's kind";
     let kind = found.required(block, "kind", read::name, fix.into());
     let fix = "Add a `node` attribute with the name of the node that runs it, such as \
                \"edge\"";

@@ -5727,7 +5727,10 @@ Rules:
    `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
    so its tests build a `spec::connector::Connector` (`laptop.architect`,
    2026-10-08T03:01:36Z:
-   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927), and
+   `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
+   with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
+   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
@@ -5772,7 +5775,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
 | 3 | `daqmx-stub` | Stands in for NI's `libnidaqmx.so` in the tests of `connector-ni`, built as a shared library and as a Rust library. A dev-dependency of `connector-ni` only. | none |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
-| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
+| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector`; `config-hcl` and `connector-influx` as dev-dependencies only |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |

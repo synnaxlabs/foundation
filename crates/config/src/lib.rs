@@ -83,12 +83,12 @@ pub fn check(
         channels: channels(documents),
         kinds,
     };
-    let kinds = KINDS.map(|(kind, _)| kind.as_str());
+    let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
         found
             .diagnostics
-            .extend(read::unknown(document, "a file", &[], &kinds));
+            .extend(read::unknown(document, "a file", &[], &keywords));
         for block in &document.blocks {
             let Some((kind, check_block)) = KINDS
                 .iter()

@@ -109,7 +109,7 @@ fn refuses_a_connector_with_no_kind_or_no_node() {
         "document.missing-attribute",
         "connector",
         "the `connector` block has no `kind`",
-        "Add a `kind` attribute with the connector's kind, such as \"influx\"",
+        "Add a `kind` attribute with the connector's kind",
     )];
     expected.push((
         "document.missing-attribute",
