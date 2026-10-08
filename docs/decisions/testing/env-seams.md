@@ -86,7 +86,11 @@
   #1972 patches noq-udp to send an IPv4 source as `IP_PKTINFO` on Apple, macOS ignores
   each IPv4 source and sends from an address of its choice, with no error. Decided by
   `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958). On `os`,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
+  `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
+  no `net` under `--cfg loom`; #2038 gives the loom models a cfg name of their own and
+  removes the feature. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415). On `os`,
   a peer that resets after the handshake gives `Ok` from `Net::connect`, and the stream
   reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the
   connect, an IPv4-mapped address as plain IPv4, and any other address as given, with
