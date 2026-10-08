@@ -1025,11 +1025,15 @@ How to read this record:
   (OS CLOCK BOUND) it is 36500 days ahead, so the ahead limit stops nothing and one bad
   stamp makes each later true stamp `Backwards` (#952 review, 2026-10-06).
 - **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
-  `codec`, and `home` items, apart from two. `Config`, which only `node` builds, names
+  `codec`, and `home` items, apart from three. `Config`, which only `node` builds, names
   `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
   shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool,
   so `hub` takes no pool of its own and the two cannot differ (architect,
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051). `Config`
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
+  `home::reader` re-exports the `delivery` values that the surface names: `Next`,
+  `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
+  2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367). `Config`
   takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
   for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
   the caller gives it with no entry that waits for a commit. The condition is stated,
@@ -1040,9 +1044,6 @@ How to read this record:
   PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
   Until then, the shard is the only writer (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6034204295).
-  It also names the `delivery` values that `home::reader` re-exports (`Next`,
-  `Position`, `Error`, `named::Key`, and `complete::Charge`) (`laptop.architect`,
-  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
   `home::Error` holds only what `write` gives, and each other call has its own error.
   Conversions from `control` errors are private. The `hub` row stays as it is. `Shard`
   gives no stored seq until a caller needs one (architect review,
@@ -1081,8 +1082,8 @@ How to read this record:
   #274 ends it at `Readers::deadline`. An open of the same key takes the old session
   over, and `reader::Opened::replaced` names it. `home::reader` re-exports
   `delivery::{Error, Position, named}`, so `hub` does not depend on `delivery`
-  (`laptop.architect`,
-  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
+  (`laptop.architect`, 2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
   `home` drops the position records of `delivery` until #274 appends them to the index
   log, so a reopen after a restart starts at the live tail. Lost: one open that takes a
   `delivery::Reader`, because only a named open can fail. Decided by `laptop.architect`
@@ -4965,12 +4966,12 @@ How to read this record:
 - **R16-10 (#340)** One exception to one path per item (r16 2): `hub` re-exports each
   item of another layer-2 crate that its public surface names, at the same path under
   a module named for that crate (`hub::home::Error` for `home::Error`). Layer 3 names
-  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
-  re-exports, and only items its own signatures use. Layer 2 and `node` name the item
-  at its home. Copies of the types lost: each change in `home` needs a change in
-  `hub`. Decided by the architect (#340). `home` also re-exports the `delivery` values
-  that its surface names (`laptop.architect`,
-  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
+  a layer-2 item only through `hub` (X44), so it has no other path. Only `hub` and
+  `home` (for the `delivery` values that its surface names) re-export, and only items
+  their own signatures use. Layer 2 and `node` name the item at its home. Copies of
+  the types lost: each change in `home` needs a change in `hub`. Decided by the
+  architect (#340). The `home` exception: `laptop.architect`, 2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
