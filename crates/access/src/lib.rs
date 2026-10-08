@@ -22,6 +22,17 @@ pub struct Rules {
     subjects: Map<Name, Subject>,
 }
 
+/// No subject, policy, or connector: each hello gets [`proof::Error::Unknown`].
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            policies: Vec::new(),
+            connectors: Set::default(),
+            subjects: Map::default(),
+        }
+    }
+}
+
 impl Rules {
     /// Builds the rules from the region trees that the owner reads. Each item is the
     /// prefix of a region, with [`Prefix::ROOT`] for the root region, and the
@@ -40,11 +51,7 @@ impl Rules {
     where
         T: IntoIterator<Item = (&'a Name, &'a Definition)>,
     {
-        let mut rules = Self {
-            policies: Vec::new(),
-            connectors: Set::default(),
-            subjects: Map::default(),
-        };
+        let mut rules = Self::default();
         for (region, tree) in trees {
             for (name, definition) in tree {
                 match definition {

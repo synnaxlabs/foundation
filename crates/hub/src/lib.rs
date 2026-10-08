@@ -14,7 +14,7 @@ use std::task::Waker;
 
 use types::frame::key_set::Interner;
 use types::hash;
-use types::name::{Name, Prefix};
+use types::name::Name;
 
 pub use channel::Channel;
 pub use link::{Link, Served};
@@ -112,10 +112,7 @@ impl Hub {
             node,
             time,
             entropy,
-            rules: access::Rules::new(std::iter::empty::<(
-                Prefix,
-                [(&Name, &spec::definition::Definition); 0],
-            )>()),
+            rules: access::Rules::default(),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
