@@ -3865,7 +3865,7 @@ How to read this record:
   `value::Kind::text` gives the text of a string or of a reference, so each place that
   reads the two as the same text matches them once (`laptop.architect-2`, #1702,
   2026-10-08T06:05:28Z,
-  [ruling](https://github.com/synnaxlabs/foundation/issues/1702#issuecomment-6053513102)).
+  https://github.com/synnaxlabs/foundation/issues/1702#issuecomment-6053513102).
   `export` and `discover` write every name as a string (`"site_a.pt_1"`): they need no
   HCL rule, and a generated file reads back as exactly the Document it came from. This
   replaces the #363 ruling that a file writes a reserved name only as a string. The
@@ -3916,7 +3916,9 @@ How to read this record:
   `laptop.architect-2` at 2026-10-08T07:04:36Z
   (https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
   Supersedes the clause "A negative span reads, and each caller owns its bound" of
-  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886, and its
+  `error.fix()` for `time::Error::Long`: that fix is now "Use a span from "0s" to
+  "106751d"", since each span it names reads.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
