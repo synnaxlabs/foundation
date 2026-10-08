@@ -1844,7 +1844,7 @@ End of search list.
         append("src/util/ua_encryptedsecret.c", "#include <time.h>\n");
         append(
             "src/util/ua_util.c",
-            "#include <stdio.h>\n#include <time.h>\n",
+            "#include <sys/socket.h>\n#include <sys/types.h>\n",
         );
         assert_eq!(
             check(&root),
@@ -1852,7 +1852,7 @@ End of search list.
                 "src/util/ua_encryptedsecret.c: includes the system header `time.h`, \
                  which SYSTEM_HEADERS does not list"
                     .to_owned(),
-                "src/util/ua_util.c: includes the system header `time.h`, which \
+                "src/util/ua_util.c: includes the system header `sys/types.h`, which \
                  SYSTEM_HEADERS does not list"
                     .to_owned(),
             ])
