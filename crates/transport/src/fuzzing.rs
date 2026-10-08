@@ -21,3 +21,23 @@ pub fn peer(protocol: Option<&[u8]>, chain: &[&[u8]]) -> Option<Peer> {
 pub fn certificate(private_key: &PrivateKey) -> Vec<u8> {
     tls::certificate(private_key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_node_certificate_reads_back_to_its_node() {
+        let private_key = PrivateKey([1; 32]);
+        let der = certificate(&private_key);
+        assert_eq!(
+            peer(Some(b"foundation/1"), &[&der]),
+            Some(Peer::Node(private_key.public()))
+        );
+    }
+
+    #[test]
+    fn a_refused_chain_gives_no_peer() {
+        assert_eq!(peer(Some(b"foundation/1"), &[&[1, 2, 3]]), None);
+    }
+}
