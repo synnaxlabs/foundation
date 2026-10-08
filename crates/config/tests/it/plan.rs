@@ -19,6 +19,8 @@ use types::digest::Digest;
 use types::ed25519::PrivateKey;
 use types::name::{Name, Selector};
 
+mod codec;
+
 const EDGE: &str = include_str!("../../../acceptance/tests/it/fixtures/edge.hcl");
 const INFLUX: &str = include_str!("../../../acceptance/tests/it/fixtures/influx.hcl");
 

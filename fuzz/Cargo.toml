@@ -72,6 +72,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "config_plan"
+path = "fuzz_targets/config_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "config_hcl_read"
 path = "fuzz_targets/config_hcl_read.rs"
 test = false

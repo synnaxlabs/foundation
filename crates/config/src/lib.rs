@@ -7,7 +7,7 @@ mod connector;
 mod node_settings;
 mod openssh;
 mod placement;
-mod plan;
+pub mod plan;
 mod private_key;
 mod retention;
 mod subject;

@@ -1,3 +1,7 @@
+//! The change from a mesh's spec to its config files, and the plan file that holds it.
+
+mod codec;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
@@ -11,6 +15,8 @@ use types::digest::Digest;
 use types::name::Name;
 
 use crate::{Definition, Entry, Found, KINDS, channel, checked, sort, span};
+
+pub use codec::Error;
 
 const CONNECTOR_HOME: Code = Code::new("config.connector-home");
 const SPLIT_PLACEMENT: Code = Code::new("config.split-placement");
@@ -58,7 +64,15 @@ pub fn plan(
     kinds: &Table,
 ) -> Result<Plan, Vec<Diagnostic>> {
     let found = checked(documents, kinds)?;
-    let channels = channels(&found.entries, applied);
+    let kinds =
+        found
+            .entries
+            .iter()
+            .filter_map(|(name, entry)| match &entry.definition {
+                Definition::Channel(kind) => Some((name, kind)),
+                Definition::Spec(_) => None,
+            });
+    let channels = channels(kinds, BTreeMap::new(), applied, unheld(applied));
     let mut diagnostics = wrong(&found, &channels);
     let placements = placements(&found);
     let indexes = indexes(&found, &placements, &mut diagnostics);
@@ -90,6 +104,73 @@ pub struct Plan {
     pub homes: BTreeMap<Name, Name>,
 }
 
+impl Plan {
+    /// The canonical bytes of the plan, which start with the plan format version. The
+    /// bytes hold no span, so [`Plan::decode`] gives each `label_span` as `None`.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        codec::encode(self)
+    }
+
+    /// Reads the bytes of [`Plan::encode`]. Never panics: the bytes come from a user.
+    /// A plan that it reads encodes to the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Version`] when the format version is not the one this build writes.
+    /// - [`Error::Malformed`] at the first byte that [`Plan::encode`] does not write.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        codec::decode(bytes)
+    }
+
+    /// The definitions of the spec after the plan, by tree key: `applied` with each
+    /// change. A channel keeps the key of the stored channel at its name, and a new
+    /// name gets a key from `key`, in name order. An edge to a name that is no channel
+    /// after the plan gets a key from `key` too, which [`spec::region::check`] refuses
+    /// as dangling. `key` must give keys that no channel holds.
+    #[must_use]
+    pub fn definitions(
+        &self,
+        applied: &BTreeMap<Name, definition::Definition>,
+        key: impl FnMut() -> Key,
+    ) -> BTreeMap<Name, definition::Definition> {
+        let mut definitions = applied.clone();
+        for change in &self.changes {
+            definitions.remove(&change.name);
+        }
+        let kept = definitions
+            .iter()
+            .filter_map(|(name, definition)| match definition {
+                definition::Definition::Channel(channel) => Some((name, channel.key)),
+                _ => None,
+            })
+            .collect();
+        let kinds = self.changes.iter().filter_map(|change| {
+            match &change.new.as_ref()?.definition {
+                Definition::Channel(kind) => Some((&change.name, kind)),
+                Definition::Spec(_) => None,
+            }
+        });
+        let channels = channels(kinds, kept, applied, key);
+        for change in &self.changes {
+            if let Some(Entry {
+                definition: Definition::Spec(definition),
+                ..
+            }) = &change.new
+            {
+                definitions.insert(change.name.clone(), definition.clone());
+            }
+        }
+        let channels = channels.into_iter();
+        definitions.extend(
+            channels.map(|(name, channel)| {
+                (name, definition::Definition::Channel(channel))
+            }),
+        );
+        definitions
+    }
+}
+
 /// One definition that the plan adds, changes, or removes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -103,13 +184,9 @@ pub struct Change {
     pub new: Option<Entry>,
 }
 
-/// The channel of each `channel` entry. It keeps the key of the stored channel at its
-/// name. Else it gets `Key::from_u128(n)` for the least `n` that no stored channel or
-/// earlier entry holds.
-fn channels(
-    entries: &BTreeMap<Name, Entry>,
-    applied: &BTreeMap<Name, definition::Definition>,
-) -> BTreeMap<Name, Channel> {
+/// Gives `Key::from_u128(n)` for each `n` from 1 up that no channel of `applied`
+/// holds.
+fn unheld(applied: &BTreeMap<Name, definition::Definition>) -> impl FnMut() -> Key {
     let held: BTreeSet<Key> = applied
         .values()
         .filter_map(|definition| match definition {
@@ -117,40 +194,45 @@ fn channels(
             _ => None,
         })
         .collect();
-    let mut made = (1..).map(Key::from_u128).filter(|key| !held.contains(key));
-    let keys: BTreeMap<&Name, Key> = entries
-        .iter()
-        .filter(|(_, entry)| matches!(entry.definition, Definition::Channel(_)))
-        .map(|(name, _)| match applied.get(name) {
-            Some(definition::Definition::Channel(channel)) => (name, channel.key),
-            _ => (
-                name,
-                made.next().expect("invariant: fewer than 2^128 channels"),
-            ),
-        })
-        .collect();
-    let mut channels = BTreeMap::new();
-    for (name, entry) in entries {
-        let Definition::Channel(kind) = &entry.definition else {
-            continue;
+    let mut made = (1..)
+        .map(Key::from_u128)
+        .filter(move |key| !held.contains(key));
+    move || made.next().expect("invariant: fewer than 2^128 channels")
+}
+
+/// The channel of each of `kinds`, which come in name order, by name. A channel
+/// keeps the key of the channel that `applied` stores at its name, and else gets one
+/// from `key`. An edge points at the channel at its name in `kinds` or `kept`, or else
+/// at a key from `key`.
+fn channels<'n>(
+    kinds: impl Iterator<Item = (&'n Name, &'n spec::channel::Kind<Name>)>,
+    mut kept: BTreeMap<&'n Name, Key>,
+    applied: &BTreeMap<Name, definition::Definition>,
+    mut key: impl FnMut() -> Key,
+) -> BTreeMap<Name, Channel> {
+    let kinds: Vec<_> = kinds.collect();
+    for &(name, _) in &kinds {
+        let stored = match applied.get(name) {
+            Some(definition::Definition::Channel(channel)) => channel.key,
+            _ => key(),
         };
-        let kind = kind.clone().map(|to| {
-            *keys.get(&to).unwrap_or_else(|| {
-                panic!(
-                    "invariant: `check` refuses the edge to `{to}`, which no block \
-                     defines"
-                )
-            })
-        });
-        channels.insert(
-            name.clone(),
-            Channel {
-                key: keys[name],
-                kind,
-            },
-        );
+        kept.insert(name, stored);
     }
-    channels
+    kinds
+        .into_iter()
+        .map(|(name, kind)| {
+            let kind = kind
+                .clone()
+                .map(|to| kept.get(&to).copied().unwrap_or_else(&mut key));
+            (
+                name.clone(),
+                Channel {
+                    key: kept[name],
+                    kind,
+                },
+            )
+        })
+        .collect()
 }
 
 /// A `config.wrong-channel` diagnostic for each edge to a channel that is not what the
