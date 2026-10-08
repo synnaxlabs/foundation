@@ -115,8 +115,8 @@ state on `main`.
 - The first message of a stream, and each datagram, starts with a `wire` header
   (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
   counts such a datagram. A client opens only hub streams; `node` refuses the other
-  protocols from a client. `wire::header` landed; the dispatch table in `node` is not
-  built.
+  protocols from a client. `node` stops and resets each stream until a protocol has a
+  server. It reads no datagram yet (#1661), and admits every peer (#1628).
 
 ### Subject to owner
 
@@ -355,11 +355,11 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
-| `spec_data_type` | `spec::channel::DataType` | Prints as the text it was read from |
+| `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
-| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, and each definition decodes to itself; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |

@@ -166,10 +166,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
   `Kind::edges` gives each edge and the channel it points at, in this order: the error
   then the control channel of an index, or the index then the quality channel of a
-  data channel. `check` reads the edges through it, and `config` will too. Each user
-  error has a fix: `unit::Error::fix`, and `document::value::Kind::noun` names a value
-  that has the wrong kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
+  data channel. `check` reads the edges through it. Each user error has a fix:
+  `unit::Error::fix`, and `document::value::Kind::noun` names a value that has the wrong
+  kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
+  Amended: `config` reads each edge from its attribute, so that another bad attribute
+  does not hide an unknown edge (`laptop.architect-2`, 2026-10-08T01:32:47Z,
+  https://github.com/synnaxlabs/foundation/pull/1685#issuecomment-6050335562).
+  Supersedes the `config` caller of `Kind::edges` in
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294.
   `types` owns the text of `sample::Type` both ways (`Display` and `FromStr`): exact
   case, no leading zero in a count, and one space after the comma of a list; `Stamp` and
   `Span` read and show as `timestamp` and `duration` (A9), so a text that reads shows as
@@ -185,11 +190,11 @@ How to read this record:
   Amended: `sample::Type::Matrix { element, rows: u16, columns: u16 }` holds
   `T[rows][columns]` (A13), row-major, with the bytes of an array of `rows * columns`
   elements. Its fields are public: no `u16` pair overflows `width`, so no format needs a
-  check. Its text is `f32[2][3]`; a length over 65535 is `Error::Matrix`, and more than
-  two lengths is `Error::Lengths`. The spec's data type code of a matrix is `MATRIX` 6,
-  then the element code, `rows: u16`, and `columns: u16`. A matrix of a number can have
-  a unit, by the element's rule, as an array. Decided by `laptop.architect`
-  (2026-10-07T17:30:55Z):
+  check. Its text is `f32[2][3]`; a length over 65535 is `Error::Matrix` (amended
+  below), and more than two lengths is `Error::Lengths`. The spec's data type code of a
+  matrix is `MATRIX` 6, then the element code, `rows: u16`, and `columns: u16`. A matrix
+  of a number can have a unit, by the element's rule, as an array. Decided by
+  `laptop.architect` (2026-10-07T17:30:55Z):
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011, and for
   the spec by `laptop.architect-2` (2026-10-07T17:27:36Z):
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043187013.
@@ -206,13 +211,27 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6044826781.
   Supersedes the field shape of
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
-  `channel::DataType` reads and writes `quality`, and otherwise the text of
-  `sample::Type`. A text that is neither is `channel::Error::DataType`, which holds the
+  Amended: each fault of a matrix side (not digits, a leading zero, or over 65535) is
+  `Error::Matrix`, as only it states the range of a side; `Error::Count` covers only an
+  array length and a list maximum. Decided by `laptop.architect` (2026-10-08T01:01:30Z):
+  https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6049989554.
+  Supersedes, in
+  https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011, its
+  `Count` for a side that is not a count, and the `Matrix` message and fix.
+  `spec::data_type::DataType` reads and writes `quality`, and otherwise the text of
+  `sample::Type`. A text that is neither is `data_type::Error`, which holds the
   `sample::Error`; its message names `quality` when the text has no form, and its fix is
-  the cause's. Decided by `laptop.architect-2`: the mapping (2026-10-07T11:21:13Z,
-  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520), and
-  the payload, message, and fix (2026-10-08T00:47:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6049836256).
+  the cause's. `channel::Error` holds only `Unit`, so each call gives only the errors it
+  can make. Decided by `laptop.architect-2`: the mapping (2026-10-07T11:21:13Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520), the
+  payload, message, and fix (2026-10-08T00:47:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6049836256), and the
+  module and error split (2026-10-08T01:32:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6050335363).
+  Supersedes change 2 of
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and the
+  `channel::Error::DataType` target of the mapping in
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -779,6 +798,13 @@ How to read this record:
   (2026-10-07T10:59:02Z and 2026-10-07T11:18:03Z):
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036483605 and
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036799415.
+  A `Commit` answers for the entries appended before its call, and nothing else. Held
+  past the drop, it resolves once the task ended: with `Ok` when those entries are
+  durable, else with the error that ended the task. A caller that needs each entry
+  durable before the drop calls `committed` after its last append. Lost: the error of
+  the task to each `Commit` held past the drop, a second meaning only after the drop.
+  Decided by `laptop.architect` (#1234, 2026-10-07T07:06:07Z):
+  https://github.com/synnaxlabs/foundation/issues/1234#issuecomment-6032824731.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group with
   samples of a write: the writer's key set with only that group present, its range,
   and its encoded series. The home stores it, keeps it as the index's newest frame,
@@ -3703,6 +3729,21 @@ How to read this record:
   not depend on the order that a tool reads them. The problems can differ. Decided by
   architect-2 (#1444, 2026-10-07T17:08:05Z,
   https://github.com/synnaxlabs/foundation/pull/1444#issuecomment-6042832407).
+- **CHANNEL BLOCK (2026-10-08)** `channel "<name>" { kind, ... }` defines one channel
+  (S5) at its own name. `kind` is `"index"` or `"data"`, and `"data"` is the default.
+  An index takes `error` and `control`. A data channel takes `index` and `data_type`,
+  which it needs, and `quality` and `unit`. Each value is a string or a reference.
+  `config::check` gives `config::Definition::Channel`, a `spec::channel::Kind<Name>`
+  whose edges are names until `plan` gives each channel its key. `Definition::Spec`
+  holds each other definition. Each edge must name a channel that a `channel` block of
+  the Documents defines, or `check` gives `config.unknown-channel`, at the span of the
+  edge, in source order. An edge to a channel that only the stored spec has (X28) gives
+  it too, until #1082. Lost: `spec::definition::Definition<C = Channel>`, because `plan`
+  would then wrap each of the eight variants again to change one. Decided by
+  `laptop.architect-2` (#1152, 2026-10-07T11:17:44Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
+  2026-10-08T00:51:39Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
 
 ### 1.12 Access, identity, and secrets
 
@@ -4428,6 +4469,35 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411. When a
   caller outside the tests of `node` builds a result channel, file an `interface` issue
   for a result from `spawn`.
+- **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
+  on `Config::net` before any shard starts; a failed bind starts no shard, and
+  `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which
+  builds the transport with `Config::private_key` once the last shard has opened its
+  buffer (X42), so the node takes no session before that. Its limits are patches until
+  #1662 makes them settings, as LIMITS of SHARD HOMES is: window 1 MiB, 64 streams of
+  each kind, idle 30 s, and messages of the smaller of 64 KiB and the pool's largest
+  block. Each session runs in its own future, and each stream of it reads its header in
+  its own future, so a late header delays no other stream. One exhaustive `match` on
+  `wire::Protocol` in `node` routes each stream; until a protocol has a server, its arm
+  stops the stream with `Code(wire::header::REJECTED)` and resets the reply half with
+  the same code, as for a header that does not decode, or for a first message with bytes
+  after the header. The node reads no datagram until the first protocol that takes
+  datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
+  reads the key from its data directory (#1660). The node admits every peer that
+  completes the handshake until the mesh states its rule. At the stop, each session and
+  stream future drops, then the transport. The bound on the wait for a header is #1628.
+  A transport that stops with an error ends the routing and the node runs on with no
+  port, until #1647 stops the node. #1647 merges before the first protocol in `route`
+  gets a server. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
+  datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047.
+  Amended (2026-10-07, #1649 round 1, a finding of `performance` that
+  `laptop.integrator-1` deferred, 23:41 UTC): the window caps a session at the window
+  over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
+  bandwidth-delay product. The number of sessions has no bound until #1628.
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -4667,7 +4737,7 @@ Storage classes used in the table:
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
-| Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
+| Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (`spec::data_type`, meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |
 | Struct template | Files. `config` expands it into one channel per field. Stored form is open (5.1) | People, `discover` | `config` (expand, plan), SDK code generation, `export` | `spec`, `config` |
 | Unit | Files, on a primitive channel or a struct field; Spec on the data channel. The unit table and standard codes are in the binary | People, `discover` | Unit checks at plan, sinks, reduction checks | `spec` (`spec::unit`) |
