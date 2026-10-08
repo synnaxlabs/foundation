@@ -1550,6 +1550,15 @@ mod tests {
         mesh.group.borrow().raft.term()
     }
 
+    /// The term for which `mesh` asks node `to` for a pre-vote: the term after its
+    /// own. A voter that follows no leader asks within two election timeouts.
+    async fn pre_vote_term(mesh: &Mesh, to: u8) -> Term {
+        let asked = mesh.outgoing(key(to)).await.unwrap();
+        let last = Position::default();
+        assert_eq!(asked.body, Body::PreVote { last });
+        asked.term
+    }
+
     /// What `future` gives, or `None` when it waits for longer than `limit`.
     async fn within<F: Future>(
         clock: &Clock,
@@ -2051,7 +2060,7 @@ mod tests {
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 4).await);
-                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(pre_vote_term(&mesh, 2).await, Term(1));
             });
         }
 
@@ -2097,6 +2106,7 @@ mod tests {
                 assert_eq!(mesh.receive(public(2), heartbeat), Err(refused));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
+                // A node with no voters sends no message, so no call gives its term.
                 assert_eq!(term(&mesh), Term(0));
             });
         }
@@ -2124,7 +2134,7 @@ mod tests {
                 }
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
-                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(pre_vote_term(&mesh, 2).await, Term(1));
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
                 let reply = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
@@ -2146,7 +2156,7 @@ mod tests {
                 );
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
-                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(pre_vote_term(&mesh, 2).await, Term(1));
             });
         }
 
@@ -2242,9 +2252,8 @@ mod tests {
                 assert_eq!(mesh.receive(public(2), short), Err(Error::Raft(unproven)));
                 let claim = Error::Claim(claim::Error::Forged { signer: key(2) });
                 assert_eq!(mesh.receive(public(2), forged), Err(claim));
-                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(pre_vote_term(&mesh, 2).await, Term(1));
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-                assert_eq!(term(&mesh), common::TERM);
                 let reply = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
             });
@@ -2276,7 +2285,7 @@ mod tests {
                 assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Err(forged));
                 node.clock().sleep(TICK).await;
                 assert!(quiet(&mesh, 2).await);
-                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(pre_vote_term(&mesh, 2).await, Term(1));
                 let probe = Body::Append {
                     prev: at,
                     entries: Vec::new(),
@@ -2307,6 +2316,7 @@ mod tests {
                 let lie = ready.messages.remove(0);
                 let refused = Error::NotVoter { from: key(4) };
                 assert_eq!(mesh.receive(public(4), lie), Err(refused));
+                // A node with no voters sends no message, so no call gives its term.
                 assert_eq!(term(&mesh), Term(0));
             });
         }
@@ -2408,8 +2418,7 @@ mod tests {
             let held = fill(&pool);
             assert!(started(&mesh, home(2)).await.is_pending());
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-            assert_eq!(mesh.group.borrow().state.home(INDEX), Some(key(1)));
-            assert_eq!(mesh.group.borrow().running(), Ok(()));
+            assert!(now(pin!(watch.next())).await.is_pending());
             drop(held);
             assert_eq!(watch.next().await, Ok(Some(key(2))));
         });
@@ -2702,6 +2711,8 @@ mod tests {
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
             let mesh = Mesh::start(config).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
             switch.refuse();
             let refused = block::Error::Refused { requested: 1 };
             assert_eq!(pool.alloc(1).err(), Some(refused));
@@ -2709,7 +2720,7 @@ mod tests {
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
             assert!(quiet(&mesh, 2).await);
-            assert_eq!(mesh.group.borrow().running(), Ok(()));
+            assert!(now(pin!(watch.next())).await.is_pending());
             switch.allow();
             let reply = mesh.outgoing(key(2)).await.unwrap();
             assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
@@ -3559,6 +3570,7 @@ mod tests {
                 poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx).is_pending())).await
             );
             node.clock().sleep(TICK).await;
+            // No call of `Mesh` gives the wakers that the group holds.
             let slots: Vec<_> = mesh.group.borrow().watches.keys().copied().collect();
             assert_eq!(slots, [3]);
         });
@@ -3641,14 +3653,48 @@ mod tests {
         });
     }
 
+    /// Gives node 1 a probe of leader 2 that it rejects, then `heartbeats`
+    /// heartbeats, with no read of a reply between them. Gives each reply to node 2.
+    async fn replies(mesh: &Mesh, clock: &Clock, heartbeats: usize) -> Vec<Body> {
+        let probe = Body::Append {
+            prev: Position {
+                term: common::TERM,
+                index: 1,
+            },
+            entries: Vec::new(),
+            commit: 0,
+        };
+        assert_eq!(mesh.receive(public(2), proven(2, 1, probe)), Ok(()));
+        for _ in 0..heartbeats {
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+        }
+        clock.sleep(TICK).await;
+        let mut replies = Vec::new();
+        while let Poll::Ready(reply) = now(pin!(mesh.outgoing(key(2)))).await {
+            let reply = reply.unwrap();
+            assert_eq!(reply, message(1, 2, reply.body.clone()));
+            replies.push(reply.body);
+        }
+        replies
+    }
+
+    #[test]
+    fn a_queue_holds_64_messages() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let mut expected = vec![Body::AppendReject { hint: 0 }];
+            expected.resize(64, Body::HeartbeatReply);
+            assert_eq!(replies(&mesh, &node.clock(), 63).await, expected);
+        });
+    }
+
     #[test]
     fn a_full_queue_drops_its_oldest_message() {
-        let mut queue = Queue::default();
-        let heartbeat = |commit| message(1, 2, Body::Heartbeat { commit });
-        (0..=64)
-            .map(heartbeat)
-            .for_each(|message| queue.push(message));
-        let expected: Vec<_> = (1..=64).map(heartbeat).collect();
-        assert_eq!(Vec::from(queue.messages), expected);
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let replies = replies(&mesh, &node.clock(), 64).await;
+            assert_eq!(replies, vec![Body::HeartbeatReply; 64]);
+        });
     }
 }
