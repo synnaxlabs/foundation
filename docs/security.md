@@ -350,7 +350,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
 | `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
-| `mesh_log` | The decode of one mesh log record: the header, its checks and version, and the hard state and entries of the body, by `mesh::testing::round_trip_log_record` after `seal_log_record` | Encodes to the same bytes |
+| `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` makes both checks pass | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |

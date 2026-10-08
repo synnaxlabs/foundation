@@ -491,6 +491,13 @@ mod tests {
     }
 
     #[test]
+    fn a_log_record_with_bytes_after_it_gives_none() {
+        let record = log::encode(0, Some(hard(true)), &entries());
+        let two = [&record[..], &record[..]].concat();
+        assert_eq!(round_trip_log_record(&two), None);
+    }
+
+    #[test]
     fn seal_does_nothing_to_less_than_a_header() {
         let record = log::encode(0, None, &[]);
         let mut short = record[..HEADER - 1].to_vec();
