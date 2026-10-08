@@ -55,8 +55,11 @@ impl Loop {
     pub(crate) fn next(&self) -> Option<Monotonic> {
         // SAFETY: the member takes its own loop.
         let ticks = unsafe { (self.members().next_timer)(self.raw()) };
-        (ticks != i64::MAX)
-            .then(|| Monotonic(u64::try_from(ticks).unwrap_or(0).saturating_mul(100)))
+        (ticks != i64::MAX).then(|| {
+            let ticks = u64::try_from(ticks)
+                .expect("invariant: each due time is the clock's time or later");
+            Monotonic(ticks.saturating_mul(100))
+        })
     }
 }
 
