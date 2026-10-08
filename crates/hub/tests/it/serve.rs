@@ -14,7 +14,8 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::Pool;
 use env::files::Operation;
 use env::tasks::Tasks;
-use hub::{Channel, serve};
+use hub::serve;
+use spec::data_type::DataType;
 use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code, Port, Transport};
 use types::channel;
@@ -680,12 +681,10 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
     let home = |test: Test, incoming| async move {
         let names: Vec<_> = KEYS.map(|key| format!("v{key}")).collect();
         for (key, name) in KEYS.zip(&names) {
-            test.hub.define(Channel {
-                key: channel::Key::from_u128(key),
-                name: super::name(name),
-                data_type: I64,
-                index: channel::Key::from_u128(1),
-            });
+            test.hub.define([(
+                &super::name(name),
+                &super::spec_channel(key, DataType::Sample(I64), 1),
+            )]);
         }
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let mut writer = test.writer("a", &names).await;
@@ -732,12 +731,10 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
     let written = raw.clone();
     let home = |test: Test, incoming| async move {
-        test.hub.define(Channel {
-            key: channel::Key::from_u128(6),
-            name: super::name("text"),
-            data_type: Type::String,
-            index: channel::Key::from_u128(1),
-        });
+        test.hub.define([(
+            &super::name("text"),
+            &super::spec_channel(6, DataType::Sample(Type::String), 1),
+        )]);
         let mut writer = test.writer("a", &["text", "value"]).await;
         let (clock, now) = (test.clock.clone(), test.now());
         test.tasks.spawn(async move {
@@ -802,12 +799,10 @@ fn sends_no_message_for_a_last_series_of_no_bytes() {
         };
         let types = KEYS.map(|_| I64).chain([empty]);
         for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
-            test.hub.define(Channel {
-                key: channel::Key::from_u128(key),
-                name: super::name(name),
-                data_type,
-                index: channel::Key::from_u128(1),
-            });
+            test.hub.define([(
+                &super::name(name),
+                &super::spec_channel(key, DataType::Sample(data_type), 1),
+            )]);
         }
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let mut writer = test.writer("a", &names).await;
@@ -1034,12 +1029,10 @@ fn stops_a_session_whose_ends_find_the_pool_empty_with_busy() {
     let home = move |test: Test, incoming| async move {
         let names: Vec<_> = WIDE[1..].iter().map(|key| format!("v{key}")).collect();
         for (&key, name) in WIDE[3..].iter().zip(&names[2..]) {
-            test.hub.define(Channel {
-                key: channel::Key::from_u128(key),
-                name: super::name(name),
-                data_type: I64,
-                index: channel::Key::from_u128(1),
-            });
+            test.hub.define([(
+                &super::name(name),
+                &super::spec_channel(key, DataType::Sample(I64), 1),
+            )]);
         }
         let names = [
             &["value", "value-c"][..],

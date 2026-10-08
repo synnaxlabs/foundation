@@ -24,11 +24,11 @@ exclude_re = [
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes these lines.
   'crates/transport/src/datagram\.rs:',
-  'crates/transport/src/stream\.rs:.*Receiver::recv_into\b',
   'crates/transport/src/session\.rs:.*Session::datagrams\b',
   # Parts in the block reach the sum of the slow path of `size` only when (bytes +
-  # 255) times the count of parts overflows `usize`, such as 16 Mi parts of a block of
-  # 1 TiB, which no test can allocate. Parts outside the block panic first.
+  # 255) times the count of parts overflows `usize`, such as 2^33 parts of a block of
+  # 2 GiB, the largest block, which no test can allocate. Parts outside the block
+  # panic first.
   'crates/transport/src/stream\.rs:.*replace - with \+ in size$',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.
   'crates/transport/src/tls\.rs:.*root_hint_subjects.*Vec::leak',
@@ -65,6 +65,11 @@ exclude_re = [
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
+  # No input makes `getaddrinfo` give `EAI_AGAIN` or `EAI_MEMORY` on demand. The test of
+  # the map, through a private call, kills each.
+  'crates/os/src/net/resolve\.rs:.*delete match arm \(libc::EAI_(AGAIN|MEMORY), _\)',
+  # The list is C memory, so no test sees a leak (#1928).
+  'crates/os/src/net/resolve\.rs:.*replace <impl Drop for List>::drop with \(\)',
   # Only a pool whose largest block is 1472 bytes tells `<` from `<=`. Block sizes are
   # 64 times 2^k times 5 to 8, so none is 1472: 1280, then 1536.
   'crates/transport/src/client\.rs:.*replace < with <= in Config::setup',
