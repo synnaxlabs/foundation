@@ -111,11 +111,12 @@ struct Flow {
     cost: complete::Cost,
     /// The session missed a frame, so it gets no later frame.
     behind: bool,
-    /// The frames released to the session and not taken, oldest first.
-    waiting: VecDeque<Frame>,
-    /// The frames released after `waiting` that wait for credit, with their charges,
-    /// oldest first. While one waits, the credit is spent.
-    owed: VecDeque<(Frame, u64)>,
+    /// The frames released to the session and not taken, oldest first, with their
+    /// charges. The first `covered` have credit; the rest wait for a grant, and while
+    /// one waits, the credit is spent. One queue, so a session's memory grows only when
+    /// more frames wait than waited before.
+    waiting: VecDeque<(Frame, u64)>,
+    covered: usize,
 }
 
 #[derive(Debug)]
@@ -235,7 +236,7 @@ impl Readers {
             cost: complete::Cost::new(charge),
             behind: position.live < self.released,
             waiting: VecDeque::with_capacity(WAITING),
-            owed: VecDeque::new(),
+            covered: 0,
         });
         self.woken_complete.clear();
         self.woken_complete.reserve(self.complete.len());
@@ -292,11 +293,10 @@ impl Readers {
         };
         let flow = &mut self.flows[i];
         flow.credit.grant(limit_bytes);
-        let credit = &mut flow.credit;
-        while let Some((frame, _)) =
-            flow.owed.pop_front_if(|(_, charge)| credit.spend(*charge))
+        while let Some(&(_, charge)) = flow.waiting.get(flow.covered)
+            && flow.credit.spend(charge)
         {
-            flow.waiting.push_back(frame);
+            flow.covered += 1;
         }
     }
 
@@ -362,25 +362,26 @@ impl Readers {
             while self.sets.pop_front_if(stale).is_some() {}
             let set = &self.sets[0];
             let whole = frame.charge();
-            let mut last: Option<&mut VecDeque<Frame>> = None;
+            let mut last: Option<(&mut VecDeque<(Frame, u64)>, u64)> = None;
             for (session, flow) in iter::zip(&self.complete, &mut self.flows) {
                 if flow.behind || seq.end <= session.position.live {
                     continue;
                 }
                 let charge = flow.cost.charge(&frame, set, whole);
-                if !flow.credit.spend(charge) {
-                    flow.owed.push_back((frame.clone(), charge));
-                    continue;
+                if flow.credit.spend(charge) {
+                    if flow.covered == 0 {
+                        self.woken_complete.push(session.key);
+                    }
+                    flow.covered += 1;
                 }
-                if flow.waiting.is_empty() {
-                    self.woken_complete.push(session.key);
-                }
-                if let Some(waiting) = last.replace(&mut flow.waiting) {
-                    waiting.push_back(frame.clone());
+                if let Some((waiting, charge)) =
+                    last.replace((&mut flow.waiting, charge))
+                {
+                    waiting.push_back((frame.clone(), charge));
                 }
             }
-            if let Some(waiting) = last {
-                waiting.push_back(frame);
+            if let Some((waiting, charge)) = last {
+                waiting.push_back((frame, charge));
             }
             self.released = seq.end;
         }
@@ -391,13 +392,13 @@ impl Readers {
     /// with no frame to take to the sessions to wake.
     fn miss_owed(&mut self) {
         for (session, flow) in iter::zip(&self.complete, &mut self.flows) {
-            if flow.owed.is_empty() {
+            if flow.waiting.len() == flow.covered {
                 continue;
             }
-            flow.owed.clear();
+            flow.waiting.truncate(flow.covered);
             flow.behind = true;
             // A session with frames to take sees the miss after it takes them.
-            if flow.waiting.is_empty() {
+            if flow.covered == 0 {
                 self.woken_complete.push(session.key);
             }
         }
@@ -407,7 +408,8 @@ impl Readers {
     /// credit. While one does, call [`Readers::release`] after each commit.
     #[must_use]
     pub fn pending(&self) -> bool {
-        !self.queue.is_empty() || self.flows.iter().any(|flow| !flow.owed.is_empty())
+        let owed = |flow: &Flow| flow.waiting.len() > flow.covered;
+        !self.queue.is_empty() || self.flows.iter().any(owed)
     }
 
     /// Takes the session's next waiting frame. A latest session has at most one; a
@@ -426,10 +428,15 @@ impl Readers {
                     return Next::Empty;
                 };
                 let flow = &mut self.flows[i];
-                match flow.waiting.pop_front() {
-                    Some(frame) => Next::Frame(frame),
-                    None if flow.behind => Next::Behind,
-                    None => Next::Empty,
+                if flow.covered > 0 {
+                    flow.covered -= 1;
+                    let (frame, _) =
+                        flow.waiting.pop_front().expect("invariant: covered");
+                    Next::Frame(frame)
+                } else if flow.behind {
+                    Next::Behind
+                } else {
+                    Next::Empty
                 }
             }
             Key::Latest(key) => self.take_latest(key).map_or(Next::Empty, Next::Frame),
