@@ -783,16 +783,27 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_message_it_fails() {
+        fn when_stream_ends_inside_a_message_it_fails_and_keeps_no_chunk() {
             let pool = pool(1 << 16);
-            let mut source = Source::new(vec![0x05, 1, 2], 64);
+            let batch = Bytes::from(vec![0x05, 1, 2]);
+            let mut at = 0;
             let mut reader = Reader::new(16);
+            let source = |max: usize| {
+                let end = batch.len().min(at + max);
+                let chunk = (at < end).then(|| batch.slice(at..end));
+                at = end;
+                Ok(Poll::Ready(chunk))
+            };
+            let read = reader
+                .read(|_| true, |len| pool.alloc(len).ok(), source)
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
+                read,
                 Err(Error::Broken {
                     reason: "the stream ended inside a message".to_owned()
                 })
             );
+            assert!(batch.is_unique(), "a chunk outlives the read");
         }
 
         #[test]
