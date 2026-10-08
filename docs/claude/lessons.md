@@ -80,7 +80,7 @@ I/O and time. Our own build needs evidence that the library fails, as HCL READER
 library fits, our own code goes in the adapters, not in the protocol.
 
 Name the future users, and count only the ones on record: an entry in
-`docs/decisions.md`, an open issue, or a Synnax feature. The future scope picks the part
+`docs/decisions/`, an open issue, or a Synnax feature. The future scope picks the part
 we build on. It does not mean we build the future features now, and it does not excuse a
 trait with one speculative implementation.
 
