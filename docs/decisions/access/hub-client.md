@@ -26,12 +26,13 @@
   handshake for each request, and `foundation status` needs a session that lives); `&mut
   self` with the renewal inside `request` (an idle program loses its session at the
   expiry); a queue in a task that owns the session; a lock of a library
-  (`tokio::sync::Semaphore` is FIFO, but it adds a dependency to `hub` for one lock on
-  one thread, and `futures::lock::Mutex` wakes the first waiter of its slab, not the
-  oldest, and lets a new `lock` take the lock ahead of it, which starves a waiter);
-  `Error::Stopped` with a `u32` code, which gives `hub` a meaning for each code. The
-  plan (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069186434)
-  was approved with the `Refusal` change by `laptop.architect` at 2026-10-08T21:25:05Z
+  (`tokio::sync::Semaphore` is FIFO, but it is built for many threads, with atomics and
+  an `Arc` for an owned permit, where `hub` needs one lock on one thread, and
+  `futures::lock::Mutex` wakes the first waiter of its slab, not the oldest, and lets a
+  new `lock` take the lock ahead of it, which starves a waiter); `Error::Stopped` with a
+  `u32` code, which gives `hub` a meaning for each code. The plan
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069186434) was
+  approved with the `Refusal` change by `laptop.architect` at 2026-10-08T21:25:05Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069345374).
   `laptop.architect` approved the surface and the shared `pool` at 2026-10-08T21:32:05Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056) and
@@ -40,6 +41,8 @@
   order "in the order they began" and the dropped request at 21:38:44Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
   approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128).
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It
+  approved the pool sentence at e7a48c81 at 22:15:33Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889).
   Supersedes the sentence "Any pool works" of
   https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.
