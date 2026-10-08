@@ -21,11 +21,13 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 ## Each merged PR
 
 For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
-number, its merge commit, its issue, and its crates. It checks tests, the review trail,
-design, performance, and defects, by the rules at the merge commit, never by a rule in
-an open PR or in your branch. Check each problem that it reports yourself, and drop the
-ones you cannot confirm. Post its verdict as one comment on the PR, under your header
-line. Then act on each problem:
+number, its merge commit, its issue, and its crates. Set the `model` of the Agent call
+as COST TRIALS in `docs/decisions.md` says. It checks tests, the review trail, design,
+performance, and defects, by the rules at the merge commit, never by a rule in an open
+PR or in your branch. Check each problem that it reports yourself, and drop the ones
+you cannot confirm. Post its verdict as one comment on the PR: your name line, then its
+rating and summary as given, then each problem you confirmed and each check that
+passed. Then act on each problem:
 
 - A defect: an issue with its `crate:` label.
 - A contract question: send it to the crate's architect.
