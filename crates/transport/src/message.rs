@@ -27,6 +27,27 @@ pub(crate) fn prefix(len: usize) -> Varint {
         .unwrap_or_else(|| panic!("a message of {len} bytes is over the varint limit"))
 }
 
+/// Each cut of the least and the greatest real prefix of 2, 4, and 8 bytes, and of
+/// 2^15 and 2^31, so each value bit of each cut is both clear and set.
+#[cfg(test)]
+pub(crate) fn cut_prefixes() -> impl Iterator<Item = Vec<u8>> {
+    [
+        64,
+        16_383,
+        16_384,
+        1 << 15,
+        (1 << 30) - 1,
+        1 << 30,
+        1 << 31,
+        (1 << 62) - 1,
+    ]
+    .into_iter()
+    .flat_map(|len| {
+        let whole = prefix(len).to_vec();
+        (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
+    })
+}
+
 /// Splits a stream's bytes into whole messages, each in one block.
 #[derive(Debug)]
 pub(crate) struct Reader {
@@ -315,7 +336,9 @@ fn pull(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::slice;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{iter, slice};
 
     use block::{Config, Heap, Pool};
     use proptest::prelude::*;
@@ -383,6 +406,17 @@ mod tests {
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
+    /// `cut` at the least limit a node can have, at the most it has by default, at the
+    /// limit of the `Config` example, and at no limit.
+    fn at_each_limit(cut: Vec<u8>) -> [(Vec<u8>, usize); 4] {
+        [
+            (cut.clone(), 1_472),
+            (cut.clone(), 1 << 16),
+            (cut.clone(), 16 << 20),
+            (cut, usize::MAX),
+        ]
+    }
+
     /// Every message `reader` reads from `source`, until the stream ends.
     fn read_all(
         reader: &mut Reader,
@@ -439,6 +473,125 @@ mod tests {
                 let mut reader = Reader::started(20_000, first);
                 let read = read_all(&mut reader, &pool, &mut source);
                 prop_assert_eq!(read, Ok(messages));
+            }
+
+            #[test]
+            fn when_stream_ends_inside_a_prefix_it_fails(
+                // A power of two, then a limit of that size.
+                limit in prop_oneof![
+                    Just(16),
+                    (10..usize::BITS).prop_flat_map(|bits| {
+                        let least = 1_usize << bits;
+                        1_472.max(least)..=least.wrapping_shl(1).wrapping_sub(1)
+                    }),
+                    Just(usize::MAX),
+                ],
+                // `None` repeats the first byte.
+                tail in prop::collection::vec(
+                    prop_oneof![
+                        Just(None),
+                        Just(Some(0)),
+                        Just(Some(0xFF)),
+                        any::<u8>().prop_map(Some),
+                    ],
+                    7,
+                ),
+            ) {
+                let pool = pool(1 << 16);
+                // A message before the cut prefix leaves state in the reader.
+                let starts = [Vec::new(), encode(&[vec![1, 2, 3]])];
+                // Each first byte of a prefix of 2, 4, or 8 bytes.
+                for first in 0x40_u8..=0xFF {
+                    let len = 1_usize << (first >> 6);
+                    let tail = tail.iter().map(|byte| byte.unwrap_or(first));
+                    let whole: Vec<_> = iter::once(first).chain(tail).collect();
+                    for cut in 1..len {
+                        for split in 1..len {
+                            for start in &starts {
+                                let cut = whole.get(..cut).expect("a cut");
+                                let bytes = [start.as_slice(), cut].concat();
+                                let mut source = Source::new(bytes, split);
+                                let mut reader = Reader::new(limit);
+                                prop_assert_eq!(
+                                    read_all(&mut reader, &pool, &mut source),
+                                    Err(Error::Broken {
+                                        reason: "the stream ended inside a message"
+                                            .to_owned()
+                                    }),
+                                    "{:x?} then {:x?}, {} per chunk, limit {}",
+                                    start,
+                                    cut,
+                                    split,
+                                    limit
+                                );
+                                // Private: only a peer that misframes ends a stream
+                                // inside a message, and no heap count is exact in a
+                                // binary with a test harness.
+                                prop_assert_eq!(reader.held.buffer.capacity(), 0);
+                                let slots = reader.held.chunks.capacity();
+                                prop_assert!(
+                                    slots <= CHUNKS_MAX,
+                                    "a list of {} slots",
+                                    slots
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn when_stream_ends_inside_a_prefix_after_each_size_of_message_it_fails() {
+            let pool = pool(1 << 16);
+            // At 1 byte per chunk, each size leaves a list of each capacity up to a
+            // full one.
+            for (len, split) in (0..=70).map(|len| (len, 1)).chain([(200, 2), (200, 7)])
+            {
+                for (cut, limit) in cut_prefixes().flat_map(at_each_limit) {
+                    let bytes = [encode(&[vec![1; len]]), cut.clone()].concat();
+                    let mut source = Source::new(bytes, split);
+                    let mut reader = Reader::new(limit);
+                    assert_eq!(
+                        read_all(&mut reader, &pool, &mut source),
+                        Err(Error::Broken {
+                            reason: "the stream ended inside a message".to_owned()
+                        }),
+                        "{len} bytes, then {cut:x?}, {split} per chunk, limit {limit}"
+                    );
+                    // Private: only a peer that misframes ends a stream inside a
+                    // message, and no heap count is exact in a binary with a test
+                    // harness.
+                    assert_eq!(reader.held.buffer.capacity(), 0);
+                    let slots = reader.held.chunks.capacity();
+                    assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
+                }
+            }
+        }
+
+        #[test]
+        fn when_stream_ends_inside_a_prefix_while_admit_or_take_refuses_it_fails() {
+            let pool = pool(1 << 16);
+            for (admits, gives) in [(false, true), (true, false), (false, false)] {
+                for split in 1..=7 {
+                    for (cut, limit) in cut_prefixes().flat_map(at_each_limit) {
+                        let mut source = Source::new(cut.clone(), split);
+                        let mut reader = Reader::new(limit);
+                        let read = reader.read(
+                            |_| admits,
+                            |len| pool.alloc(len).ok().filter(|_| gives),
+                            |max| Ok(source.take(max)),
+                        );
+                        assert_eq!(
+                            read.map(|read| read.map(|block| block.is_some())),
+                            Err(Error::Broken {
+                                reason: "the stream ended inside a message".to_owned()
+                            }),
+                            "admit {admits}, take {gives}, limit {limit}: {cut:x?}, \
+                             {split} per chunk"
+                        );
+                    }
+                }
             }
         }
 
@@ -561,7 +714,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            // No call shows the heap that the reader keeps.
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held.buffer, vec![9; 8]);
             let read = reader
                 .read(
@@ -581,7 +734,6 @@ mod tests {
                 })
             );
             assert_eq!(reader.held.buffer.capacity(), 0);
-            assert!(reader.held.chunks.is_empty());
             let mut next = Source::new(encode(&[vec![5; 20]]), 64);
             let next = super::read(&mut reader, &pool, &mut next);
             assert_eq!(next, Ok(Poll::Ready(Some(vec![5; 20]))));
@@ -666,8 +818,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 10);
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // No call shows the heap that the reader keeps.
-            assert!(reader.held.chunks.is_empty());
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held.buffer, message[..10]);
             assert_eq!(reader.held.buffer.capacity(), 1_024);
             let buffer = reader.held.buffer.as_ptr();
@@ -692,8 +843,7 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // No call shows the heap that the reader keeps.
-            assert!(reader.held.chunks.is_empty());
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held.buffer, message);
             drop(held);
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
@@ -701,24 +851,60 @@ mod tests {
             assert_eq!(reader.held.buffer.capacity(), 0);
         }
 
-        #[test]
-        fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
-            // No call shows the heap that a reader keeps.
-            let mut held = Held::default();
-            for byte in 0..CHUNKS_MAX {
-                held.push(100, Bytes::from(vec![u8::try_from(byte).expect("a byte")]));
+        /// A chunk that counts itself in `live` while it lives.
+        struct Counted {
+            bytes: Vec<u8>,
+            live: Arc<AtomicUsize>,
+        }
+
+        impl AsRef<[u8]> for Counted {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
             }
-            assert_eq!(held.chunks.len(), CHUNKS_MAX);
-            assert!(held.buffer.is_empty());
-            held.push(100, Bytes::from_static(&[64]));
-            assert_eq!(held.chunks.len(), 1);
-            assert_eq!(held.buffer, (0..64).collect::<Vec<u8>>());
-            assert_eq!(held.buffer.capacity(), 100);
-            let mut block = [0; 65];
-            held.drain_into(&mut block);
-            assert_eq!(block.to_vec(), (0..65).collect::<Vec<u8>>());
-            assert!(held.chunks.is_empty());
-            assert_eq!(held.buffer.capacity(), 0);
+        }
+
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.live.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        /// Each copy of a full list, not only the first two that
+        /// `tests/alloc/chunks.rs` pins, keeps the list at the bound.
+        #[test]
+        fn a_read_of_many_tiny_chunks_never_holds_more_than_chunks_max() {
+            let pool = pool(1 << 20);
+            let message: Vec<u8> = (0..=250).cycle().take(1 << 18).collect();
+            let stream = encode(slice::from_ref(&message));
+            let live = Arc::new(AtomicUsize::new(0));
+            let (mut at, mut size) = (0, 0);
+            let source = |max: usize| {
+                assert!(live.load(Ordering::Relaxed) <= 64, "at byte {at}");
+                size = size % 3 + 1;
+                let end = at + size.min(max);
+                if end == stream.len() {
+                    // The check in `take` sees a 65th chunk only after a full list.
+                    assert_eq!(live.load(Ordering::Relaxed), 64, "a full list");
+                }
+                live.fetch_add(1, Ordering::Relaxed);
+                let bytes = stream[at..end].to_vec();
+                at = end;
+                let live = Arc::clone(&live);
+                Ok(Poll::Ready(Some(Bytes::from_owner(Counted {
+                    bytes,
+                    live,
+                }))))
+            };
+            let take = |len| {
+                assert!(live.load(Ordering::Relaxed) <= 64, "at the last byte");
+                pool.alloc(len).ok()
+            };
+            let mut reader = Reader::new(message.len());
+            let read = reader
+                .read(|_| true, take, source)
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
+            assert_eq!(read, Ok(Poll::Ready(Some(message))));
+            assert_eq!(live.load(Ordering::Relaxed), 0);
         }
 
         #[test]
@@ -747,29 +933,32 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_message_it_fails() {
+        fn when_stream_ends_inside_a_message_it_fails_and_keeps_no_byte() {
             let pool = pool(1 << 16);
-            let mut source = Source::new(vec![0x05, 1, 2], 64);
-            let mut reader = Reader::new(16);
+            let batch = Bytes::from(encode(&[vec![3; 1_000]]));
+            let end = 2 + 100;
+            let mut at = 0;
+            let mut reader = Reader::new(1_000);
+            let source = |_| {
+                let chunk = (at < end).then(|| batch.slice(at..=at));
+                at += 1;
+                Ok(Poll::Ready(chunk))
+            };
+            let read = reader
+                .read(|_| true, |len| pool.alloc(len).ok(), source)
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
+                read,
                 Err(Error::Broken {
                     reason: "the stream ended inside a message".to_owned()
                 })
             );
-        }
-
-        #[test]
-        fn when_stream_ends_inside_a_prefix_it_fails() {
-            let pool = pool(1 << 16);
-            let mut source = Source::new(vec![0x40], 64);
-            let mut reader = Reader::new(16);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Err(Error::Broken {
-                    reason: "the stream ended inside a message".to_owned()
-                })
-            );
+            assert!(batch.is_unique(), "a chunk outlives the read");
+            // Private: only a peer that misframes ends a stream inside a message, and
+            // no heap count is exact in a binary with a test harness.
+            assert_eq!(reader.held.buffer.capacity(), 0);
+            let slots = reader.held.chunks.capacity();
+            assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
         }
 
         #[test]

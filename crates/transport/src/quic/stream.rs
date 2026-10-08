@@ -4139,14 +4139,14 @@ mod tests {
 
     #[test]
     fn that_end_inside_a_message_break_the_connection() {
-        testing::run(1, |shard| {
-            let mut pair = connected(shard);
-            misframe(
-                &mut pair,
-                &[2, 3, b'a'],
-                "the stream ended inside a message",
-            );
-        });
+        let cuts = message::cut_prefixes();
+        for cut in iter::once(vec![3, b'a']).chain(cuts) {
+            let bytes = [&[2], cut.as_slice()].concat();
+            testing::run(1, move |shard| {
+                let mut pair = connected(shard);
+                misframe(&mut pair, &bytes, "the stream ended inside a message");
+            });
+        }
     }
 
     #[test]
