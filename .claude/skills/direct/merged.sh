@@ -2,8 +2,10 @@
 # Prints one line for each PR that merges into main from now on: "#<n> +<add> -<del>
 # <title>". Run it with Monitor; it never exits.
 set -u
+# The default order is by creation, which drops an old PR that merges late.
 list() {
-  gh pr list --state merged --limit 30 --json number,additions,deletions,title \
+  gh pr list --state merged --limit 30 --search sort:updated-desc \
+    --json number,additions,deletions,title \
     --jq '.[] | "#\(.number) +\(.additions) -\(.deletions) \(.title)"'
 }
 seen=$(mktemp)
