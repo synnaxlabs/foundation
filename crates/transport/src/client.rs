@@ -16,8 +16,9 @@ const WINDOW_BYTES_MIN: usize = 1 << 20;
 const IDLE: Span = Span::from_nanos(30 * Span::SECOND.nanos());
 
 /// A program's sessions to nodes. It dials a node with no node key, so the node sees
-/// it as [`Peer::Client`](crate::Peer::Client). It accepts no session: a dial to its
-/// port gets no answer. It stays on the thread that made it.
+/// it as [`Peer::Client`](crate::Peer::Client). It accepts no session: it answers a
+/// dial with a stateless reset, which the dialer ignores until the dial times out. It
+/// stays on the thread that made it.
 ///
 /// Dropping it closes nothing that it gave. Each session stays open until its last
 /// clone drops. Once each connection drained, it frees its [`port::Part`].
@@ -29,8 +30,7 @@ impl Client {
     /// Starts a program's transport on `part`. Bind a [`Port`](crate::Port) at port 0
     /// and give it one part. The limits are fixed: messages up to `pool.largest()`, a
     /// window of that or 1 MiB, whichever is larger, and a 30 s idle timeout. A node
-    /// may open 1 stream to it, because a node never opens one to a program and QUIC
-    /// cannot take 0.
+    /// may open 1 two-way and 1 one-way stream to it at a time, though it opens none.
     ///
     /// # Errors
     ///
