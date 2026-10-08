@@ -174,8 +174,6 @@ struct Sending {
     woken: VecDeque<StreamId>,
     /// The stretch that a write copies, kept across writes.
     buffer: Vec<u8>,
-    /// The messages whose claim waited for room in `budget`.
-    waited: u64,
 }
 
 /// The message bytes that one direction of a connection counts, and the claims that
@@ -738,6 +736,11 @@ impl Budget {
         }
     }
 
+    /// The claims that queued for room since this budget was made.
+    fn queued(&self) -> u64 {
+        self.tickets.iter().sum()
+    }
+
     /// Whether a claim of `class` holds room, taken or not.
     fn holds(&self, class: Class) -> bool {
         self.held[class.rank()] + self.given[class.rank()] > 0
@@ -1024,11 +1027,9 @@ impl Sending {
         given: Option<&[Part]>,
     ) -> Poll<()> {
         let order = self.share.order();
-        let idle = matches!(half.claim.state, State::Idle);
         let charged = self
             .budget
             .charge(half.key, half.body, &mut half.claim, order);
-        self.waited += u64::from(idle && !charged);
         if charged && self.turns.allows(half, order) {
             let left = half.left();
             let send = &mut inner.send_stream(half.key.id);
@@ -1093,7 +1094,7 @@ impl Sending {
 impl Streams {
     /// The messages that waited for room in the send budget.
     pub(super) fn budget_waits(&self) -> u64 {
-        self.sending.waited
+        self.sending.budget.queued()
     }
 
     /// The streams of a connection that refuses a message over `bytes_max`, with a
@@ -1115,7 +1116,6 @@ impl Streams {
                 share: Share::default(),
                 woken: VecDeque::new(),
                 buffer: Vec::new(),
-                waited: 0,
             },
             receiving: Budget::new(window_bytes.saturating_add(bytes_max)),
             closed: Closed::default(),
