@@ -166,6 +166,7 @@ impl Used {
             return Poll::Pending;
         };
         *retry = None;
+        self.task = None;
         let job = match newest.step {
             Step::Get(digest) => Job::Get(digest),
             Step::Read | Step::Retry | Step::Stuck => {

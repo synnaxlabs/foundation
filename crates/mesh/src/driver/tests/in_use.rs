@@ -453,6 +453,88 @@ fn keep_ends_when_the_group_stops_during_a_retry() {
     });
 }
 
+// As in the test above, but the retry get finds the missed chunk, and the retry read
+// that follows waits on a put of the other.
+#[test]
+fn a_call_at_a_later_pointer_waits_for_no_retry_read_of_an_older_one() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &create_large(200));
+        let mut lacked = update.chunks.iter().filter(|at| **at != update.root);
+        let lacked = [*lacked.next().unwrap(), *lacked.next().unwrap()];
+        let held = update.chunks.iter().filter(|at| !lacked.contains(at));
+        let held: Vec<Digest> = held.copied().collect();
+        put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let second = settled.await.unwrap();
+        let first = mesh.spec().await.unwrap();
+        let Some(Behind {
+            cause: Cause::Read(spec::region::Error::Tree(tree::Error::Missing(missed))),
+            ..
+        }) = first.behind
+        else {
+            panic!("{first:?}");
+        };
+        let other = *lacked.iter().find(|at| **at != missed).unwrap();
+        put(&mesh.store, &mesh.pool, &chunks, &[missed])
+            .await
+            .unwrap();
+        let block = mesh.pool.copy(chunks.get(other).unwrap()).unwrap();
+        let mut stuck = pin!(mesh.store.put(other, &block));
+        assert!(now(stuck.as_mut()).await.is_pending());
+        node.clock().sleep(seconds(2)).await;
+        let b = create_subjects(&["plant.b"], 1);
+        let third = commit(&mesh, second, &b).await;
+        let mut call = pin!(mesh.spec());
+        node.clock().sleep(seconds(3)).await;
+        let used = Poll::Ready(Ok(in_use(third, &b)));
+        assert_eq!(now(call.as_mut()).await, used);
+    });
+}
+
+// v1 has a problem. The first read of v2 waits on a put of its root, and v3 commits
+// while it waits.
+#[test]
+fn a_first_read_goes_on_when_a_newer_pointer_commits() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let first = commit(&mesh, base(), &create_admin()).await;
+        assert_eq!(mesh.spec().await.unwrap().behind.unwrap().pointer, first);
+        let b = create_subjects(&["plant.b"], 1);
+        let mut b_chunks = Chunks::default();
+        let b_tree = spec::region::tree(&mut b_chunks, &b);
+        let held = b_tree.chunks.iter().filter(|at| **at != b_tree.root);
+        let held: Vec<Digest> = held.copied().collect();
+        put(&mesh.store, &mesh.pool, &b_chunks, &held)
+            .await
+            .unwrap();
+        let block = mesh.pool.copy(b_chunks.get(b_tree.root).unwrap()).unwrap();
+        let mut b_root = pin!(mesh.store.put(b_tree.root, &block));
+        assert!(now(b_root.as_mut()).await.is_pending());
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(first, b_tree.root, BTreeSet::new(), holders);
+        let second = settled.await.unwrap();
+        let mut call = pin!(mesh.spec());
+        assert!(now(call.as_mut()).await.is_pending());
+        let mut c_chunks = Chunks::default();
+        let c_tree =
+            spec::region::tree(&mut c_chunks, &create_subjects(&["plant.c"], 1));
+        let block = mesh.pool.copy(c_chunks.get(c_tree.root).unwrap()).unwrap();
+        let mut c_root = pin!(mesh.store.put(c_tree.root, &block));
+        assert!(now(c_root.as_mut()).await.is_pending());
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(second, c_tree.root, BTreeSet::new(), holders);
+        settled.await.unwrap();
+        node.clock().sleep(seconds(1)).await;
+        b_root.await.unwrap();
+        node.clock().sleep(seconds(1)).await;
+        let used = Poll::Ready(Ok(in_use(second, &b)));
+        assert_eq!(now(call.as_mut()).await, used);
+    });
+}
+
 // The first read misses one chunk. The next get of it fails, and the one after finds
 // no chunk.
 #[test]
