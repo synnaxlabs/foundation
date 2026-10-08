@@ -1579,7 +1579,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
   Supersedes: "At the open it makes the list of each place and its home entry, sorted by
   place" above; `Places` makes it at the first frame of each key set. `lay` walks the
-  places for a frame with at least one series at the places for each 16 entries that
+  places for a frame with at least one series at the places for each 8 entries that
   they name, and sorts the series of a sparser frame. Lost: walk only (10 series of 100k
   places took 140 to 420 µs, not 0.5 to 0.7 µs), and sort only (a scattered frame of
   100k series took 3.9 to 6.0 ms, not 1.6 to 1.7 ms). The architect accepted the cost of

@@ -67,7 +67,7 @@ impl Places {
     /// The series of `frame`, of key set `set`, at the places, in place order. Time
     /// is O(j log(n/j)) for the lesser j and the greater n of the m places in `set`
     /// and the series in `frame`, plus O(k log k) for the k series it gives, or O(m)
-    /// when it gives at least one series for each 16 entries that places name.
+    /// when it gives at least one series for each 8 entries that places name.
     ///
     /// # Panics
     ///
@@ -135,7 +135,7 @@ fn each(held: &Held, frame: &Frame, mut f: impl FnMut(usize, Range<usize>)) {
 
 /// A frame that gives fewer than one series for each `SPARSE` entries that places name
 /// is sparse: [`lay`] sorts its series by place, as a walk of each place costs more.
-const SPARSE: usize = 16;
+const SPARSE: usize = 8;
 
 /// Fills `placed` with the series of `frame` at the places of `held`.
 fn lay(
@@ -184,7 +184,7 @@ fn lay(
 }
 
 /// Places the series of a sparse frame in `placed`, which holds them in entry order.
-// Inlined into `lay`, it slows the dense walk.
+// Inlined into `lay`, it slows a lay of few places.
 #[inline(never)]
 fn sort(held: &Held, placed: &mut [Placed]) {
     for placed in placed.iter_mut() {
@@ -472,8 +472,8 @@ mod tests {
             data: &data,
         }]);
         // The index series is outside the places, so the frame gives 2 of its 3.
-        let frame = filled(&set, &[(0, 3), (40, 10), (50, 5)]);
-        for entries in [31, 32, 33] {
+        let frame = filled(&set, &[(0, 3), (52, 10), (57, 5)]);
+        for entries in [15, 16, 17] {
             let slots: Box<[Slot]> = set.entries()[60 - entries..]
                 .iter()
                 .rev()
@@ -486,7 +486,7 @@ mod tests {
                 .iter()
                 .map(|placed| (placed.place, placed.end))
                 .collect();
-            assert_eq!(laid, [(9, 5), (19, 18)], "{entries} entries");
+            assert_eq!(laid, [(2, 5), (7, 18)], "{entries} entries");
             let body = build(&frame, &placed);
             let read: Vec<(usize, &[u8])> = split(&body, laid).collect();
             assert_eq!(read, expected, "{entries} entries");
