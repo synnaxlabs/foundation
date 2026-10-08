@@ -166,14 +166,15 @@ impl Node {
     /// or checks the one there, and each shard opens its buffer in directory
     /// `shard-<i>` of its files, and makes it there when it is not there. The shards
     /// open their buffers one after another, in order of core. Once each buffer has
-    /// opened, shard 0 serves the port and admits every peer that proves its key,
-    /// until its transport stops, which stops the node.
+    /// opened, shard 0 opens the mesh of [`Config::region`] in directory `mesh`, when
+    /// the node has a region, then serves the port and admits every peer that proves
+    /// its key, until its transport stops, which stops the node.
     /// Returns once each shard runs or one has failed to start. When the disk budget
     /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
     /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
     /// start, a shard with no memory, a data directory that another node holds or that
-    /// was made for another shard count, or a buffer that does not open stops the node,
-    /// and [`Node::join`] returns its error.
+    /// was made for another shard count, or a buffer or mesh that does not open stops
+    /// the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -303,15 +304,15 @@ impl Node {
     }
 
     /// Calls `task` with the node's hub on shard 0, once each shard has opened its
-    /// buffer and after each task given before it, then runs its future. So the code
-    /// in its closure body runs in the order of the calls; the futures that tasks give
-    /// run in no set order. Does not wait. A node that stops or fails before shard 0
-    /// calls a task drops it uncalled. A task runs on shard 0's thread, so it may hold
-    /// values that are not `Send`, such as sessions; it sends its result back through a
-    /// value it owns. Its future runs until it completes or shard 0 ends, which drops
-    /// it. A panic in a task ends shard 0 and fails the node: [`Node::join`] gives
-    /// [`Error::Panicked`], unless the transport stopped first, which gives
-    /// [`Error::Transport`].
+    /// buffer and the mesh has opened, and after each task given before it, then runs
+    /// its future. So the code in its closure body runs in the order of the calls; the
+    /// futures that tasks give run in no set order. Does not wait. A node that stops or
+    /// fails before shard 0 calls a task drops it uncalled. A task runs on shard 0's
+    /// thread, so it may hold values that are not `Send`, such as sessions; it sends
+    /// its result back through a value it owns. Its future runs until it completes or
+    /// shard 0 ends, which drops it. A panic in a task ends shard 0 and fails the node:
+    /// [`Node::join`] gives [`Error::Panicked`], unless the transport stopped first,
+    /// which gives [`Error::Transport`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
         F: Future<Output = ()> + 'static,
