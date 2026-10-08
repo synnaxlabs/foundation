@@ -2,9 +2,11 @@
 //! it, for the tests and benches that count or time the hub.
 
 use env::tasks::Tasks;
+use hub::Hub;
 use hub::home::Outcome;
 use hub::writer::Writer;
-use hub::{Channel, Hub};
+use spec::channel::{Channel, Data, Kind};
+use spec::data_type::DataType;
 use types::channel;
 use types::frame::{Draft, Form, Label, Path};
 use types::sample::{Scalar, Type};
@@ -26,16 +28,20 @@ pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         time,
         entropy: node.entropy(),
     });
-    for (key, channel, scalar) in
-        [(1, "time", Scalar::Stamp), (2, "value", Scalar::I64)]
-    {
-        hub.define(Channel {
-            key: channel::Key::from_u128(key),
-            name: name(channel),
-            data_type: Type::Scalar(scalar),
-            index: channel::Key::from_u128(1),
-        });
-    }
+    let time = Channel {
+        key: channel::Key::from_u128(1),
+        kind: Kind::Index {
+            error: None,
+            control: None,
+        },
+    };
+    let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
+    let data = Data::new(time.key, None, i64, None).expect("no unit");
+    let value = Channel {
+        key: channel::Key::from_u128(2),
+        kind: Kind::Data(data),
+    };
+    hub.define([(&name("time"), &time), (&name("value"), &value)]);
     (hub, now)
 }
 

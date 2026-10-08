@@ -11,6 +11,7 @@ block = { path = "../block" }
 clock = { path = "../clock" }
 env = { path = "../env" }
 home = { path = "../home" }
+spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
 wire = { path = "../wire" }
@@ -21,7 +22,6 @@ buffer = { path = "../buffer" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
 sim = { path = "../sim" }
-spec = { path = "../spec" }
 
 [[test]]
 name = "alloc"

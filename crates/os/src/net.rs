@@ -1,6 +1,6 @@
-//! TCP streams and listeners on the real network. Each one is a non-blocking socket
-//! that registers with the I/O driver of the Tokio runtime of the thread of its first
-//! poll.
+//! TCP streams, listeners, and name lookups on the real network. Each stream and
+//! listener is a non-blocking socket that registers with the I/O driver of the Tokio
+//! runtime of the thread of its first poll.
 
 use std::io;
 use std::net::SocketAddr;
@@ -20,6 +20,8 @@ mod listener;
     reason = "`TCP_NOTSENT_LOWAT` is a `setsockopt` rustix lacks"
 )]
 mod lowat;
+#[expect(unsafe_code, reason = "`getaddrinfo` is the C library's name lookup")]
+mod resolve;
 mod socket;
 mod stream;
 
@@ -42,8 +44,8 @@ impl env::net::Driver for Driver {
         Ok(Box::new(Listener::listen(config)?))
     }
 
-    fn resolve<'a>(&'a self, _: &'a str, _: u16) -> Resolve<'a> {
-        panic!("os::net has no resolver yet")
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> Resolve<'a> {
+        Box::pin(resolve::lookup(host, port))
     }
 }
 

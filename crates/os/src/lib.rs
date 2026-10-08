@@ -113,12 +113,14 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 /// with the I/O driver of the Tokio runtime current on that thread. Each thread that
 /// `os` starts has one.
 ///
+/// [`env::net::Net::resolve`] looks up a host name as each other program on this
+/// machine does, on an OS thread of its own for each lookup.
+///
 /// # Panics
 ///
 /// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener,
 ///   on a thread with no Tokio runtime or with no I/O driver.
-/// - [`env::net::Net::udp`], and [`env::net::Net::resolve`] of a host name: this
-///   driver has no UDP and no resolver yet.
+/// - [`env::net::Net::udp`]: this driver has no UDP yet.
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
 pub fn net() -> env::net::Net {
