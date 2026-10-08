@@ -1410,6 +1410,12 @@ mod tests {
     /// Asserts that `call` panics on a shard that does not carry the index at
     /// slot 3.
     fn check_not_carried(seed: u64, call: fn(&mut Shard)) {
+        check_panics(seed, "the shard does not carry the index at Slot(3)", call);
+    }
+
+    /// Asserts that `call` panics with `message` on a shard that carries slots 0 and
+    /// 2.
+    fn check_panics(seed: u64, message: &str, call: fn(&mut Shard)) {
         let (mut sim, _handle) = start(seed, move |test| async move {
             call(&mut test.shard(AREA).await);
         });
@@ -1417,7 +1423,7 @@ mod tests {
             sim.run(),
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "the shard does not carry the index at Slot(3)".into(),
+                message: message.into(),
                 seed,
             })
         );
@@ -3818,20 +3824,79 @@ mod tests {
             });
         }
 
-        /// Asserts that `call` panics with `message` on a shard that carries slots 0
-        /// and 2.
-        fn check_panics(seed: u64, message: &str, call: fn(&mut Shard)) {
-            let (mut sim, _handle) = start(seed, move |test| async move {
-                call(&mut test.shard(AREA).await);
+        /// The key set of the indexes at slots 1 and 2.
+        fn one_and_two() -> Arc<KeySet> {
+            let groups = [1, 2].map(|slot| Group {
+                index: key(Slot::new(slot)),
+                data: &[],
             });
-            assert_eq!(
-                sim.run(),
-                Err(sim::Error::Panicked {
-                    thread: DIR.into(),
-                    message: message.into(),
-                    seed,
-                })
-            );
+            create_interner().intern(&groups)
+        }
+
+        /// Shed at place 0 moves the index at place 2 there, and not the one at
+        /// place 1.
+        #[test]
+        fn keeps_the_writer_on_an_index_that_a_shed_does_not_move() {
+            run(139, |test| async move {
+                let (mut shard, _) = test.wide(3).await;
+                let set = one_and_two();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[10])]);
+                let written = shard.write(a, LIVE, first);
+                assert_eq!(written, Ok(&[applied(1, 0, 1), applied(2, 0, 1)][..]));
+                shard.shed(Slot::new(0));
+                let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[20])]);
+                let written = shard.write(a, LIVE, next);
+                assert_eq!(written, Ok(&[applied(1, 1, 1), applied(2, 1, 1)][..]));
+            });
+        }
+
+        #[test]
+        fn wakes_the_readers_of_each_index_after_a_shed_moves_one() {
+            run(140, |test| async move {
+                let (mut shard, _) = test.wide(3).await;
+                let set = one_and_two();
+                let one = complete(&mut shard, Slot::new(1));
+                let two = complete(&mut shard, Slot::new(2));
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[10])]);
+                shard.write(a, LIVE, first).expect("written");
+                shard.committed().await.expect("the commit ends");
+                shard.shed(Slot::new(0));
+                assert_eq!(woken(&mut shard), [one, two]);
+            });
+        }
+
+        #[test]
+        fn wakes_no_reader_of_an_index_it_shed() {
+            run(141, |test| async move {
+                let set = only_two();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(2));
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let first = frame(&test.pool, &set, &[(0, &[10])]);
+                shard.write(a, LIVE, first).expect("written");
+                shard.committed().await.expect("the commit ends");
+                shard.close_writer(a);
+                shard.close_reader(reader);
+                shard.shed(Slot::new(2));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+            });
+        }
+
+        /// The second shed ends an index with fewer reader keys than the first.
+        #[test]
+        fn gives_no_reader_key_twice_after_two_sheds() {
+            run(142, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let old = latest(&mut shard, Slot::new(0));
+                close(&mut shard, old);
+                shard.shed(Slot::new(0));
+                shard.shed(Slot::new(2));
+                shard.carry(Slot::new(0));
+                assert_ne!(latest(&mut shard, Slot::new(0)), old);
+            });
         }
 
         #[test]
@@ -4189,6 +4254,26 @@ mod tests {
                     test.clock.sleep(INSIDE).await;
                     let second = named(&mut shard, "a", "r");
                     assert_eq!(missed(&mut shard, second.key, 0), []);
+                });
+            }
+
+            #[test]
+            fn holds_no_position_after_a_shed_and_a_carry() {
+                run(143, |test| async move {
+                    let set = two_indexes();
+                    let mut shard = test.shard(AREA).await;
+                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    let first = named(&mut shard, "a", "r");
+                    committed(&test, &mut shard, a, &[10, 20]).await;
+                    shard.ack(first.key, live(1)).expect("forward");
+                    close(&mut shard, first.key.into());
+                    shard.close_writer(a);
+                    shard.shed(Slot::new(0));
+                    shard.carry(Slot::new(0));
+                    let second = named(&mut shard, "a", "r");
+                    let b = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    committed(&test, &mut shard, b, &[30]).await;
+                    assert_eq!(taken(&mut shard, second.key.into(), 0), [seq(2, 1)]);
                 });
             }
 
