@@ -120,7 +120,17 @@ where
         }
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
         // The end of this future drops each serve task that has not yet recorded.
-        while kept.lock().expect("not poisoned").len() < accepted {
+        let deadline = node.clock().now() + Span::SECOND;
+        loop {
+            let recorded = kept.lock().expect("not poisoned").len();
+            if recorded == accepted {
+                break;
+            }
+            let now = node.clock().now();
+            assert!(
+                now < deadline,
+                "{recorded} of {accepted} serve tasks recorded"
+            );
             node.clock().sleep(Span::MICROSECOND).await;
         }
         drop((link, test));
