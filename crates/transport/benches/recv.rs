@@ -5,11 +5,11 @@
 //!
 //! Each round, the client sends 16 messages of one size on one `Complete` stream, and
 //! the server times each poll of its read until it has them. A `recv_into` reads into
-//! one buffer made before the bench. A sim sleep before each
-//! round lets the peer read and acknowledge. The window holds a round, so a message
-//! waits for no credit. `polls/msg` near 1 means most messages were whole at their
-//! first poll; a message that spans polls costs more. A poll also drives the session,
-//! so it holds the cost of the packets it reads.
+//! one buffer made before the bench. A sim sleep before each round lets the peer read
+//! and acknowledge. The window holds a round, so a message waits for no credit.
+//! `polls/msg` near 1 means most messages were whole at their first poll; a message
+//! that spans polls costs more. A poll also drives the session, so it holds the cost
+//! of the packets it reads.
 //!
 //! To compare two builds, run each several times in turn on one pinned core and
 //! compare p10 and p50: on a busy machine, p90 holds the preemptions.
