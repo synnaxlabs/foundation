@@ -2100,6 +2100,12 @@ mod tests {
                 &elements,
                 &Error::Utf8 { sample: 0 },
             );
+            refuses(
+                Type::String,
+                &[1_024, 1_025],
+                &elements,
+                &Error::Utf8 { sample: 0 },
+            );
             let mut elements = vec![b'a'; 1_022];
             elements.extend("\u{20ac}".as_bytes());
             let ends = [1_024, 1_025];
@@ -2108,6 +2114,21 @@ mod tests {
             elements.extend(b"\xf0\x9fA\x80\x80bb");
             let ends = [1_025, 1_030];
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 0 });
+        }
+
+        #[test]
+        fn refuses_utf8_before_trailing_bytes() {
+            let values = raw(&[1, 2], 1, b"a\xff");
+            let mut encoded = [
+                encode(Scalar::U32, &values[..8]),
+                encode(Scalar::U8, b"a\xff"),
+            ]
+            .concat();
+            encoded.push(0);
+            let expected = Err(Error::Utf8 { sample: 1 });
+            assert_eq!(validate(Type::String, 2, &encoded).map(|_| ()), expected);
+            let mut out = vec![0; values.len()];
+            assert_eq!(decode(Type::String, 2, &encoded, &mut out), expected);
         }
 
         #[test]
