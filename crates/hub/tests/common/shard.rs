@@ -16,12 +16,12 @@ pub(crate) fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
 }
 
-/// A home shard on a new ring of `node`, its interner, and the node's mesh time now
-/// once it has one.
+/// A home shard on a new ring of `node`, its interner, the node's mesh time now once
+/// it has one, and the reader of that time.
 pub(crate) async fn shard(
     node: &sim::node::Node,
     tasks: Tasks,
-) -> (home::Shard, Interner, i64) {
+) -> (home::Shard, Interner, i64, clock::Reader) {
     let config = block::Config { budget: 1 << 23 };
     let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
     let (clock, mesh) = clock::Clock::new(node.clock());
@@ -55,7 +55,7 @@ pub(crate) async fn shard(
     });
     loop {
         if let Some(now) = mesh.now().mesh {
-            return (shard, interner, now.latest.nanos());
+            return (shard, interner, now.latest.nanos(), mesh);
         }
         node.clock().sleep(Span::from_nanos(1)).await;
     }
