@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -1326,8 +1327,9 @@ mod directory {
         }
     }
 
-    /// A crash at the sync of the record: a power cut loses the record, and a
-    /// process crash keeps it. The next start syncs the record before `shard-0`.
+    /// A crash at the sync of the record: a power cut keeps a prefix of the creates
+    /// of the lock and the record, and a process crash keeps both. The next start
+    /// syncs the record before `shard-0`.
     #[test]
     fn a_crash_at_the_sync_of_the_record_leaves_it_whole_or_absent() {
         use env::files::Operation::SyncDir;
@@ -1336,23 +1338,30 @@ mod directory {
             operation: SyncDir,
             code: 5,
         };
+        let made = ["lock", "shards-2"].map(PathBuf::from);
+        let prefixes = BTreeSet::from([vec![], made[..1].to_vec(), made.to_vec()]);
         for (crash, kept) in [
-            (sim::Crash::Power, &[][..]),
-            (sim::Crash::Process, &["lock", "shards-2"][..]),
+            (sim::Crash::Power, prefixes),
+            (sim::Crash::Process, BTreeSet::from([made.to_vec()])),
         ] {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            host.fail_file(Path::new(""), SyncDir);
-            let e = run_on(&mut sim, &host);
-            assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
-            sim.crash(&host, crash);
-            let kept: Vec<PathBuf> = kept.iter().map(PathBuf::from).collect();
-            assert_eq!(listed(&mut sim, &host, ""), kept, "{crash:?}");
-            host.fail_file(Path::new(""), SyncDir);
-            let e = run_on(&mut sim, &host);
-            assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
-            let made = ["lock", "shards-2"].map(PathBuf::from);
-            assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
+            let mut listings = BTreeSet::new();
+            for seed in 0..32 {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                host.fail_file(Path::new(""), SyncDir);
+                let e = run_on(&mut sim, &host);
+                assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
+                sim.crash(&host, crash);
+                listings.insert(listed(&mut sim, &host, ""));
+                host.fail_file(Path::new(""), SyncDir);
+                let e = run_on(&mut sim, &host);
+                assert_eq!(e, Err(Error::Directory(io.clone())), "{crash:?}");
+                assert_eq!(listed(&mut sim, &host, ""), made, "{crash:?}");
+            }
+            assert_eq!(listings, kept, "{crash:?}");
         }
     }
 

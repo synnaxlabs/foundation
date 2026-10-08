@@ -11,8 +11,7 @@ const KEYS: [&str; 3] = ["select", "disk", "pool"];
 /// Checks a `node_settings` block and gives its policy. An unknown attribute stops the
 /// budget check, because it may be a budget under a wrong key.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let select = found.select(block, "nodes that it sets", "site_a.*");
     let disk = found.attribute(block, "disk", read::size);
     let pool = found.attribute(block, "pool", read::size);

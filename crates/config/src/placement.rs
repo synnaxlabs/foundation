@@ -11,8 +11,7 @@ const KEYS: [&str; 4] = ["select", "home", "standby", "copies"];
 
 /// Checks a `placement` block and gives its policy.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let select =
         found.select(block, "connectors and indexes that it places", "site_a.*");
     let home = found.attribute(block, "home", read::name);

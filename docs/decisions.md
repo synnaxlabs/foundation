@@ -3620,6 +3620,26 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
+  a body that its reader does not take, with the attribute keys and the block keywords
+  apart, so a key that names an attribute never passes as a block. One function holds
+  both checks, so a kind cannot forget one half. When a body takes blocks and no
+  attribute, as a file does, the fix of an attribute is to move it into one of those
+  blocks. `read::missing` reports a body with none of some keys, and panics on an
+  empty list, which is a defect of the caller. `read::required` reads one key or gives
+  that diagnostic. `config` uses them, also at the top level of a file, and so does each
+  kind, so one mistake has one code: `document.unknown-attribute`,
+  `document.unknown-block`, and `document.missing-attribute`. Decided by
+  `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
+  2026-10-08 03:05 UTC) and on #1772
+  (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
+  2026-10-08 03:27 UTC, and
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
+  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
+  rest at `finish`, which drops the diagnostics when a caller returns early;
+  `unknown_attributes` and `unknown_blocks` as two functions; a public
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -4426,6 +4446,35 @@ How to read this record:
   directory at 2026-10-07T19:22:31Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
   https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
+  Amended (2026-10-07, #1551): the disk keeps one log, in the order that the calls
+  ended, of the creates, removes, and renames that no `sync_dir` of their directory
+  covered. A rename is one change. A `Power` crash keeps a prefix of the log. It draws
+  the prefix from the files stream only when the log is not empty, and the digest holds
+  its length. Each file call in flight takes effect as for `Process`, and the prefix
+  decides whether its change stays, except a `sync` or `sync_dir` in flight, which has
+  no effect. A `sync_dir` makes durable only the changes of its directory. A journaled
+  file system can commit more; `sim` does not, so a missing `sync_dir` shows. A file
+  takes space while an entry, a durable entry, a change in the log, or a handle names
+  it. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508: a
+  `Power` crash undoes each rename since the last `sync_dir`, a rename in flight too.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692: the
+  commit of a create in flight. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531: a commit
+  makes the entries of the directory durable. A create that a `Power` crash cuts is
+  whole or has no bytes, and the prefix decides whether its entry stays. A cut gives a
+  state that a journaled file system can reach, or a state that only a missing
+  `sync_dir` reaches. Lost: a log for each directory, which gives states that need no
+  missing `sync_dir`.
+  Decided by `laptop.architect-2` (2026-10-07T19:20:28Z):
+  https://github.com/synnaxlabs/foundation/issues/1551#issuecomment-6045125302; the
+  calls in flight, 2026-10-08T02:39:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051056642; the text,
+  2026-10-08T02:27:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6050920514; the order
+  that the calls ended, 2026-10-08T02:43:34Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051095403.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
