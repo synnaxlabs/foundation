@@ -3720,19 +3720,17 @@ How to read this record:
   `Fields` is read only through `iter`: `Fields::get` went, as no caller reads one
   field by key (#1579). It supersedes the `Fields::get` item of
   https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661.
-  Time: `benches/sim.rs` times `write` from an empty store for six bodies of 32768
-  points (the lab's line in time order, newest first, and evens then odds; 63 sparse
-  keys; 16 series; a string field), and `Fields::iter` over the lab and sparse
-  stores. The chunks cost time against the store before them: writes newest first are
-  2.9 to 3.2 times slower, and `Fields::iter` with 63 sparse keys 10.5 to 12 times
-  slower (box2, Xeon 8488C, busy host). That is accepted, as no node binary holds the
-  store, and memory, not time, limited the lab runs. Until #1501 takes the baseline,
-  a change to the store gives a paired run of `benches/sim.rs` against `77e13735` in
-  its PR. The fixes (a cursor for each column in the series iterator, and a gap at the
-  front of a chunk) wait for a test or acceptance run whose time is spent in the
-  store (#1501). Decided by the architect (`laptop.architect-2`) on
-  2026-10-07T19:40:18Z
-  (https://github.com/synnaxlabs/foundation/pull/1448#issuecomment-6045453368).
+  Writes of a backlog newest first are 2.9 to 3.2 times slower, and `Fields::iter`
+  with 63 sparse keys 10.5 to 12 times slower, than at `ae0fd3fc` (box2, Xeon 8488C,
+  busy host). The architect accepts this for about 19 B a point in place of 700 to
+  1388 B, as the store is in no node binary. `benches/sim.rs` times the store. Until
+  its baseline on a quiet Linux host is a comment on #1501, a PR that changes the
+  store gives the numbers of `benches/sim.rs` at its base and at its head, on one
+  machine. The fixes (a cursor for each column in the series iterator, and a gap at
+  the front of a chunk) wait for a test or acceptance run whose time is spent in the
+  store (#1501). Decided by `laptop.architect-2` (2026-10-07T19:40Z):
+  https://github.com/synnaxlabs/foundation/pull/1448#issuecomment-6045453368, amended
+  in https://github.com/synnaxlabs/foundation/pull/1837#issuecomment-6055768246.
   `connector_influx::sim::serve(listener, tasks, store, database)` is its HTTP front, on
   `connector::http::sim::serve` (HTTP SIM SERVER). `POST /write?db=` (InfluxDB 1) and
   `POST /api/v2/write?bucket=` (InfluxDB 2 and 3) give 204 when the store takes each
