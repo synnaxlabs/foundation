@@ -2118,40 +2118,52 @@ How to read this record:
   spec only. Raft holds each region's spec pointer (version and root hash) and runtime
   state. Fast state (status, health, clock error, control state, reader positions)
   stays out of Raft. Supersedes: S9 name-hierarchy tree, S9 gossip hints.
+  Until peers get chunks, only a region with one voter applies a change (SPEC
+  CHANGE); #1231 ends this. Decided by `laptop.architect`, 2026-10-08T11:03:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
 - **R4 SETTLED** Own sans-I/O Raft modeled on etcd/raft, PreVote and CheckQuorum on,
   with etcd scenarios and the TLA+ spec as oracles. No gossip. Each region's spec is one
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
-- **SPEC CHANGE (#1083)** A `Spec` change record (kind 4) moves a region's spec
-  pointer by compare-and-swap. It holds the base pointer, the new root, and the digests
-  of the new tree's chunks, never their bytes, so `mesh` moves the pointer without the
-  chunks. Byte form: the base version (8 bytes, little-endian), the base root (32), the
-  new root (32), the chunk count (2 bytes, little-endian), then each digest (32), in
-  strictly rising order. The new version is `base.version + 1`. Lost: a version in the
-  record, which can disagree with the base. A record lists at most `CHUNKS_MAX` = 1024
-  digests, about 32 KiB, so that one record fits in an append of 64 KiB, a node's
+- **SPEC CHANGE (#1083)** A `Spec` change record (kind 4) moves a region's spec pointer
+  by compare-and-swap. It holds the base pointer, the new root, and the digests of the
+  new tree's chunks, never their bytes, so `mesh` moves the pointer without the chunks.
+  Byte form: the base version (8 bytes, little-endian), the base root (32), the new root
+  (32), the chunk count (2 bytes, little-endian), then each digest (32), in strictly
+  rising order, then the holder count (2 bytes, little-endian), then each holder key
+  (16), in strictly rising order. The new version is `base.version + 1`. Lost: a version
+  in the record, which can disagree with the base. A record lists at most `CHUNKS_MAX` =
+  1024 digests, about 32 KiB, so that one record fits in an append of 64 KiB, a node's
   limit; decode refuses a larger count. An entry over a member's limit is never sent,
   and `raft` sends it again with no end (#1361). `raft` bounds an `Append` by its count
-  of entries, not by its bytes, so two records at the bound in one `Append` go over
-  64 KiB. #1361 bounds it by bytes before a milestone applies a spec change to a region
-  of more than one member. #1741
-  decides how a change of more new chunks applies. Every member applies a change whose
-  base is the pointer, and refuses one whose base is not (`Refused::Stale`), so of two
-  changes from one base only the first applies. The state machine never reads chunks
-  and never runs a check: a committed spec with problems moves the pointer, and the
-  node keeps the last spec it used (#1741). The pointer before the first change is
-  version 0 at the root of the tree of `Config::founding`. No BQ12 signature check on
-  the change in this milestone (#1213). Trigger: `mesh::Pointer` moves to a layer 1
-  crate in a refactor PR before a `wire` message carries it. `Mesh::open` runs no check
-  of `Config::founding`: the founding is agreed region state, and a check at each open
-  stops a node on a later build whose checks find more problems. The node that founds
-  the region checks the founding with the `spec` function of #1841, and does not found
-  a region whose founding has problems (#1744). A founding with problems at a later
-  build follows the rule of a committed spec with problems (#1741). Decided by
-  `laptop.architect`: chunks through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a
-  spec with problems, 2026-10-07T07:03:20Z
+  of entries, not by its bytes, so two records at the bound in one `Append` go over 64
+  KiB. #1361 bounds it by bytes before a milestone applies a spec change to a region of
+  more than one member. Trigger: before a milestone applies a change that lists more
+  than `CHUNKS_MAX` chunks, a `Spec` change can list them. The holders are the voters
+  whose durable put of the listed chunks the proposer counted; until #1231 they are only
+  the proposer. Every member refuses, at apply, a change whose holders are not a
+  majority of each half of the voters as of the entry (`Refused::Quorum`): the voters of
+  the last `Voters` entry at or before it, or the founding voters. So a `Voters` entry
+  between the propose and the commit cannot leave the pointer at chunks that no majority
+  holds. The record lists only the chunks that the base tree lacks, so the rule also
+  needs the chunks of the base on a majority after a change of voters (#1231). Every
+  member applies a change whose base is the pointer, and refuses one whose base is not
+  (`Refused::Stale`), so of two changes from one base only the first applies. The state
+  machine never reads chunks and never runs a check: a committed spec with problems
+  moves the pointer, and the node keeps the last spec it used (#1741). The pointer
+  before the first change is version 0 at the root of the tree of `Config::founding`. No
+  BQ12 signature check on the change in this milestone (#1213). Trigger: `mesh::Pointer`
+  moves to a layer 1 crate in a refactor PR before a `wire` message carries it.
+  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region state,
+  and a check at each open stops a node on a later build whose checks find more
+  problems. The node that founds the region checks the founding with the `spec` function
+  of #1841, and does not found a region whose founding has problems (#1744). A founding
+  with problems at a later build follows the rule of a committed spec with problems
+  (#1741). Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
+  2026-10-07T06:42:23Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
+  with problems, 2026-10-07T07:03:20Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
   founding definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
@@ -2163,16 +2175,26 @@ How to read this record:
   bound of an `Append` in bytes, 2026-10-08T08:44:55Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with
   "member" for "voter", 2026-10-08T08:46:16Z
-  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056189352).
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056189352); the
+  holders, the refusal at apply, the quorum rule, and the trigger for `CHUNKS_MAX`,
+  2026-10-08T11:03:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
 - **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by
   tree key, the region's spec through the leader, as `set_home` does, and gives the new
   pointer. It first runs `spec::region::check` (REGION CHECK) at the region's prefix: a
   problem gives `Error::Problems`, which holds each problem as `check` gives it, and
   proposes nothing. `mesh` defines no problem of its own. It then builds the tree with
-  `spec::region::tree`, and the change lists each chunk of the new tree. A tree of more
-  than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing;
-  #1741 decides how a change of more new chunks applies. A change that the state
-  refuses gives `Error::Stale { base, pointer }`. A call learns the refusal of its own
+  `spec::region::tree`. The change lists each chunk of the new tree that the tree of
+  the base lacks, or each chunk of the new tree when `Config::chunks`, the node's
+  `blob::Store`, cannot give the tree of the base. A change that lists more than
+  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. The
+  node puts each listed chunk in its store, which gives `Error::Pool` or
+  `Error::Blob` on a failure, and counts itself as the one holder. When the holders
+  are not a majority of each half of the voters, before the propose or at the apply,
+  the call gives `Error::Quorum { held, voters }` for the first half that lacks one,
+  the incoming half first. The count before the propose costs no entry. `Mesh::open`
+  puts each chunk of the founding tree in the store. A change that the state refuses
+  as stale gives `Error::Stale { base, pointer }`. A call learns the refusal of its own
   entry from `Applied`, which keeps the refusal of each applied entry above the lowest
   open floor of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
@@ -2186,6 +2208,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771).
+  The listed chunks, the store, the put, the founding put, and `Quorum`, decided by
+  `laptop.architect`, 2026-10-08T11:03:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
