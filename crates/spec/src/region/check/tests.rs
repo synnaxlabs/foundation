@@ -274,6 +274,35 @@ fn finds_no_problem_in_the_founding_definitions_at_a_reserved_label() {
 }
 
 #[test]
+fn finds_a_subject_and_a_policy_at_another_reserved_label_misplaced() {
+    let definitions = create_definitions(&[
+        ("ops.@x.@access", access()),
+        ("ops.@x.@subject", subject()),
+    ]);
+    assert_eq!(
+        check(&prefix("ops"), &definitions),
+        [
+            Problem::Misplaced {
+                name: name("ops.@x.@access"),
+                kind: Kind::Access,
+            },
+            Problem::Misplaced {
+                name: name("ops.@x.@subject"),
+                kind: Kind::Subject,
+            },
+        ]
+    );
+    let definitions = create_definitions(&[("@x.@subject", subject())]);
+    assert_eq!(
+        check(&Prefix::ROOT, &definitions),
+        [Problem::Misplaced {
+            name: name("@x.@subject"),
+            kind: Kind::Subject,
+        }]
+    );
+}
+
+#[test]
 fn finds_a_channel_at_a_reserved_key_misplaced() {
     let definitions = create_definitions(&[("@admin.@subject", index(1))]);
     assert_eq!(

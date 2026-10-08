@@ -314,19 +314,19 @@ mod tests {
     }
 
     #[test]
-    fn gives_a_reserved_label_only_for_a_kind_of_the_founding_definitions() {
-        for (kind, segment) in KINDS {
-            let label =
-                matches!(kind, Kind::Subject | Kind::Access).then(|| name("plant.@x"));
-            let key = name(&format!("plant.@x.{segment}"));
-            assert_eq!(kind.label(&key), label, "{segment}");
+    fn gives_a_reserved_label_only_at_a_founding_key() {
+        for label in ["plant.@x", "@admin.x"] {
+            for (kind, segment) in KINDS {
+                let key = name(&format!("{label}.{segment}"));
+                assert_eq!(kind.label(&key), None, "{key}");
+            }
+            for kind in [Kind::Connector, Kind::Channel] {
+                assert_eq!(kind.label(&name(label)), None, "{label}");
+            }
         }
-        assert_eq!(
-            Kind::Subject.label(&name("@admin.@subject")),
-            Some(name("@admin"))
-        );
-        for kind in [Kind::Connector, Kind::Channel] {
-            assert_eq!(kind.label(&name("plant.@x")), None);
+        let admin = types::ed25519::PublicKey::new([7; 32]).unwrap();
+        for (key, definition) in crate::founding::create(admin) {
+            assert_eq!(definition.kind().label(&key), Some(name("@admin")), "{key}");
         }
     }
 }
