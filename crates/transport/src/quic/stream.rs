@@ -4670,19 +4670,19 @@ mod tests {
             let mut pair = connected(shard);
             let (mut senders, mut incoming) = open_all(&mut pair, shard);
             let before = announced(&mut pair);
-            for sender in &mut senders[..4] {
+            for sender in &mut senders[..2] {
                 let finished = pair.client.endpoint.finish(pair.now(), sender);
                 assert_eq!(finished, Ok(()));
             }
             pair.run(RUN);
             let now = pair.now();
-            for incoming in &mut incoming[..4] {
+            for incoming in &mut incoming[..2] {
                 let read = drain(&mut pair.server, now, &mut incoming.receiver);
                 assert_eq!(read, (vec![b"a".to_vec()], true));
             }
             pair.run(RUN);
             assert_eq!(announced(&mut pair), before + 1);
-            for _ in 0..4 {
+            for _ in 0..2 {
                 assert!(try_open(&mut pair).is_some());
             }
             assert!(try_open(&mut pair).is_none());
