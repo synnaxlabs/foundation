@@ -3932,9 +3932,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051099968).
   Supersedes the reviewers of a later round in ruling 2 of
   https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6040439732
-  (2026-10-07T06:32:32Z). The check reads that `performance` from a `Reviewers:` line
-  anywhere in the text of the old round, parsed or not, and reads a `Reviewers:` or
-  `Hot path:` line of an old round only at the start of its line.
+  (2026-10-07T06:32:32Z). For this rule only, the check reads a `Hot path:` or
+  `Reviewers:` line anywhere in the text of the old round, parsed or not, and only at
+  the start of its line. The other reviewers of an old round are read as before.
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not
