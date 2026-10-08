@@ -773,7 +773,7 @@ mod tests {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(100);
             assert_eq!(read_bytewise(&mut reader, 64), Ok(Step::Block(64)));
-            // Private: no call shows the heap that the reader keeps.
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held(), (None, 64));
             reader.clear();
             assert_eq!(read_bytewise(&mut reader, 65), Ok(Step::Block(65)));
@@ -794,7 +794,7 @@ mod tests {
             reader.admit();
             let read = reader.read(|max| Ok(source.take(max)));
             assert_eq!(read, Ok(Step::Block(100)));
-            // Private: no call shows the heap that the reader keeps.
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held(), (None, 10));
             assert!(reader.fill(None).is_pending());
             assert_eq!(reader.held(), (Some((100, 100)), 0));
@@ -905,7 +905,7 @@ mod tests {
             reader.admit();
             assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
             assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
-            // Private: no call shows the heap that the reader keeps.
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held(), (None, 0));
         }
 
@@ -931,7 +931,7 @@ mod tests {
             assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Room(5)));
             reader.admit();
             assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Pending));
-            // Private: no call shows the heap that the reader keeps.
+            // Private: no heap count is exact in a binary with a test harness.
             assert_eq!(reader.held(), (Some((1, 5)), 0));
             source.open = false;
             assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
