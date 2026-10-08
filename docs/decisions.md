@@ -4823,7 +4823,8 @@ How to read this record:
 - **NODE SPAWN (2026-10-07)** `Node::spawn(task)` calls `task` with the node's one hub,
   on shard 0, once each shard has opened its buffer, then runs its future. It has the
   shape and the rules of `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a
-  panic ends shard 0 and fails the node (`Error::Panicked`). Shard 0 calls the tasks
+  panic ends shard 0 and fails the node (`Error::Panicked`), unless the transport
+  stopped first, which gives `Error::Transport`. Shard 0 calls the tasks
   with the hub in the order of their calls, so their closure bodies run in that order;
   their futures run in no set order. A task that is given before the hub exists waits
   for it. A node that stops or fails before shard 0 calls a task drops it uncalled, and
@@ -4844,7 +4845,11 @@ How to read this record:
   Supersedes the start order of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411. When a
   caller outside the tests of `node` builds a result channel, file an `interface` issue
-  for a result from `spawn`.
+  for a result from `spawn`. `Error::Transport` over a panic after the transport stopped
+  decided by `laptop.architect-2` (2026-10-08T03:21:42Z):
+  https://github.com/synnaxlabs/foundation/pull/1769#issuecomment-6051497737.
+  Supersedes the panic error of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
 - **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
   on `Config::net` before any shard starts; a failed bind starts no shard, and
   `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which
