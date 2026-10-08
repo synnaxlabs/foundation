@@ -2135,6 +2135,24 @@ mod tests {
         }
 
         #[test]
+        fn checks_a_sample_after_two_vectors_of_ascii() {
+            let long = format!("{}\u{e9}", "a".repeat(1_100));
+            let samples = ["a".repeat(1_000), long];
+            let (count, values) = variable(1, &samples);
+            let encoded = encode_type(Type::String, count, &values);
+            assert_eq!(validate(Type::String, count, &encoded), Ok(values.len()));
+            let mut out = vec![0; values.len()];
+            assert_eq!(decode(Type::String, count, &encoded, &mut out), Ok(()));
+            assert_eq!(out, values);
+            let mut elements = vec![b'a'; 2_048];
+            elements.extend(b"\xc3\xa9\xff");
+            let ends = [1_000, 2_050, 2_051];
+            refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 2 });
+            let ends = [1_000, 2_049, 2_051];
+            refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 1 });
+        }
+
+        #[test]
         fn refuses_utf8_before_trailing_bytes() {
             let values = raw(&[1, 2], 1, b"a\xff");
             let mut encoded = [
