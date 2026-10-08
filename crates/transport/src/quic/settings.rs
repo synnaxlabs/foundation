@@ -527,10 +527,6 @@ mod tests {
         fn signs_its_resets_with_a_key_from_its_entropy() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-                let program = |shard: &testing::Shard| {
-                    let setup = shard.client().setup().expect("a setup");
-                    Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN)
-                };
                 pair.server.endpoint = program(shard);
                 pair.dial(pair::SERVER_KEY.public());
                 pair.run(Duration::from_millis(100));
@@ -544,6 +540,29 @@ mod tests {
                 let reset = other.transmit(pair.now(), &mut buffer).expect("a reset");
                 assert_ne!(token(reset.contents), first);
             });
+        }
+
+        #[test]
+        fn issues_ids_with_a_key_from_its_entropy() {
+            testing::run(1, |shard| {
+                let (now, mut buffer) = (pair::at(Duration::ZERO), Vec::new());
+                let mut dialer = program(shard);
+                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
+                let issued = ids(initial.contents).1.expect("a source ID").to_vec();
+                // A program resets a short packet only to an ID that it could issue.
+                let mut short = [[0x40].as_slice(), &issued].concat();
+                short.resize(64, 0);
+                let mut other = program(shard);
+                other.receive(now, &pair::meta(pair::CLIENT, &short), &short);
+                assert!(other.transmit(now, &mut buffer).is_none());
+            });
+        }
+
+        /// A program's endpoint on `shard`.
+        fn program(shard: &testing::Shard) -> Endpoint {
+            let setup = shard.client().setup().expect("a setup");
+            Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN)
         }
     }
 
