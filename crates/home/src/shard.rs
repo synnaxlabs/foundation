@@ -808,7 +808,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, key};
+    use crate::common::{create_interner, create_pool, data_type, key, values};
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -4003,10 +4003,10 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn writes_and_reads_a_series_of_each_type() {
-        run(87, |test| async move {
-            let series = every_type();
+    /// Writes `count` samples of each series of `series`, an index then its data, on a
+    /// run of `seed`, and checks that a reader and the stored body give them back.
+    fn check_write_and_read(seed: u64, count: u32, series: Vec<(Type, Vec<u8>)>) {
+        run(seed, move |test| async move {
             let data: Vec<(channel::Key, Type)> = (3..)
                 .zip(&series[1..])
                 .map(|(slot, &(data_type, _))| (key(Slot::new(slot)), data_type))
@@ -4026,13 +4026,14 @@ mod tests {
             for (entry, bytes) in write.iter_mut() {
                 bytes.copy_from_slice(&series[entry].1);
             }
-            write.set_count(0, 3);
-            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(2, 0, 3)][..]));
+            write.set_count(0, count);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(2, 0, count)][..]));
             shard.committed().await.expect("the commit ends");
+            let count = usize::try_from(count).expect("a small count");
             let decoded = |data_type: Type, bytes: &[u8]| -> (Type, Vec<u8>) {
-                let len = codec::validate(data_type, 3, bytes).expect("valid");
+                let len = codec::validate(data_type, count, bytes).expect("valid");
                 let mut out = vec![0; len];
-                codec::decode(data_type, 3, bytes, &mut out).expect("decodes");
+                codec::decode(data_type, count, bytes, &mut out).expect("decodes");
                 (data_type, out)
             };
             let reader::Next::Frame(frame) = shard.take(latest) else {
@@ -4053,6 +4054,31 @@ mod tests {
                 .collect();
             assert_eq!(stored, series);
         });
+    }
+
+    #[test]
+    fn writes_and_reads_a_series_of_each_type() {
+        check_write_and_read(87, 3, every_type().to_vec());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+        /// At most 3 data series of 16 samples, so the frame fits one record of
+        /// `BODY_MAX`.
+        #[test]
+        fn writes_and_reads_series_of_any_types_counts_and_ends(
+            types in proptest::collection::vec(data_type(0..=3, 0..=2), 1..4),
+            count in 1_u32..17,
+            state in proptest::prelude::any::<u64>(),
+        ) {
+            let stamps = (1..=i64::from(count)).flat_map(|n| (n * 10).to_le_bytes());
+            let index = (Type::Scalar(Scalar::Stamp), stamps.collect());
+            let data = (1..).zip(types).map(|(n, data_type)| {
+                (data_type, values(state.wrapping_add(n), count, data_type))
+            });
+            check_write_and_read(87, count, iter::once(index).chain(data).collect());
+        }
     }
 
     #[test]
