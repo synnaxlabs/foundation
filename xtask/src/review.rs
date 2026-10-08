@@ -612,7 +612,7 @@ fn marks(prefix: &str) -> bool {
         let item = item.filter(|after| after.starts_with([' ', '\t']));
         let note = || {
             let (label, after) = rest.strip_prefix("[^")?.split_once("]:")?;
-            (!label.contains(']')).then_some(after)
+            (!label.is_empty() && !label.contains(']')).then_some(after)
         };
         match item.or_else(|| rest.strip_prefix('>')).or_else(note) {
             Some(after) => rest = after,
