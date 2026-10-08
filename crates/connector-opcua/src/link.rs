@@ -235,3 +235,85 @@ fn the_shim_check_uses_the_compiler_of_cc() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("No such file or directory"), "{stdout}");
 }
+
+/// Each symbol outside the copy and `shim.c` that they may name, in glibc on x86-64
+/// and 64-bit Arm, at each optimization level. None gives or takes a heap block, so no
+/// block crosses between the allocator of libc and `src/alloc.rs`.
+const OUTSIDE: [&str; 40] = [
+    "_GLOBAL_OFFSET_TABLE_",
+    "__ctype_b_loc",
+    "__errno_location",
+    "__fprintf_chk",
+    "__memcpy_chk",
+    "__memmove_chk",
+    "__memset_chk",
+    "__printf_chk",
+    "__stack_chk_fail",
+    "__stack_chk_guard",
+    "__syslog_chk",
+    "__tls_get_addr",
+    "abort",
+    "access",
+    "connector_opcua_calloc",
+    "connector_opcua_free",
+    "connector_opcua_malloc",
+    "connector_opcua_realloc",
+    "fflush",
+    "fprintf",
+    "memcmp",
+    "memcpy",
+    "memmove",
+    "memset",
+    "printf",
+    "pthread_mutex_destroy",
+    "pthread_mutex_init",
+    "pthread_mutex_lock",
+    "pthread_mutex_unlock",
+    "pthread_mutexattr_destroy",
+    "pthread_mutexattr_init",
+    "pthread_mutexattr_settype",
+    "puts",
+    "stderr",
+    "stdout",
+    "strcmp",
+    "strlen",
+    "strncmp",
+    "strtod",
+    "syslog",
+];
+
+/// The symbols that `nm` with `flag` gives for the archives of this build.
+fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
+    let out = std::path::Path::new(env!("OUT_DIR"));
+    let output = std::process::Command::new("nm")
+        .args(["-P", flag])
+        .arg(out.join("libopen62541.a"))
+        .arg(out.join("libshim.a"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    // A line that names an object of the archive has one word.
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let name = words.next()?;
+            words.next().map(|_| name.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn the_c_names_only_the_listed_symbols_outside_it() {
+    let defined = symbols("--defined-only");
+    let undefined = symbols("--undefined-only");
+    let outside: Vec<&str> =
+        undefined.difference(&defined).map(String::as_str).collect();
+    assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
+    let unlisted: Vec<&str> = outside
+        .into_iter()
+        .filter(|name| !OUTSIDE.contains(name))
+        .collect();
+    assert!(unlisted.is_empty(), "the C names {unlisted:?}");
+}
