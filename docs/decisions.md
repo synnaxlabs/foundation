@@ -74,14 +74,15 @@ How to read this record:
 - **Root CLAUDE.md principles** apply to every crate: injected dependencies, no mutable
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
-- **DEVX (2026-10-08)** Design each public API for the person, agent, or program that
-  uses it. A public API is any surface that a user reaches: the CLI, MCP, the config
-  language, the client protocol and each SDK, and each file that a user reads or
-  writes. Each plan for one compares its options by the steps of each common task, the
-  first use after a new install among them, and by the error and fix that each wrong
-  step gives (C7). A step that Foundation can do itself is not a step for the user
-  (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when we're designing public
-  APIs like this, we really need to think about devx" (2026-10-08T02:43:43Z,
+- **DEVX (2026-10-08)** Design each user surface for the person, agent, or program
+  that uses it. A user surface is any surface that a user reaches: the CLI, MCP, the
+  config language, the client protocol and each SDK, and each file that a user reads
+  or writes. Each plan for one compares its options by the steps of each common task,
+  the first use after a new install among them. It also compares them by the error and
+  fix that each wrong step gives (C7). A step that Foundation can do itself is not a
+  step for the user (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when
+  we're designing public APIs like this, we really need to think about devx"
+  (2026-10-08T02:43:43Z,
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981). The
   plan rule is decided by `laptop.architect-2` and `laptop.architect` from those words
   (2026-10-08T02:46:51Z,
@@ -2229,10 +2230,11 @@ How to read this record:
   A voter that does not lead cannot make a node follow it: a leader claim needs a
   quorum of grants (RAFT SURFACE, #750), except a voter that led a term at or above
   the node's committed one, which can forge a link until #882 (RAFT SURFACE). After a
-  restart the committed term is the term at the applied index, because `Hard` holds no
-  commit index, so more past leaders can forge a link. Lost: the commit index in
-  `Hard`, one more durable write each time the commit index moves, for a gap that #882
-  closes; and a bound of the highest term in the stable log, which refuses a real
+  restart, the committed term is the term at the applied index, because `Hard` holds no
+  commit index. That term can be lower than the term at the commit index before the
+  restart, so more past leaders can forge a link. Lost: the commit index in `Hard`. It
+  costs one more durable write each time the commit index moves, for a gap that #882
+  closes. Also lost: a bound of the highest term in the stable log. It refuses a real
   leader whose link has a lower term than an entry of the node that is not committed.
   Decided by `laptop.architect` (#1682, 2026-10-08T01:03:46Z):
   https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758. A
@@ -2865,8 +2867,8 @@ How to read this record:
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
   sentence on `Unsynced` and `Status`. The same ruling supersedes the approval of
-  `Unsynced`, `Status`, and `Config.time` in item 2 of that comment, and of
-  `Config.time` (a `clock::Reader`) in
+  `Unsynced`, `Status`, and `Config.time` in item 2 of that comment. It also supersedes
+  the approval of `Config.time` (a `clock::Reader`) in
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724 (ruled by
   `laptop.architect`, 2026-10-08T00:46:02Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6049818540). `open`
@@ -2888,7 +2890,8 @@ How to read this record:
   the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   other calls that change the region and the change records stay private. The surface
-  is approved in the same comment. The surface as built, with the types that the caller
+  is approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
+  above). The surface as built, with the types that the caller
   builds, `Config.time`, and the sentence that `open` does not check the key of the
   transport (the last two superseded above), is approved by the architect,
   2026-10-07T19:55:12Z:
@@ -5920,9 +5923,12 @@ decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fi
 the system is solid.
 
 Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps
-priority. FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
-connectors. Supersedes, for ONE NODE work only, the order of this entry: features,
-access, and config files do not wait until its acceptance scenario passes (#462). The
+priority. ONE NODE is the milestone that the person approved on 2026-10-08
+(https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089). FIRST
+SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
+Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
+2026-10-05, which has no link). For ONE NODE work, features, access, and config files
+do not wait until the acceptance scenario of FIRST SLICE passes (#462). The
 person decided ("Yes, that's fine. I really think that first slice should try to focus
 on the 'guts' the internals while ONE NODE work should be focused on developer APIs and
 connectors."), relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
