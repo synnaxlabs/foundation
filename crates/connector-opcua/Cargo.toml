@@ -7,6 +7,8 @@ publish.workspace = true
 
 [features]
 open62541 = ["dep:cc"]
+# Exposes `bench` to the `run` bench and the `alloc` test.
+sim = ["open62541"]
 
 [dependencies]
 env = { path = "../env" }
@@ -17,8 +19,8 @@ cc = { workspace = true, optional = true }
 
 [dev-dependencies]
 cc = { workspace = true }
-# Turns on `open62541`, since the bench host runs no features.
-connector-opcua = { path = ".", features = ["open62541"] }
+# Turns on `sim`, since the bench host runs no features.
+connector-opcua = { path = ".", features = ["sim"] }
 counting = { path = "../counting" }
 divan = { workspace = true }
 sim = { path = "../sim" }

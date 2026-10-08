@@ -3,12 +3,20 @@
 
 #[cfg(feature = "open62541")]
 mod alloc;
-#[cfg(feature = "open62541")]
+#[cfg(feature = "sim")]
 #[doc(hidden)]
 pub mod bench;
 #[cfg(feature = "open62541")]
+#[cfg_attr(
+    not(feature = "sim"),
+    expect(dead_code, reason = "only `bench` uses it until the session of #435")
+)]
 mod event;
 #[cfg(feature = "open62541")]
+#[cfg_attr(
+    not(feature = "sim"),
+    expect(dead_code, reason = "only `bench` uses it until the session of #435")
+)]
 mod ffi;
 #[cfg(test)]
 #[cfg(feature = "open62541")]
