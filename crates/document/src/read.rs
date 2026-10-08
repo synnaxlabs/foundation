@@ -85,9 +85,9 @@ fn size_fix(text: &str, error: byte::Error) -> String {
 ///
 /// # Errors
 ///
-/// A diagnostic at the value's span: `document.bad-span` when the value is not a
-/// string, or when `time::Span` refuses its text, and `document.negative-span` when
-/// the span is below zero.
+/// A `document.bad-span` diagnostic at the value's span when the value is not a
+/// string or `time::Span` refuses its text, and a `document.negative-span`
+/// diagnostic there when the span is below zero.
 pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
     let bad = |message: String, fix: String| {
         Diagnostic::new(BAD_SPAN, value.span, message, fix)
@@ -258,7 +258,8 @@ fn count(labels: usize) -> String {
 /// each message, such as "the connector".
 ///
 /// Returns a `document.repeated-block` diagnostic at the keyword of each such block,
-/// "<of> has another `<keyword>` block", with a note at the first.
+/// "<of> has another `<keyword>` block", with the fix "Join the two into one" and a
+/// note at the first block's keyword.
 #[must_use]
 pub fn repeated(body: &Document, of: &str, keyword: &str) -> Vec<Diagnostic> {
     let mut blocks = body
@@ -1010,13 +1011,13 @@ mod tests {
 
     #[test]
     fn refuses_a_span_below_zero_at_the_value() {
-        for text in ["-1ns", "-2h"] {
+        for (text, written) in [("-1ns", "-1ns"), ("-2h", "-2h"), ("-60m", "-1h")] {
             assert_eq!(
                 super::span(&string(text)),
                 Err(Diagnostic::new(
                     Code::new("document.negative-span"),
                     Some(span()),
-                    format!("the span {text} is below zero"),
+                    format!("the span {written} is below zero"),
                     "Write a span of zero or more".into(),
                 )),
             );
