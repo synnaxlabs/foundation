@@ -24,6 +24,18 @@ pub enum Key {
     Complete(complete::Key),
 }
 
+impl From<complete::Key> for Key {
+    fn from(key: complete::Key) -> Self {
+        Self::Complete(key)
+    }
+}
+
+impl From<latest::Key> for Key {
+    fn from(key: latest::Key) -> Self {
+        Self::Latest(key)
+    }
+}
+
 /// What a session gets from [`Readers::take`].
 #[derive(Debug)]
 pub enum Next {
@@ -35,18 +47,6 @@ pub enum Next {
     /// after the frames before the miss, on this and each later call. A latest session
     /// never gives it.
     Behind,
-}
-
-impl From<complete::Key> for Key {
-    fn from(key: complete::Key) -> Self {
-        Self::Complete(key)
-    }
-}
-
-impl From<latest::Key> for Key {
-    fn from(key: latest::Key) -> Self {
-        Self::Latest(key)
-    }
 }
 
 /// The readers of one index at its home, in both modes. For complete readers: their
