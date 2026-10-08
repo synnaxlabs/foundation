@@ -938,13 +938,23 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
-  it on drop. So the task ends, and drops the commit it waits for, at its first poll
-  after the hub and each of its sessions drop, and the home and its buffer end then.
-  `node` relies on this to close a shard's ring before it lets go of the data
-  directory lock. Lost: `Hub::close(self) -> Commit`, which each caller must call, and
-  which a clone or a live session defeats. Decided by `laptop.architect`
-  (2026-10-07T18:07:55Z:
+  it on drop, and the task ends at its first poll after that. Lost:
+  `Hub::close(self) -> Commit`, which each caller must call, and which a clone or a
+  live session defeats. Decided by `laptop.architect` (2026-10-07T18:07:55Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
+  The commit that the task waits for lives in the state, and the task polls it through
+  the state. So the drop of the state drops the commit in the same call. Once the hub
+  and each of its sessions drop, the hub holds no part of the home: no `Home`, no
+  `Commit`, no `Reading`. A task that the hub spawns holds a part of the home only
+  through the state or a session. `node` takes its own commit before it gives the home
+  to the hub, drops the hub and each session, awaits the commit, which resolves once the
+  buffer's task ended, drops it, and then lets go of the data directory lock. Lost: a
+  future of the end of the task, one more step for each caller; and an order in `node`,
+  which cannot know what the hub holds. Supersedes: "So the task ends, and drops the
+  commit it waits for, at its first poll after the hub and each of its sessions drop"
+  (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
+  Decided by `laptop.architect` (2026-10-07T21:23:22Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6047128783).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1528,8 +1538,9 @@ How to read this record:
   dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
   NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
   `Transport::public_key` gives the key that the transport proves to each peer, so
-  `node` can check it against the key it loads. Decided by laptop.architect and
-  laptop.architect-2 (#1587, 2026-10-07 19:55 UTC):
+  `Mesh::open` can check it against the public half of the private key of its config
+  (MESH SURFACE). Decided by laptop.architect and laptop.architect-2 (#1587, 2026-10-07
+  19:55 UTC):
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
@@ -2426,17 +2437,31 @@ How to read this record:
   #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
   to the types of other crates. `Config` and `serve` add types that the caller builds:
   `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
-  `env::tasks::Tasks`, `clock::Reader`, `block::Pool`, `transport::Transport`,
+  `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
-  So a crate that opens a region has `env`, `clock`, `block`, and `transport` in its
-  line of the crate map. `open` does not check that the transport proves the key of
-  `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
+  So a crate that opens a region has `env`, `block`, and `transport` in its line of the
+  crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
+  `Status`: no public call reads the one or gives the two. The join answer of #336
+  decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
+  Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, in
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
+  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
+  key that is not the public half of `Config.private_key`. `node` builds both from the
+  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
+  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
+  the architect, 2026-10-07T19:55:13Z:
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
+  Supersedes the sentence that `open` does not check the key of the transport:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
   `Debug` text of a `Config` does not show the private key. The calls that change the
   region and the change records stay private. The surface is approved by the architect,
   2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  surface as built, with the types that the caller builds and the sentence on the key of
-  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  surface as built, with the types that the caller builds and the sentence that `open`
+  does not check the key of the transport (superseded above), is approved by the
+  architect, 2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
@@ -2579,8 +2604,16 @@ How to read this record:
   checks the expiry against the stamp, not against the time of the commit, so a join
   that commits after the expiry still admits its node, and every node checks the same
   stamp at every replay. A voter with no mesh time with a known error at or after the
-  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
-  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  Unix epoch stamps no join: a guess at the expiry is the case that the later edge
+  stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. The stamp
+  is crate-private. Until the join answer of #336 calls it, it takes the mesh time as an
+  argument and gives its own type, `driver::Unstamped`, so `mesh::Config` has no mesh
+  time and `mesh::Error` has no case for a join that no voter stamps. #336 decides with
+  its caller whether such a join goes out of `Mesh` as an `Error`, or back to the node
+  as a stop code or an answer. Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, for the type that `stamp` gives, the `Error::Unsynced` of
   https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
   region whose voters all have an unknown clock error admits no node by ticket, and the
   operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
@@ -4321,6 +4354,7 @@ How to read this record:
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
+| HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 
 ---
 

@@ -9,67 +9,38 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::path::PathBuf;
+#[path = "../common/mod.rs"]
+mod common;
+
 use std::pin::pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use block::{Heap, Pool};
+use common::{SETTLE, hub, name, shard};
 use env::tasks::Tasks;
+use hub::Hub;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
-use hub::{Channel, Hub};
 use types::authority::Authority;
 use types::channel;
-use types::frame::key_set::{Group, Interner, KeySet};
+use types::frame::key_set::{Group, KeySet};
 use types::frame::{Draft, Form, Label, Path};
-use types::name::Name;
 use types::sample::{Scalar, Type};
-use types::time::{Span, Stamp};
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
-const COMMIT: Span = Span::from_nanos(10_000_000);
-/// Past the commit of a write.
-const SETTLE: Span = Span::from_nanos(20_000_000);
 /// Frames that warm the hub up: its vectors reach their size.
 const WARM: i64 = 4;
 /// Frames whose write and read are counted. More than the streak of `next`, so a
 /// count covers its yield.
 const COUNTED: i64 = 300;
 
-fn name(name: &str) -> Name {
-    name.parse().expect("a valid name")
-}
-
 /// Writes one sample to `time` and to `value`, with the allocations the write made.
 fn write(writer: &mut Writer, stamp: i64) -> u64 {
-    let set = writer.set();
-    let entries = set.entries();
-    let entry = |key| {
-        let key = channel::Key::from_u128(key);
-        entries
-            .iter()
-            .position(|entry| entry.key == key)
-            .expect("the key set holds the channel")
-    };
-    let (time, value) = (entry(1), entry(2));
-    let group = entries[time].group;
-    let (written, allocations) = ALLOCATOR.count(|| {
-        let mut draft = writer
-            .draft(Form::Raw, &[(time, 8), (value, 8)])
-            .expect("a frame");
-        for entry in [time, value] {
-            let bytes = draft.series_mut(entry).expect("the series is present");
-            bytes.copy_from_slice(&stamp.to_le_bytes());
-        }
-        draft.set_count(group, 1);
-        writer.write(Label::Path(Path::Live), draft).map(<[_]>::len)
-    });
-    assert_eq!(written, Ok(1), "the home applies the frame");
-    allocations
+    ALLOCATOR
+        .count(|| common::write(writer, common::draft(writer, stamp)))
+        .1
 }
 
 /// Takes the next frame of `reader`, which waits for it, with the allocations the
@@ -95,68 +66,6 @@ fn wait(reader: &mut Reader) -> u64 {
     });
     assert!(waited, "no frame waits for the reader");
     allocations
-}
-
-/// A home shard on a new ring of `node`, its interner, and the node's mesh time now
-/// once it has one.
-async fn shard(node: &sim::node::Node, tasks: Tasks) -> (home::Shard, Interner, i64) {
-    let config = block::Config { budget: 1 << 23 };
-    let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-    let (clock, mesh) = clock::Clock::new(node.clock());
-    let wall = node.wall();
-    tasks.spawn(async move { clock.run(wall).await });
-    let mut interner = Interner::new();
-    let config = buffer::Config {
-        files: node.files(),
-        dir: PathBuf::from("shard-0"),
-        pool: Rc::clone(&pool),
-        clock: node.clock(),
-        tasks,
-        entropy: node.entropy(),
-        // A frame takes 4 KiB of the ring, and a full ring loses each later live
-        // frame (#160), so the test writes fewer than 1024.
-        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
-        commit: COMMIT,
-    };
-    let buffer = buffer::Buffer::open(config, interner.slots())
-        .await
-        .expect("opens");
-    let shard = home::Shard::new(home::Config {
-        shard: 0,
-        buffer,
-        clock: mesh.clone(),
-        limits: home::order::Limits {
-            earliest: Stamp::from_nanos(1),
-            ahead: Span::from_nanos(1_000_000_000),
-        },
-    });
-    loop {
-        if let Some(now) = mesh.now().mesh {
-            return (shard, interner, now.latest.nanos());
-        }
-        node.clock().sleep(Span::from_nanos(1)).await;
-    }
-}
-
-/// A hub on [`shard`], with `time` and `value` defined, and the node's mesh time now.
-async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (home, interner, now) = shard(node, tasks.clone()).await;
-    let hub = Hub::new(hub::Config {
-        home,
-        interner,
-        tasks,
-    });
-    for (key, channel, scalar) in
-        [(1, "time", Scalar::Stamp), (2, "value", Scalar::I64)]
-    {
-        hub.define(Channel {
-            key: channel::Key::from_u128(key),
-            name: name(channel),
-            data_type: Type::Scalar(scalar),
-            index: channel::Key::from_u128(1),
-        });
-    }
-    (hub, now)
 }
 
 /// Writes that each wake five latest readers, `latest` and four more it opens, from
