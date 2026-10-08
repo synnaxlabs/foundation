@@ -1567,6 +1567,41 @@ mod tests {
     }
 
     #[test]
+    fn a_dial_after_the_carrier_dropped_gives_closed_with_code_0() {
+        let (mut sim, client, server) = nodes(0);
+        let at = [crate::Address::Udp(address(&server))];
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialer = carrier.dialer();
+            drop(carrier);
+            let closed = Error::Closed { code: Code(0) };
+            assert_eq!(dialer.check(), Err(closed.clone()));
+            let session = crate::dial::dial(&dialer, SERVER.public(), &at).await;
+            assert_eq!(session.err(), Some(closed));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dialer_gives_the_broken_socket_after_the_carrier_dropped() {
+        let (mut sim, client, _) = nodes(0);
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialer = carrier.dialer();
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            {
+                let mut accepting = pin!(carrier.accept());
+                assert!(poll_once(accepting.as_mut()).await.is_none());
+                node.fail_udp(address(&node));
+                assert_eq!(accepting.await.err(), Some(network.clone()));
+            }
+            drop(carrier);
+            assert_eq!(dialer.check(), Err(network));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_broken_socket_keeps_the_end_of_a_session_that_ended_before() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);

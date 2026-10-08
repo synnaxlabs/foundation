@@ -35,8 +35,7 @@ pub(crate) fn main() {
     );
 }
 
-/// The heap bytes of the run after [`FIRST`] and after [`LAST`] peers. The client drops
-/// each of its transports first, so only the server's heap can grow.
+/// The heap bytes of the whole run after [`FIRST`] and after [`LAST`] peers.
 fn run() -> (usize, usize) {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
