@@ -7,6 +7,7 @@
 pub mod bench;
 mod directory;
 mod handoff;
+mod identity;
 mod route;
 mod scope;
 #[cfg_attr(
@@ -73,22 +74,19 @@ pub struct Config<M> {
     /// Where the node's one port binds: UDP, and TCP on the same port number once
     /// the port carries TCP (#77).
     pub listen: SocketAddr,
-    /// The node's private key. Its transport proves the key to each peer.
-    pub private_key: types::ed25519::PrivateKey,
-    /// The node's key. It stays the same when the private key changes. A patch until
-    /// the node reads it from its data directory (#1660).
-    pub key: types::node::Key,
     /// The region whose mesh the node opens, or `None` for no mesh. One founding member
-    /// has [`Config::key`], and its card holds the public half of
-    /// [`Config::private_key`]. Give the same value at each start: the node keeps no
-    /// copy of it, and until the mesh stores it (#1209), a log opened with another
-    /// value checks proofs against the wrong voters and starts at another spec. A patch
-    /// until the node keeps its region in its data directory when it founds or joins
-    /// one, and reads it at each start (#1660, #1744). The hub of each task knows each
-    /// channel of the founding's `definitions`. Give only a founding that
-    /// `spec::region::check` accepts. One with a data channel whose index is not an
-    /// index of it, or with two channels of one key, makes shard 0 panic, and
-    /// [`Node::join`] gives [`Error::Panicked`].
+    /// has the node's key, and its card holds the public half of the node's private
+    /// key, both from the file `node.key` in the data directory. Only `node` reads that
+    /// file, so until the node founds its region itself (#1744), only the tests of
+    /// `node` give `Some`. Give the same value at each start: the node keeps no copy of
+    /// it, and until the mesh stores it (#1209), a log opened with another value checks
+    /// proofs against the wrong voters and starts at another spec. A patch until the
+    /// node keeps its region in its data directory when it founds or joins one, and
+    /// reads it at each start (#1744). The hub of each task knows each channel of the
+    /// founding's `definitions`. Give only a founding that `spec::region::check`
+    /// accepts. One with a data channel whose index is not an index of it, or with two
+    /// channels of one key, makes shard 0 panic, and [`Node::join`] gives
+    /// [`Error::Panicked`].
     pub region: Option<mesh::region::Founding>,
 }
 
@@ -102,7 +100,6 @@ impl<M> fmt::Debug for Config<M> {
             .field("entropy", &self.entropy)
             .field("disk", &self.disk)
             .field("listen", &self.listen)
-            .field("key", &self.key)
             .field("region", &self.region)
             .finish_non_exhaustive()
     }
@@ -157,15 +154,17 @@ impl Node {
     /// shard count in the data directory, or checks the one there, and each shard
     /// opens its buffer in directory `shard-<i>` of its files, and makes it there when
     /// it is not there. The shards open their buffers one after another, in order of
-    /// core. Once each buffer has opened, shard 0 opens the mesh of [`Config::region`]
-    /// when it has one, then serves the port and admits every peer that proves its
-    /// key, until its transport or the mesh's group stops, which stops the node.
-    /// Returns once each shard runs or one has failed to start. When the disk budget
-    /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
-    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
-    /// start, a shard with no memory, a data directory that another node holds or that
-    /// was made for another shard count, or a buffer or a mesh that does not open
-    /// stops the node, and [`Node::join`] returns its error.
+    /// core. Once each buffer has opened, shard 0 reads the node's key and private key
+    /// from the file `node.key` in the data directory, and makes the file at the first
+    /// start once it has mesh time, then opens the mesh of [`Config::region`] when it
+    /// has one, then serves the port and admits every peer that proves its key, until
+    /// its transport or the mesh's group stops, which stops the node. Returns once each
+    /// shard runs or one has failed to start. When the disk budget holds no ring on
+    /// each shard, no shard starts, and [`Node::join`] gives [`Error::Disk`] with the
+    /// budget, the shard count, and the least budget. A failed start, a shard with no
+    /// memory, a data directory that another node holds or that was made for another
+    /// shard count, a key file that is not valid, or a buffer or a mesh that does not
+    /// open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -198,8 +197,6 @@ impl Node {
         };
         let endpoint = Endpoint {
             part: part.expect("invariant: a port splits into the parts asked for"),
-            private_key: config.private_key.clone(),
-            key: config.key,
             region: config.region.clone(),
             clock: config.clock.clone(),
             entropy: config.entropy.clone(),
@@ -330,10 +327,11 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, [`Error::Blob`] for a chunk store or [`Error::Mesh`]
-    /// for a mesh that did not open, or [`Error::Transport`] or [`Error::Group`],
-    /// whichever the node sees stop first, else [`Error::Panicked`] for the first
-    /// shard by core that panicked. Any failed shard stops the node.
+    /// whose buffer did not open, [`Error::Key`] or [`Error::Directory`] for a key
+    /// file that shard 0 could not read or write, [`Error::Blob`] for a chunk store or
+    /// [`Error::Mesh`] for a mesh that did not open, or [`Error::Transport`] or
+    /// [`Error::Group`], whichever the node sees stop first, else [`Error::Panicked`]
+    /// for the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -612,17 +610,17 @@ struct Serve {
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
-    private_key: types::ed25519::PrivateKey,
-    key: types::node::Key,
     region: Option<mesh::region::Founding>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }
 
 impl Endpoint {
-    /// The hub of shard 0 over `home`, which knows each channel of the node's region.
+    /// The hub of shard 0 of the node `key` over `home`, which knows each channel of
+    /// the node's region.
     fn hub(
         &self,
+        key: types::node::Key,
         home: home::Shard,
         interner: Interner,
         time: clock::Reader,
@@ -632,7 +630,7 @@ impl Endpoint {
             home,
             interner,
             tasks: tasks.clone(),
-            node: self.key,
+            node: key,
             time,
             entropy: self.entropy.clone(),
         });
@@ -642,18 +640,19 @@ impl Endpoint {
         hub
     }
 
-    /// Opens the node's transport on `pool` and `tasks`, then, when the node has a
-    /// region, the chunk store in directory [`directory::blob`] of `files`, and the
-    /// mesh of that region over both, in directory [`directory::mesh`]. Gives the
-    /// error of a store or a mesh that did not open.
+    /// Opens the node's transport on `pool` and `tasks` with `identity`, then, when the
+    /// node has a region, the chunk store in directory [`directory::blob`] of `files`,
+    /// and the mesh of that region over both, in directory [`directory::mesh`]. Gives
+    /// the error of a store or a mesh that did not open.
     async fn open(
         self,
+        identity: identity::Identity,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), Error> {
         let config = transport::Config {
-            private_key: self.private_key.clone(),
+            private_key: identity.private_key.clone(),
             message_bytes_max: MESSAGE,
             window_bytes: WINDOW,
             streams_max: STREAMS,
@@ -677,8 +676,8 @@ impl Endpoint {
         .await
         .map_err(Error::Blob)?;
         let config = mesh::Config {
-            key: self.key,
-            private_key: self.private_key,
+            key: identity.key,
+            private_key: identity.private_key,
             founding: region,
             files,
             dir: directory::mesh(),
@@ -695,14 +694,15 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Opens the endpoint, then runs each task given with a hub over `home` that knows
-    /// each channel of the region's founding spec, and serves the node's port, until
-    /// `guard` completes, the transport stops, or the mesh's group stops. A transport
-    /// or a group that stops goes into `failed` before any task drops. Then drops the
-    /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
-    /// and waits for each task of the mesh to end, the last of which drops the
-    /// transport. Runs no task and takes no session when a shard did not open, or when
-    /// the mesh did not open, which goes into `failed`.
+    /// Loads the node's identity ([`identity::load`]) and opens the endpoint, then
+    /// runs each task given with a hub over `home` that knows each channel of the
+    /// region's founding spec, and serves the node's port, until `guard` completes,
+    /// the transport stops, or the mesh's group stops. A transport or a group that
+    /// stops goes into `failed` before any task drops. Then drops the tasks, the hub,
+    /// `home`, `guard`, each session and stream future, and the mesh, and waits for
+    /// each task of the mesh to end, the last of which drops the transport. Runs no
+    /// task and takes no session when a shard did not open, or when the identity did
+    /// not load or the mesh did not open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -720,12 +720,22 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let hub = self.endpoint.hub(home, interner, self.time, &tasks);
-        let (transport, mesh) =
-            match self.endpoint.open(files, pool, tasks.clone()).await {
-                Ok(opened) => opened,
+        let identity =
+            match identity::load(&files, &self.time, &self.endpoint.entropy).await {
+                Ok(identity) => identity,
                 Err(error) => return fail(error),
             };
+        let hub = self
+            .endpoint
+            .hub(identity.key, home, interner, self.time, &tasks);
+        let (transport, mesh) = match self
+            .endpoint
+            .open(identity, files, pool, tasks.clone())
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) => return fail(error),
+        };
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // `next` gives the stop of the group on a watch of any index.
         let watch = mesh
@@ -812,9 +822,9 @@ pub enum Error {
         /// The shard count of this start.
         cores: usize,
     },
-    /// A file call that locks the data directory, or reads or records its shard
-    /// count, failed. [`env::files::Error::Busy`] on `lock` is another node that runs
-    /// on the data directory.
+    /// A file call that locks the data directory, reads or records its shard count, or
+    /// reads or writes the node's key, failed. [`env::files::Error::Busy`] on `lock` is
+    /// another node that runs on the data directory.
     Directory(env::files::Error),
     /// The disk budget holds no ring on each of `cores` shards.
     Disk {
@@ -836,6 +846,10 @@ pub enum Error {
     Group(mesh::Stopped),
     /// The chunk store did not open. The node took no session.
     Blob(blob::Error),
+    /// The file `node.key` in the data directory is not a key that a node wrote:
+    /// another length, tag, or checksum. The node took no session and does not write
+    /// over the file, because a new key is a new node to its region.
+    Key,
     /// The node's port did not bind. No shard started.
     Port {
         /// The address of the bind.
@@ -879,6 +893,10 @@ impl fmt::Display for Error {
             Self::Blob(error) => {
                 write!(f, "cannot open the node's chunk store: {error}")
             }
+            Self::Key => f.write_str(
+                "the file node.key in the data directory is not a node key; restore it \
+                 from a backup of this node",
+            ),
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }

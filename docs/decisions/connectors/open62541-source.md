@@ -50,8 +50,10 @@
   flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
   compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
-  2026-10-08 13:31 UTC). A `-W` flag with no `,` is a warning, which changes no code,
-  so `collect` leaves it out by that pattern, not by name. Decided by
+  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below is the one flag
+  of `build.rs` outside `flags.txt`, so the objects of the check do not have it. A
+  `-W` flag with no `,` is a warning, which changes no code, so `collect` leaves it
+  out by that pattern, not by name. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
   2026-10-08 13:57 UTC) and `laptop.director`
@@ -127,3 +129,31 @@
   2026-10-08 17:47 UTC; the release path,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
   2026-10-08 18:08 UTC).
+  The copy and `shim.c` allocate through the global allocator of the binary.
+  `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4 functions
+  of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and `UA_free`
+  as them, before `config.h` sets the libc calls as the defaults. They keep the C
+  contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)` and
+  `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is aligned
+  to 16. No pointer crosses between the libc allocator and these: the objects of the
+  copy and of `shim.c` call no libc function that gives or takes a heap pointer. A
+  crypto library that a later PR links keeps its own allocator. So the counting
+  allocator of a test or benchmark binary counts C too. The copy check compiles
+  without `alloc.h`. A test reads the archives that `build.rs` makes with it, and
+  fails on each symbol outside the copy and `shim.c` that its closed list does not
+  hold. The list holds no clock function and no libc function that gives or takes a
+  heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc`
+  (`std::alloc` calls `malloc`, so it recurses), and 4 `-D` flags (a define gives no
+  prototype, and C99 needs one). Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067206932,
+  2026-10-08 19:13 UTC; the header:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
+  2026-10-08 19:46 UTC). The exception for `UA_ARCH_HEADER` in the flags passage
+  above, the copy check without `alloc.h`, and the test of the archives: approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
+  2026-10-08 20:04 UTC, and at 1a593331:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069664332,
+  2026-10-08 21:46 UTC, and the list for 64-bit Arm at 586e8089:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069858320,
+  2026-10-08 22:00 UTC).

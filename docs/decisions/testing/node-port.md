@@ -1,7 +1,7 @@
 - **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
   on `Config::net` before any shard starts; a failed bind starts no shard, and
   `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which
-  builds the transport with `Config::private_key` once the last shard has opened its
+  builds the transport with the node's private key once the last shard has opened its
   buffer (X42), so the node takes no session before that. Its limits are patches until
   #1662 makes them settings, as LIMITS of SHARD HOMES is: window 1 MiB, 64 streams of
   each kind, idle 30 s, and messages of the smaller of 64 KiB and the pool's largest
@@ -11,8 +11,7 @@
   stops the stream with `Code(wire::header::REJECTED)` and resets the reply half with
   the same code, as for a header that does not decode, or for a first message with bytes
   after the header. The node reads no datagram until the first protocol that takes
-  datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
-  reads the key from its data directory (#1660). The node admits every peer that
+  datagrams has a server (#1661). The node admits every peer that
   completes the handshake; the mesh checks each message of a mesh stream (NODE MESH).
   At the stop, each session and stream future drops, then the transport. The bound on
   the wait for a header is #1628.
@@ -56,3 +55,44 @@
   session and stream future drops, then the mesh, and the transport drops when the
   last task of the mesh ends, before `lock` drops:
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
+  Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
+  Once each buffer has opened, shard 0 reads the node's key and private key from the
+  file `node.key` in the data directory, before the hub, the transport, and the mesh
+  open. The file is 68 bytes: the tag `foundation/key/1`, the node key (UUIDv7,
+  big-endian), the Ed25519 private key, and the CRC32C of those 64 bytes
+  (little-endian). It is one sector, which a crash keeps whole or old. At the first
+  start, shard 0 makes the file with `Mode::Create`; 68 zero bytes are a key not yet
+  written, so shard 0 makes a key (`types::node::Key::v7` at mesh time, once it has one,
+  from `Config::entropy`, and 32 random bytes). At each start, shard 0 writes the key
+  back and syncs the file and the directory before the transport proves it, because a
+  failed sync of an earlier start can leave a key that a read sees but a power cut
+  loses. A node that joins by ticket (#336) makes its key the same way at its first
+  start. A file of another length, tag, or checksum gives `Error::Key`, which
+  `Node::join` ranks above `Error::Blob`, `Error::Mesh`, `Error::Transport`, and
+  `Error::Group`; the node never writes over it, because a new key is a new node to its
+  region. Each other file error on `node.key` gives `Error::Directory`. The form is not
+  a contract: only `node` reads it. The seal key goes into `node.key` with its first
+  caller, as the tag `foundation/key/2` with 32 more bytes. `admin.key` (#1744 PR 1b)
+  shares this code when it lands. #1988 makes `os` give each file the mode `0600` and
+  each directory `0700`; until then `os` gives `0644` and `0755`:
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
+  plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
+  time of a new key, by `laptop.architect-2` (20:10 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The
+  private pool and the rank above `Error::Blob` and `Error::Mesh` are the amendment
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068057306, which
+  the same comment approves. The rank above `Error::Transport` and `Error::Group`,
+  from the merge with #1936, by `laptop.architect-2` (21:48 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1991#issuecomment-6069688780. The load
+  before the hub and the write back at each start (the fix of a finding of `breaker`
+  in round 1 of #1991), by `laptop.architect-2` (20:23 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1991#issuecomment-6068373063. This
+  supersedes `Config::private_key`, the patch of
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047. While a
+  Rust caller gives `Config::region`, a founding with a dangling index or two channels
+  of one key makes shard 0 panic. The first PR that gives `node` a `spec::region::check`
+  before each define (#1744 or #1957 PR 2) runs it on `Config::region` too, and then a
+  founding with problems defines no channel (#1741), by `laptop.architect-2` (20:08
+  UTC): https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
+  the ruling of `laptop.architect` (20:08 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791.
