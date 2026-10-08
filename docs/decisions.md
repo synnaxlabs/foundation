@@ -2037,6 +2037,10 @@ How to read this record:
   `Message` type of the proposal, because it changes `send` and `try_send` for each
   caller and must own its ranges (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
+  The message that `TooLarge` keeps also keeps its room in the receive budget, in the
+  receiver's own buffer, until a read takes it, a reset ends the stream, or the
+  receiver drops: its bytes stay in the session, so the budget counts them (architect,
+  #68: https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6063890182).
   `send_parts` gives the carrier one slice of the block for each run of adjacent parts
   over 1452 bytes. It copies each stretch of shorter runs and zeros between them. The
   write reads the caller's parts, and the stream keeps only the parts that the carrier
