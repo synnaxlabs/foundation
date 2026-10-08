@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -10,7 +11,8 @@ use types::name::Name;
 use types::node;
 
 use crate::change::Unknown;
-use crate::region::Unfit;
+use crate::member::Member;
+use crate::region::{self, Unfit};
 use crate::{claim, log};
 
 /// Why a mesh call failed.
@@ -100,7 +102,8 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
-    /// A file call on the directory of the spec in use, or on a file in it, failed.
+    /// A file call on the founding file, on the directory of the spec in use, or on a
+    /// file in it, failed.
     Files(files::Error),
     /// A file in the directory of the spec in use does not name a pointer.
     Stray {
@@ -120,6 +123,21 @@ pub enum Error {
         homes: usize,
         /// The most homes that one change gives.
         most: usize,
+    },
+    /// `Config::founding` is not the region that the first open of the mesh directory
+    /// stored. Each field sets the state at version 0, so a node with another value
+    /// applies the log to another state.
+    Founding {
+        /// What the first open stored.
+        stored: Box<region::Founding>,
+        /// `Config::founding`, with its members in key order.
+        given: Box<region::Founding>,
+    },
+    /// The log of the mesh directory holds a record, and the directory holds no
+    /// founding file that reads back whole.
+    Unfounded {
+        /// The path of the founding file.
+        path: PathBuf,
     },
 }
 
@@ -199,6 +217,13 @@ impl fmt::Display for Error {
                 "the change gives {homes} homes, more than the {most} that one change \
                  can give"
             ),
+            Self::Founding { stored, given } => founded(f, stored, given),
+            Self::Unfounded { path } => write!(
+                f,
+                "the log of the mesh directory holds a record, but {} is not there or \
+                 does not read back whole",
+                path.display()
+            ),
         }
     }
 }
@@ -216,6 +241,93 @@ fn write_problems(
         separator = "; ";
     }
     Ok(())
+}
+
+// Names the first field of `stored` and `given` that differs, and for the members, the
+// definitions, and the homes, the first key whose value differs or is in only one of
+// the two.
+fn founded(
+    f: &mut fmt::Formatter<'_>,
+    stored: &region::Founding,
+    given: &region::Founding,
+) -> fmt::Result {
+    let founded = "the mesh was founded with";
+    if stored.prefix != given.prefix {
+        return write!(
+            f,
+            "{founded} prefix \"{}\", not \"{}\"",
+            stored.prefix, given.prefix
+        );
+    }
+    if let Some((key, stored, given)) = first(&members(stored), &members(given)) {
+        return match (stored, given) {
+            (Some(_), Some(_)) => write!(f, "{founded} another record of member {key}"),
+            (Some(_), None) => {
+                write!(f, "{founded} member {key}, which the config lacks")
+            }
+            (None, _) => write!(f, "{founded} no member {key}"),
+        };
+    }
+    if stored.voters != given.voters {
+        return write!(
+            f,
+            "{founded} voters {}, not {}",
+            Keys(&stored.voters),
+            Keys(&given.voters)
+        );
+    }
+    match first(&stored.definitions, &given.definitions) {
+        Some((name, Some(_), Some(_))) => {
+            write!(f, "{founded} another definition {name}")
+        }
+        Some((name, Some(_), None)) => {
+            write!(f, "{founded} definition {name}, which the config lacks")
+        }
+        Some((name, None, _)) => write!(f, "{founded} no definition {name}"),
+        None => match first(&stored.homes, &given.homes) {
+            Some((index, Some(_), Some(_))) => {
+                write!(f, "{founded} another home of index {index}")
+            }
+            Some((index, Some(_), None)) => {
+                write!(f, "{founded} a home of index {index}, which the config lacks")
+            }
+            Some((index, None, _)) => write!(f, "{founded} no home of index {index}"),
+            None => write!(f, "{founded} another region"),
+        },
+    }
+}
+
+// The members of `founding` by key.
+fn members(founding: &region::Founding) -> BTreeMap<node::Key, &Member> {
+    let members = founding.members.iter();
+    members.map(|member| (member.card.key(), member)).collect()
+}
+
+// The first key, in key order, whose value differs between `a` and `b`, with the
+// value in each.
+fn first<'a, K: Ord, V: PartialEq>(
+    a: &'a BTreeMap<K, V>,
+    b: &'a BTreeMap<K, V>,
+) -> Option<(&'a K, Option<&'a V>, Option<&'a V>)> {
+    let keys: BTreeSet<&K> = a.keys().chain(b.keys()).collect();
+    keys.into_iter()
+        .map(|key| (key, a.get(key), b.get(key)))
+        .find(|(_, a, b)| a != b)
+}
+
+// A set of node keys as `{a, b}`.
+struct Keys<'a>(&'a BTreeSet<node::Key>);
+
+impl fmt::Display for Keys<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("{")?;
+        let mut separator = "";
+        for key in self.0 {
+            write!(f, "{separator}{key}")?;
+            separator = ", ";
+        }
+        f.write_str("}")
+    }
 }
 
 impl From<log::Error> for Error {

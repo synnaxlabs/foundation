@@ -32,10 +32,6 @@ impl Member {
     /// a presence byte and then `ephemeral` as 8 little-endian bytes, signed, a count
     /// of status entries as 8 little-endian bytes, and each entry in the byte order of
     /// its name: the name behind a length byte, then the channel key.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
-    )]
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         self.card.encode(out);
         out.extend(self.admission);
@@ -46,10 +42,6 @@ impl Member {
     /// Takes one record from the start of `bytes`. `None` when the bytes do not start
     /// with what [`Member::encode`] gives, or when the card's signature does not hold;
     /// `bytes` is then at no known place.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
-    )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let card = card::Signed::decode(bytes)?;
         let admission = take(bytes)?;
