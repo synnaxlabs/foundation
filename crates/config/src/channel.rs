@@ -6,7 +6,7 @@ use spec::data_type::DataType;
 use spec::unit::Unit;
 use types::name::Name;
 
-use crate::{Definition, Found, Reported, written};
+use crate::{Definition, Found, Reported};
 
 const BAD_CHANNEL_KIND: Code = Code::new("config.bad-channel-kind");
 const BAD_DATA_TYPE: Code = Code::new("config.bad-data-type");
@@ -152,7 +152,7 @@ fn text<'v>(
     what: &str,
     example: &str,
 ) -> Result<&'v str, Diagnostic> {
-    written(value).ok_or_else(|| {
+    value.kind.text().ok_or_else(|| {
         Diagnostic::new(
             code,
             value.span,

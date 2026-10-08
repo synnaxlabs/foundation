@@ -1,7 +1,7 @@
 //! The reader settings that each out connector reads from its config.
 
 use document::diagnostic::{Code, Diagnostic};
-use document::value::{Kind, Value};
+use document::value::Value;
 use document::{Block, Document};
 use hub::reader::Mode;
 use types::name::{Name, Selector};
@@ -9,11 +9,8 @@ use types::time::Span;
 
 use crate::kind;
 
-const LABEL_COUNT: Code = Code::new("config.label-count");
-const REPEATED_BLOCK: Code = Code::new("config.repeated-block");
 const BAD_MODE: Code = Code::new("connector.bad-mode");
 const LATEST_HOLD: Code = Code::new("connector.latest-hold");
-const NEGATIVE_SPAN: Code = Code::new("config.negative-span");
 
 const READER_KEYS: [&str; 3] = ["name", "mode", "hold"];
 
@@ -44,9 +41,9 @@ pub struct Settings {
 /// # Errors
 ///
 /// One diagnostic for each problem: an unknown key, no `select`, a value that does
-/// not read, a label, attribute, or block in `reader` that it does not take, a second
-/// `reader` block, a negative `hold`, and a `hold` in `latest` mode, since only a
-/// complete reader holds.
+/// not read, a label, attribute, or block in `reader` that it does not take, each
+/// `reader` block after the first, a negative `hold`, and a `hold` in `latest` mode,
+/// since only a complete reader holds.
 ///
 /// # Panics
 ///
@@ -81,19 +78,11 @@ pub fn read(
         ),
         &mut diagnostics,
     );
-    let mut readers = config
+    diagnostics.extend(document::read::repeated(config, kind::NOUN, "reader"));
+    let first = config
         .blocks
         .iter()
-        .filter(|block| &*block.keyword == "reader");
-    let first = readers.next();
-    for repeated in readers {
-        diagnostics.push(Diagnostic::new(
-            REPEATED_BLOCK,
-            repeated.keyword_span,
-            "the connector has a second `reader` block".into(),
-            "Join the two into one".into(),
-        ));
-    }
+        .find(|block| &*block.keyword == "reader");
     let (name, mode, hold) = match first {
         Some(first) => block(first, &mut diagnostics),
         None => (None, Mode::Complete, Span::ZERO),
@@ -115,14 +104,8 @@ fn block(
     block: &Block,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> (Option<Name>, Mode, Span) {
-    if let Some(label) = block.labels.first() {
-        diagnostics.push(Diagnostic::new(
-            LABEL_COUNT,
-            label.span,
-            "the `reader` block takes no label".into(),
-            "Remove each label, and name the reader with a `name` attribute".into(),
-        ));
-    }
+    let fix = "Remove each label, and name the reader with a `name` attribute";
+    keep(document::read::labels::<0>(block, fix.into()), diagnostics);
     diagnostics.extend(document::read::unknown(
         &block.body,
         "the `reader` block",
@@ -134,7 +117,7 @@ fn block(
         .map(|name| keep(document::read::name(&name.value), diagnostics));
     let mode = attribute("mode").map(|mode| keep(self::mode(&mode.value), diagnostics));
     let hold = attribute("hold");
-    let span = hold.map(|hold| keep(self::hold(&hold.value), diagnostics));
+    let span = hold.map(|hold| keep(document::read::span(&hold.value), diagnostics));
     if let (Some(hold), Some(Some(Mode::Latest))) = (hold, mode) {
         diagnostics.push(Diagnostic::new(
             LATEST_HOLD,
@@ -152,33 +135,18 @@ fn block(
     )
 }
 
-/// Reads a span of zero or more.
-fn hold(value: &Value) -> Result<Span, Diagnostic> {
-    let span = document::read::span(value)?;
-    if span < Span::ZERO {
-        return Err(Diagnostic::new(
-            NEGATIVE_SPAN,
-            value.span,
-            format!("the reader holds {span}, which is below zero"),
-            "Write a hold of zero or more".into(),
-        ));
-    }
-    Ok(span)
-}
-
 /// Reads `"complete"` or `"latest"`, as a string or a reference.
 fn mode(value: &Value) -> Result<Mode, Diagnostic> {
-    let text = match &value.kind {
-        Kind::String(text) => text,
-        Kind::Reference(name) => name.as_str(),
-        kind => {
-            return Err(Diagnostic::new(
-                BAD_MODE,
-                value.span,
-                format!("a mode is a string or a reference, not {}", kind.noun()),
-                "Write \"complete\" or \"latest\"".into(),
-            ));
-        }
+    let Some(text) = value.kind.text() else {
+        return Err(Diagnostic::new(
+            BAD_MODE,
+            value.span,
+            format!(
+                "a mode is a string or a reference, not {}",
+                value.kind.noun()
+            ),
+            "Write \"complete\" or \"latest\"".into(),
+        ));
     };
     match text {
         "complete" => Ok(Mode::Complete),
