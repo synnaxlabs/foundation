@@ -277,17 +277,19 @@ impl Gateway {
     /// is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the caller
     /// stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromProgram<'m>, Error> {
-        let step = self.order.step(message, |kind, bytes| match kind {
-            HELLO => {
-                Signed::decode(bytes).map(|signed| (FromProgram::Signed(signed), None))
+        if let Some((bytes, last)) = self.order.body(message)? {
+            return Ok(FromProgram::Body { bytes, last });
+        }
+        let (decoded, length) = match kind(message)? {
+            HELLO => (FromProgram::Signed(Signed::decode(message)?), None),
+            REQUEST => {
+                let request = Request::decode(message)?;
+                (FromProgram::Request(request), Some(request.length))
             }
-            _ => Request::decode(bytes)
-                .map(|request| (FromProgram::Request(request), Some(request.length))),
-        })?;
-        Ok(match step {
-            Step::Message(message) => message,
-            Step::Body { bytes, last } => FromProgram::Body { bytes, last },
-        })
+            kind => return Err(Error::Kind { kind }),
+        };
+        self.order.next(length)?;
+        Ok(decoded)
     }
 }
 
@@ -322,16 +324,19 @@ impl Program {
     /// As [`Gateway::decode`], for a challenge in place of a hello and a response in
     /// place of a request.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromNode<'m>, Error> {
-        let step = self.order.step(message, |kind, bytes| match kind {
-            HELLO => Challenge::decode(bytes)
-                .map(|challenge| (FromNode::Challenge(challenge), None)),
-            _ => Response::decode(bytes)
-                .map(|response| (FromNode::Response(response), Some(response.length))),
-        })?;
-        Ok(match step {
-            Step::Message(message) => message,
-            Step::Body { bytes, last } => FromNode::Body { bytes, last },
-        })
+        if let Some((bytes, last)) = self.order.body(message)? {
+            return Ok(FromNode::Body { bytes, last });
+        }
+        let (decoded, length) = match kind(message)? {
+            HELLO => (FromNode::Challenge(Challenge::decode(message)?), None),
+            REQUEST => {
+                let response = Response::decode(message)?;
+                (FromNode::Response(response), Some(response.length))
+            }
+            kind => return Err(Error::Kind { kind }),
+        };
+        self.order.next(length)?;
+        Ok(decoded)
     }
 }
 
@@ -349,24 +354,16 @@ enum Order {
     Done,
 }
 
-/// What [`Order::step`] gives: a message with a kind, or body bytes.
-enum Step<'m, M> {
-    Message(M),
-    Body { bytes: &'m [u8], last: bool },
-}
-
 impl Order {
-    /// Takes `message`. Where a body continues, it is body bytes; else `decode` reads
-    /// a message of kind 4 or 5, and gives it with its body's length for kind 5.
-    fn step<'m, M>(
+    /// Takes `message` as body bytes, with whether the body ends with it, where a body
+    /// continues. Gives `None` where the next message has a kind.
+    fn body<'m>(
         &mut self,
         message: &'m [u8],
-        decode: impl FnOnce(u8, &[u8]) -> Result<(M, Option<u64>), Error>,
-    ) -> Result<Step<'m, M>, Error> {
-        let first = match *self {
-            Self::First => true,
-            Self::Hello => false,
-            Self::Done => return Err(Error::Trailing),
+    ) -> Result<Option<(&'m [u8], bool)>, Error> {
+        match *self {
+            Self::First | Self::Hello => Ok(None),
+            Self::Done => Err(Error::Trailing),
             Self::Body { remain } => {
                 let len = message.len();
                 if len == 0 {
@@ -379,27 +376,29 @@ impl Order {
                 } else {
                     Self::Body { remain }
                 };
-                return Ok(Step::Body {
-                    bytes: message,
-                    last: remain == 0,
-                });
+                Ok(Some((message, remain == 0)))
             }
-        };
-        let &kind = message.first().ok_or(Error::Empty)?;
-        if kind != HELLO && kind != REQUEST {
-            return Err(Error::Kind { kind });
         }
-        let (decoded, length) = decode(kind, message)?;
-        *self = match (first, length) {
+    }
+
+    /// Takes a decoded message after [`body`](Self::body) gave `None`: `None` for a
+    /// message of the hello stream, else the body length of a request or response.
+    fn next(&mut self, length: Option<u64>) -> Result<(), Error> {
+        *self = match (*self, length) {
             (_, None) => Self::Hello,
-            (false, Some(_)) => return Err(Error::Mixed { kind }),
-            (true, Some(0)) => Self::Done,
-            (true, Some(length)) => Self::Body {
+            (Self::First, Some(0)) => Self::Done,
+            (Self::First, Some(length)) => Self::Body {
                 remain: body_len(length),
             },
+            (_, Some(_)) => return Err(Error::Mixed { kind: REQUEST }),
         };
-        Ok(Step::Message(decoded))
+        Ok(())
     }
+}
+
+/// The kind byte of `message`.
+fn kind(message: &[u8]) -> Result<u8, Error> {
+    message.first().copied().ok_or(Error::Empty)
 }
 
 /// The fields of `bytes` after its kind byte.
