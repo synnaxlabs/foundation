@@ -4141,7 +4141,9 @@ How to read this record:
   calls in flight, 2026-10-08T02:39:46Z:
   https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051056642; the text,
   2026-10-08T02:27:20Z:
-  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6050920514.
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6050920514; the order
+  that the calls ended, 2026-10-08T02:43:34Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051095403.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
