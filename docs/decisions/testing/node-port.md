@@ -67,8 +67,8 @@
   region. Each other file error on `node.key` gives `Error::Directory`. The form is not
   a contract: only `node` reads it. The seal key goes into `node.key` with its first
   caller, as the tag `foundation/key/2` with 32 more bytes. `admin.key` (#1744 PR 1b)
-  shares this code when it lands. #1988 makes `os` give each file the mode `0600` and
-  each directory `0700`; until then `os` gives `0644` and `0755`:
+  shares this code when it lands. `os` gives each new file the mode `0600` and each new
+  directory `0700`, and does not change the mode of one that is there (#1988):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
   plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
   time of a new key, by `laptop.architect-2` (20:10 UTC):

@@ -131,7 +131,9 @@ pub fn net() -> env::net::Net {
 /// handle of its I/O thread. `os` keeps its own entries in `dir`, so give it a
 /// directory that nothing else uses. `threads` starts I/O thread `name`, which runs
 /// each call of the disk and of its files in the order they reach it, and ends after
-/// the disk and its files drop. Give each shard a disk of its own.
+/// the disk and its files drop. Give each shard a disk of its own. Each file and
+/// directory that it makes has the mode `0600` or `0700`; it does not change the mode
+/// of one that is there.
 ///
 /// # Errors
 ///
