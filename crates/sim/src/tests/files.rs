@@ -299,7 +299,7 @@ fn each_node_has_its_own_disk() {
 }
 
 #[test]
-fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
+fn free_counts_a_removed_file_until_its_last_handle_closes_and_its_remove_is_durable() {
     let frees = run(0, MIB, |node, _| async move {
         let files = node.files();
         let mut frees = vec![files.free().await.unwrap()];
@@ -313,12 +313,19 @@ fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
         frees.push(files.free().await.unwrap());
         drop(file);
         frees.push(files.free().await.unwrap());
+        files.sync_dir(Path::new("")).await.unwrap();
+        frees.push(files.free().await.unwrap());
         frees
     });
     let created = MIB - 64 * KIB;
     let expected = [MIB, created, created, created - 4 * KIB, created - 4 * KIB];
     assert_eq!(frees[..5], expected);
-    assert_eq!(frees[5], MIB - 4 * KIB, "the last handle closed");
+    assert_eq!(
+        frees[5],
+        created - 4 * KIB,
+        "the create of `f` is not durable"
+    );
+    assert_eq!(frees[6], MIB - 4 * KIB, "the remove of `f` is durable");
 }
 
 #[test]
@@ -690,7 +697,7 @@ fn writes_in_flight_over_filled_sectors_leave_either_bytes() {
 }
 
 /// The free bytes after an open that makes a 64 KiB file is polled once, its future
-/// drops before or after the call ends, and the file is removed.
+/// drops before or after the call ends, and the remove of the file is durable.
 fn free_after_dropped_open(ended: bool) -> u64 {
     run(0, MIB, move |node, _| async move {
         let (files, clock) = (node.files(), node.clock());
@@ -709,6 +716,7 @@ fn free_after_dropped_open(ended: bool) -> u64 {
             clock.sleep(Span::MILLISECOND).await;
         }
         files.remove(Path::new("a")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
         files.free().await.unwrap()
     })
 }
@@ -1426,6 +1434,7 @@ fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
         let found = files.open(path, Mode::Write).await.err();
         assert_eq!(found, Some(Error::NotFound { path: "a".into() }));
+        files.sync_dir(Path::new("")).await.unwrap();
         assert_eq!(files.free().await.unwrap(), MIB, "the handle closed");
         let made = create(&node, "a", KIB).await;
         assert_eq!(read(&made, &pool, 0, 512).await, [0; 512]);
@@ -1481,6 +1490,7 @@ fn a_remove_of_a_removed_path_gives_not_found() {
         let found = file.remove().await;
         assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
+        files.sync_dir(Path::new("")).await.unwrap();
         assert_eq!(files.free().await.unwrap(), MIB, "the handle closed");
     });
 }

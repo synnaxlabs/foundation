@@ -39,10 +39,9 @@ impl Drop for Live {
     }
 }
 
-/// Resolves when each task of a [`Mesh`](super::Mesh) has ended, from
-/// [`Mesh::ended`](super::Mesh::ended).
+/// Resolves once each task of a [`Mesh`](super::Mesh) has ended.
+/// [`Mesh::ended`](super::Mesh::ended) gives it.
 #[derive(Debug)]
-#[must_use = "a future does nothing unless polled"]
 pub struct Ended(pub(super) Rc<Running>);
 
 impl Future for Ended {

@@ -2785,6 +2785,11 @@ How to read this record:
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): each task that sends ends
+  at its next poll after the group stops or the last `Mesh` drops. A dial or a send in
+  progress stops, so it never holds `Mesh::ended` for a dial timeout. Decided by
+  `laptop.architect`, 04:00 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -2855,18 +2860,23 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
   three types.
-  Amended (2026-10-08, PR 3b of #585): `Config::dir` is the mesh's directory in
-  `Config::files`, and the log is in its `log` directory. `node` gives `mesh` (decided
-  by `laptop.architect`, 03:37 UTC:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). `open`
-  makes `dir` and syncs its parent when it is not there. `Mesh::ended` gives `Ended`, a
-  future that resolves when each task of the mesh has ended: the group's task and each
-  task that sends. It holds no `Group`, so it waits soon after the last clone drops or
-  the group stops. Then the log is closed, and a new open of `dir` succeeds. Lost: a
-  counting `Tasks` driver in `node`, which counts each task of a shard, not those of the
-  mesh; a `Files` call that gives a subdirectory, which changes `env` for one caller
-  (the field won, by `laptop.architect-2`, 03:54 UTC:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866).
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir` is the
+  mesh's directory, relative to the data directory. The mesh makes it and syncs its
+  parent, and the log goes in `log` in it. Its parent must be there and durable. `node`
+  gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each task of
+  the mesh has ended: the group's task and each task that sends. It holds no clone, so
+  it does not keep the group running. Once it resolves, the mesh holds no file, and a
+  new open of its directory can take the log. Decided by `laptop.architect`, 04:00 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after
+  the ruling on PR 3b, 03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475, and the
+  field over a `Files` call by `laptop.architect-2`, 03:54 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866. Lost: a
+  counting `Tasks` driver in `node`, because `node` then watches the tasks of another
+  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end
+  the group; `env::files::Files::within`, because `env` then gives two ways to scope
+  the files of a crate, beside `buffer::Config::dir`. A change that wants it later
+  moves `buffer` and `mesh` together.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -3610,6 +3620,26 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
+  a body that its reader does not take, with the attribute keys and the block keywords
+  apart, so a key that names an attribute never passes as a block. One function holds
+  both checks, so a kind cannot forget one half. When a body takes blocks and no
+  attribute, as a file does, the fix of an attribute is to move it into one of those
+  blocks. `read::missing` reports a body with none of some keys, and panics on an
+  empty list, which is a defect of the caller. `read::required` reads one key or gives
+  that diagnostic. `config` uses them, also at the top level of a file, and so does each
+  kind, so one mistake has one code: `document.unknown-attribute`,
+  `document.unknown-block`, and `document.missing-attribute`. Decided by
+  `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
+  2026-10-08 03:05 UTC) and on #1772
+  (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
+  2026-10-08 03:27 UTC, and
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
+  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
+  rest at `finish`, which drops the diagnostics when a caller returns early;
+  `unknown_attributes` and `unknown_blocks` as two functions; a public
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -4416,6 +4446,35 @@ How to read this record:
   directory at 2026-10-07T19:22:31Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
   https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
+  Amended (2026-10-07, #1551): the disk keeps one log, in the order that the calls
+  ended, of the creates, removes, and renames that no `sync_dir` of their directory
+  covered. A rename is one change. A `Power` crash keeps a prefix of the log. It draws
+  the prefix from the files stream only when the log is not empty, and the digest holds
+  its length. Each file call in flight takes effect as for `Process`, and the prefix
+  decides whether its change stays, except a `sync` or `sync_dir` in flight, which has
+  no effect. A `sync_dir` makes durable only the changes of its directory. A journaled
+  file system can commit more; `sim` does not, so a missing `sync_dir` shows. A file
+  takes space while an entry, a durable entry, a change in the log, or a handle names
+  it. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508: a
+  `Power` crash undoes each rename since the last `sync_dir`, a rename in flight too.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692: the
+  commit of a create in flight. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531: a commit
+  makes the entries of the directory durable. A create that a `Power` crash cuts is
+  whole or has no bytes, and the prefix decides whether its entry stays. A cut gives a
+  state that a journaled file system can reach, or a state that only a missing
+  `sync_dir` reaches. Lost: a log for each directory, which gives states that need no
+  missing `sync_dir`.
+  Decided by `laptop.architect-2` (2026-10-07T19:20:28Z):
+  https://github.com/synnaxlabs/foundation/issues/1551#issuecomment-6045125302; the
+  calls in flight, 2026-10-08T02:39:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051056642; the text,
+  2026-10-08T02:27:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6050920514; the order
+  that the calls ended, 2026-10-08T02:43:34Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6051095403.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
