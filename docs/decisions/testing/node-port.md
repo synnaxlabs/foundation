@@ -58,12 +58,12 @@
   start, shard 0 makes the file with `Mode::Create`; 68 zero bytes are a key not yet
   written, so shard 0 makes a key (`types::node::Key::v7` at mesh time, once it has one,
   from `Config::entropy`, and 32 random bytes). At each start, shard 0 writes the key
-  back and syncs the file and the directory before the transport proves it, since a
+  back and syncs the file and the directory before the transport proves it, because a
   failed sync of an earlier start can leave a key that a read sees but a power cut
   loses. A node that joins by ticket (#336) makes its key the same way at its first
   start. A file of another length, tag, or checksum gives `Error::Key`, which
   `Node::join` ranks above `Error::Blob` and `Error::Mesh`; the node never writes over
-  it, since a new key is a new node to its region. Each other file error on `node.key`
+  it, because a new key is a new node to its region. Each other file error on `node.key`
   gives `Error::Directory`. The form is not a contract: only `node` reads it. The seal
   key goes into `node.key` with its first caller, as the tag `foundation/key/2` with 32
   more bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. #1988 makes `os`
@@ -84,5 +84,4 @@
   before each define (#1744 or #1957 PR 2) runs it on `Config::region` too, and then a
   founding with problems defines no channel (#1741), by `laptop.architect-2`:
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
-  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068089189 and
-  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507.
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791.
