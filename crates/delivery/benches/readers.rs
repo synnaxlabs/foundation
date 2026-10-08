@@ -2,12 +2,15 @@
 //! complete readers, which runs per frame, and of one floor, which the home reads when
 //! `buffer` trims.
 
-use delivery::complete::Key;
+use std::sync::Arc;
+
+use delivery::complete::{Charge, Key};
 use delivery::{Position, Reader, Readers, Start};
 use divan::Bencher;
 use types::channel;
-use types::frame::key_set::{Group, Interner};
+use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{Draft, Form, Frame, Path};
+use types::sample::{Scalar, Type};
 
 fn main() {
     divan::main();
@@ -21,7 +24,11 @@ fn opened(sessions: usize, limit_bytes: u64) -> (Readers, Vec<Key>) {
     });
     let mut readers = Readers::new(0);
     let keys = (0..sessions)
-        .map(|_| readers.open(Reader::Unnamed, start, limit_bytes).key)
+        .map(|_| {
+            readers
+                .open(Reader::Unnamed, start, limit_bytes, Charge::Whole)
+                .key
+        })
         .collect();
     (readers, keys)
 }
@@ -42,17 +49,18 @@ fn ack(bencher: Bencher<'_, '_>, sessions: usize) {
     });
 }
 
-/// A frame of one index.
-fn frame() -> Frame {
+/// A frame of one index, and its key set.
+fn frame() -> (Frame, Arc<KeySet>) {
     let set = Interner::new().intern(&[Group {
         index: channel::Key::from_u128(1),
         data: &[],
     }]);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
-    Draft::new(&pool, &set, Form::Raw, &[(0, 8)])
+    let frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8)])
         .expect("the pool holds the frame")
-        .freeze(Path::Live)
+        .freeze(Path::Live);
+    (frame, set)
 }
 
 /// One live frame to `sessions` recording readers that keep up: the home queues it,
@@ -60,15 +68,177 @@ fn frame() -> Frame {
 #[divan::bench(args = [1, 16, 256])]
 fn release(bencher: Bencher<'_, '_>, sessions: usize) {
     let (mut readers, keys) = opened(sessions, u64::MAX);
-    let frame = frame();
+    let (frame, set) = frame();
     let mut seq = 0;
     bencher.bench_local(|| {
-        readers.queue(&frame, seq..seq + 1);
+        readers.queue(&frame, &set, seq..seq + 1);
         seq += 1;
         divan::black_box(readers.release(seq));
         for &key in &keys {
             divan::black_box(readers.take(key.into()));
         }
+    });
+}
+
+/// The channels of [`wide`]: one index and its data channels.
+const CHANNELS: usize = 100_000;
+
+/// A frame of [`CHANNELS`] channels of 8 bytes each, and its key set.
+fn wide() -> (Frame, Arc<KeySet>) {
+    let f64 = Type::Scalar(Scalar::F64);
+    let data: Vec<_> = (2..=CHANNELS)
+        .map(|n| {
+            (
+                channel::Key::from_u128(u128::try_from(n).expect("few")),
+                f64,
+            )
+        })
+        .collect();
+    let set = Interner::new().intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &data,
+    }]);
+    let config = block::Config { budget: 1 << 22 };
+    let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
+    let lens: Vec<_> = (0..CHANNELS).map(|entry| (entry, 8)).collect();
+    let frame = Draft::new(&pool, &set, Form::Raw, &lens)
+        .expect("the pool holds the frame")
+        .freeze(Path::Live);
+    (frame, set)
+}
+
+/// One live frame of [`CHANNELS`] channels to one recording reader that keeps up and
+/// pays for a remote frame of its `places`: the last channel, or every channel, in
+/// entry order, which is the home's frame.
+#[divan::bench(args = [1, CHANNELS])]
+fn release_places(bencher: Bencher<'_, '_>, places: usize) {
+    release_through(bencher, |set| {
+        let entries = &set.entries()[CHANNELS - places..];
+        entries.iter().map(|entry| entry.slot).collect()
+    });
+}
+
+/// As [`release_places`] for places of every channel, last first, as a remote node
+/// whose slots are in another order lists them.
+#[divan::bench]
+fn release_places_reversed(bencher: Bencher<'_, '_>) {
+    release_through(bencher, |set| {
+        set.entries().iter().rev().map(|entry| entry.slot).collect()
+    });
+}
+
+/// The first frame of [`wide`] to a new session of places of every channel, last
+/// first, which learns the key set.
+#[divan::bench(sample_count = 100)]
+fn release_places_first(bencher: Bencher<'_, '_>) {
+    let (frame, set) = wide();
+    let slots: Box<[channel::Slot]> =
+        set.entries().iter().rev().map(|entry| entry.slot).collect();
+    bencher
+        .with_inputs(|| {
+            let mut readers = Readers::new(0);
+            let start = Start::At(Position {
+                live: 0,
+                backfill: Some(0),
+            });
+            let key = readers
+                .open(
+                    Reader::Unnamed,
+                    start,
+                    u64::MAX,
+                    Charge::Places(slots.clone()),
+                )
+                .key;
+            readers.queue(&frame, &set, 0..1);
+            (readers, key)
+        })
+        .bench_local_values(|(mut readers, key)| {
+            divan::black_box(readers.release(1));
+            divan::black_box(readers.take(key.into()));
+            readers
+        });
+}
+
+/// Releases each frame of [`wide`] to one session of the places that `slots` gives.
+fn release_through(
+    bencher: Bencher<'_, '_>,
+    slots: impl FnOnce(&KeySet) -> Box<[channel::Slot]>,
+) {
+    let (frame, set) = wide();
+    let slots = slots(&set);
+    let mut readers = Readers::new(0);
+    let start = Start::At(Position {
+        live: 0,
+        backfill: Some(0),
+    });
+    let key = readers
+        .open(Reader::Unnamed, start, u64::MAX, Charge::Places(slots))
+        .key;
+    let mut seq = 0;
+    bencher.bench_local(|| {
+        readers.queue(&frame, &set, seq..seq + 1);
+        seq += 1;
+        divan::black_box(readers.release(seq));
+        divan::black_box(readers.take(key.into()));
+    });
+}
+
+/// Two live frames, of two key sets of about `channels` channels, to one recording
+/// reader that keeps up and pays for a remote frame of one place in both.
+#[divan::bench(args = [16, CHANNELS])]
+fn release_places_alternating(bencher: Bencher<'_, '_>, channels: usize) {
+    let f64 = Type::Scalar(Scalar::F64);
+    let mut interner = Interner::new();
+    let data = |extra: usize| -> Vec<_> {
+        (2..=channels + extra)
+            .map(|n| {
+                (
+                    channel::Key::from_u128(u128::try_from(n).expect("few")),
+                    f64,
+                )
+            })
+            .collect()
+    };
+    let (da, db) = (data(0), data(1));
+    let a = interner.intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &da,
+    }]);
+    let b = interner.intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &db,
+    }]);
+    let config = block::Config { budget: 1 << 24 };
+    let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
+    let build = |set: &Arc<KeySet>| {
+        let lens: Vec<_> = (0..set.entries().len()).map(|entry| (entry, 8)).collect();
+        Draft::new(&pool, set, Form::Raw, &lens)
+            .expect("the pool holds the frame")
+            .freeze(Path::Live)
+    };
+    let (fa, fb) = (build(&a), build(&b));
+    let slot = a.entries()[channels - 1].slot;
+    let mut readers = Readers::new(0);
+    let start = Start::At(Position {
+        live: 0,
+        backfill: Some(0),
+    });
+    let key = readers
+        .open(
+            Reader::Unnamed,
+            start,
+            u64::MAX,
+            Charge::Places([slot].into()),
+        )
+        .key;
+    let mut seq = 0;
+    bencher.bench_local(|| {
+        readers.queue(&fa, &a, seq..seq + 1);
+        readers.queue(&fb, &b, seq + 1..seq + 2);
+        seq += 2;
+        divan::black_box(readers.release(seq));
+        divan::black_box(readers.take(key.into()));
+        divan::black_box(readers.take(key.into()));
     });
 }
 

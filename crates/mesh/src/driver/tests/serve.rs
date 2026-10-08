@@ -1,11 +1,8 @@
 //! Tests of `Mesh::serve`. Node 2 writes raw streams to node 1 over two transports,
 //! and node 1 serves each with its mesh.
 
-use std::num::{NonZeroU32, NonZeroUsize};
-
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code, Port, Session, Transport};
-use wire::Protocol;
+use transport::{Class, Code};
 
 use super::*;
 
@@ -16,32 +13,6 @@ const REFUSED: Code = Code(16);
 /// Half of the shortest election timeout.
 const HALF: Span = Span::from_nanos(5 * TICK.nanos());
 
-/// A transport of node `id` at [`PORT`] of `node`, with `pool`.
-fn create_transport(
-    node: &sim::node::Node,
-    tasks: &Tasks,
-    id: u8,
-    pool: Rc<Pool>,
-) -> Transport {
-    let config = transport::Config {
-        private_key: private(id),
-        message_bytes_max: NonZeroUsize::new(pool.largest().min(1 << 16)).unwrap(),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(16).unwrap(),
-        // No session of a test ends for its idle time.
-        idle: seconds(60),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks: tasks.clone(),
-        pool,
-    };
-    let at = SocketAddr::new(node.addresses()[0], PORT);
-    let mut parts = Port::bind(&node.net(), at)
-        .unwrap()
-        .split(NonZeroUsize::MIN);
-    Transport::new(config, parts.pop().unwrap()).unwrap()
-}
-
 /// Node 2, with its session to node 1.
 struct Peer {
     node: sim::node::Node,
@@ -51,9 +22,8 @@ struct Peer {
 
 impl Peer {
     async fn send(&self, sender: &mut Sender, bytes: &[u8]) {
-        let mut block = self.pool.alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        sender.send(block.freeze()).await.unwrap();
+        let block = crate::bytes::block(&self.pool, bytes).unwrap();
+        sender.send(block).await.unwrap();
     }
 
     /// Sends the header of the mesh protocol, then `messages`.
@@ -134,7 +104,7 @@ where
     let (node, result) = (nodes[0].clone(), Arc::clone(&served));
     let main = move |tasks: Tasks| async move {
         let pool = pool();
-        let transport = create_transport(&node, &tasks, 1, Rc::clone(&pool));
+        let transport = create_transport(&node, &tasks, 1, PORT, Rc::clone(&pool));
         let session = transport.accept().await.unwrap();
         let mut incoming = session.accept().await.unwrap();
         {
@@ -150,7 +120,7 @@ where
     let (node, result) = (nodes[1].clone(), Arc::clone(&sent));
     let main = move |tasks: Tasks| async move {
         let pool = create_pool();
-        let transport = create_transport(&node, &tasks, 2, Rc::clone(&pool));
+        let transport = create_transport(&node, &tasks, 2, PORT, Rc::clone(&pool));
         let addresses = [Address::Udp(at)];
         let session = transport.dial(public(1), &addresses).await.unwrap();
         let clock = node.clock();
@@ -194,7 +164,7 @@ async fn leader(
         pool,
         ..config(node, tasks, 1, &[1, 2], &[1])
     };
-    let mesh = Mesh::open(config).await.unwrap();
+    let mesh = Mesh::start(config).await.unwrap();
     let first = lead(&mesh, &node.clock(), home(1)).await;
     (mesh, first)
 }
@@ -230,25 +200,31 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
     proof.voters.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
     let stranger = message(4, 1, Body::Heartbeat { commit: 0 });
     let misrouted = message(2, 3, Body::HeartbeatReply);
+    let unproven = chain::heartbeat(chain::links(2, &[2, 3, 4]));
+    let mut forged_link = chain::heartbeat(chain::links(2, &chain::ALL));
+    let votes = &mut forged_link.chain[2].change.votes.voters;
+    votes.get_mut(&key(3)).unwrap().as_mut().unwrap().0[63] ^= 1;
+    let forged_claim = || Error::Claim(claim::Error::Forged { signer: key(3) });
+    let all: &[u8] = &chain::ALL;
+    let founders: &[u8] = &chain::FOUNDERS;
     let cases = [
-        (3, heartbeat(), Error::Spoofed { from: key(2) }),
-        (4, stranger, Error::NotVoter { from: key(4) }),
+        (all, 3, heartbeat(), Error::Spoofed { from: key(2) }),
+        (all, 4, stranger, Error::NotVoter { from: key(4) }),
+        (all, 2, forged, forged_claim()),
         (
-            2,
-            forged,
-            Error::Claim(claim::Error::Forged { signer: key(3) }),
-        ),
-        (
+            all,
             2,
             misrouted,
             Error::Raft(raft::Error::Misrouted { to: key(3) }),
         ),
+        (founders, 3, unproven, chain::unproven()),
+        (founders, 3, forged_link, forged_claim()),
     ];
-    for (from, refused, error) in cases {
+    for (members, from, refused, error) in cases {
         let (served, finished) = run(
             move |node, tasks, incoming| async move {
-                let config = config(&node, &tasks, 1, &[1, 2, 3, 4], &IDS);
-                let mesh = Mesh::open(config).await.unwrap();
+                let config = config(&node, &tasks, 1, members, &IDS);
+                let mesh = Mesh::start(config).await.unwrap();
                 let served = mesh.serve(public(from), incoming).await;
                 // The group did not see the heartbeat after the refused message:
                 // its reply comes after the write of the term. The wait is
@@ -267,6 +243,99 @@ fn serve_stops_a_one_way_stream_at_the_first_message_that_the_group_refuses() {
         let stopped = transport::Error::Stopped { code: REFUSED };
         assert_eq!((served, finished), (Err(error), Err(stopped)));
     }
+}
+
+// The three cases of a claim that fails under the key of a join that is not
+// applied, through `serve`: the vote of a heartbeat is removed and 2 and 3 prove
+// the term; an append is cut before the entry with such a vote, and the rest comes
+// from the cut; a step that replaces the join removes its key, so a heartbeat with
+// a vote under it is refused.
+#[test]
+fn serve_removes_a_vote_that_fails_under_a_written_join() {
+    let (served, finished) = run(
+        |node, tasks, incoming| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+            unapplied::write(&mesh, unapplied::changes(&[unapplied::stale_join()]))
+                .await;
+            let served = mesh.serve(public(2), incoming).await;
+            let reply = mesh.outgoing(key(2)).await.unwrap();
+            assert_eq!(
+                (reply.body, reply.term),
+                (Body::HeartbeatReply, unapplied::later())
+            );
+            let answer = mesh.outgoing(key(2)).await.unwrap();
+            let voters = answer.proof.map(|proof| proof.voters.into_keys());
+            let voters: Option<Vec<_>> = voters.map(Iterator::collect);
+            assert_eq!(voters, Some(vec![key(2), key(3)]));
+            served
+        },
+        |peer| async move {
+            let votes = [(2, 2), (3, 3), (4, 4)];
+            let proven = unapplied::heartbeat(2, unapplied::later(), &votes);
+            let messages = [raft(proven), raft(heartbeat())];
+            let mut sender = peer.send_each(&messages).await;
+            let finished = sender.finish();
+            peer.settle().await;
+            finished
+        },
+    );
+    assert_eq!((served, finished), (Ok(()), Ok(())));
+}
+
+#[test]
+fn serve_cuts_an_append_before_a_vote_that_fails_under_a_written_join() {
+    let (served, finished) = run(
+        |node, tasks, incoming| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+            unapplied::write(&mesh, unapplied::changes(&[unapplied::stale_join()]))
+                .await;
+            let served = mesh.serve(public(3), incoming).await;
+            let reply = mesh.outgoing(key(3)).await.unwrap();
+            assert_eq!(reply.body, Body::AppendReply { last: 3 });
+            let reply = mesh.outgoing(key(3)).await.unwrap();
+            assert_eq!(reply.body, Body::AppendReply { last: 4 });
+            served
+        },
+        |peer| async move {
+            let whole = unapplied::replace(Position::default(), unapplied::replacing());
+            let mut entries = unapplied::replacing();
+            let rest = entries.split_off(3);
+            let messages = [raft(whole), raft(unapplied::replace(entries[2].at, rest))];
+            let mut sender = peer.send_each(&messages).await;
+            let finished = sender.finish();
+            peer.settle().await;
+            finished
+        },
+    );
+    assert_eq!((served, finished), (Ok(()), Ok(())));
+}
+
+#[test]
+fn serve_stops_at_a_vote_under_the_key_of_a_join_that_a_step_replaced() {
+    let (served, finished) = run(
+        |node, tasks, incoming| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+            unapplied::write(&mesh, unapplied::changes(&[unapplied::stale_join()]))
+                .await;
+            let served = mesh.serve(public(3), incoming).await;
+            node.clock().sleep(HALF).await;
+            assert_eq!(term(&mesh), unapplied::later());
+            served
+        },
+        |peer| async move {
+            let next = Term(unapplied::later().0 + 1);
+            let forged = unapplied::heartbeat(3, next, &[(3, 3), (4, 5)]);
+            let messages = [raft(unapplied::replacing_forged()), raft(forged)];
+            let mut sender = peer.send_each(&messages).await;
+            peer.settle().await;
+            sender.finish()
+        },
+    );
+    let stopped = transport::Error::Stopped { code: REFUSED };
+    assert_eq!(
+        (served, finished),
+        (Err(unapplied::forged_unproven()), Err(stopped))
+    );
 }
 
 #[test]
@@ -314,7 +383,7 @@ fn serve_drops_a_message_that_the_pool_has_no_block_for_and_goes_on() {
                 pool: Rc::clone(&pool),
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
-            let mesh = Mesh::open(config).await.unwrap();
+            let mesh = Mesh::start(config).await.unwrap();
             let held = fill(&pool);
             let free = {
                 let clock = node.clock();
@@ -396,7 +465,7 @@ fn serve_stops_a_one_way_stream_when_the_group_stopped() {
     let ((served, stop), finished) = run(
         |node, tasks, incoming| async move {
             let (mesh, _) = leader(&node, &tasks, create_pool()).await;
-            let stop = fail_sync(&node);
+            let stop = Error::Stopped(fail_sync(&node));
             assert_eq!(mesh.propose(home(4)).await, Err(stop.clone()));
             (mesh.serve(public(2), incoming).await, stop)
         },
@@ -744,7 +813,7 @@ fn serve_gives_no_code_of_the_mesh_when_the_group_stopped_before_the_proposal() 
             };
             assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
             let cause = Unknown::Kind { kind: 9 };
-            let stopped = Error::Stopped(Stopped::Change { at, cause });
+            let stopped = Stopped::Change { at, cause };
             assert_eq!(watch.next().await, Err(stopped));
             mesh.serve(public(2), incoming).await
         },

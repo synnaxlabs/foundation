@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6ce845618d9d1b6437d2cf13c15ae6464d536410e107be1a3b638630aad1eb35 # shrinks to term = 3, body = VoteReply { answer: Refused }, proof = Some(Proof { grant: PreVote, candidate: Key(1), voters: {Key(2): None, Key(4): None} }), chain = [Link { at: Position { term: Term(0), index: 1 }, change: Change { voters: Voters { incoming: {Key(1), Key(2), Key(4)}, outgoing: {} }, votes: Proof { grant: Vote, candidate: Key(1), voters: {Key(1): None, Key(3): None} }, signature: None } }, Link { at: Position { term: Term(0), index: 0 }, change: Change { voters: Voters { incoming: {Key(1), Key(2), Key(4)}, outgoing: {} }, votes: Proof { grant: PreVote, candidate: Key(1), voters: {} }, signature: None } }], other = Link { at: Position { term: Term(0), index: 1 }, change: Change { voters: Voters { incoming: {Key(1), Key(2), Key(4)}, outgoing: {} }, votes: Proof { grant: PreVote, candidate: Key(1), voters: {} }, signature: None } }

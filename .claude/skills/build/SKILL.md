@@ -48,7 +48,10 @@ or a line range.
 3. **Tests first.** Write the behavior from the issue and its decisions section as
    failing tests: property tests for codecs and pure logic, simulation tests for I/O.
 4. **Implement** until they pass. Keep the PR to a few hundred lines. When a second idea
-   appears, split.
+   appears, split. Handle each small change as `docs/coordination.md`, "Small
+   changes", says: one in this PR's crate or in a file that this PR changes goes into
+   this PR as its own commit. Before the first review round, fold in each item that the
+   issue's comments add, one commit each, and list each item in the PR body.
 5. **Local gate** (below). Fix every failure.
 6. Run `/eb-review` on the diff. Put its Complexity and Shape decisions in the PR body.
 7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.
@@ -56,7 +59,15 @@ or a line range.
 9. If review changed code, run the gate again. When review is done (`/review`,
    "Done"), run `gh pr ready <n>` and `gh pr merge <n> --auto`. The merge queue takes
    it when the checks pass.
-10. **Wait once.** Run `.claude/skills/build/wait.sh <n>` with `run_in_background`.
+10. **Wait once.** Run the wait script as it is on `main` (the copy on a branch can be
+    older), with `run_in_background`:
+
+    ```sh
+    git fetch -q origin main &&
+      s=$(git show origin/main:.claude/skills/build/wait.sh) || exit 3
+    sh -c "$s" wait.sh <n>
+    ```
+
     Never check by hand, `/loop`, or `ScheduleWakeup`. A message or the script's exit
     wakes you.
     - Exit 0 (merged): comment the final state on the issue, call
@@ -65,6 +76,10 @@ or a line range.
     - Exit 1: read the cause it prints (`gh pr checks <n>`,
       `gh run view <id> --log-failed | tail -60`, or the review). Fix it, run the gate
       on what changed, `gh pr merge <n> --auto`, and wait again.
+      "cannot be read" is three failed `gh` calls in a row: fix what gh printed (a
+      login, a wrong PR number), or wait again once the network is back.
+    - Exit 3: git could not get the script. Fix what git printed, and run it again.
+    - Exit 2 or any other exit: read what it printed, fix the cause, and run it again.
 
 ## Local gate
 
@@ -83,9 +98,8 @@ cargo mutants --in-diff "$p" --jobs 4
 
 - Each missed mutant is a missing test. Exit 3 with an empty `mutants.out/missed.txt` is
   a pass: a timeout means a test caught the mutant.
-- On a box, cap each test process as CI does, so a mutant that allocates in a loop
-  cannot take the box down: prefix `cargo mutants` with `RUST_TEST_THREADS=8
-  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --data=4294967296 --"`.
+- On a box, run `cargo mutants` in the memory cgroup that `docs/claude/testing.md` gives
+  (mutation testing).
 - A changed `Cargo.toml` or `Cargo.lock`: also
   `cargo deny check advisories bans licenses sources`.
 - A change under a `models` path in `.github/workflows/ci.yaml`: also `cargo xtask

@@ -1,7 +1,9 @@
 //! Which commits a review round covers, read from the history with `git`.
 
+use std::ffi::OsStr;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The empty tree, the source of attributes for a merge, so no `.gitattributes` can
 /// pick a merge driver that hides a conflict.
@@ -26,7 +28,9 @@ impl<'a> History<'a> {
     /// Reports whether `end` (a SHA or a prefix of at least 7 digits) is `head`, or
     /// reaches it through first-parent merges of a commit on the base that resolve no
     /// conflict: each merge's tree is the tree that `git merge-tree` makes of its
-    /// parents. Text that names no single commit does not reach `head`.
+    /// parents. A merge whose base side moves text of its first parent into a code file
+    /// does not count, as in `code_change`. Text that names no single commit does not
+    /// reach `head`.
     ///
     /// # Errors
     ///
@@ -57,16 +61,19 @@ impl<'a> History<'a> {
     /// code. A moved file counts as removed and added.
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
-    /// by its resolution. A `.rs`, `Cargo.toml`, or `Cargo.lock` file that
+    /// by its resolution: a `.rs`, `Cargo.toml`, or `Cargo.lock` file that
     /// `git merge-tree` finds a conflict in between its parents gives "resolves a
     /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
-    /// tree that `git merge-tree` makes of `from` and the newest base commit that
-    /// `end` holds, not from `from`: the base's code does not count, and text of the
-    /// range that the base moves into a code file does. A code file that this tree
-    /// has a conflict in gives "has a conflict in `<file>` between its start and the
-    /// base", so a conflict that leaves no markers fails closed too. An `end` that
-    /// holds more than one newest base commit gives "holds the base at more than one
-    /// newest commit: `<commit>`, `<commit>`".
+    /// tree that `git merge-tree` makes of `from` and the newest base commit that `end`
+    /// holds, not from `from`: the base's code does not count, and text of the range
+    /// that the base moves into a code file does. A code file that this tree has a
+    /// conflict in gives "has a conflict in `<file>` between its start and the base",
+    /// so a conflict that leaves no markers fails closed too. A path that is not code,
+    /// that `from` changes since its merge base with that base commit, as the merge
+    /// reads it, and that the merge that makes this tree moves into a code file by its
+    /// own rename detection gives "the base moves `<old>`, which the PR changes, into
+    /// the code file `<new>`". An `end` that holds more than one newest base commit
+    /// gives "holds the base at more than one newest commit: `<commit>`, `<commit>`".
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
     /// a removed one.
@@ -105,7 +112,8 @@ impl<'a> History<'a> {
                 continue;
             };
             let merge = line.split(' ').next().unwrap_or_default();
-            if let Some(path) = self.merged(first, second)?.code_conflict() {
+            let merged = self.merged(first, second)?;
+            if let Some(path) = merged.code_conflict() {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
@@ -126,6 +134,9 @@ impl<'a> History<'a> {
                 "has a conflict in `{path}` between its start and the base"
             )));
         }
+        if let Some(moved) = self.moved_into_code(&from_sha, newest, &merged.tree)? {
+            return Ok(Some(moved));
+        }
         self.first_change(&merged.tree, &end_sha)
     }
 
@@ -136,34 +147,22 @@ impl<'a> History<'a> {
     ///
     /// A failed `git` command, or a changed path that is not UTF-8.
     fn first_change(&self, old: &str, new: &str) -> Result<Option<String>, String> {
-        // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
-        // the path, each ended by a NUL.
-        let raw = self.output(&[
-            "diff",
-            "--raw",
-            "-z",
-            "--no-abbrev",
-            "--no-renames",
-            old,
-            new,
+        let globs = [
             "--",
             ":(glob)**/*.rs",
             ":(glob)**/Cargo.toml",
             ":(glob)**/Cargo.lock",
-        ])?;
-        let mut fields = raw.split(|&b| b == 0);
-        while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
-            let entry = String::from_utf8_lossy(entry);
-            let [_, _, old, new, _] = entry.split(' ').collect::<Vec<_>>()[..] else {
-                return Err(format!("git diff: a bad raw entry `{entry}`"));
-            };
-            let path = std::str::from_utf8(path).map_err(|e| {
+        ];
+        for entry in self.diff(old, new, &globs)? {
+            let path = std::str::from_utf8(&entry.path).map_err(|e| {
                 format!(
                     "git diff: the path `{}` is not UTF-8: {e}",
-                    String::from_utf8_lossy(path)
+                    String::from_utf8_lossy(&entry.path)
                 )
             })?;
-            if let Some(line) = self.first_code(old, new, rust_path(path))? {
+            if let Some(line) =
+                self.first_code(&entry.old, &entry.new, rust_path(path))?
+            {
                 return Ok(Some(format!("changes code at `{path}:{line}`")));
             }
         }
@@ -261,30 +260,258 @@ impl<'a> History<'a> {
         let [_, first, second] = line.split(' ').collect::<Vec<_>>()[..] else {
             return Ok(None);
         };
-        Ok(self.on_base(second, base)?.then_some((first, second)))
+        Ok(self.ancestor(second, base)?.then_some((first, second)))
     }
 
-    /// Reports whether `commit` is an ancestor of the commit `base`.
-    fn on_base(&self, commit: &str, base: &str) -> Result<bool, String> {
+    /// Reports whether `commit` is an ancestor of the commit `of`, or is `of`.
+    fn ancestor(&self, commit: &str, of: &str) -> Result<bool, String> {
         let status = command(self.root)
-            .args(["merge-base", "--is-ancestor", commit, base])
+            .args(["merge-base", "--is-ancestor", commit, of])
             .status()
             .map_err(|e| format!("git merge-base: {e}"))?;
         match status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => Err(format!(
-                "git merge-base --is-ancestor {commit} {base}: {status}"
+                "git merge-base --is-ancestor {commit} {of}: {status}"
             )),
         }
     }
 
     /// Reports whether `merge` has the tree that a merge of `first` and `second`
-    /// makes with no conflict.
+    /// makes with no conflict, and the merge moves no text of `first` into a code
+    /// file (`moved_into_code`).
     fn clean(&self, merge: &str, first: &str, second: &str) -> Result<bool, String> {
         let merged = self.merged(first, second)?;
         let tree = self.git(&["rev-parse", &format!("{merge}^{{tree}}")])?;
-        Ok(merged.clean && merged.tree == tree)
+        Ok(merged.clean
+            && merged.tree == tree
+            && self.moved_into_code(first, second, &merged.tree)?.is_none())
+    }
+
+    /// The phrase "the base moves `<old>`, which the PR changes, into the code file
+    /// `<new>`" for the first path `<old>` of `changed(first, second)` that their
+    /// merge, with the tree `tree`, moves into the code file `<new>`. The moves are the
+    /// merge's own: `second` is merged again with a copy of `first` that gives each
+    /// such path a probe text of its own, and the probe text is read in the code files
+    /// that the two merges make differently.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn moved_into_code(
+        &self,
+        first: &str,
+        second: &str,
+        tree: &str,
+    ) -> Result<Option<String>, String> {
+        // The merge is `first`, and moves nothing.
+        if self.ancestor(second, first)? {
+            return Ok(None);
+        }
+        let Some(probe) = self.probe(first, second)? else {
+            return Ok(None);
+        };
+        let probed = self.merged(&probe.commit, second)?.tree;
+        for entry in self.diff(tree, &probed, &[])? {
+            let new = String::from_utf8_lossy(&entry.path);
+            if !code_path(&new) {
+                continue;
+            }
+            let text = self.output(&["cat-file", "blob", &entry.new])?;
+            let old = String::from_utf8_lossy(&text).lines().find_map(|line| {
+                let n: usize =
+                    line.strip_prefix(PROBE)?.strip_prefix(' ')?.parse().ok()?;
+                probe
+                    .paths
+                    .get(n)
+                    .map(|old| String::from_utf8_lossy(old).into_owned())
+            });
+            if let Some(old) = old {
+                return Ok(Some(format!(
+                    "the base moves `{old}`, which the PR changes, into the code file \
+                     `{new}`"
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A copy of `first` in which each path of `changed(first, second)` holds the
+    /// probe text `<PROBE> <n>`, where `paths[n]` is that path. `None` when no such
+    /// path exists.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn probe(&self, first: &str, second: &str) -> Result<Option<Probe>, String> {
+        let changed = self.changed(first, second)?;
+        if changed.is_empty() {
+            return Ok(None);
+        }
+        let files: Vec<_> = changed
+            .iter()
+            .enumerate()
+            .map(|(n, (mode, path))| File {
+                mode,
+                path,
+                text: format!("{PROBE} {n}\n"),
+            })
+            .collect();
+        Ok(Some(Probe {
+            commit: self.copy(first, &files)?,
+            paths: changed.into_iter().map(|(_, path)| path).collect(),
+        }))
+    }
+
+    /// The mode and path of each file that is not code and that `first` changes since
+    /// its merge base with `second`, as a merge of the two reads that base. A file
+    /// that `first` moves since that base is in too, which changes no result: no file
+    /// of the base has its path, so the base cannot move it into a code file.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn changed(
+        &self,
+        first: &str,
+        second: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, String> {
+        // A merge of `first` with a copy of `second` that has no files builds the same
+        // base. It gives a conflict with `first` as stage 2 for each file that the base
+        // and `first` both hold with a difference, and for each file that `first`
+        // moves.
+        let gone = self.commit(second, EMPTY_TREE)?;
+        let (_, output) = self.merge_tree(&[first, &gone])?;
+        // `<tree>NUL`, then `<mode> <blob> <stage>TAB<path>NUL` for each stage of each
+        // conflicted path, then `NUL` and the messages.
+        let mut changed = Vec::new();
+        for field in output
+            .split(|&b| b == 0)
+            .skip(1)
+            .take_while(|field| !field.is_empty())
+        {
+            let mut parts = field.splitn(2, |&b| b == b'\t');
+            let stage = String::from_utf8_lossy(parts.next().unwrap_or_default());
+            let path = parts.next().unwrap_or_default();
+            if let [mode, _, "2"] = stage.split(' ').collect::<Vec<_>>()[..]
+                && !code_path(&String::from_utf8_lossy(path))
+            {
+                changed.push((mode.to_string(), path.to_vec()));
+            }
+        }
+        Ok(changed)
+    }
+
+    /// A copy of `first` (`commit`) with its tree with `files` in place of its own.
+    /// It builds the tree in an index file of its own, which it removes.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn copy(&self, first: &str, files: &[File<'_>]) -> Result<String, String> {
+        // Each entry is `<mode> <blob>TAB<path>NUL`.
+        let mut entries = Vec::new();
+        for file in files {
+            let blob =
+                self.run(&["hash-object", "-w", "--stdin"], file.text.as_bytes(), &[])?;
+            entries.extend_from_slice(file.mode.as_bytes());
+            entries.push(b' ');
+            entries.extend_from_slice(String::from_utf8_lossy(&blob).trim().as_bytes());
+            entries.push(b'\t');
+            entries.extend_from_slice(file.path);
+            entries.push(0);
+        }
+        let name = format!("xtask-review-probe-{}", std::process::id());
+        let index = self
+            .root
+            .join(self.git(&["rev-parse", "--git-path", &name])?);
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        let tree = self
+            .run(&["read-tree", first], b"", &env)
+            .and_then(|_| {
+                self.run(&["update-index", "-z", "--index-info"], &entries, &env)
+            })
+            .and_then(|_| self.run(&["write-tree"], b"", &env));
+        let removed = std::fs::remove_file(&index)
+            .map_err(|e| format!("{}: {e}", index.display()));
+        let tree = tree?;
+        removed?;
+        self.commit(first, String::from_utf8_lossy(&tree).trim())
+    }
+
+    /// A commit of `tree` with the parents and the commit time of `commit`, by a
+    /// fixed author. A merge with it finds the same merge bases in the same order as a
+    /// merge with `commit`, since the walk reads only parents and commit times, and
+    /// so builds the same base from more than one.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git` command.
+    fn commit(&self, commit: &str, tree: &str) -> Result<String, String> {
+        let line =
+            self.git(&["show", "-s", "--date=raw", "--format=%cd%x00%P", commit])?;
+        let (when, parents) = line.split_once('\0').unwrap_or_default();
+        let mut args = vec!["commit-tree", tree, "-m", "probe"];
+        for parent in parents.split_whitespace() {
+            args.extend(["-p", parent]);
+        }
+        let who = OsStr::new("xtask");
+        let when = format!("@{when}");
+        let when = OsStr::new(&when);
+        let commit = self.run(
+            &args,
+            b"",
+            &[
+                ("GIT_AUTHOR_NAME", who),
+                ("GIT_AUTHOR_EMAIL", who),
+                ("GIT_AUTHOR_DATE", when),
+                ("GIT_COMMITTER_NAME", who),
+                ("GIT_COMMITTER_EMAIL", who),
+                ("GIT_COMMITTER_DATE", when),
+            ],
+        )?;
+        Ok(String::from_utf8_lossy(&commit).trim().to_string())
+    }
+
+    /// The entries of `git diff --raw` from the tree-ish `old` to `new`, with no
+    /// renames, given the further arguments `args`.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git diff`, or an entry not in the raw format.
+    fn diff(&self, old: &str, new: &str, args: &[&str]) -> Result<Vec<Entry>, String> {
+        let raw = self.output(
+            &[
+                &[
+                    "diff",
+                    "--raw",
+                    "-z",
+                    "--no-abbrev",
+                    "--no-renames",
+                    old,
+                    new,
+                ],
+                args,
+            ]
+            .concat(),
+        )?;
+        // Each entry is `:<old mode> <new mode> <old blob> <new blob> <status>` and
+        // the path, each ended by a NUL.
+        let mut entries = Vec::new();
+        let mut fields = raw.split(|&b| b == 0);
+        while let (Some(entry), Some(path)) = (fields.next(), fields.next()) {
+            let entry = String::from_utf8_lossy(entry);
+            let [_, _, old, new, _] = entry.split(' ').collect::<Vec<_>>()[..] else {
+                return Err(format!("git diff: a bad raw entry `{entry}`"));
+            };
+            entries.push(Entry {
+                old: old.to_string(),
+                new: new.to_string(),
+                path: path.to_vec(),
+            });
+        }
+        Ok(entries)
     }
 
     /// What `git merge-tree` makes of `first` and `second`.
@@ -293,26 +520,10 @@ impl<'a> History<'a> {
     ///
     /// A failed `git merge-tree`.
     fn merged(&self, first: &str, second: &str) -> Result<Merged, String> {
-        let output = command(self.root)
-            .arg(format!("--attr-source={EMPTY_TREE}"))
-            .args([
-                "merge-tree",
-                "--write-tree",
-                "-z",
-                "--name-only",
-                first,
-                second,
-            ])
-            .output()
-            .map_err(|e| format!("git merge-tree: {e}"))?;
-        let clean = match output.status.code() {
-            Some(0) => true,
-            Some(1) => false,
-            _ => return Err(failure("merge-tree", &output.stderr)),
-        };
+        let (clean, output) = self.merge_tree(&["--name-only", first, second])?;
         // `<tree>NUL`, then `<path>NUL` for each conflicted path, then `NUL` and the
         // messages, which are not read: they can hold any bytes.
-        let mut fields = output.stdout.split(|&b| b == 0);
+        let mut fields = output.split(|&b| b == 0);
         let tree = String::from_utf8_lossy(fields.next().unwrap_or_default());
         let conflicts = fields
             .take_while(|path| !path.is_empty())
@@ -324,6 +535,26 @@ impl<'a> History<'a> {
         })
     }
 
+    /// Whether `git merge-tree --write-tree -z` with `args` finds no conflict, and its
+    /// output.
+    ///
+    /// # Errors
+    ///
+    /// A failed `git merge-tree`.
+    fn merge_tree(&self, args: &[&str]) -> Result<(bool, Vec<u8>), String> {
+        let output = command(self.root)
+            .arg(format!("--attr-source={EMPTY_TREE}"))
+            .args(["merge-tree", "--write-tree", "-z"])
+            .args(args)
+            .output()
+            .map_err(|e| format!("git merge-tree: {e}"))?;
+        match output.status.code() {
+            Some(0) => Ok((true, output.stdout)),
+            Some(1) => Ok((false, output.stdout)),
+            _ => Err(failure("merge-tree", &output.stderr)),
+        }
+    }
+
     /// The trimmed output of a `git` command that must succeed.
     fn git(&self, args: &[&str]) -> Result<String, String> {
         let output = self.output(args)?;
@@ -332,15 +563,65 @@ impl<'a> History<'a> {
 
     /// The output of a `git` command that must succeed.
     fn output(&self, args: &[&str]) -> Result<Vec<u8>, String> {
-        let output = command(self.root)
+        self.run(args, b"", &[])
+    }
+
+    /// The output of a `git` command that must succeed, given `stdin` and the
+    /// variables `env`.
+    fn run(
+        &self,
+        args: &[&str],
+        stdin: &[u8],
+        env: &[(&str, &OsStr)],
+    ) -> Result<Vec<u8>, String> {
+        let spawned = |e| format!("git {}: {e}", args.join(" "));
+        let mut child = command(self.root)
             .args(args)
-            .output()
-            .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(spawned)?;
+        child
+            .stdin
+            .take()
+            .expect("invariant: stdin is piped")
+            .write_all(stdin)
+            .map_err(spawned)?;
+        let output = child.wait_with_output().map_err(spawned)?;
         if !output.status.success() {
             return Err(failure(&args.join(" "), &output.stderr));
         }
         Ok(output.stdout)
     }
+}
+
+/// The first word of each line of probe text that `History::moved_into_code` writes.
+const PROBE: &str = "xtask-review-probe";
+
+/// One entry of `git diff --raw`.
+struct Entry {
+    /// The blob in the old tree, all zeros when the path is added.
+    old: String,
+    /// The blob in the new tree, all zeros when the path is removed.
+    new: String,
+    path: Vec<u8>,
+}
+
+/// A file to write in a tree.
+struct File<'a> {
+    mode: &'a str,
+    path: &'a [u8],
+    text: String,
+}
+
+/// A copy of a commit, with a probe text in each path that is not code and that
+/// the commit changes.
+struct Probe {
+    commit: String,
+    /// The probed paths, by the number in their probe text.
+    paths: Vec<Vec<u8>>,
 }
 
 /// What `git merge-tree` makes of two commits.
@@ -415,7 +696,10 @@ fn command(root: &Path) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_ATTR_NOSYSTEM", "1")
-        .args(["-c", "core.attributesFile=/dev/null"]);
+        .args(["-c", "core.attributesFile=/dev/null"])
+        // So a walk for merge bases reads only parents and commit times
+        // (`History::commit`).
+        .args(["-c", "core.commitGraph=false"]);
     command
 }
 

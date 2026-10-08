@@ -13,6 +13,11 @@ x86-64 (pinned cores) and on a Pi 4 before you rely on them.
 
 ## Rules
 
+The rules are for product code: code that a product path runs, or will run once its
+feature is on or its caller lands. Of these rules, code in a crate's `src/` that exists
+only for tests and benchmarks, such as a counting `GlobalAlloc`, needs only rule 12
+(measured numbers).
+
 1. **No heap allocation on the hot path.** Frames come from the shard's pool (alloc and
    free 1.1 ns, against 4.2 ns for mimalloc and 9.2 ns for macOS malloc). A counting
    allocator in tests fails any hot-path allocation.

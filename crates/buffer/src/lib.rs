@@ -1,6 +1,9 @@
 //! Stores each index's log durably within the disk budget (write-ahead ring, segments,
 //! trimming, floors, `append`) through a per-OS driver.
 
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod bench;
 mod buffer;
 mod carry;
 mod crc32c;
