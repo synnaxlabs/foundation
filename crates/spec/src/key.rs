@@ -16,17 +16,8 @@ impl Kind {
     /// The first that applies: [`Error::Long`] when the key would hold more than
     /// [`Name::MAX_BYTES`], [`Error::Name`] when `label` is not a name, and
     /// [`Error::Reserved`] when a segment of `label` starts with `@`.
-    #[expect(
-        clippy::missing_panics_doc,
-        clippy::unwrap_in_result,
-        reason = "a checked label and a kind segment always make a name"
-    )]
     pub fn key(self, label: &str) -> Result<Name, Error> {
-        let segment = match self {
-            Self::Connector | Self::Channel => None,
-            _ => Some(self.as_str()),
-        };
-        let most = segment.map_or(Name::MAX_BYTES, |segment| {
+        let most = self.segment().map_or(Name::MAX_BYTES, |segment| {
             Name::MAX_BYTES - segment.len() - 2
         });
         if label.len() > most {
@@ -36,29 +27,46 @@ impl Kind {
         if label.reserved() {
             return Err(Error::Reserved);
         }
-        Ok(match segment {
+        Ok(self.join(label))
+    }
+
+    /// The tree key of a definition of this kind with the label `label`, reserved or
+    /// not. Panics when the key would hold more than [`Name::MAX_BYTES`].
+    pub(crate) fn join(self, label: Name) -> Name {
+        match self.segment() {
             None => label,
-            Some(segment) => format!("{label}.@{segment}").parse().expect(
-                "a short label that is not reserved and a kind segment make a name",
-            ),
-        })
+            Some(segment) => format!("{label}.@{segment}")
+                .parse()
+                .expect("invariant: a short label and a kind segment make a name"),
+        }
     }
 
     /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
-    /// when it does not. Only the label of a subject or an access policy, the kinds
-    /// of the founding definitions, can be reserved, which [`Kind::key`] refuses.
-    pub(crate) fn label(self, key: &Name) -> Option<Name> {
-        let label: Name = match self {
-            Self::Connector | Self::Channel => key.clone(),
-            _ => key
+    /// when it does not. Only a subject or an access policy can have a reserved label:
+    /// Foundation makes those ([`crate::founding::create`]), and [`Kind::key`] refuses
+    /// them, so no file holds a definition whose label is reserved.
+    #[must_use]
+    pub fn label(self, key: &Name) -> Option<Name> {
+        let label: Name = match self.segment() {
+            None => key.clone(),
+            Some(segment) => key
                 .as_str()
-                .strip_suffix(self.as_str())?
+                .strip_suffix(segment)?
                 .strip_suffix(".@")?
                 .parse()
                 .ok()?,
         };
         let founding = matches!(self, Self::Subject | Self::Access);
         (founding || !label.reserved()).then_some(label)
+    }
+
+    /// The segment of the kind in its tree key, or `None` for a connector or a channel,
+    /// which is at its own name.
+    const fn segment(self) -> Option<&'static str> {
+        match self {
+            Self::Connector | Self::Channel => None,
+            _ => Some(self.as_str()),
+        }
     }
 
     /// The name of the kind, such as `node_settings`: the keyword a file format names
@@ -80,30 +88,6 @@ impl Kind {
         }
     }
 }
-
-/// Whether Foundation, not a file, owns the definition at tree key `key`: [`Kind::key`]
-/// gives `key` for no label that a file can use. `plan` leaves out each definition at
-/// such a key.
-#[must_use]
-pub fn reserved(key: &Name) -> bool {
-    ALL.into_iter()
-        .find_map(|kind| kind.label(key))
-        .is_none_or(|label| label.reserved())
-}
-
-/// Each kind.
-const ALL: [Kind; 10] = [
-    Kind::Access,
-    Kind::Connector,
-    Kind::Channel,
-    Kind::Region,
-    Kind::NodeSettings,
-    Kind::Compression,
-    Kind::Placement,
-    Kind::Time,
-    Kind::Retention,
-    Kind::Subject,
-];
 
 /// A label that makes no tree key. `Display` gives the message: a lower-case clause
 /// with no final period. [`Error::fix`] gives what to do instead.
@@ -299,60 +283,21 @@ mod tests {
             let key = kind.key(label.as_str()).unwrap();
             prop_assert_eq!(kind.label(&key), Some(label));
         }
-
-        #[test]
-        fn leaves_each_key_of_a_label_to_the_files(
-            segments in prop::collection::vec("[a-z0-9_-]{1,12}", 1..8),
-            kind in prop::sample::select(ALL.to_vec()),
-        ) {
-            let key = kind.key(&segments.join(".")).unwrap();
-            prop_assert!(!reserved(&key), "{key}");
-        }
     }
 
-    #[test]
-    fn reserves_each_key_that_no_label_gives() {
-        for key in [
-            "@admin.@subject",
-            "@admin.@access",
-            "plant.@x.@access",
-            "plant.@changes",
-            "@x.y",
-            "@access",
-        ] {
-            assert!(reserved(&name(key)), "{key}");
-        }
-        for key in [
-            "plant.@access",
-            "plant.x",
-            "plant.@region",
-            "plant.@subject",
-        ] {
-            assert!(!reserved(&name(key)), "{key}");
-        }
-    }
-
-    #[test]
-    fn lists_each_kind_once() {
-        let positions: Vec<usize> = ALL
-            .into_iter()
-            .map(|kind| match kind {
-                // A new kind goes here and in `ALL`, or `reserved` gives `true` for
-                // each of its keys.
-                Kind::Access => 0,
-                Kind::Connector => 1,
-                Kind::Channel => 2,
-                Kind::Region => 3,
-                Kind::NodeSettings => 4,
-                Kind::Compression => 5,
-                Kind::Placement => 6,
-                Kind::Time => 7,
-                Kind::Retention => 8,
-                Kind::Subject => 9,
-            })
-            .collect();
-        assert_eq!(positions, Vec::from_iter(0..ALL.len()));
-    }
+    /// Each kind.
+    const ALL: [Kind; 10] = [
+        Kind::Access,
+        Kind::Connector,
+        Kind::Channel,
+        Kind::Region,
+        Kind::NodeSettings,
+        Kind::Compression,
+        Kind::Placement,
+        Kind::Time,
+        Kind::Retention,
+        Kind::Subject,
+    ];
 
     #[test]
     fn gives_no_label_for_a_key_of_another_kind() {

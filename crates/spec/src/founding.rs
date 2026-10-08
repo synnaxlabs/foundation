@@ -37,9 +37,7 @@ pub fn create(admin: PublicKey) -> BTreeMap<Name, Definition> {
 }
 
 fn key(kind: Kind) -> Name {
-    format!("{ADMIN}.@{}", kind.as_str())
-        .parse()
-        .expect("invariant: `@admin` and a kind segment are a name")
+    kind.join(ADMIN.parse().expect("invariant: `@admin` is a name"))
 }
 
 #[cfg(test)]
@@ -89,8 +87,13 @@ mod tests {
 
     #[test]
     fn gives_definitions_that_no_file_can_hold() {
-        for key in create(admin()).keys() {
-            assert!(crate::key::reserved(key), "{key}");
+        for (key, definition) in create(admin()) {
+            let label = definition.kind().label(&key);
+            assert_eq!(label, Some(name(ADMIN)), "{key}");
+            assert_eq!(
+                definition.kind().key(ADMIN),
+                Err(crate::key::Error::Reserved)
+            );
         }
     }
 
