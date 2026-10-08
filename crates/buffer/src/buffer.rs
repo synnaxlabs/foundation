@@ -323,6 +323,12 @@ impl State {
         woken.extend(self.ending.drain(..).map(|(_, waker)| waker));
     }
 
+    /// Takes the waker of the [`End`] with `key` out of `ending`.
+    fn forget(&mut self, key: u64) -> Option<Waker> {
+        let at = self.ending.iter().position(|(held, _)| *held == key)?;
+        Some(self.ending.swap_remove(at).1)
+    }
+
     /// Closes the open group into the queue and opens a spare.
     fn close_open(&mut self) {
         let spare = self.spares.pop().unwrap_or_default();
@@ -969,15 +975,8 @@ impl Future for End {
         if state.ended {
             return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
         }
-        let key = self.key;
-        let replaced = match state.ending.iter_mut().find(|(held, _)| *held == key) {
-            Some((_, waker)) if waker.will_wake(cx.waker()) => None,
-            Some((_, waker)) => Some(mem::replace(waker, cx.waker().clone())),
-            None => {
-                state.ending.push((key, cx.waker().clone()));
-                None
-            }
-        };
+        let replaced = state.forget(self.key);
+        state.ending.push((self.key, cx.waker().clone()));
         // A waker's drop can drop another `End`, which borrows the state.
         drop(state);
         drop(replaced);
@@ -988,8 +987,7 @@ impl Future for End {
 impl Drop for End {
     fn drop(&mut self) {
         let mut state = self.shared.state.borrow_mut();
-        let held = state.ending.iter().position(|(key, _)| *key == self.key);
-        let held = held.map(|at| state.ending.swap_remove(at));
+        let held = state.forget(self.key);
         // A waker's drop can drop another `End`, which borrows the state.
         drop(state);
         drop(held);
