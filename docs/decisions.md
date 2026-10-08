@@ -2521,9 +2521,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
-  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
-  key that is not the public half of `Config.private_key`. `node` builds both from the
-  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
+  sentence on `Unsynced` and `Status`. The same ruling supersedes the approval of
+  `Unsynced`, `Status`, and `Config.time` in item 2 of that comment, and of
+  `Config.time` (a `clock::Reader`) in
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724 (ruled by
+  `laptop.architect`, 2026-10-08T00:46:02Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6049818540). `open`
+  panics when `Config.transport` proves a key that is not the public half of
+  `Config.private_key`. `node` builds both from the one key that it loads, so a
+  mismatch is a defect in `node`, not bad outside input.
   `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
   the architect, 2026-10-07T19:55:13Z:
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
@@ -2540,8 +2546,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   other calls that change the region and the change records stay private. The surface
   is approved in the same comment. The surface as built, with the types that the caller
-  builds and the sentence that `open` does not check the key of the transport
-  (superseded above), is approved by the architect, 2026-10-07T19:55:12Z:
+  builds, `Config.time`, and the sentence that `open` does not check the key of the
+  transport (the last two superseded above), is approved by the architect,
+  2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
