@@ -38,7 +38,8 @@ pub enum Error {
     },
     /// The change at `name` is not one that `plan` makes from the applied spec: its
     /// old digest is not the stored one, or the stored or new definition is of a kind
-    /// or at a name that no file defines.
+    /// that no block of a file defines, or `name` is not the tree key of an unreserved
+    /// label of its kind.
     Mismatch {
         /// The tree key of the change.
         name: Name,
