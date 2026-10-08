@@ -29,9 +29,11 @@ topic, and `grep -rl` for each crate name), `docs/claude/testing.md`,
 `docs/claude/performance.md`, and `docs/claude/design.md`. For the review trail, use
 `gh pr view <n> --comments`, `gh pr diff <n>`, `gh api
 repos/synnaxlabs/foundation/pulls/<n>/reviews` and `.../pulls/<n>/comments`, and the
-linked issues. Judge the PR by the rules at its merge commit (`git show
-<merge>:<path>`). Report a gap in a rule only when the rule on `main` today still lets
-it through.
+linked issues. Judge each round by the rules on `main` when it ran (`git rev-list -1
+--first-parent --before=<time of its comment> origin/main`, then `git show
+<commit>:<path>`). A rule that came into `main` after the last round, also in the same
+merge queue batch, is not a finding. Report a gap in a rule only when the rule on `main`
+today still lets it through.
 
 Check, with file and line at the merge commit:
 

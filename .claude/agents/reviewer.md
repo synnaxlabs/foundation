@@ -66,7 +66,10 @@ Check:
   its code does there, or add or change a `build.rs` that compiles C or C++? A run that
   "Round 1" of the `review` skill asks for, and that the PR does not link, is a finding.
 - Inputs at the edges: empty, maximum size, overflow, out of order, duplicate,
-  concurrent, crash midway.
+  concurrent, crash midway. For each buffer, queue, or map whose size a peer sets,
+  name the bound on all of them for each node (the pool budget, or a stated cap times
+  a stated count). A buffer with no such bound is a finding
+  (`docs/claude/performance.md`, rule 13).
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
   code catch or skip an error to hide a defect?
 - Guards: does a check repeat one that another path already makes? Remove it and run
