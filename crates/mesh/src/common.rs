@@ -192,14 +192,7 @@ pub(crate) fn grant_signed(
 ///
 /// When `leader` is not 1, 2 or 3: a proof holds its candidate as a voter.
 pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
-    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
-    proven_at(
-        leader,
-        to,
-        TERM,
-        &[1, 2, 3].map(|voter| (voter, voter)),
-        body,
-    )
+    proven_in(TERM, leader, to, body)
 }
 
 /// As [`proven`], in `term`.
