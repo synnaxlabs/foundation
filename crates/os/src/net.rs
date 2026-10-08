@@ -62,6 +62,8 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     }
     let stream = TcpStream::from_std(fd.into()).map_err(|e| failed(errno(&e)))?;
     stream.writable().await.map_err(|e| failed(errno(&e)))?;
+    // Before `take_error`, so a reset that removed the peer is still pending.
+    let named = stream.peer_addr();
     let reset = match stream.take_error() {
         Ok(None) => None,
         Ok(Some(e)) | Err(e) => match failed(errno(&e)) {
@@ -71,7 +73,7 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     };
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    let peer = peer(&stream, remote)?;
+    let peer = peer(named, remote, reset.is_some())?;
     // With a reset, the kernel gave it to `take_error`, so a read would see an end of
     // stream.
     let stream = Stream::new(stream, canonical(local), peer, &config.options, reset)
@@ -79,25 +81,21 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     Ok(Box::new(stream))
 }
 
-/// The peer of `stream`, connected to `remote`, as the kernel names it: without a
+/// The peer that the kernel `named` for a stream connected to `remote`: without a
 /// scope or flow label the kernel does not use, and with the address an unspecified
-/// `remote` reached. After a reset the kernel holds no peer, so the peer is `remote`,
-/// which `connect` has already passed through `canonical`.
-fn peer(stream: &std::net::TcpStream, remote: SocketAddr) -> Result<SocketAddr, Error> {
-    match stream.peer_addr() {
+/// `remote` reached. After a `reset` the kernel holds no peer, so the peer is
+/// `remote`, which `connect` has already passed through `canonical`.
+fn peer(
+    named: std::io::Result<SocketAddr>,
+    remote: SocketAddr,
+    reset: bool,
+) -> Result<SocketAddr, Error> {
+    match named {
         Ok(peer) => Ok(canonical(peer)),
-        Err(e) => match errno(&e) {
-            RESET => Ok(remote),
-            code => Err(io_error(code)),
-        },
+        Err(_) if reset => Ok(remote),
+        Err(e) => Err(io_error(errno(&e))),
     }
 }
-
-/// What `getpeername` gives on a socket after a reset.
-#[cfg(target_os = "macos")]
-const RESET: Errno = Errno::INVAL;
-#[cfg(not(target_os = "macos"))]
-const RESET: Errno = Errno::NOTCONN;
 
 /// `address` as `sim` names it: an IPv4 address on an IPv6 socket is an IPv4 address.
 /// Any other address keeps its scope and flow label.
@@ -231,8 +229,6 @@ mod tests {
     mod peer {
         use std::time::Duration;
 
-        use rustix::fs::{Mode, OFlags};
-
         use super::*;
 
         #[test]
@@ -250,17 +246,21 @@ mod tests {
             drop(server);
             let read = client.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
             assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
-            assert_eq!(client.peer_addr().map_err(|e| errno(&e)), Err(RESET));
-            assert_eq!(peer(&client, remote), Ok(remote));
+            let none = if cfg!(target_os = "macos") {
+                Errno::INVAL
+            } else {
+                Errno::NOTCONN
+            };
+            assert_eq!(client.peer_addr().map_err(|e| errno(&e)), Err(none));
+            assert_eq!(peer(client.peer_addr(), remote, true), Ok(remote));
         }
 
         #[test]
-        fn another_failure_gives_its_code() {
-            let null = rustix::fs::open("/dev/null", OFlags::RDONLY, Mode::empty());
-            let stream = std::net::TcpStream::from(null.unwrap());
+        fn no_peer_without_a_reset_gives_its_code() {
             let remote = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4433);
-            let code = Errno::NOTSOCK.raw_os_error();
-            assert_eq!(peer(&stream, remote), Err(Error::Io { code }));
+            let named = Err(Errno::INVAL.into());
+            let code = Errno::INVAL.raw_os_error();
+            assert_eq!(peer(named, remote, false), Err(Error::Io { code }));
         }
     }
 
