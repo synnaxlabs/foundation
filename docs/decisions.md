@@ -5570,7 +5570,8 @@ How to read this record:
   Rejected: one I/O thread for every socket, as `os::files` uses; each message would
   cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
-  it lacks, from one `libc::setsockopt`. Decided by `laptop.architect-2` (2026-10-08 02:32 UTC, #120,
+  it lacks, from one `libc::setsockopt`. Decided by `laptop.architect-2` (2026-10-08
+  02:32 UTC, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
   `os`, a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
