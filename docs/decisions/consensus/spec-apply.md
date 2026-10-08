@@ -5,9 +5,10 @@
   it, and proposes nothing. `mesh` defines no problem of its own. `homes` maps index
   names to node names (S12 (placement part) + B7). An index that `definitions` does not
   hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
-  give `Error::Homes`, both before the read of the base tree. Between the two, it keeps
-  of `homes` only each index with no home in this node's state, and `Homes` and
-  `UnknownNode` count only those (`laptop.architect`, 2026-10-08T18:35:16Z:
+  give `Error::Homes`, both before the read of the base tree. `Homes` counts only the
+  listed indexes with no home in this node's state then. `UnknownNode` and the change
+  take only the listed indexes with no home when the call checks the node names, which
+  are among those (`laptop.architect`, 2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A node
   name that no member has gives `Error::UnknownNode`, after `Error::NoVote` and before
   the first put. None of them proposes anything. `Homes` right after `NotIndex` decided
@@ -53,7 +54,8 @@
   returns it when each listed index has a home then, and else gives `Stale`. No entry
   removes a home, so the path on which the call's entry applies needs no check, and both
   paths give the same result. Trigger: when an entry can remove a home, that path checks
-  too. Decided by `laptop.architect`, 2026-10-08T17:20:54Z
+  too, and so does the count of `Homes` at the name check. Decided by
+  `laptop.architect`, 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
   changed by `laptop.architect` at 2026-10-08T17:34:20Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915), which
