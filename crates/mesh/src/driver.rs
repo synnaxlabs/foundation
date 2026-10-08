@@ -5127,7 +5127,7 @@ mod tests {
             };
             let _mesh = Mesh::start(at()).await.unwrap();
             let busy = Mesh::start(at()).await.err();
-            let path = dir.join(LOG).join("log-0");
+            let path = dir.join(LOG).join("lock");
             let cause = log::Error::Files(files::Error::Busy { path });
             assert_eq!(busy, Some(Error::Log(cause)));
             assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
