@@ -22,6 +22,8 @@ mod listener;
 mod lowat;
 mod socket;
 mod stream;
+#[cfg(target_os = "macos")]
+mod unsent;
 
 /// The network of this machine.
 pub(crate) struct Driver;
