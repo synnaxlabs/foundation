@@ -3055,6 +3055,18 @@ How to read this record:
   `TooLarge`, and `MALFORMED` for each other, so `blob` holds no copy of the map.
   Decided by `laptop.architect` (2026-10-08T00:54:19Z):
   https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210.
+  A requester that refuses a chunk over its own limit stops the stream with
+  `TOO_LARGE`, the true cause; the server only ends the open requests, as after any
+  stop. A `TooLarge` or a `MISMATCH` on a get is that peer's failure for the digest:
+  the requester asks the next peer that holds it, each peer at most once for one
+  fetch, and when no peer remains the fetch fails with an exact error that names the
+  digest and the last cause, with the length and the limit for `TooLarge`. The length
+  in a head is a claim until the body hashes, and a member node can lie
+  (`docs/security.md`), so one peer cannot deny a chunk. The other open requests of
+  the stopped stream go again on a new stream. "The sender goes to another peer" of
+  `TOO_LARGE` holds for a put only. Lost: give up at the first `TooLarge`. Decided by
+  `laptop.architect` (2026-10-08T06:24:02Z):
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053784863.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
