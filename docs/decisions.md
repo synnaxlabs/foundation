@@ -2388,7 +2388,8 @@ How to read this record:
   region state (#1744, #336), and each committed change (#1957). A spec with problems
   follows #1741: the node defines none of it and keeps the spec it uses, which is
   empty for a founding with problems. So no spec from disk or a peer makes an open
-  panic. `Config::region` keeps its panic while a Rust caller gives it (NODE PORT).
+  panic. `Config::region` keeps its panic (NODE PORT) until the first PR that adds the
+  check (#1744 or #1957 PR 2), and the check then covers it too.
   Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
   2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
@@ -2410,10 +2411,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
-  The panic of `Hub::define` and the check before it, 2026-10-08T20:06:20Z
-  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068089189),
-  with the node part by `laptop.architect-2`, 2026-10-08T20:03:39Z
-  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068045334).
+  The panic of `Hub::define` and the check before it, agreed with
+  `laptop.architect-2`, 2026-10-08T20:08:50Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791).
 - **SPEC APPLY (#1083)** `Mesh::apply(base, definitions, homes)` makes the definitions,
   by tree key, the region's spec through the leader, as `set_home` does, and gives the
   new pointer. It first runs `spec::region::check` (REGION CHECK) at the region's
