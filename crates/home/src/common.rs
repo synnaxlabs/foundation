@@ -53,7 +53,9 @@ pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
     match data_type {
         Type::String => {
             let mut values = variable(state, count, Scalar::U8, 5);
-            values[4 * count..].iter_mut().for_each(|byte| *byte &= 0x7f);
+            values[4 * count..]
+                .iter_mut()
+                .for_each(|byte| *byte &= 0x7f);
             values
         }
         Type::Bytes => variable(state, count, Scalar::U8, 5),
