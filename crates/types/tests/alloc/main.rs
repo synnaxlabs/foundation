@@ -200,6 +200,31 @@ fn lay_places(pool: &block::Pool, set: &KeySet, other: &KeySet) {
     assert_eq!(allocations, 0, "the places allocated");
     assert_eq!(laid, (3, charged), "key 3 and key 1, then key 1");
     lay_sparse_and_dense_frames(pool);
+    walk_only_a_dense_frame(pool);
+}
+
+/// A frame of 3 series at the places is dense, so its first lay grows the bounds of
+/// each place, only while the places name at most 32 entries.
+fn walk_only_a_dense_frame(pool: &block::Pool) {
+    let data: Vec<(Key, Type)> = (2..62).map(|n| (Key::from_u128(n), F64)).collect();
+    let mut interner = Interner::new();
+    let set = interner.intern(&[Group {
+        index: Key::from_u128(1),
+        data: &data,
+    }]);
+    let make = |lens: &[(usize, usize)]| {
+        let draft = Draft::new(pool, &set, Form::Raw, lens);
+        draft.expect("the pool holds it").freeze(Path::Live)
+    };
+    let index = make(&[(0, 8)]);
+    let frame = make(&[(0, 8), (40, 8), (50, 8)]);
+    for (entries, grown) in [(32, 2), (33, 1)] {
+        let slots = set.entries()[61 - entries..].iter().rev().map(|e| e.slot);
+        let mut places = Places::new(slots.collect());
+        places.lay(&index, &set);
+        let (_, allocations) = ALLOCATOR.count(|| places.lay(&frame, &set).len());
+        assert_eq!(allocations, grown, "{entries} entries");
+    }
 }
 
 /// Laying a sparse frame, then a dense one of the same key set, allocates only for

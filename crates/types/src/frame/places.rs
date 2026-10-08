@@ -460,8 +460,8 @@ mod tests {
     }
 
     /// A frame that gives 2 series is dense for places of up to `2 * SPARSE` entries,
-    /// whatever series it holds outside them. Each side lays the series in place
-    /// order, which is not entry order here.
+    /// whatever series it holds outside them (`tests/alloc` pins the cut). Each side
+    /// lays the series in place order, which is not entry order here.
     #[test]
     fn lays_frames_on_each_side_of_the_sparse_bound() {
         let data: Vec<(crate::channel::Key, Type)> = (2..61)
@@ -473,7 +473,7 @@ mod tests {
         }]);
         // The index series is outside the places, so the frame gives 2 of its 3.
         let frame = filled(&set, &[(0, 3), (40, 10), (50, 5)]);
-        for (entries, dense) in [(31, true), (32, true), (33, false)] {
+        for entries in [31, 32, 33] {
             let slots: Box<[Slot]> = set.entries()[60 - entries..]
                 .iter()
                 .rev()
@@ -490,8 +490,6 @@ mod tests {
             let body = build(&frame, &placed);
             let read: Vec<(usize, &[u8])> = split(&body, laid).collect();
             assert_eq!(read, expected, "{entries} entries");
-            let walked = if dense { entries } else { 0 };
-            assert_eq!(reader.bounds.len(), walked, "{entries} entries");
         }
     }
 
