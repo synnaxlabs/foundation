@@ -1,7 +1,7 @@
 //! The Ed25519 calls that the signed records of `mesh` share.
 
 use aws_lc_rs::signature::Ed25519KeyPair;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 
 /// The key pair of `private`.
 pub(crate) fn pair(private: &PrivateKey) -> Ed25519KeyPair {

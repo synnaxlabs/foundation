@@ -173,7 +173,7 @@ mod tests {
 
     use env::net::udp;
     use sim::node::Node;
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use crate::testing::{self, IDLE, address, nodes, spans};
