@@ -192,6 +192,7 @@ impl Client {
         }
         sender.finish()?;
         let first = receiver.recv().await;
+        // Only after `recv`: a drop during it must wait for the node to free the request.
         open.begun = true;
         let Some(message) = first? else {
             return Err(Error::Unanswered);

@@ -42,7 +42,8 @@
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
   approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It
-  approved the pool sentence at e7a48c81 at 22:15:33Z
+  approved the pool sentence at e7a48c81, and gave the reason against
+  `tokio::sync::Semaphore`, at 22:15:33Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889).
   Supersedes the sentence "Any pool works" of
   https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.
