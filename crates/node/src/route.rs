@@ -12,9 +12,8 @@ use wire::Protocol;
 use crate::scope::Scope;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
-/// transport stops, and gives the error that stopped it. Admits every peer; `mesh`,
-/// when the node has one, checks each message against its region, and the hub serves
-/// each node.
+/// transport stops, and gives the error that stopped it. Admits every peer to a
+/// session; `route` decides each stream.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
     mesh: Option<Mesh>,
