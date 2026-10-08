@@ -14,7 +14,7 @@ cat "$STUB/$n"
 STUB
 cat > "$tmp/bin/sleep" <<'STUB'
 #!/bin/sh
-# The shell prints a note for each signal that stops a job, but SIGINT and SIGPIPE.
+# The shell prints a note for each signal that stops a job, except SIGINT and SIGPIPE.
 [ -f "$STUB/$(($(cat "$STUB/calls") + 1))" ] || kill -PIPE "$PPID"
 STUB
 chmod +x "$tmp/bin/gh" "$tmp/bin/sleep"
