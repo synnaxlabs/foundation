@@ -3,7 +3,10 @@
 use std::cmp::Ordering;
 
 use super::key_set::{self, KeySet};
-use super::{Form, Frame, Path, Range, bounds, lead, parts, to_u32, to_usize};
+use super::{
+    Form, Frame, Path, Range, bounds, descriptor_ends, lead, parts, spans, to_u32,
+    to_usize,
+};
 use crate::channel;
 
 /// The entries of one key set that a reader wants, and the index of each. Made once
@@ -143,6 +146,28 @@ impl<'a> View<'a> {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
         }))
+    }
+
+    /// Each present entry that the mask holds and the bytes of its series in
+    /// [`Frame::body`], in the order of [`View::iter`]. The bounds are in the frame's
+    /// body, not in a frame of only these series: [`split`](super::split) cannot cut
+    /// with them. Time is as for [`View::iter`].
+    pub fn bounds(
+        &self,
+    ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + use<'a> {
+        let (_, descriptors, _) = parts(&self.frame.0);
+        match &self.mask.held {
+            Held::Every => Series::Every(
+                spans(descriptor_ends(descriptors))
+                    .map(|(entry, start, end)| (entry, start..end)),
+            ),
+            Held::Listed(held) => {
+                Series::Listed(Join::new(descriptors, &held.entries).map(move |n| {
+                    let (start, end) = bounds(descriptors, n);
+                    (to_usize(lead(&descriptors[n])), start..end)
+                }))
+            }
+        }
     }
 }
 
@@ -317,6 +342,22 @@ mod tests {
     }
 
     #[test]
+    fn bounds_each_held_series_in_the_body_of_the_frame() {
+        let set = two_groups();
+        let frame = full(&set);
+        let bounds = |slots: &[u32]| {
+            let mask = Mask::new(&set, slots.iter().map(|&slot| Slot::new(slot)));
+            View::new(&frame, &mask).bounds().collect::<Vec<_>>()
+        };
+        assert_eq!(bounds(&[4]), [(2, 24..29), (3, 32..33)]);
+        assert_eq!(
+            bounds(&[1, 2, 3, 4]),
+            [(0, 0..3), (1, 8..18), (2, 24..29), (3, 32..33)]
+        );
+        assert_eq!(bounds(&[]), []);
+    }
+
+    #[test]
     #[should_panic(expected = "the frame is of key set 1 and the mask of key set 0")]
     fn refuses_a_mask_of_another_key_set() {
         let mut interner = interner();
@@ -411,6 +452,12 @@ mod tests {
                 folded
             });
             prop_assert_eq!(folded, expected);
+            let body = frame.body();
+            let cut: Vec<(usize, &[u8])> = view
+                .bounds()
+                .map(|(entry, bounds)| (entry, &body[bounds]))
+                .collect();
+            prop_assert_eq!(cut, read);
             for (group, &index) in (0..).zip(set.groups()) {
                 let range = frame.range(group).filter(|_| held.contains(&index));
                 prop_assert_eq!(view.range(group), range, "group {}", group);

@@ -10,6 +10,8 @@ mod datagram;
 )]
 mod hello;
 #[cfg(test)]
+mod packet;
+#[cfg(test)]
 mod pair;
 mod settings;
 mod stateless;
@@ -437,6 +439,8 @@ impl Endpoint {
     ///   when the stream has a message or a reset that no read took.
     /// - Else [`Error::Reset`] when the peer reset the stream, and
     ///   [`Error::Broken`] when the read finds a fault of the peer's.
+    ///
+    /// After an error, `receiver` holds no bytes of a message.
     pub(crate) fn read(
         &mut self,
         now: Monotonic,
@@ -447,9 +451,13 @@ impl Endpoint {
             return ended;
         }
         let (key, closed) = (receiver.key().connection, receiver.closed().cloned());
-        self.streams(now, key, closed, |streams, inner, pool, events| {
+        let read = self.streams(now, key, closed, |streams, inner, pool, events| {
             streams.read(inner, receiver, |len| take(pool, len), events)
-        })
+        });
+        if read.is_err() {
+            receiver.clear();
+        }
+        read
     }
 
     /// Resets `sender`'s stream with `code`. The peer's next read gives

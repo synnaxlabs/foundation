@@ -181,9 +181,9 @@ fn holds(public: PublicKey, claim: &Claim<'_>, signature: Option<Signature>) -> 
     ed25519::holds(public, &statement(claim), &bytes)
 }
 
-/// Why [`check`] refused a message.
+/// Why a claim in a message does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// A claim has no signature that holds under the public key of its signer.
     Forged {
         /// The node whose signature the claim needs.

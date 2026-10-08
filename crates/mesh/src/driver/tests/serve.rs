@@ -2,7 +2,7 @@
 //! and node 1 serves each with its mesh.
 
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code, Session};
+use transport::{Class, Code};
 
 use super::*;
 
@@ -22,9 +22,8 @@ struct Peer {
 
 impl Peer {
     async fn send(&self, sender: &mut Sender, bytes: &[u8]) {
-        let mut block = self.pool.alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        sender.send(block.freeze()).await.unwrap();
+        let block = crate::bytes::block(&self.pool, bytes).unwrap();
+        sender.send(block).await.unwrap();
     }
 
     /// Sends the header of the mesh protocol, then `messages`.
@@ -466,7 +465,7 @@ fn serve_stops_a_one_way_stream_when_the_group_stopped() {
     let ((served, stop), finished) = run(
         |node, tasks, incoming| async move {
             let (mesh, _) = leader(&node, &tasks, create_pool()).await;
-            let stop = fail_sync(&node);
+            let stop = Error::Stopped(fail_sync(&node));
             assert_eq!(mesh.propose(home(4)).await, Err(stop.clone()));
             (mesh.serve(public(2), incoming).await, stop)
         },
@@ -814,7 +813,7 @@ fn serve_gives_no_code_of_the_mesh_when_the_group_stopped_before_the_proposal() 
             };
             assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
             let cause = Unknown::Kind { kind: 9 };
-            let stopped = Error::Stopped(Stopped::Change { at, cause });
+            let stopped = Stopped::Change { at, cause };
             assert_eq!(watch.next().await, Err(stopped));
             mesh.serve(public(2), incoming).await
         },

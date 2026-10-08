@@ -113,6 +113,18 @@ pub(crate) struct Ended {
     pub(crate) held: Option<Held>,
 }
 
+/// What a crash leaves of a [`Mode::Create`] open in flight that makes a file. The
+/// file system can make the entry, allocate, and commit the directory in any order.
+#[derive(Clone, Copy, Hash)]
+enum Cut {
+    /// The open took effect.
+    Whole,
+    /// The entry, with no bytes.
+    Empty,
+    /// No entry. Only after a power crash.
+    Lost,
+}
+
 struct Flight {
     node: usize,
     /// The path of the call, or of the file for a call on an open file.
@@ -362,11 +374,12 @@ impl Files {
         ended.held
     }
 
-    /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
-    /// hold of the node ends, a leaked one too. A call in flight ends as one whose
-    /// future dropped, in the order of its end time. After a `Power` crash only each
-    /// write takes effect, and the disk keeps what is durable. Returns the wakers of
-    /// the closes and the blocks of the calls, for the caller to drop after it
+    /// Crashes `node` by `crash` at true time `at`: each call, result, close, and hold
+    /// of the node ends, a leaked one too. A call in flight ends as one whose future
+    /// dropped, in the order of its end time. A create open in flight that makes a file
+    /// can make it with no bytes. After a `Power` crash only each write and each such
+    /// create can take effect, and the disk keeps what is durable. Returns the wakers
+    /// of the closes and the blocks of the calls, for the caller to drop after it
     /// releases the lock.
     pub(crate) fn crash(
         &mut self,
@@ -379,6 +392,7 @@ impl Files {
             .into_iter()
             .partition(|(_, key)| flights[key].node == node);
         self.queue = queue;
+        let power = crash == Crash::Power;
         let (mut closes, mut orphans) = (Vec::new(), Vec::new());
         for (_, key) in cut {
             let mut flight = (self.flights.remove(&key))
@@ -387,15 +401,37 @@ impl Files {
             let close = flight.call.handle().map(|handle| handle.key);
             closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
-            let applied =
-                crash == Crash::Process || matches!(flight.call, Call::Write { .. });
+            let drawn = (matches!(flight.call, Call::Open(Mode::Create { .. }))
+                && !flight.failed
+                && self.disks[node].makes(&flight.path))
+            .then(|| match self.rng.below(2 + u64::from(power)) {
+                0 => Cut::Whole,
+                1 => Cut::Empty,
+                _ => Cut::Lost,
+            });
+            let (applied, commit) = match drawn {
+                None => (!power || matches!(flight.call, Call::Write { .. }), false),
+                Some(Cut::Lost) => (false, false),
+                Some(Cut::Empty) => {
+                    flight.call = Call::Open(Mode::Create { len: 0 });
+                    (true, power)
+                }
+                Some(Cut::Whole) => (true, power),
+            };
+            let path = commit.then(|| flight.path.clone());
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
+                if let (Some(path), Ok(_)) = (path, &ended.result) {
+                    let dir = path.parent().expect("invariant: a file path");
+                    let Ok(()) = self.disks[node].sync_dir(dir) else {
+                        unreachable!("invariant: an open made the file");
+                    };
+                }
                 (ended.result.is_ok(), ended.held)
             } else {
                 (false, flight.held)
             };
-            (at, key, kind, ok).hash(&mut self.digest);
+            (at, key, kind, drawn, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
         let leaked: Vec<_> = (self.done)
