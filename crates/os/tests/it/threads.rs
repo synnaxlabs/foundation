@@ -276,6 +276,8 @@ fn a_panic_in_the_drop_of_a_tokio_task_gives_ok() {
 #[test]
 fn a_panic_whose_payload_panics_in_its_drop_in_a_tokio_task_gives_panicked() {
     let body = || async {
+        // Tokio catches the panic of the poll and the first panic in the drop of its
+        // payload.
         drop(tokio::spawn(async { panic_any(Relay(2)) }));
         pending::<()>().await;
     };
@@ -296,4 +298,28 @@ fn a_panic_in_the_poll_and_then_the_drop_of_a_tokio_task_aborts_the_process() {
         let handle = threads().start("thread-15", body).unwrap();
         assert_joins(handle, Ok(()));
     });
+}
+
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_the_body_aborts_the_process() {
+    assert_aborts(|| {
+        let body = || async {
+            let _bomb = Bomb;
+            panic!("body");
+        };
+        let handle = threads().start("thread-16", body).unwrap();
+        assert_joins(handle, panicked("thread-16"));
+    });
+}
+
+#[test]
+fn a_panic_in_the_drop_of_an_aborted_tokio_task_gives_ok() {
+    let body = || async {
+        let task = tokio::spawn(Stuck(0));
+        task.abort();
+        let error = task.await.expect_err("the abort drops the task");
+        assert!(error.is_panic(), "{error}");
+    };
+    let handle = threads().start("thread-17", body).unwrap();
+    assert_joins(handle, Ok(()));
 }

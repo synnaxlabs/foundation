@@ -304,6 +304,15 @@ fn a_panic_ends_the_run_and_its_thread() {
 }
 
 #[test]
+fn a_panic_in_the_call_of_main_ends_the_run_and_its_thread() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let main = |_: env::tasks::Tasks| -> Ready<()> { panic!("main") };
+    let handle = node.shards().start(shard("shard-0"), main);
+    assert_panicked(&mut sim, handle.unwrap(), "main");
+}
+
+#[test]
 fn a_panic_in_a_spawned_task_ends_its_shard() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());

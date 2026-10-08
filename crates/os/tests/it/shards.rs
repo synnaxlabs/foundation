@@ -385,6 +385,8 @@ fn a_panic_in_the_drop_of_a_tokio_task_does_not_end_the_shard() {
 #[test]
 fn a_panic_whose_payload_panics_in_its_drop_in_a_tokio_task_ends_the_shard() {
     let main = |_: Tasks| async {
+        // Tokio catches the panic of the poll and the first panic in the drop of its
+        // payload.
         drop(tokio::task::spawn_local(async { panic_any(Relay(2)) }));
         pending::<()>().await;
     };
@@ -405,4 +407,44 @@ fn a_panic_in_the_poll_and_then_the_drop_of_a_tokio_task_aborts_the_process() {
         let handle = shards().start(config("shard-16"), main).unwrap();
         assert_joins(handle, Ok(()));
     });
+}
+
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_a_task_aborts_the_process() {
+    assert_aborts(|| {
+        let main = |tasks: Tasks| async move {
+            tasks.spawn(async {
+                let _bomb = Bomb;
+                panic!("task");
+            });
+            pending::<()>().await;
+        };
+        let handle = shards().start(config("shard-17"), main).unwrap();
+        assert_joins(handle, panicked("shard-17"));
+    });
+}
+
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_main_aborts_the_process() {
+    assert_aborts(|| {
+        let main = |_: Tasks| async {
+            let _bomb = Bomb;
+            panic!("main");
+        };
+        let handle = shards().start(config("shard-18"), main).unwrap();
+        assert_joins(handle, panicked("shard-18"));
+    });
+}
+
+#[test]
+fn a_panic_in_the_drop_of_an_aborted_tokio_task_does_not_end_the_shard() {
+    let main = |_: Tasks| async {
+        let task = tokio::task::spawn_local(Stuck(0));
+        task.abort();
+        let error = task.await.expect_err("the abort drops the task");
+        assert!(error.is_panic(), "{error}");
+        yield_now().await;
+    };
+    let handle = shards().start(config("shard-19"), main).unwrap();
+    assert_joins(handle, Ok(()));
 }
