@@ -2622,7 +2622,7 @@ mod port {
         use std::pin::pin;
         use std::task::Poll;
 
-        use ::mesh::{Member, Pointer};
+        use ::mesh::Member;
         use spec::definition::{Definition, Kind};
         use spec::subject::Subject;
         use spec::tree::Chunks;
@@ -3006,9 +3006,8 @@ mod port {
             assert!(held && logged);
         }
 
-        /// The mesh of a region with founding definitions opens at version 0 of their
-        /// tree, and a second open with the same region opens the same mesh: the
-        /// home set after the first open is there.
+        /// A node started with a region with founding definitions puts the chunks of
+        /// their tree in its chunk store: the mesh opens at version 0 of that tree.
         #[test]
         fn the_mesh_opens_at_the_founding_definitions_of_its_region() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -3017,58 +3016,46 @@ mod port {
             let subject = Subject::new([KEY.public()].into()).unwrap();
             let label = Kind::Subject.key("plant.operator").unwrap();
             region.definitions = [(label, Definition::Subject(subject))].into();
-            let founding = Pointer {
-                version: 0,
-                root: spec::region::tree(&mut Chunks::default(), &region.definitions)
-                    .root,
-            };
+            let mut chunks = Chunks::default();
+            let tree = spec::region::tree(&mut chunks, &region.definitions);
+            let listed = tree.chunks.clone();
+            let node = start(&host, (OWN, KEY), region);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
             let shard = env::shards::Config {
-                name: "endpoint".into(),
+                name: "store".into(),
                 core: None,
             };
             let own = host.clone();
-            let seen = Arc::new(Mutex::new(Vec::new()));
-            let out = Arc::clone(&seen);
-            let started = host.shards().start(shard, move |tasks| async move {
-                for open in 0..2 {
-                    // The task of the first transport holds its port until it drains.
-                    let listen = SocketAddr::new(own.addresses()[0], PORT + open);
-                    let bound =
-                        transport::Port::bind(&own.net(), listen).expect("a port");
-                    let endpoint = Endpoint {
-                        part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
-                        private_key: KEY,
-                        key: OWN,
-                        region: Some(region.clone()),
-                        clock: own.clock(),
-                        entropy: own.entropy(),
-                    };
-                    let pool = block::Config { budget: 1 << 20 };
-                    let memory = block::Heap::new(pool.reservation());
-                    let pool = Rc::new(block::Pool::new(pool, memory));
-                    let (_transport, mesh) = endpoint
-                        .open(own.files(), pool, tasks.clone())
-                        .await
-                        .expect("the mesh opens");
-                    let mesh = mesh.expect("the endpoint has a region");
-                    let mut watch = mesh.watch(INDEX);
-                    let mut home = watch.next().await;
-                    if open == 0 {
-                        mesh.set_home(INDEX, OWN).await.expect("the home commits");
-                    } else {
-                        // The mesh applies its log again once it leads.
-                        home = watch.next().await;
-                    }
-                    out.lock().unwrap().push((mesh.pointer(), home));
-                    let ended = mesh.ended();
-                    drop(mesh);
-                    ended.await;
+            let held = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&held);
+            let started = host.shards().start(shard, move |_| async move {
+                let pool = block::Config { budget: 1 << 20 };
+                let memory = block::Heap::new(pool.reservation());
+                let pool = Rc::new(block::Pool::new(pool, memory));
+                let store = blob::Store::open(blob::Config {
+                    files: own.files(),
+                    dir: crate::directory::blob(),
+                    pool,
+                })
+                .await
+                .expect("the store opens");
+                for digest in tree.chunks {
+                    let block = store.get(digest).await.expect("a read");
+                    let bytes = block.map(|block| block.to_vec());
+                    out.lock().unwrap().push((digest, bytes));
                 }
             });
-            drop(started.expect("the endpoint starts"));
+            drop(started.expect("the store starts"));
             assert_eq!(sim.run(), Ok(()));
-            let opened = [(founding, Ok(None)), (founding, Ok(Some(OWN)))];
-            assert_eq!(*seen.lock().unwrap(), opened);
+            assert!(listed.contains(&tree.root));
+            let expected: Vec<_> = listed
+                .into_iter()
+                .map(|digest| (digest, chunks.get(digest).map(<[u8]>::to_vec)))
+                .collect();
+            assert_eq!(*held.lock().unwrap(), expected);
         }
 
         /// A node that starts again with its region, at once after a stop or a power
