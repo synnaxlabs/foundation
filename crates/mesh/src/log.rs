@@ -505,31 +505,31 @@ fn records(
     let mut end = 0_usize;
     while let Some(rest) = bytes.get(start(end)..) {
         let at = start(end);
-        let claimed = |after: &[u8]| bytes.len().saturating_sub(after.len());
-        let (body, after) = match Record::read(rest) {
-            Record::End => break,
+        let end_of = |after: &[u8]| bytes.len().saturating_sub(after.len());
+        let head = match header(rest) {
+            At::End => break,
+            At::Garbage => return Err(corrupt(at)),
+            At::Header(head) => head,
+        };
+        let (body, after) = match head.read() {
             Record::Version(found) => {
                 let path = file.to_path_buf();
                 return Err(Error::Version { path, found });
             }
             Record::Torn { number, after } if number == *next => {
-                return Ok((end, Some(claimed(after))));
+                return Ok((end, Some(end_of(after))));
             }
             Record::Whole {
                 number,
                 body,
                 after,
             } if number == *next => (body, after),
-            Record::Garbage
-            | Record::Short
-            | Record::Torn { .. }
-            | Record::Whole { .. } => {
+            Record::Short | Record::Torn { .. } | Record::Whole { .. } => {
                 return Err(corrupt(at));
             }
         };
-        let claimed = claimed(after);
         apply(stored, body).ok_or_else(|| corrupt(at))?;
-        end = claimed;
+        end = end_of(after);
         *next = next.saturating_add(1);
     }
     Ok((end, None))
@@ -563,12 +563,8 @@ struct Header<'a> {
     after: &'a [u8],
 }
 
-// The record at the start of some bytes.
+// The record that a header starts.
 enum Record<'a> {
-    // Zeros, or too few bytes for a header: the end of the records.
-    End,
-    // Bytes that are not zeros and not a header.
-    Garbage,
     // A header of another format version.
     Version(u16),
     // A header that claims a body longer than the bytes after it.
@@ -586,28 +582,23 @@ enum Record<'a> {
     },
 }
 
-impl<'a> Record<'a> {
-    fn read(bytes: &'a [u8]) -> Self {
-        let head = match header(bytes) {
-            At::End => return Self::End,
-            At::Garbage => return Self::Garbage,
-            At::Header(head) => head,
-        };
-        if head.version != VERSION {
-            return Self::Version(head.version);
+impl<'a> Header<'a> {
+    fn read(self) -> Record<'a> {
+        if self.version != VERSION {
+            return Record::Version(self.version);
         }
-        let Some((body, after)) = head.after.split_at_checked(head.len) else {
-            return Self::Short;
+        let Some((body, after)) = self.after.split_at_checked(self.len) else {
+            return Record::Short;
         };
-        let number = head.number;
-        if check(body) == head.check {
-            Self::Whole {
+        let number = self.number;
+        if check(body) == self.check {
+            Record::Whole {
                 number,
                 body,
                 after,
             }
         } else {
-            Self::Torn { number, after }
+            Record::Torn { number, after }
         }
     }
 }
@@ -726,16 +717,25 @@ fn body(mut bytes: &[u8]) -> Option<(Option<Hard>, Vec<Entry>)> {
 /// The number of the record and whether its entries follow a log are not checked.
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn decode(record: &[u8]) -> Option<(u64, Option<Hard>, Vec<Entry>)> {
-    let Record::Whole {
+    let Some(Record::Whole {
         number,
         body: bytes,
         after: [],
-    } = Record::read(record)
+    }) = self::record(record)
     else {
         return None;
     };
     let (hard, entries) = body(bytes)?;
     Some((number, hard, entries))
+}
+
+// The record at the start of `bytes`, or `None` when no header is there.
+#[cfg(any(test, feature = "sim"))]
+fn record(bytes: &[u8]) -> Option<Record<'_>> {
+    match header(bytes) {
+        At::Header(head) => Some(head.read()),
+        At::End | At::Garbage => None,
+    }
 }
 
 /// Makes both checks of `record` match its bytes. Does nothing to fewer bytes than a
@@ -2854,7 +2854,7 @@ mod tests {
             entries in entries(),
         ) {
             let bytes = encode(number, hard.clone(), &entries);
-            let Record::Whole { number: read_number, body, after } = Record::read(&bytes) else {
+            let Some(Record::Whole { number: read_number, body, after }) = record(&bytes) else {
                 panic!("a record reads as a whole record");
             };
             prop_assert_eq!((read_number, after), (number, &[][..]));
@@ -2874,7 +2874,7 @@ mod tests {
             let mut bytes = encode(3, hard, &entries);
             let at = at.index(bytes.len());
             bytes[at] ^= 1 << bit;
-            let whole = matches!(Record::read(&bytes), Record::Whole { number: 3, .. });
+            let whole = matches!(record(&bytes), Some(Record::Whole { number: 3, .. }));
             prop_assert!(!whole);
         }
 
