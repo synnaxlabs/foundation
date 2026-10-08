@@ -4661,10 +4661,12 @@ How to read this record:
   `Unplaced::fix` is static and cannot name that connector (`laptop.architect`,
   2026-10-08T16:51:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 2).
-  In the second, each node of `p` is the node of an `Overlap` of `p`. The removals then
-  give `config.empty-placement`, whose fix names a node (`laptop.architect`,
-  2026-10-08T17:11:23Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065131594).
+  In the second, `p` names two or more nodes, and each is the node of an `Overlap` of
+  `p`. The removals then give `config.empty-placement`, whose fix names a node
+  (`laptop.architect`, 2026-10-08T17:11:23Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065131594, changed
+  by `laptop.architect`, 2026-10-08T17:22:53Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065329233).
   `config.connector-home` (X22) is at the `home` of a placement `p` that wins for a
   connector `a` on the node `n` and names another node. Its fix is "Name `n` as the
   `home`, and keep `n` out of `standby` and `copies`" when `p` wins for no connector on
@@ -4742,8 +4744,9 @@ How to read this record:
   `c` another edit, the node of the nearest connector as the home of an index with no
   writer, which guesses a home for data that no connector on that node makes, the
   `Overlap` fix "Move the node to `home`, or remove it from the placement", which offers
-  a removal that leaves no node, and an `Overlap` fix computed in `config` for each
-  name, which gives one variant a second source of text.
+  a removal that leaves no node, an `Overlap` fix computed in `config` for each name,
+  which gives one variant a second source of text, and a fix computed in `config` from
+  each `Overlap` of `p`.
   Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
