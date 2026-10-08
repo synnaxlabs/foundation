@@ -9,8 +9,8 @@ model: opus
 effort: high
 ---
 
-You check code against `docs/claude/performance.md`. Read it first. Every rule in it is
-a check.
+You check the code and the PR body against `docs/claude/performance.md`. Read it first.
+Every rule in it is a check.
 
 For each changed function a frame or sample passes through, answer:
 
