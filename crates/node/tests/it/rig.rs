@@ -3,6 +3,7 @@
 //! `os`. Each method with a `todo!` waits on the issue it names.
 
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Output;
@@ -66,13 +67,23 @@ pub(crate) struct Error {
 }
 
 impl Rig {
-    /// Makes a temporary directory for the test on this thread.
+    /// Makes a temporary directory for the test on this thread, with a name that no
+    /// directory has: a failed run keeps its directory, and a later run can get the
+    /// same PID.
     pub(crate) fn new() -> Self {
         let thread = std::thread::current();
         let test = thread.name().expect("invariant: libtest names the thread");
         let name = format!("foundation-node-{}-{test}", std::process::id());
-        let dir = std::env::temp_dir().join(name.replace("::", "-"));
-        std::fs::create_dir(&dir).expect("make the directory");
+        let name = name.replace("::", "-");
+        let mut n = 0;
+        let dir = loop {
+            let dir = std::env::temp_dir().join(format!("{name}-{n}"));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => break dir,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => n += 1,
+                Err(error) => panic!("make {}: {error}", dir.display()),
+            }
+        };
         Self {
             dir,
             opcua: Opcua::default(),
@@ -170,4 +181,11 @@ impl Drop for Rig {
             std::fs::remove_dir_all(&self.dir).expect("remove the directory");
         }
     }
+}
+
+#[test]
+fn a_rig_takes_a_new_directory_when_its_name_is_in_use() {
+    let kept = Rig::new();
+    let rig = Rig::new();
+    assert_ne!(rig.dir, kept.dir);
 }
