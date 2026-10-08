@@ -391,6 +391,8 @@ fn line_directives(copy: &Path, dir: &Path) -> Result<Vec<String>, String> {
         let text = String::from_utf8_lossy(&bytes);
         // `cc` skips a byte order mark at the start of a file.
         let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        // `cc` also ends a line at a lone carriage return.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         for (index, line) in text.lines().enumerate() {
             let Some(rest) = line.trim_start().strip_prefix('#').map(str::trim_start)
             else {
@@ -885,6 +887,7 @@ Disassembly of section .text.log:
                 ("src/d.h", "\u{feff}#line 2\n"),
                 ("src/m.h", "#line 3\n"),
                 ("src/q.c", "#line 4\n"),
+                ("src/r.c", "int a;\r#line 7\r\n#line 8\r\n"),
                 ("src/z.c", "#line 5\n"),
                 ("src/k.c", "#line 6\n"),
                 ("include/c.h", "#define line 1\n# 1 \"c.y\" 1\n#line\n"),
@@ -909,6 +912,8 @@ Disassembly of section .text.log:
                 held("src/k.c:1"),
                 held("src/m.h:1"),
                 held("src/q.c:1"),
+                held("src/r.c:2"),
+                held("src/r.c:3"),
                 held("src/z.c:1")
             ])
         );
