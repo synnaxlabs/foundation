@@ -140,7 +140,8 @@ impl Node {
     /// or checks the one there, and each shard opens its buffer in directory
     /// `shard-<i>` of its files, and makes it there when it is not there. The shards
     /// open their buffers one after another, in order of core. Once each buffer has
-    /// opened, shard 0 serves the port and admits every peer that proves its key.
+    /// opened, shard 0 serves the port and admits every peer that proves its key,
+    /// until its transport stops, which stops the node.
     /// Returns once each shard runs or one has failed to start. When the disk budget
     /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
     /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
@@ -619,9 +620,10 @@ impl Endpoint {
 impl Serve {
     /// Runs each task given with a hub over `home`, and serves the node's port with
     /// a transport on `pool`, until `guard` completes or the transport stops. Then
-    /// drops the tasks, the hub, `home`, `guard`, each session, and the transport,
-    /// and gives the error that stopped the transport, if it stopped first. Runs no
-    /// task and takes no session when a shard did not open.
+    /// drops the tasks, the hub, `home`, and `guard`, and gives the error that stopped
+    /// the transport, if it stopped first. Each session and the transport drop after
+    /// `guard` when `guard` completes, and before the tasks when the transport stops.
+    /// Runs no task and takes no session when a shard did not open.
     async fn run(
         self,
         home: home::Shard,

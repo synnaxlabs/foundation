@@ -2468,8 +2468,21 @@ mod port {
         assert_eq!(node.join(), Err(Error::Transport(error.clone())));
         assert_eq!(
             Error::Transport(error).to_string(),
-            "the node's transport stopped: the socket broke: network call failed with OS \
-             error 5"
+            "the node's transport stopped: the socket broke: network call failed \
+             with OS error 5"
         );
+    }
+
+    /// A stop of the node at the instant its transport stops is not a failure.
+    #[test]
+    fn a_stop_as_the_transport_stops_gives_no_error() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        host.fail_udp(listen(&host));
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
     }
 }
