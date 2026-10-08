@@ -287,14 +287,14 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 }
 
 /// Parses `body` as a round comment. `None` when it has no round heading:
-/// [`Shown::number`], or [`Shown::hidden`] when it is not `old`. The fields are
+/// [`Shown::number`], or [`Shown::html_number`] when it is not `old`. The fields are
 /// the first block after the heading, so the findings text cannot set them. The last
 /// block is the end lines ([`END`]), unless the comment is `old`, posted before
 /// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = unpadded(body);
     let shown = Shown::read(&body);
-    let number = shown.number.or(shown.hidden.filter(|_| !old))?;
+    let number = shown.number.or(shown.html_number.filter(|_| !old))?;
     let text = &shown.text;
     let lines = shown.fields().iter().copied();
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
@@ -438,7 +438,7 @@ struct Shown<'a> {
     /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
-    hidden: Option<&'a str>,
+    html_number: Option<&'a str>,
 }
 
 impl<'a> Shown<'a> {
@@ -476,7 +476,7 @@ impl<'a> Shown<'a> {
                 shown.html = Some(source.trim());
             }
             if matches!(event, Event::Html(_)) && open.len() == 1 {
-                shown.hidden = shown.hidden.or(heading(source));
+                shown.html_number = shown.html_number.or(heading(source));
             }
             match event {
                 Event::Start(tag) if !inline(tag.to_end()) => {
