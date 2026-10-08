@@ -187,8 +187,8 @@ How to read this record:
   elements. Its fields are public: no `u16` pair overflows `width`, so no format needs a
   check. Its text is `f32[2][3]`; a length over 65535 is `Error::Matrix` (amended
   below), and more than two lengths is `Error::Lengths`. The spec's data type code of a
-  matrix is `MATRIX` 6, then the element code, `rows: u16`, and `columns: u16`. A
-  matrix of a number can have a unit, by the element's rule, as an array. Decided by
+  matrix is `MATRIX` 6, then the element code, `rows: u16`, and `columns: u16`. A matrix
+  of a number can have a unit, by the element's rule, as an array. Decided by
   `laptop.architect` (2026-10-07T17:30:55Z):
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011, and for
   the spec by `laptop.architect-2` (2026-10-07T17:27:36Z):
