@@ -1,7 +1,7 @@
 # Security
 
 The threat model of Foundation. The red-team sessions own this file and update it when
-a surface lands. `docs/decisions.md` wins where they differ. A defect that an
+a surface lands. `docs/decisions/` wins where they differ. A defect that an
 attacker can use is a GitHub issue with the `security` label and a failing test.
 
 ## What we protect

@@ -552,7 +552,7 @@ fn a_round_that_names_a_hot_path_needs_performance() {
     assert_eq!(check(&record(vec![bot(&cold)])), Vec::<String>::new());
     let docs = ROUND.replace("Hot path: none", "Hot path: `Sender::send`");
     let mut record = record(vec![bot(&docs)]);
-    record.files = vec!["docs/decisions.md".to_string()];
+    record.files = vec!["docs/decisions/crate-map.md".to_string()];
     assert_eq!(
         check(&record),
         vec![
@@ -734,7 +734,10 @@ fn round_1_of_a_code_pr_needs_each_reviewer_of_the_table() {
 fn needs_only_the_reviewer_for_a_diff_with_no_code() {
     let first = later("`reviewer`").replace("round 3", "round 1");
     let mut docs = record(vec![bot(&first)]);
-    docs.files = vec!["docs/decisions.md".to_string(), "README.md".to_string()];
+    docs.files = vec![
+        "docs/decisions/crate-map.md".to_string(),
+        "README.md".to_string(),
+    ];
     assert_eq!(check(&docs), Vec::<String>::new());
     for code in ["xtask/Cargo.toml", "Cargo.lock", "a/.rs"] {
         let mut record = record(vec![bot(&first)]);

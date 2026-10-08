@@ -78,13 +78,17 @@ pub struct Config<M> {
     /// The node's key. It stays the same when the private key changes. A patch until
     /// the node reads it from its data directory (#1660).
     pub key: types::node::Key,
-    /// The region whose mesh the node opens, or `None` for no mesh. One founding
-    /// member has [`Config::key`], and its card holds the public half of
+    /// The region whose mesh the node opens, or `None` for no mesh. One founding member
+    /// has [`Config::key`], and its card holds the public half of
     /// [`Config::private_key`]. Give the same value at each start: the node keeps no
     /// copy of it, and until the mesh stores it (#1209), a log opened with another
-    /// value checks proofs against the wrong voters and starts at another spec. A
-    /// patch until the node keeps its region in its data directory when it founds or
-    /// joins one, and reads it at each start (#1660, #1744).
+    /// value checks proofs against the wrong voters and starts at another spec. A patch
+    /// until the node keeps its region in its data directory when it founds or joins
+    /// one, and reads it at each start (#1660, #1744). The hub of each task knows each
+    /// channel of the founding's `definitions`. Give only a founding that
+    /// `spec::region::check` accepts. One with a data channel whose index is not an
+    /// index of it, or with two channels of one key, makes shard 0 panic, and
+    /// [`Node::join`] gives [`Error::Panicked`].
     pub region: Option<mesh::region::Founding>,
 }
 
@@ -669,13 +673,14 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Opens the endpoint, then runs each task given with a hub over `home`, and
-    /// serves the node's port, until `guard` completes or the transport stops. A
-    /// transport that stops goes into `failed` before any task drops. Then drops the
-    /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
-    /// and waits for each task of the mesh to end, the last of which drops the
-    /// transport. Runs no task and takes no session when a shard did not open, or when
-    /// the mesh did not open, which goes into `failed`.
+    /// Opens the endpoint, then runs each task given with a hub over `home` that knows
+    /// each channel of the region's founding spec, and serves the node's port, until
+    /// `guard` completes or the transport stops. A transport that stops goes into
+    /// `failed` before any task drops. Then drops the tasks, the hub, `home`, `guard`,
+    /// each session and stream future, and the mesh, and waits for each task of the
+    /// mesh to end, the last of which drops the transport. Runs no task and takes no
+    /// session when a shard did not open, or when the mesh did not open, which goes
+    /// into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -694,6 +699,19 @@ impl Serve {
             );
         };
         let (key, entropy) = (self.endpoint.key, self.endpoint.entropy.clone());
+        // The endpoint's open takes the founding, so the channels go first.
+        let channels: Vec<_> = self
+            .endpoint
+            .region
+            .iter()
+            .flat_map(|region| &region.definitions)
+            .filter_map(|(name, definition)| match definition {
+                spec::definition::Definition::Channel(channel) => {
+                    Some((name.clone(), channel.clone()))
+                }
+                _ => None,
+            })
+            .collect();
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
                 Ok(opened) => opened,
@@ -708,6 +726,7 @@ impl Serve {
             entropy,
             mesh: mesh.clone(),
         });
+        hub.define(channels.iter().map(|(name, channel)| (name, channel)));
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // The port's future holds the mesh, so it drops before the wait.
         {
