@@ -174,8 +174,9 @@ nothing checked again. So when round 1 led to fix commits:
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge needs no round: its
 `git show --remerge-diff <merge>` is empty, and the base moves no path that the PR
-changed and that is not code into a code path (REVIEW CHECK in `docs/decisions.md`). Any
-other merge gets a round on that diff, which runs as step 1 says.
+changed and that is not code into a code path (REVIEW CHECK in
+`docs/decisions/operations/review-check.md`). Any other merge gets a round on that diff,
+which runs as step 1 says.
 
 ## Done
 
