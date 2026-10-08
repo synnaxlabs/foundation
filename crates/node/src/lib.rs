@@ -670,17 +670,6 @@ impl Endpoint {
     }
 }
 
-/// The channels of `region`'s founding spec.
-fn channels(
-    region: &mesh::region::Founding,
-) -> impl Iterator<Item = (&types::name::Name, &spec::channel::Channel)> {
-    let definitions = region.definitions.iter();
-    definitions.filter_map(|(name, definition)| match definition {
-        spec::definition::Definition::Channel(channel) => Some((name, channel)),
-        _ => None,
-    })
-}
-
 impl Serve {
     /// Loads the node's identity ([`identity::load`]) and opens the endpoint, then
     /// runs each task given with a hub over `home` that knows each channel of the
@@ -722,7 +711,14 @@ impl Serve {
             entropy: self.endpoint.entropy.clone(),
         });
         if let Some(region) = &self.endpoint.region {
-            hub.define(channels(region));
+            hub.define(region.definitions.iter().filter_map(|(name, definition)| {
+                match definition {
+                    spec::definition::Definition::Channel(channel) => {
+                        Some((name, channel))
+                    }
+                    _ => None,
+                }
+            }));
         }
         let (transport, mesh) = match self
             .endpoint
