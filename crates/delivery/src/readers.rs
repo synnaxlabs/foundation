@@ -2990,7 +2990,10 @@ pub(super) mod tests {
                 backfill: i64,
                 flipped: bool,
             },
-            Close(usize),
+            Close {
+                session: usize,
+                synced: bool,
+            },
             Flush,
             Advance,
         }
@@ -3133,7 +3136,8 @@ pub(super) mod tests {
                             flipped,
                         }
                     }),
-                any::<usize>().prop_map(Input::Close),
+                (any::<usize>(), any::<bool>())
+                    .prop_map(|(session, synced)| Input::Close { session, synced }),
                 Just(Input::Flush),
                 Just(Input::Advance),
             ]
@@ -3179,12 +3183,18 @@ pub(super) mod tests {
             }
         }
 
-        /// Closes the open session `key` at `now` with the call for its kind.
-        fn close(readers: &mut Readers, model: &Model, key: complete::Key, now: i64) {
-            match model.open[&key].0 {
-                Some(_) => readers.close(key.into(), Some(at(now))),
-                None => readers.close(key.into(), None),
-            }
+        /// Closes the open session `key` at `now`. A named session always gets `now`,
+        /// as the home has mesh time when one opens. An unnamed one gets it when
+        /// `synced`.
+        fn close(
+            readers: &mut Readers,
+            model: &Model,
+            key: complete::Key,
+            now: i64,
+            synced: bool,
+        ) {
+            let named = model.open[&key].0.is_some();
+            readers.close(key.into(), (named || synced).then(|| at(now)));
         }
 
         /// Applies one input to the readers and the model, and checks that they agree.
@@ -3227,17 +3237,17 @@ pub(super) mod tests {
                     let (key, to) = (*key, moved(*from, live, backfill, flipped));
                     assert_eq!(readers.ack(key, to), model.ack(key, to));
                 }
-                Input::Close(session) if !model.open.is_empty() => {
+                Input::Close { session, synced } if !model.open.is_empty() => {
                     let key = *model
                         .open
                         .keys()
                         .nth(session % model.open.len())
                         .expect("in range");
-                    close(readers, model, key, now);
+                    close(readers, model, key, now, synced);
                     model.close(key, now);
                 }
                 Input::Flush => readers.flush(),
-                Input::Ack { .. } | Input::Close(_) | Input::Advance => {}
+                Input::Ack { .. } | Input::Close { .. } | Input::Advance => {}
             }
             assert_eq!(readers.floor(), model.floor());
             assert_eq!(readers.deadline(), model.deadline());
@@ -3263,7 +3273,7 @@ pub(super) mod tests {
             }
             let mut restored = Readers::restore(records, at(now), 0);
             for key in model.open.keys() {
-                close(&mut readers, &model, *key, now);
+                close(&mut readers, &model, *key, now, true);
             }
             for later in [0, 1, 5, 10, 20, 40] {
                 restored.advance(at(now + later));
@@ -3550,7 +3560,7 @@ pub(super) mod tests {
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        close(&mut readers, &model.readers, key, 0);
+                        close(&mut readers, &model.readers, key, 0, i % 2 == 0);
                         model.close(key, 0);
                     }
                     Live::Ack(i, ahead) => {
