@@ -199,13 +199,16 @@ state on `main`.
   (`raft::Change`). The voter reads the chain up to the entry whose configuration
   the leader's votes are a quorum of, checks each signature it reads, and follows
   the leader; it keeps nothing from the chain. A forged link, or one whose votes are
-  no quorum of the configuration before it, is refused, and the voter does not
-  change (architect, #881,
+  no quorum of the configuration that elected its leader (the last link read of a
+  lower term, else the voter's last committed configuration of a lower term), is
+  refused, and the voter does not change (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
-  `raft/tests/it/behind.rs` and `mesh::claim` pin it. The chain does not cover a
-  leader that the missed change made a voter (#1096), and it cannot prove a term that
-  no configuration entry stands behind: a node that a leave removed can reach such a
-  term, and a change that adds it back then stalls the group (#1485).
+  `raft/tests/it/behind.rs` pins that the voter follows the leader, `mesh::claim` pins a
+  forged link, and the `chain` tests in `crates/raft/src/machine.rs` pin the quorum
+  rule. The chain does not cover a leader that the missed change made a voter (#1096),
+  and it cannot prove a term that no configuration entry stands behind: a node that a
+  leave removed can reach such a term, and a change that adds it back then stalls the
+  group (#1485).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

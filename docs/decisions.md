@@ -839,6 +839,31 @@ How to read this record:
   since the bench host runs no features. Decided by `laptop.architect`
   (2026-10-07T19:05:26Z):
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
+- **NODE BENCH (#1637, 2026-10-07)** The cargo feature `sim` of `node`, off by default
+  (`node`'s dev-dependency on itself turns it on for the bench), adds `#[doc(hidden)]
+  pub mod bench` with `Scope { new, spawn }` and its `Default` over `scope::Scope`. Only
+  the bench `benches/scope.rs` (`test = true`) uses it. Its `env::tasks::Driver` keeps
+  each task, `spawn` gives it, and the bench polls it by hand, so a time holds only
+  `Spawned::poll` and the future's poll. A `bare` line polls the boxed future directly
+  in the same binary, as the control. Lost: a time through `Node::spawn` on `sim` or
+  Tokio, which hides a 0.3 ns change in the executor's cost, and a copy of the poll
+  before `clone_from`, which #1627 decided and the `bare` control replaces. The
+  `same_waker` time is the check on `clone_from` until #715 gates it with a baseline
+  from the form with `clone_from`: an `Arc` waker clone allocates nothing, so no
+  allocation count can. Decided by `laptop.architect-2` (2026-10-07 23:56 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976; the
+  surface of `spawn`, in round 1 of #1666 (2026-10-08 00:11 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049426380. The
+  bench's `Driver`, beside those of `os` and `sim`, is the #1632 clause, by
+  `laptop.architect-2` (2026-10-08 00:18 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1632#issuecomment-6049501422. #1632
+  applies its text to the doc of `env::tasks::Driver` and to ENV SEAMS. The feature is
+  `sim`, since a hook that only a bench or a fuzz target uses is test-only (#1570), by
+  `laptop.architect-2` (2026-10-08 00:56 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049939448. It
+  supersedes
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976 in its
+  clause that the feature is `bench`.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
@@ -4469,6 +4494,7 @@ How to read this record:
 | B3 one cumulative position per index | READER RULES |
 | Retention trims a held sample: the trim clauses of #895 (6032219156), of the READER RULES floor (#89), and of HANDOFF RECORD (#402) | RETENTION, READER RULES, HANDOFF RECORD, STORE TRIM |
 | `set_floor` takes `keep`, and the floor is past each sample stored more than `keep` ago: #1377 (6037946637, parts 1 and 2, and part 3 before the first estimate or while a store time of the path is at or after the cutoff; the floor sentence of 6038431739) and #1080 (6037950577) | READER RULES (the cutoff) |
+| BENCH SPEND; the coordinator as the session that rents and ends the ARM RUNNER hosts | Test budget (5.5) |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -5379,11 +5405,19 @@ engine, and performance work past the P1 targets.
 
 **Test budget (2026-10-05).** The person approved 1000 USD for AWS testing, and it
 replaces BENCH SPEND: a nightly chaos lab (about 2 USD a day), a spot simulation swarm
-of four c7i.8xlarge for four hours (ledger cap 22.85 USD at the on-demand price, about
-9 USD at spot), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
-benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
-should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
-and an automatic shutdown first.
+of four c7i.8xlarge for four hours (about 9 USD at spot, with its ledger cap by "Cloud
+machines" step 2 in `docs/coordination.md`), a nightly P1 benchmark on a c7i.metal-24xl
+(about 4 USD), and benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day
+("test budget should be capped at $100 a day"). Every launch goes in the ledger (#15)
+with its cap and an automatic shutdown first. Only `laptop.monitor` rents and ends
+machines, by "Cloud machines" in `docs/coordination.md`, and no other session holds AWS
+credentials (the person,
+https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
+2026-10-07T16:48:27Z). Supersedes: BENCH SPEND, and the coordinator as the session that
+rents and ends the ARM RUNNER hosts. Those hosts stay under AWS CEILING, outside the
+test budget, its limits, and "Cloud machines" step 3. Each launch and end of one still
+gets its line on #15, with its 72-hour renewal stop as its end time. Step 4 checks each
+instance by itself, because those hosts have no `issue` tag.
 
 ### 5.6 First phase
 
