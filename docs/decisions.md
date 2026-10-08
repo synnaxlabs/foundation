@@ -2229,7 +2229,7 @@ How to read this record:
   A voter that does not lead cannot make a node follow it: a leader claim needs a
   quorum of grants (RAFT SURFACE, #750), except a voter that led a term at or above
   the node's committed one, which can forge a link until #882 (RAFT SURFACE). After a
-  restart the committed term is the term at the applied index, since `Hard` holds no
+  restart the committed term is the term at the applied index, because `Hard` holds no
   commit index, so more past leaders can forge a link. Lost: the commit index in
   `Hard`, one more durable write each time the commit index moves, for a gap that #882
   closes; and a bound of the highest term in the stable log, which refuses a real
