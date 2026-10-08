@@ -294,10 +294,12 @@ impl Config {
         let limit = self.message_bytes_max.get().min(self.pool.largest());
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
-        } else if limit < MESSAGE_BYTES_MIN && limit < self.message_bytes_max.get() {
-            ("pool", POOL_RULE)
         } else if limit < MESSAGE_BYTES_MIN {
-            ("message_bytes_max", "must be at least 1472")
+            if limit < self.message_bytes_max.get() {
+                ("pool", POOL_RULE)
+            } else {
+                ("message_bytes_max", "must be at least 1472")
+            }
         } else if self.window_bytes < limit {
             ("window_bytes", "must be at least the message limit")
         } else {
