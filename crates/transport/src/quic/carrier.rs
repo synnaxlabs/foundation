@@ -23,8 +23,9 @@ use types::time::Monotonic;
 
 use super::stream::{Incoming, Receiver, Sender};
 use super::wait::{self, RETRY};
-use super::{Endpoint, Event, connection};
-use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer, Status, port};
+use super::{Endpoint, Event, Setup, connection};
+use crate::stream::Part;
+use crate::{Class, Code, Error, PAYLOAD_IPV4, Peer, Status, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
 /// shard's other tasks.
@@ -36,20 +37,16 @@ const BATCHES: usize = 8;
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
-    /// Starts an endpoint for `config` on `port`, and spawns its task on
-    /// `config.tasks`.
-    ///
-    /// # Panics
-    ///
-    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(config: Config, part: port::Part) -> Self {
+    /// Starts an endpoint for `setup` on `part`, and spawns its task on
+    /// `setup.tasks`.
+    pub(crate) fn new(setup: Setup, part: port::Part) -> Self {
         let port::Part {
             index,
             sender,
             receiver,
         } = part;
-        let endpoint = Endpoint::new(&config, index, sender.batch_max());
-        let Config { clock, tasks, .. } = config;
+        let endpoint = Endpoint::new(&setup, index, sender.batch_max());
+        let Setup { clock, tasks, .. } = setup;
         let state = Rc::new(RefCell::new(State {
             endpoint,
             clock: clock.clone(),
@@ -103,6 +100,11 @@ impl Carrier {
     pub(crate) fn status(&self) -> Status {
         let state = self.0.borrow();
         state.waits.status(state.clock.now())
+    }
+
+    /// The clock of the carrier's endpoint.
+    pub(crate) fn clock(&self) -> Clock {
+        self.0.borrow().clock.clone()
     }
 
     /// Checks that the socket still works.
@@ -405,9 +407,9 @@ impl Session {
         )
     }
 
-    /// Writes `message` when it is `Some`, and takes it. Ready once the stream holds
-    /// no message: it took all of `message`, or with `None`, all of the one before.
-    /// Ready with the error.
+    /// Writes `parts` of `message` when it is `Some`, as [`Endpoint::write`] does,
+    /// and takes the block. Ready once the stream holds no message: it took all of
+    /// `message`, or with `None`, all of the one before. Ready with the error.
     ///
     /// # Errors
     ///
@@ -421,9 +423,10 @@ impl Session {
         cx: &mut Context<'_>,
         sender: &Sender,
         message: &mut Option<Block>,
+        parts: &[Part],
     ) -> Poll<Result<(), Error>> {
         self.with(|endpoint, clock, slot, _| {
-            match endpoint.write(clock.now(), sender, message) {
+            match endpoint.write(clock.now(), sender, message, parts) {
                 Ok(Poll::Pending) => {
                     register_one(&mut slot.writing, sender.key().id, cx.waker());
                     Poll::Pending
@@ -447,8 +450,8 @@ impl Session {
         self.with(|endpoint, clock, _, _| endpoint.finish(clock.now(), sender))
     }
 
-    /// Puts `message` on `sender`'s stream when the stream can take it now, as
-    /// [`Endpoint::try_write`] does. Else gives it back.
+    /// Puts `parts` of `message` on `sender`'s stream when the stream can take it
+    /// now, as [`Endpoint::try_write`] does. Else gives the block back.
     ///
     /// # Errors
     ///
@@ -461,9 +464,10 @@ impl Session {
         &self,
         sender: &Sender,
         message: Block,
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
         self.with(|endpoint, clock, _, _| {
-            endpoint.try_write(clock.now(), sender, message)
+            endpoint.try_write(clock.now(), sender, message, parts)
         })
     }
 
@@ -513,6 +517,30 @@ impl Session {
             };
             waits.leave(now, stream);
             Poll::Ready(read)
+        })
+    }
+
+    /// Ready with the length of the next whole message of `receiver`'s stream, which
+    /// it copies to the start of `buffer`, `None` after the last, or with the error.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::read_into`].
+    pub(crate) fn poll_read_into(
+        &self,
+        cx: &mut Context<'_>,
+        receiver: &mut Receiver,
+        buffer: &mut [u8],
+    ) -> Poll<Result<Option<usize>, Error>> {
+        self.with(|endpoint, clock, slot, _| {
+            match endpoint.read_into(clock.now(), receiver, buffer) {
+                Ok(Poll::Pending) => {
+                    register_one(&mut slot.reading, receiver.key().id, cx.waker());
+                    Poll::Pending
+                }
+                Ok(Poll::Ready(len)) => Poll::Ready(Ok(len)),
+                Err(error) => Poll::Ready(Err(error)),
+            }
         })
     }
 
@@ -883,7 +911,7 @@ mod tests {
     use types::ed25519::PrivateKey;
     use types::time::{Monotonic, Span};
 
-    use super::{BATCHES, Carrier, Retry, Socket, register};
+    use super::{BATCHES, Carrier, Part, Retry, Socket, register};
     use crate::quic::{Endpoint, connection, stream, wait};
     use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::{Class, Code, Error, Peer};
@@ -1326,7 +1354,8 @@ mod tests {
         });
         shard(&client, CLIENT, |config, node| async move {
             let (sender, receiver) = socket(&node).expect("a socket");
-            let mut endpoint = Endpoint::new(&config, 0, sender.batch_max());
+            let mut endpoint =
+                Endpoint::new(&testing::setup(&config), 0, sender.batch_max());
             let mut socket = Socket::new(sender, receiver);
             node.clock().sleep(Span::MILLISECOND).await;
             let now = node.clock().now();
@@ -1355,7 +1384,7 @@ mod tests {
         shard(&client, CLIENT, move |config, node| async move {
             let part = testing::part(&node.net(), address(&node));
             node.clock().sleep(Span::MILLISECOND).await;
-            let carrier = Carrier::new(config, part);
+            let carrier = Carrier::new(testing::setup(&config), part);
             let before = node.clock().now();
             let dialed = carrier.connect(SERVER.public(), at).await;
             // A lost first datagram goes again only after hundreds of milliseconds.
@@ -1419,7 +1448,7 @@ mod tests {
         shard(&client, CLIENT, move |config, node| async move {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), address(&node));
-            let carrier = Carrier::new(config, part);
+            let carrier = Carrier::new(testing::setup(&config), part);
             let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let open = poll_fn(|cx| session.poll_open(cx, Class::Complete)).await;
@@ -1433,12 +1462,14 @@ mod tests {
             assert!(session.state.borrow().endpoint.drained());
             let block = || testing::block(&pool, b"a");
             let mut message = Some(block());
-            let written = poll_fn(|cx| session.poll_write(cx, &sender, &mut message));
+            let whole = [Part::whole(&block())];
+            let written =
+                poll_fn(|cx| session.poll_write(cx, &sender, &mut message, &whole));
             assert_eq!(written.await, Err(closed.clone()));
             assert!(message.is_some());
-            let flushed = poll_fn(|cx| session.poll_write(cx, &sender, &mut None));
+            let flushed = poll_fn(|cx| session.poll_write(cx, &sender, &mut None, &[]));
             assert_eq!(flushed.await, Err(closed.clone()));
-            let given = session.try_write(&sender, block());
+            let given = session.try_write(&sender, block(), &whole);
             assert_eq!(given.map(|given| given.is_some()), Err(closed.clone()));
             assert_eq!(session.finish(&mut finishing), Err(closed.clone()));
             let read = poll_fn(|cx| session.poll_read(cx, &mut receiver)).await;
@@ -1574,7 +1605,7 @@ mod tests {
                 sender,
                 receiver,
             };
-            let carrier = Carrier::new(config, part);
+            let carrier = Carrier::new(testing::setup(&config), part);
             let first = carrier.connect(SERVER.public(), at).await;
             let second = carrier.connect(SERVER.public(), at).await;
             node.clock().sleep(spans(Span::MILLISECOND, 100)).await;

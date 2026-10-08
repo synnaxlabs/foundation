@@ -4,6 +4,7 @@
 mod channel;
 mod commit;
 pub mod reader;
+pub mod serve;
 pub mod writer;
 
 use std::cell::RefCell;
@@ -170,6 +171,25 @@ impl Hub {
         mode: reader::Mode,
     ) -> Result<Reader, reader::Error> {
         Reader::open(&self.0, channels, mode)
+    }
+
+    /// Serves one remote reader session on `incoming`, a hub stream whose header the
+    /// caller read. It reads the `Open` and its keys, opens the session at this
+    /// node's home, sends `Opened`, then sends each frame that the session takes
+    /// through the reader's places, and applies each `Credit`. It returns when the
+    /// session ends: after `Behind` and a finish when the session missed a frame, or
+    /// when the peer finishes or the stream breaks. A drop of the future closes the
+    /// session at the home and drops the stream.
+    ///
+    /// # Errors
+    ///
+    /// The [`serve::Error`] that ended the session. The stream stops with the code
+    /// that HUB WIRE gives for it, except after [`serve::Error::Stream`].
+    pub async fn serve(
+        &self,
+        incoming: transport::stream::Incoming,
+    ) -> Result<(), serve::Error> {
+        serve::run(&self.0, incoming).await
     }
 }
 
