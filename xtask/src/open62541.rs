@@ -113,16 +113,16 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 }
 
 /// Builds each file of `sources.txt` in `patches/open62541/` from the copy alone,
-/// with its `flags.txt` and then `-O0`, so each call stays in the function that holds
-/// it in the source.
+/// with its `flags.txt` and then `-g -O0`, so a call stays in the function that holds
+/// it in the source, except in a function that the compiler inlines.
 ///
 /// # Errors
 ///
-/// A build that fails, a header outside the copy other than one of
+/// A build that fails, an `#include` of a header outside the copy other than one of
 /// [`SYSTEM_HEADERS`] in a system directory, a call of a clock function from a
-/// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, and any
-/// other reference to a clock function, such as its address in code or data,
-/// through which any code can call it.
+/// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any other
+/// reference to a clock function, such as its address in code or data, through
+/// which any code can call it, and each inlined function.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     inspect(&root.join(DEST), &root.join("target/open62541/check"))
 }
@@ -311,20 +311,28 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
     let objects = build(copy, &sources, &flags, out).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
     let mut problems = Vec::new();
-    for (source, object, tree) in objects {
+    for (source, object, preprocessed) in objects {
         let disassembly = exec(Command::new("objdump").arg("-dr").arg(&object))
             .map_err(|e| vec![e])?;
         for function in clock_calls(&disassembly) {
             calls.insert((source.to_owned(), function));
         }
         let relocations = exec(Command::new("objdump").arg("-r").arg(&object));
-        for (section, symbol) in clock_addresses(&relocations.map_err(|e| vec![e])?) {
+        let relocations = relocations.map_err(|e| vec![e])?;
+        for (section, symbol) in clock_addresses(&relocations, &disassembly) {
             problems.push(format!(
                 "{source}: the section `{section}` takes the address of `{symbol}`, \
                  so a call through it escapes CLOCK_CALLS"
             ));
         }
-        for problem in includes(&tree, &dirs) {
+        let info = exec(Command::new("objdump").arg("--dwarf=info").arg(&object));
+        for function in inlined(&info.map_err(|e| vec![e])?) {
+            problems.push(format!(
+                "{source}: inlines `{function}`, so a clock call in it hides in its \
+                 caller"
+            ));
+        }
+        for problem in includes(&preprocessed, copy, &flags, &dirs) {
             problems.push(format!("{source}: {problem}"));
         }
     }
@@ -350,40 +358,66 @@ fn inside(path: &Path) -> bool {
     })
 }
 
-/// An error for each header in `tree`, the `-H` output of `cc`, that a file of the
-/// copy includes from outside the copy, other than one of [`SYSTEM_HEADERS`] in one
-/// of the system directories `dirs`.
-fn includes(tree: &str, dirs: &[PathBuf]) -> Vec<String> {
+/// An error for each `#include` in a file of the copy, as `preprocessed` (the output
+/// of `cc -E -dI` in `copy`) shows it, that finds a header outside the copy, other
+/// than one of [`SYSTEM_HEADERS`] in one of the system directories `dirs`. It finds
+/// the header as `cc` does, through the `-I` directories `flags` gives. Unlike
+/// `cc -H`, `-dI` also shows an `#include` of a header that the unit included before.
+fn includes(
+    preprocessed: &str,
+    copy: &Path,
+    flags: &str,
+    dirs: &[PathBuf],
+) -> Vec<String> {
+    let quoted: Vec<&Path> = flags
+        .lines()
+        .filter_map(|f| f.strip_prefix("-I"))
+        .map(Path::new)
+        .collect();
     let mut problems = Vec::new();
-    let mut outside: Vec<bool> = Vec::new();
-    for line in tree.lines() {
-        let Some((dots, header)) = line.split_once(' ') else {
+    let mut file = Path::new("");
+    for line in preprocessed.lines() {
+        if let Some(marker) = line.strip_prefix("# ")
+            && let Some((_, name)) = marker.split_once(" \"")
+        {
+            file = Path::new(name.rsplit_once('"').map_or(name, |(name, _)| name));
+            continue;
+        }
+        let Some(directive) = line.strip_prefix("#include") else {
             continue;
         };
-        if dots.is_empty() || dots.bytes().any(|b| b != b'.') {
+        if !inside(file) {
             continue;
         }
-        outside.truncate(dots.len() - 1);
-        let from_copy = outside.last().is_none_or(|&outside| !outside);
-        let path = Path::new(header);
-        outside.push(!inside(path));
-        if !from_copy || inside(path) {
-            continue;
-        }
-        let path = files::normalize(path);
-        let name = dirs
-            .iter()
-            .filter_map(|dir| path.strip_prefix(dir).ok())
-            .min_by_key(|name| name.components().count());
-        let problem = match name {
-            Some(name) if SYSTEM_HEADERS.iter().any(|&h| name == Path::new(h)) => {
+        let directive = directive.trim();
+        let (name, local) = match directive.as_bytes() {
+            [b'"', .., b'"'] => (&directive[1..directive.len() - 1], true),
+            [b'<', .., b'>'] => (&directive[1..directive.len() - 1], false),
+            _ => {
+                problems
+                    .push(format!("includes {directive}, which is not a file name"));
                 continue;
             }
-            Some(name) => format!(
-                "includes the system header `{}`, which SYSTEM_HEADERS does not list",
-                name.display()
+        };
+        let parent = file.parent().filter(|_| local);
+        let user = parent
+            .into_iter()
+            .chain(quoted.iter().copied())
+            .map(|dir| (dir.join(name), false));
+        let system = dirs.iter().map(|dir| (dir.join(name), true));
+        let problem = match user
+            .chain(system)
+            .find(|(path, _)| copy.join(path).is_file())
+        {
+            Some((_, true)) if SYSTEM_HEADERS.contains(&name) => continue,
+            Some((_, true)) => format!(
+                "includes the system header `{name}`, which SYSTEM_HEADERS does not list"
             ),
-            None => format!("includes {header}, which is outside the copy"),
+            Some((path, false)) if inside(&path) => continue,
+            Some((path, false)) => {
+                format!("includes {}, which is outside the copy", path.display())
+            }
+            None => format!("includes {directive}, which no include directory holds"),
         };
         problems.push(problem);
     }
@@ -402,8 +436,8 @@ fn system_dirs(verbose: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Compiles each source of `sources` in `copy` into `out` at once, and gives each
-/// (source, object, the `-H` output of its compile).
+/// Compiles and preprocesses each source of `sources` in `copy` into `out` at once,
+/// and gives each (source, object, the output of `cc -E -dI`).
 fn build<'a>(
     copy: &Path,
     sources: &'a str,
@@ -413,16 +447,51 @@ fn build<'a>(
     let mut children = Vec::new();
     for (index, source) in sources.lines().enumerate() {
         let object = out.join(format!("{index}.o"));
-        let mut cc = Command::new("cc");
-        cc.current_dir(copy).args(flags.lines());
-        cc.args(["-c", "-H", "-O0", "-o"]).arg(&object).arg(source);
-        children.push((source, object, spawn(&mut cc)?));
+        let cc = |mode: &[&str]| {
+            let mut cc = Command::new("cc");
+            cc.current_dir(copy)
+                .args(flags.lines())
+                .args(["-g", "-O0"])
+                .args(mode);
+            spawn(cc.arg(source))
+        };
+        let compile = cc(&["-c", "-o", &object.to_string_lossy()])?;
+        children.push((source, object, compile, cc(&["-E", "-dI"])?));
     }
     children
         .into_iter()
-        .map(|(source, object, child)| {
-            wait(child).map(|(_, tree)| (source, object, tree))
+        .map(|(source, object, compile, preprocess)| {
+            wait(compile)?;
+            wait(preprocess).map(|(preprocessed, _)| (source, object, preprocessed))
         })
+        .collect()
+}
+
+/// The name of each function that the output of `objdump --dwarf=info` shows inlined.
+/// An `always_inline` function is inlined also at `-O0`.
+fn inlined(info: &str) -> Vec<String> {
+    let mut names = std::collections::BTreeMap::new();
+    let mut origins = Vec::new();
+    let (mut entry, mut inline) = ("", false);
+    for line in info.lines() {
+        if let Some((key, tag)) = line.split_once(">: Abbrev Number:") {
+            entry = key.rsplit('<').next().unwrap_or(key);
+            inline = tag.ends_with("(DW_TAG_inlined_subroutine)");
+            continue;
+        }
+        // An attribute follows the offset of its own entry, as `<64>   DW_AT_name`.
+        let line = line.split_once("> ").map_or("", |(_, rest)| rest.trim());
+        if let Some(value) = line.strip_prefix("DW_AT_name") {
+            names.insert(entry, value.rsplit(": ").next().unwrap_or(value));
+        } else if inline && let Some(value) = line.strip_prefix("DW_AT_abstract_origin")
+        {
+            let origin = value.trim_start_matches([' ', ':']);
+            origins.push(origin.trim_start_matches("<0x").trim_end_matches('>'));
+        }
+    }
+    origins
+        .into_iter()
+        .map(|origin| names.get(origin).map_or(origin, |&name| name).to_owned())
         .collect()
 }
 
@@ -447,16 +516,26 @@ fn clock_calls(text: &str) -> BTreeSet<String> {
     calls
 }
 
-/// Each (section, clock function) in the output of `objdump -r` where the section
-/// takes the address of a function of [`CLOCKS`], in code or in data.
-fn clock_addresses(text: &str) -> Vec<(String, &'static str)> {
+/// Each (section, clock function) in `relocations`, the output of `objdump -r`,
+/// where the section takes the address of a function of [`CLOCKS`]: any reference
+/// other than a call from a section that `disassembly`, the output of `objdump -dr`,
+/// shows.
+fn clock_addresses(
+    relocations: &str,
+    disassembly: &str,
+) -> Vec<(String, &'static str)> {
+    let code: BTreeSet<&str> = disassembly
+        .lines()
+        .filter_map(|line| line.strip_prefix("Disassembly of section "))
+        .map(|name| name.trim_end_matches(':'))
+        .collect();
     let mut found = Vec::new();
     let mut section = "";
-    for line in text.lines() {
+    for line in relocations.lines() {
         if let Some(name) = line.strip_prefix("RELOCATION RECORDS FOR [") {
             section = name.trim_end_matches("]:");
         } else if let Some((kind, symbol)) = clock(line)
-            && !CALLS.contains(&kind)
+            && !(CALLS.contains(&kind) && code.contains(section))
         {
             found.push((section.to_owned(), symbol));
         }
@@ -628,51 +707,105 @@ OFFSET           TYPE              VALUE
 
 RELOCATION RECORDS FOR [.rodata]:
 0000000000000000 R_AARCH64_ABS64   UA_DateTime_localTimeUtcOffset+0x8
+
+RELOCATION RECORDS FOR [.data.rel.ro]:
+0000000000000000 R_X86_64_PLT32    UA_DateTime_now
+";
+        let disassembly = "\
+Disassembly of section .text:
+Disassembly of section .text.log:
 ";
         assert_eq!(
-            clock_addresses(text),
+            clock_addresses(text, disassembly),
             [
                 (".text".to_owned(), "UA_DateTime_now"),
                 (".data.rel".to_owned(), "UA_DateTime_now"),
                 (".rodata".to_owned(), "UA_DateTime_localTimeUtcOffset"),
+                (".data.rel.ro".to_owned(), "UA_DateTime_now"),
             ]
         );
     }
 
     #[test]
-    fn includes_names_each_header_from_outside_the_copy() {
-        let dirs = [
-            PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/13/include"),
-            PathBuf::from("/usr/include/x86_64-linux-gnu"),
-            PathBuf::from("/usr/include"),
-        ];
-        let tree = "\
-. include/a.h
-.. /usr/include/stdio.h
-... /usr/include/x86_64-linux-gnu/bits/types.h
-.. /usr/include/x86_64-linux-gnu/sys/socket.h
-.. /usr/lib/gcc/x86_64-linux-gnu/13/include/../../../../../include/stdint.h
-. src/../../out.h
-.. /usr/include/locale.h
-. /usr/include/openssl/ssl.h
-.. /usr/include/openssl/x.h
-. /opt/a b.h
-Multiple include guards may be useful for:
-/usr/include/x.h
-src/a.c:1: warning: x
-    1 | . /usr/include/z.h
-. include/b.h
-.. ./include/../deps/c.h
-";
+    fn includes_finds_each_header_as_cc_does() {
+        let root = temp("includes");
+        create_files(
+            &root,
+            &[
+                ("copy/src/local.h", ""),
+                ("copy/include/a.h", ""),
+                ("copy/deps/d.h", ""),
+                ("out.h", ""),
+                ("sys/x/time.h", ""),
+                ("sys/stdio.h", ""),
+                ("sys/stdint.h", ""),
+                ("sys/openssl/ssl.h", ""),
+            ],
+        );
+        let dirs = [root.join("sys/x"), root.join("sys")];
+        let out = root.join("out.h");
+        let preprocessed = format!(
+            "\
+# 0 \"src/a.c\"
+# 1 \"src/a.c\"
+#include \"local.h\"
+#include \"a.h\"
+#include <d.h>
+#include <local.h>
+#include \"../../out.h\"
+#include <stdio.h>
+#include \"stdint.h\"
+#include <time.h>
+#include <openssl/ssl.h>
+#include UA_X
+# 1 \"{sys}/stdio.h\" 1 3 4
+#include <sys/stat.h>
+# 9 \"src/a.c\" 2
+#pragma once
+# 1 \"include/a.h\" 1
+#include \"../src/local.h\"
+#include \"{out}\"
+",
+            sys = root.join("sys").display(),
+            out = out.display(),
+        );
+        let flags = "-DX\n-Iinclude\n-Ideps\n-std=c99\n";
         assert_eq!(
-            includes(tree, &dirs),
+            includes(&preprocessed, &root.join("copy"), flags, &dirs),
             [
-                "includes src/../../out.h, which is outside the copy",
+                "includes <local.h>, which no include directory holds".to_owned(),
+                "includes src/../../out.h, which is outside the copy".to_owned(),
+                "includes the system header `time.h`, which SYSTEM_HEADERS does not \
+                 list"
+                    .to_owned(),
                 "includes the system header `openssl/ssl.h`, which SYSTEM_HEADERS \
-                 does not list",
-                "includes /opt/a b.h, which is outside the copy",
+                 does not list"
+                    .to_owned(),
+                "includes UA_X, which is not a file name".to_owned(),
+                format!("includes {}, which is outside the copy", out.display()),
             ]
         );
+        remove(&root).unwrap();
+    }
+
+    #[test]
+    fn inlined_names_each_inlined_function() {
+        let info = "\
+ <1><41>: Abbrev Number: 4 (DW_TAG_subprogram)
+    <42>   DW_AT_name        : (indirect string, offset: 0xbd): UA_Log_Stdout_log
+ <2><63>: Abbrev Number: 5 (DW_TAG_inlined_subroutine)
+    <64>   DW_AT_abstract_origin: <0xc0>
+    <68>   DW_AT_low_pc      : 0x21
+ <2><70>: Abbrev Number: 6 (DW_TAG_formal_parameter)
+    <71>   DW_AT_abstract_origin: <0x41>
+ <2><75>: Abbrev Number: 5 (DW_TAG_inlined_subroutine)
+    <76>   DW_AT_abstract_origin: <0xd0>
+ <1><c0>: Abbrev Number: 10 (DW_TAG_subprogram)
+    <c1>   DW_AT_name        : (indirect string, offset: 0xa0): helper
+ <1><c8>: Abbrev Number: 7 (DW_TAG_variable)
+    <c9>   DW_AT_name        : y
+";
+        assert_eq!(inlined(info), ["helper", "d0"]);
     }
 
     #[test]
@@ -1157,6 +1290,59 @@ End of search list.
             Err(vec![
                 "src/util/ua_util.c: `hidden` calls a global clock function. Find \
                  whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                    .to_owned(),
+            ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn check_finds_an_unlisted_header_that_a_listed_header_included_first() {
+        let (root, repo, result) = run_after("order", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let copy = root.join("patches/open62541");
+        let append = |path: &str, text: &str| {
+            let old = std::fs::read_to_string(copy.join(path)).unwrap();
+            std::fs::write(copy.join(path), old + text).unwrap();
+        };
+        append("src/util/ua_encryptedsecret.c", "#include <time.h>\n");
+        append(
+            "src/util/ua_util.c",
+            "#include <pthread.h>\n#include <time.h>\n",
+        );
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                "src/util/ua_encryptedsecret.c: includes the system header `time.h`, \
+                 which SYSTEM_HEADERS does not list"
+                    .to_owned(),
+                "src/util/ua_util.c: includes the system header `time.h`, which \
+                 SYSTEM_HEADERS does not list"
+                    .to_owned(),
+            ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn check_finds_a_clock_call_that_a_listed_function_inlines() {
+        let (root, repo, result) = run_after("inline", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        std::fs::write(
+            root.join("patches/open62541/plugins/ua_log_stdout.c"),
+            "#include \"clock.h\"\n\
+             static inline __attribute__((always_inline)) long long helper(void) {\n\
+             return UA_DateTime_now();\n}\n\
+             long long UA_Log_Stdout_log(void) { return helper(); }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                "plugins/ua_log_stdout.c: inlines `helper`, so a clock call in it hides \
+                 in its caller"
                     .to_owned(),
             ])
         );
