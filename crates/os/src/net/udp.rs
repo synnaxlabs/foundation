@@ -4,7 +4,7 @@
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::thread::{self, ThreadId};
@@ -50,13 +50,7 @@ impl Udp {
         let local = config.local;
         let fd =
             super::socket(local, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
-        sockopt::set_socket_send_buffer_size(&fd, config.send_buffer_bytes)
-            .map_err(io_error)?;
-        sockopt::set_socket_recv_buffer_size(&fd, config.recv_buffer_bytes)
-            .map_err(io_error)?;
-        if local.is_ipv6() {
-            sockopt::set_ipv6_v6only(&fd, false).map_err(io_error)?;
-        }
+        configure(fd.as_fd(), config).map_err(io_error)?;
         bind(fd.as_fd(), local)?;
         let socket = UdpSocket::from(fd);
         let state = UdpSocketState::new((&socket).into()).map_err(|e| from_io(&e))?;
@@ -77,6 +71,17 @@ impl Udp {
             receive: OnceLock::new(),
         })
     }
+}
+
+/// Sets the buffer sizes of `config` on `fd`, and lets an IPv6 socket take IPv4,
+/// whatever the host's default.
+fn configure(fd: BorrowedFd<'_>, config: &udp::Config) -> Result<(), Errno> {
+    sockopt::set_socket_send_buffer_size(fd, config.send_buffer_bytes)?;
+    sockopt::set_socket_recv_buffer_size(fd, config.recv_buffer_bytes)?;
+    if config.local.is_ipv6() {
+        sockopt::set_ipv6_v6only(fd, false)?;
+    }
+    Ok(())
 }
 
 impl udp::Driver for Udp {
@@ -404,10 +409,16 @@ mod tests {
             assert_eq!(sockopt::socket_recv_buffer_size(fd), Ok(kept(1 << 15)));
         }
 
+        /// Linux takes the default from `net.ipv6.bindv6only`, and macOS from
+        /// `net.inet6.ip6.v6only`.
         #[test]
-        fn takes_ipv4_on_an_ipv6_socket() {
-            let udp = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
-            assert_eq!(sockopt::ipv6_v6only(udp.bound.socket.as_fd()), Ok(false));
+        fn takes_ipv4_on_an_ipv6_socket_on_a_v6_only_host() {
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            let fd =
+                crate::net::socket(local, SocketType::DGRAM, ipproto::UDP).unwrap();
+            sockopt::set_ipv6_v6only(&fd, true).unwrap();
+            assert_eq!(configure(fd.as_fd(), &config(local)), Ok(()));
+            assert_eq!(sockopt::ipv6_v6only(&fd), Ok(false));
         }
 
         #[test]
