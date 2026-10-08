@@ -4672,9 +4672,15 @@ How to read this record:
   unit of failover (`laptop.director`, #1901, 2026-10-08T15:20:28Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459). Its fix
   is "Make the placement `p` win for the connector `c` and the index `i`", where `p`
-  wins for `c`, or for `i` when no placement selects `c` (same comment of 15:21:54Z). A
-  tie for the index or the connector gives no `config.split-placement`. The
-  region check and the region of each key (REGION CHECK) come with #1029. Lost: a
+  wins for `c`, or for `i` when no placement selects `c` (same comment of 15:21:54Z).
+  When no placement selects `c` and `p` names a `home` that is not the node `n` of `c`,
+  the fix is "Exclude the indexes of the connector `c` from the `select` of `p`, and
+  select the connector and its indexes with a placement whose `home` is `n`", so each
+  index of `c` gives one fix that one edit applies (`laptop.architect`,
+  2026-10-08T15:46:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980). A tie
+  for the index or the connector gives no `config.split-placement`. The region check
+  and the region of each key (REGION CHECK) come with #1029. Lost: a
   `Planned` with keys (A4), a home on each change, a `config::Error` for a lazy fetch of
   chunks, a provisional tree and `tree::diff`, which writes chunks that the plan drops,
   and the chunks of the applied tree as an input, with which `ops` reads the tree a
@@ -4688,7 +4694,9 @@ How to read this record:
   placement, and "Select the connector `a` and each index under its name with a more
   specific placement", which no placement can follow when `p` names `a` by its exact
   name, and the `config.split-placement` fix "and each name under it", which also
-  moves the indexes of a nested connector. Supersedes the fix texts of
+  moves the indexes of a nested connector, and, when `p` names another home, a fix
+  that moves the index `i` alone, which leaves each other index of `c` split.
+  Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, the
