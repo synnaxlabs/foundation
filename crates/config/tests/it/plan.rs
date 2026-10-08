@@ -9,12 +9,14 @@ use document::diagnostic::Diagnostic;
 use document::{Document, Source, read as reader};
 use spec::Pointer;
 use spec::channel::Channel;
+use spec::compression::{self, Mode};
 use spec::definition::Definition as Stored;
+use spec::time::{self, Peers};
 use spec::tree::{self, Chunks};
 use types::channel::Key;
 use types::digest::Digest;
 use types::ed25519::PrivateKey;
-use types::name::Name;
+use types::name::{Name, Selector};
 
 const EDGE: &str = include_str!("../../../acceptance/tests/it/fixtures/edge.hcl");
 const INFLUX: &str = include_str!("../../../acceptance/tests/it/fixtures/influx.hcl");
@@ -307,6 +309,20 @@ fn removes_a_definition_that_no_file_holds() {
     let plan = spec.plan(&[EDGE], &members).expect("no problems");
     let old = Digest::of(spec.get("influx"));
     assert_eq!(changes(&plan), [(&name("influx"), Some(old), None)]);
+}
+
+#[test]
+fn keeps_a_stored_definition_whose_kind_no_block_defines() {
+    let mut spec = Spec::create_empty();
+    let select = Selector::new(["a.**"]).expect("a selector");
+    let time = Stored::Time(time::Policy::new(select.clone(), Peers::Voters));
+    let mode = Mode::Raw;
+    let compression = Stored::Compression(compression::Policy { select, mode });
+    spec.set([time, compression].map(|definition| {
+        let key = definition.kind().key("a").expect("a key");
+        tree::Change::Set(key, definition.encode())
+    }));
+    assert_eq!(changes(&spec.plan(&[], &[]).expect("no problems")), []);
 }
 
 #[test]

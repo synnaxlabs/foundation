@@ -10,7 +10,7 @@ use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
-use crate::{Definition, Entry, Found, channel, checked, sort, span};
+use crate::{Definition, Entry, Found, KINDS, channel, checked, sort, span};
 
 const CONNECTOR_HOME: Code = Code::new("config.connector-home");
 const SPLIT_PLACEMENT: Code = Code::new("config.split-placement");
@@ -27,8 +27,8 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///
 /// A channel keeps the key of the stored channel at its name, so a renamed channel is
 /// removed and added, and each channel with an edge to it changes. A definition of the
-/// applied spec whose label is reserved, which only Foundation makes, is never a
-/// change.
+/// applied spec whose label is reserved, which only Foundation makes, or whose kind no
+/// block of a file defines, is never a change.
 ///
 /// # Errors
 ///
@@ -463,7 +463,8 @@ fn unknown(
 }
 
 /// The change of each definition whose bytes differ from the stored bytes, in tree key
-/// order. A stored definition whose label is reserved is never removed.
+/// order. A stored definition whose label is reserved, or whose kind no block defines,
+/// is never removed.
 fn changes(
     entries: BTreeMap<Name, Entry>,
     mut channels: BTreeMap<Name, Channel>,
@@ -472,10 +473,9 @@ fn changes(
     let mut stored: BTreeMap<&Name, &definition::Definition> = applied
         .iter()
         .filter(|(name, definition)| {
-            !definition
-                .kind()
-                .label(name)
-                .is_some_and(|label| label.reserved())
+            let kind = definition.kind();
+            KINDS.iter().any(|(block, _)| *block == kind)
+                && !kind.label(name).is_some_and(|label| label.reserved())
         })
         .collect();
     let mut changes = Vec::new();

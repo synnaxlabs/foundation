@@ -4622,7 +4622,11 @@ How to read this record:
   stored key at its name, and a new name gets `Key::from_u128(n)`, a key that no stored
   channel holds. A definition changes when its encoded bytes differ from the stored
   bytes. A stored definition that no file holds is removed (A2), except one whose label
-  is reserved (FIRST ADMIN). An edge that `check` cannot resolve stays
+  is reserved (FIRST ADMIN), or whose kind no block of a file defines, such as `Time`
+  and `Compression` until their blocks come: the files cannot state such a kind, so
+  they ask for no removal. Lost: remove it, and refuse the plan, which stops each apply
+  with no fix in the files (`laptop.architect`, #1886, 2026-10-08T15:22:47Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An edge that `check` cannot resolve stays
   `config.unknown-channel` (CHANNEL BLOCK). An edge to a channel of the wrong kind is
   `config.wrong-channel`. `place` runs for each index, with the node of its first
   writer: a connector whose `writes` holds the index or a channel on it. Its `Unplaced`
