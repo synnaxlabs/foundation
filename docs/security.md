@@ -345,8 +345,9 @@ state on `main`.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
 - The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
-- A local patch (`patches/`) is a path package, so `cargo deny` does not check it
-  against advisories (#1867).
+- A local patch of a crate (`patches/`) is a path package, so `cargo deny` does not
+  check it against advisories (#1867). The open62541 copy in `patches/open62541/` is C,
+  not a crate: no check compares it with advisories until #1910.
 - A node fetches the signed binary of a release by hash from a nearby peer (C9d). The
   signing key and its check are not built.
 

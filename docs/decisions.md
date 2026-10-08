@@ -4052,6 +4052,12 @@ How to read this record:
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
+  with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
+  clock functions give 0, and the 5 POSIX constructors print their name and abort,
+  since our config always has an event loop. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
+  2026-10-08 02:27 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
