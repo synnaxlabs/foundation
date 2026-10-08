@@ -20,16 +20,17 @@ impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
     /// `base`. `homes` gives the home node of each index that has no home, by index
     /// name to node name. At the apply, each index that has no home gets its listed
-    /// one, and a listed index that has a home keeps it. On `Ok`, a put of each chunk of the new tree in
-    /// [`Config::store`](super::Config::store) has returned. The change lists each
-    /// chunk of the new tree that the tree of `base` lacks, or each chunk of the new
-    /// tree when the store cannot give the tree of `base`. A follower forwards the
-    /// change to the leader. Returns the new pointer once its entry has committed and
-    /// this node applied it. It tries again when a new leader replaces the entry, and
-    /// after each tick while no leader takes it, as [`Mesh::set_home`] does. A call
-    /// whose entry finds the pointer that the call makes, after a lost answer or an
-    /// equal change of another call, returns that pointer. A retry that finds a later
-    /// pointer gives `Stale`, even when an entry of this call applied before it.
+    /// one, and a listed index that has a home keeps it. On `Ok`, a put of each chunk
+    /// of the new tree in [`Config::store`](super::Config::store) has returned. The
+    /// change lists each chunk of the new tree that the tree of `base` lacks, or each
+    /// chunk of the new tree when the store cannot give the tree of `base`. A follower
+    /// forwards the change to the leader. Returns the new pointer once its entry has
+    /// committed and this node applied it. It tries again when a new leader replaces
+    /// the entry, and after each tick while no leader takes it, as [`Mesh::set_home`]
+    /// does. A call whose entry finds the pointer that the call makes, after a lost
+    /// answer or an equal change of another call, returns that pointer. A retry that
+    /// finds a later pointer gives `Stale`, even when an entry of this call applied
+    /// before it.
     ///
     /// # Errors
     ///
