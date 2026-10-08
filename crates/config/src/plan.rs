@@ -9,7 +9,7 @@ use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Span};
 use spec::channel::{Channel, Problem};
 use spec::definition;
-use spec::placement::{Placed, Policy, Tie, label, place};
+use spec::placement::{Placed, Policy, Tie, place};
 use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
@@ -510,10 +510,12 @@ fn fix(
     }
     match mismatch {
         Mismatch::Home { node } => format!(
-            "Name `{node}` as the `home`, and keep `{node}` out of `standby` and `copies`"
+            "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
+             `copies`"
         ),
         Mismatch::Split { placement } => format!(
-            "Make the placement `{}` win for the connector `{connector}` and its indexes",
+            "Make the placement `{}` win for the connector `{connector}` and its \
+             indexes",
             label(placement)
         ),
     }
@@ -603,6 +605,13 @@ fn unplaced(at: Option<Span>, placed: &Result<Placed<'_>, Tie>) -> Option<Diagno
         Err(tie) => (tie.to_string(), tie.fix()),
     };
     Some(Diagnostic::new(UNPLACED, at, message, fix.into()))
+}
+
+/// The label of the placement at the tree key `key`.
+fn label(key: &Name) -> Name {
+    definition::Kind::Placement
+        .label(key)
+        .expect("invariant: the key of a placement block has its label form")
 }
 
 /// The node of the first connector that writes `index` or a channel on it. Reports

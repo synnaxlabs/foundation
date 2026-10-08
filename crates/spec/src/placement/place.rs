@@ -87,8 +87,8 @@ impl Tie {
     /// What to do instead: a sentence with no final period.
     #[must_use]
     pub const fn fix(&self) -> &'static str {
-        "Change the `select` of one of the two placements, so that one selects the name \
-         more specifically"
+        "Change the `select` of one of the two placements, so that one selects the \
+         name more specifically"
     }
 }
 
@@ -174,10 +174,8 @@ impl fmt::Display for Homeless<'_> {
 
 impl std::error::Error for Homeless<'_> {}
 
-/// The label of the placement at the tree key `key`, or `key` when it is not the tree
-/// key of a placement.
-#[must_use]
-pub fn label(key: &Name) -> Name {
+/// The label of the placement at tree key `key`, or `key` when it has no label form.
+fn label(key: &Name) -> Name {
     Kind::Placement.label(key).unwrap_or_else(|| key.clone())
 }
 
