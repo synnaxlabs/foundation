@@ -69,3 +69,7 @@
   `via` set to the node's key. Decided by
   `laptop.architect` (2026-10-08T18:36:19Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
+  Amended by #1660, where the key moves from `node::Config` to `node.key`
+  (https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831); the
+  sentence is by `laptop.architect` (2026-10-08T21:42:22Z,
+  https://github.com/synnaxlabs/foundation/pull/1991#issuecomment-6069608203).
