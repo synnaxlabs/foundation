@@ -5058,6 +5058,12 @@ How to read this record:
   `charge_of` in `types` changes with that handle. Decided by `laptop.architect`
   (2026-10-07T18:30:48Z):
   https://github.com/synnaxlabs/foundation/pull/1504#issuecomment-6044276677
+- **POOL COPY (#1599)** `Pool::copy(&self, bytes: &[u8]) -> Result<Block, Error>` gives
+  a frozen block that holds a copy of `bytes`, with the errors of `alloc` for
+  `bytes.len()`. Callers repeated `alloc`, `copy_from_slice`, and `freeze`. Lost:
+  `alloc` with a closure that writes in place, because each caller already holds its
+  bytes as a slice. Decided by `laptop.architect` (2026-10-07T20:43:02Z):
+  https://github.com/synnaxlabs/foundation/issues/1599#issuecomment-6046480683
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no

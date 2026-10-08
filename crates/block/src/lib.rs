@@ -332,6 +332,17 @@ impl Pool {
         })
     }
 
+    /// A frozen block that holds a copy of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pool::alloc`] for `bytes.len()`.
+    pub fn copy(&self, bytes: &[u8]) -> Result<Block, Error> {
+        let mut block = self.alloc(bytes.len())?;
+        block.copy_from_slice(bytes);
+        Ok(block.freeze())
+    }
+
     /// Takes back the blocks that holders dropped, so that `alloc` can use them
     /// again. `alloc` calls it when it has no free block; the owner shard may call it
     /// from its loop to spread the cost.
@@ -1291,6 +1302,49 @@ mod tests {
             assert_eq!(second.as_ptr(), address);
             assert_eq!(&*second, &[0xAA; 4]);
             assert_eq!(pool.committed(), 128);
+        }
+    }
+
+    mod copy {
+        use super::*;
+
+        proptest! {
+            #![proptest_config(cases())]
+
+            #[test]
+            fn gives_a_block_of_the_bytes(
+                bytes in prop::collection::vec(any::<u8>(), 0..=4096),
+            ) {
+                let pool = create_pool(1 << 16);
+                let block = pool.copy(&bytes).expect("the budget has room");
+                prop_assert_eq!(&*block, &bytes[..]);
+                prop_assert_eq!(block.as_ptr().addr() % ALIGN, 0);
+                prop_assert_eq!(pool.committed(), footprint(bytes.len()));
+            }
+        }
+
+        #[test]
+        fn overwrites_the_old_bytes_of_a_block_used_again() {
+            let pool = create_pool(128);
+            let mut first = pool.alloc(64).expect("the budget has room");
+            first.fill(0xAA);
+            drop(first);
+            let block = pool.copy(&[1, 2, 3]).expect("the block is back");
+            assert_eq!(&*block, &[1, 2, 3]);
+            assert_eq!(pool.committed(), 128);
+        }
+
+        #[test]
+        fn fails_as_alloc_for_the_length_of_the_bytes() {
+            let pool = create_pool(256);
+            let first = pool.copy(&[7; 64]).expect("the budget has room");
+            assert_eq!(pool.copy(&[0; 128]).err(), Some(exhausted(128, 128)));
+            assert_eq!(pool.copy(&[0; 193]).err(), Some(too_large(193, 192)));
+            assert_eq!(pool.committed(), 128);
+            assert_eq!(&*first, &[7; 64]);
+            let (pool, watch) = create_watched_pool(256);
+            watch.switch.refuse();
+            assert_eq!(pool.copy(&[0; 10]).err(), Some(refused(10)));
         }
     }
 
