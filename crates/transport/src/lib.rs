@@ -266,7 +266,8 @@ pub struct Config {
     pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.
-    /// Size it near bandwidth times round trip. Must be at least `message_bytes_max`.
+    /// Size it near bandwidth times round trip. Must be at least the message limit:
+    /// the smaller of `message_bytes_max` and `pool.largest()`.
     pub window_bytes: usize,
     /// The most two-way streams, and apart from them the most one-way streams, a peer
     /// may have open to this node at once, per session. Size it near the rate of new
@@ -300,7 +301,7 @@ impl Config {
         } else if limit < MESSAGE_BYTES_MIN {
             ("message_bytes_max", "must be at least 1472")
         } else if self.window_bytes < limit {
-            ("window_bytes", "must be at least message_bytes_max")
+            ("window_bytes", "must be at least the message limit")
         } else {
             return Ok(quic::Setup {
                 role: quic::Role::Node(self.private_key.clone()),
@@ -349,7 +350,7 @@ mod tests {
     };
     const WINDOW: Error = Error::Config {
         field: "window_bytes",
-        rule: "must be at least message_bytes_max",
+        rule: "must be at least the message limit",
     };
 
     /// A config of `shard` with these limits.
