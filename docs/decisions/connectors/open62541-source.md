@@ -11,7 +11,8 @@
   2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy. Each file from
   the release is byte for byte the file at the tag. Every other file (`src_generated/`,
   `sources.txt`, `flags.txt`, `VERSION`) is the output of that command alone, never
-  edited by hand. Our change edits only release files. `cargo xtask open62541` is the
+  edited by hand, but for the thread-local block of `config.h` (below). Our other
+  changes edit only release files. `cargo xtask open62541` is the
   clock check. It builds the copy from its own files with `-g -O0` and reads the call
   relocations against the closed list. It fails on a call outside the list, a listed
   pair with no call, a clock address in any section that is not code, each
@@ -148,3 +149,15 @@
   2026-10-08 19:13 UTC; the header:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
   2026-10-08 19:46 UTC).
+  The copy builds with `UA_MULTITHREADING` 0, so it takes no `UA_LOCK` and links no
+  `pthread_mutex_*` symbol: each server and each client runs on one thread. Level 0
+  alone makes `UA_THREAD_LOCAL` empty, so two threads would share `UA_rng` and the
+  `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
+  So our change of `src_generated/open62541/config.h` moves its thread-local block out
+  of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
+  control, and the test of the archives fails on each `pthread_mutex_*` symbol, since
+  the closed list holds none. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
+  2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
+  0 is the fix, as its own change" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211.

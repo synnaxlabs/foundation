@@ -28,3 +28,8 @@
   how a test outside the copy checks each changed line, for the approval of the
   architect of `connector-opcua` (#435; `laptop.architect-2`, 2026-10-08T11:24:06Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
+  A change of a file that the copy command of a C copy generates (the thread-local
+  block of the open62541 `config.h`) is made again after each run of that command, as
+  a change of a release file is, and a test fails when it is lost (`laptop.architect-2`,
+  2026-10-08 20:03 UTC,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912).
