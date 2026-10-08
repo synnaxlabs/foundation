@@ -14,9 +14,10 @@ use crate::error::{Error, Note, Place, Problem};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
-/// The change from the files to the spec at `base`. `Source(i)` is `files[i]`.
+/// The change from the files to the spec at `base`, and the plan that `apply` takes.
+/// `Source(i)` is `files[i]`.
 ///
 /// # Errors
 ///
@@ -33,7 +34,7 @@ pub(crate) fn plan(
     members: &BTreeSet<Name>,
     front_ends: &BTreeMap<&'static str, FrontEnd>,
     kinds: &connector::kind::Table,
-) -> Result<Output, Error> {
+) -> Result<(Output, config::plan::Plan), Error> {
     let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
     let failed = |diagnostics: Vec<Diagnostic>| {
         let problems = diagnostics
@@ -58,11 +59,8 @@ pub(crate) fn plan(
             .filter(|change| change.action == action)
             .count()
     };
-    Ok(Output {
-        base: Base {
-            version: plan.base.version,
-            root: plan.base.root.to_string(),
-        },
+    let output = Output {
+        base: Base::from(plan.base),
         added: count(Action::Add),
         changed: count(Action::Change),
         removed: count(Action::Remove),
@@ -72,7 +70,8 @@ pub(crate) fn plan(
             .map(|(index, home)| (index.to_string(), home.to_string()))
             .collect(),
         changes,
-    })
+    };
+    Ok((output, plan))
 }
 
 /// The change from the files to the spec, as `plan` gives it.
@@ -128,6 +127,15 @@ pub(crate) struct Base {
     pub(crate) root: String,
 }
 
+impl From<spec::Pointer> for Base {
+    fn from(pointer: spec::Pointer) -> Self {
+        Self {
+            version: pointer.version,
+            root: pointer.root.to_string(),
+        }
+    }
+}
+
 /// One change of a plan.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Change {
@@ -164,17 +172,12 @@ impl Change {
                 config::Definition::Channel(_) => (Kind::Channel, None),
                 _ => unreachable!("invariant: `ops` knows each kind of definition"),
             };
-            let action = if change.old.is_some() {
-                Action::Change
-            } else {
-                Action::Add
-            };
-            (action, kind, entry.label_span, definition)
+            (Action::of(change), kind, entry.label_span, definition)
         } else {
             let stored = applied
                 .get(name)
                 .expect("invariant: a removal is of an applied definition");
-            (Action::Remove, stored.kind(), None, Some(stored))
+            (Action::of(change), stored.kind(), None, Some(stored))
         };
         let fingerprints = match definition {
             Some(Definition::Subject(subject)) => subject
@@ -209,6 +212,16 @@ pub(crate) enum Action {
 }
 
 impl Action {
+    /// What `change` does: it removes with no new definition, else changes with an
+    /// old one, else adds.
+    pub(crate) const fn of(change: &config::plan::Change) -> Self {
+        match (&change.old, &change.new) {
+            (_, None) => Self::Remove,
+            (Some(_), Some(_)) => Self::Change,
+            (None, Some(_)) => Self::Add,
+        }
+    }
+
     const fn symbol(self) -> char {
         match self {
             Self::Add => '+',
@@ -235,7 +248,8 @@ fn place(span: Span, paths: &[PathBuf]) -> Place {
     }
 }
 
-fn problem(diagnostic: Diagnostic, paths: &[PathBuf]) -> Problem {
+/// The problem of `diagnostic`, whose spans are in `paths`.
+pub(crate) fn problem(diagnostic: Diagnostic, paths: &[PathBuf]) -> Problem {
     Problem {
         code: diagnostic.code.as_str().to_owned(),
         message: diagnostic.message,

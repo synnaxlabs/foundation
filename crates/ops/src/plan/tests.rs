@@ -19,12 +19,14 @@ use super::{Output, plan};
 use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd};
 
-const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
-const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
+pub(crate) const PLANT: &str =
+    include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
+pub(crate) const SITE: &str =
+    include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
 
 /// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
 /// each attribute, so it stands in for each kind of the fixtures.
-struct Reader;
+pub(crate) struct Reader;
 
 impl kind::Kind for Reader {
     type Config = Vec<Name>;
@@ -66,15 +68,15 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
         .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
-fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
+pub(crate) fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
     BTreeMap::from([("hcl", FrontEnd { read: hcl })])
 }
 
-fn name(text: &str) -> Name {
+pub(crate) fn name(text: &str) -> Name {
     text.parse().expect("a name")
 }
 
-fn files(files: &[(&str, &str)]) -> Vec<File> {
+pub(crate) fn files(files: &[(&str, &str)]) -> Vec<File> {
     files
         .iter()
         .map(|(path, text)| File {
@@ -105,6 +107,7 @@ fn run(
         &front_ends(),
         &kinds,
     )
+    .map(|(output, _)| output)
 }
 
 fn problems(texts: &[(&str, &str)]) -> Error {
@@ -123,7 +126,7 @@ fn channel(key: u128, kind: channel::Kind) -> Definition {
 }
 
 /// `site.hcl` with a placement that homes its index on `edge`.
-fn placed_site() -> String {
+pub(crate) fn placed_site() -> String {
     format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
