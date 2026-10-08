@@ -4,7 +4,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use spec::channel::DataType;
+use spec::data_type::DataType;
 
 fuzz_target!(|text: &str| {
     if let Ok(data_type) = text.parse::<DataType>() {
