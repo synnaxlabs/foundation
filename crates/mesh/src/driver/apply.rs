@@ -3,20 +3,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use spec::Pointer;
+use spec::channel::{Channel, Kind};
 use spec::definition::Definition;
 use spec::tree::{self, Chunks, Update};
+use types::channel;
 use types::digest::Digest;
 use types::name::Name;
 use types::node;
 
 use super::{Mesh, put};
-use crate::change::{CHUNKS_MAX, Change};
+use crate::change::{CHUNKS_MAX, Change, HOMES_MAX};
 use crate::error::Error;
 use crate::region::{self, Refused};
 
 impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
-    /// `base`. On `Ok`, a put of each chunk of the new tree in
+    /// `base`. `homes` gives the home node of each index that has no home, by index
+    /// name to node name. At the apply, each index that has no home gets its listed
+    /// one, and a listed index that has a home keeps it. On `Ok`, a put of each chunk of the new tree in
     /// [`Config::store`](super::Config::store) has returned. The change lists each
     /// chunk of the new tree that the tree of `base` lacks, or each chunk of the new
     /// tree when the store cannot give the tree of `base`. A follower forwards the
@@ -29,13 +33,18 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// `Problems` comes first, then a `Blob` from the read of the tree of `base`, then
-    /// `Large`, `Stopped`, `NoVote`, and a `Quorum` before the first put. None of
-    /// these, `Pool`, and `Blob` propose anything.
+    /// `Problems` comes first, then `NotIndex`, `Homes`, a `Blob` from the read of the
+    /// tree of `base`, `Large`, `Stopped`, `NoVote`, `UnknownNode`, and a `Quorum`
+    /// before the first put. None of these, `Pool`, and `Blob` propose anything.
     ///
     /// - [`Error::Problems`] when the spec has problems.
+    /// - [`Error::NotIndex`] when `definitions` does not hold an index of `homes` as
+    ///   an index channel.
+    /// - [`Error::Homes`] when `homes` holds more homes than one change can give.
     /// - [`Error::Large`] when the change lists more chunks than one change can list.
     /// - [`Error::NoVote`] and [`Error::Stopped`] as for [`Mesh::set_home`].
+    /// - [`Error::UnknownNode`] when no member of the region has the name of a node
+    ///   of `homes`. It reads what this node applied.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
     /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
@@ -51,11 +60,28 @@ impl Mesh {
         &self,
         base: Pointer,
         definitions: BTreeMap<Name, Definition>,
+        homes: BTreeMap<Name, Name>,
     ) -> Result<Pointer, Error> {
         let problems =
             spec::region::check(self.group.borrow().state.prefix(), &definitions);
         if !problems.is_empty() {
             return Err(Error::Problems(problems));
+        }
+        let mut indexes = Vec::with_capacity(homes.len());
+        for (index, home) in homes {
+            match definitions.get(&index) {
+                Some(Definition::Channel(Channel {
+                    key,
+                    kind: Kind::Index { .. },
+                })) => indexes.push((*key, home)),
+                _ => return Err(Error::NotIndex(index)),
+            }
+        }
+        if indexes.len() > HOMES_MAX {
+            return Err(Error::Homes {
+                homes: indexes.len(),
+                most: HOMES_MAX,
+            });
         }
         let mut chunks = Chunks::default();
         let update = spec::region::tree(&mut chunks, &definitions);
@@ -69,29 +95,46 @@ impl Mesh {
         }
         // A try opens only after the puts, since its floor keeps `Applied` from a trim.
         self.check_proposer()?;
+        let homes = self.keyed(indexes)?;
         let holders = BTreeSet::from([self.key()]);
         region::quorum(self.group.borrow().raft.voters(), &holders).map_err(refused)?;
         // Each chunk, not only the listed ones: the store can lack a chunk that the
         // base shares with the new tree, and `diff` never reads a shared chunk.
         put(&self.store, &self.pool, &chunks, &update.chunks).await?;
         let listed = listed.into_iter().collect();
-        self.settle_spec(base, root, listed, holders).await
+        self.settle_spec(base, root, listed, holders, homes).await
     }
 
-    // Proposes the `Spec` change of `base`, `root`, `chunks`, and `holders`, one try
-    // at a time, until it applies, and gives the pointer it makes.
+    // The home of each index of `indexes` by the key of its node, as this node
+    // applied the members.
+    fn keyed(
+        &self,
+        indexes: Vec<(channel::Key, Name)>,
+    ) -> Result<BTreeMap<channel::Key, node::Key>, Error> {
+        let group = self.group.borrow();
+        let keyed = indexes.into_iter().map(|(index, home)| {
+            let key = group.state.named(&home).ok_or(Error::UnknownNode(home))?;
+            Ok((index, key))
+        });
+        keyed.collect()
+    }
+
+    // Proposes the `Spec` change of `base`, `root`, `chunks`, `holders`, and `homes`,
+    // one try at a time, until it applies, and gives the pointer it makes.
     pub(super) async fn settle_spec(
         &self,
         base: Pointer,
         root: Digest,
         chunks: BTreeSet<Digest>,
         holders: BTreeSet<node::Key>,
+        homes: BTreeMap<channel::Key, node::Key>,
     ) -> Result<Pointer, Error> {
         let change = Change::Spec {
             base,
             root,
             chunks,
             holders,
+            homes,
         };
         loop {
             match self.attempt()?.settle(change.clone()).await? {

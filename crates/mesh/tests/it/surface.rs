@@ -49,8 +49,10 @@ fn assert_sets<'a, F: Future<Output = Result<(), Error>>>(
 ) {
 }
 
+type Named<T> = BTreeMap<Name, T>;
+
 fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
-    _: fn(&'a Mesh, Pointer, BTreeMap<Name, Definition>) -> F,
+    _: fn(&'a Mesh, Pointer, Named<Definition>, Named<Name>) -> F,
 ) {
 }
 
@@ -463,7 +465,10 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Large { .. }
         | Error::Problems(_)
         | Error::Quorum { .. }
-        | Error::Blob(_) => {}
+        | Error::Blob(_)
+        | Error::NotIndex(_)
+        | Error::UnknownNode(_)
+        | Error::Homes { .. } => {}
     };
     let _: fn(&Error) = cases;
 }

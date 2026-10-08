@@ -124,7 +124,10 @@ mod tests {
             root: Digest([3; 32]),
             chunks,
             holders: [key(1)].into(),
+            homes: BTreeMap::new(),
         };
+        // These three have the byte form before the homes, which ends where the count
+        // of homes starts.
         for (name, chunks) in [
             ("spec_chunks_0", BTreeSet::new()),
             ("spec_held", [Digest([4; 32]), Digest([5; 32])].into()),
@@ -133,9 +136,9 @@ mod tests {
                 (0..CHUNKS_MAX).map(digest).collect(),
             ),
         ] {
-            assert_eq!(Change::decode(inputs[name]), Ok(spec(chunks)), "{name}");
-            let round_trip = round_trip_change(inputs[name]);
-            assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
+            let homed = homed(inputs[name]);
+            assert_eq!(Change::decode(&homed), Ok(spec(chunks)), "{name}");
+            assert_eq!(round_trip_change(&homed), Some(homed), "{name}");
         }
         // These two have the byte form before the holders, which ends where the count
         // of holders starts.
@@ -153,24 +156,20 @@ mod tests {
         over[73..75].copy_from_slice(&1025_u16.to_le_bytes());
         over.extend(digest(CHUNKS_MAX).0);
         assert_eq!(inputs["spec_chunks_1025"], over);
-        for name in [
-            "spec",
-            "spec_chunks_1024",
-            "spec_chunks_1025",
-            "spec_holders_out_of_order",
-        ] {
-            let length = inputs[name].len();
-            let body = Malformed::Body { kind: 4, length };
-            assert_eq!(Change::decode(inputs[name]), Err(body), "{name}");
-            assert_eq!(round_trip_change(inputs[name]), None, "{name}");
+        for (name, bytes) in &inputs {
+            let body = Malformed::Body {
+                kind: 4,
+                length: bytes.len(),
+            };
+            assert_eq!(Change::decode(bytes), Err(body), "{name}");
+            assert_eq!(round_trip_change(bytes), None, "{name}");
         }
         let mut order = spec(BTreeSet::new());
         let Change::Spec { holders, .. } = &mut order else {
             unreachable!()
         };
         *holders = [key(1), key(2)].into();
-        let mut bytes = Vec::new();
-        order.encode(&mut bytes);
+        let mut bytes = unhomed(&order);
         bytes[77..].rotate_left(16);
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
     }
@@ -183,8 +182,7 @@ mod tests {
             "spec_holders_equal",
         );
         let encoded = |chunks: &[u8], holders: &[u8]| {
-            let mut bytes = Vec::new();
-            Change::Spec {
+            unhomed(&Change::Spec {
                 base: Pointer {
                     version: 1,
                     root: Digest([2; 32]),
@@ -192,9 +190,8 @@ mod tests {
                 root: Digest([3; 32]),
                 chunks: chunks.iter().map(|&chunk| Digest([chunk; 32])).collect(),
                 holders: holders.iter().map(|&holder| key(holder)).collect(),
-            }
-            .encode(&mut bytes);
-            bytes
+                homes: BTreeMap::new(),
+            })
         };
         // Each chunk is 32 bytes from byte 75.
         let mut equal = encoded(&[4, 5], &[]);
@@ -229,11 +226,11 @@ mod tests {
             root: Digest([3; 32]),
             chunks: BTreeSet::new(),
             holders: (1..=64).map(key).collect(),
+            homes: BTreeMap::new(),
         };
-        let mut bytes = Vec::new();
-        at_bound.encode(&mut bytes);
+        let mut bytes = unhomed(&at_bound);
         assert_eq!(inputs["spec_holders_64"], bytes);
-        assert_eq!(Change::decode(&bytes), Ok(at_bound));
+        assert_eq!(Change::decode(&homed(&bytes)), Ok(at_bound));
         // The count of holders is after the count of chunks, which is 0.
         bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
         bytes.extend(key(65).as_u128().to_le_bytes());
@@ -243,6 +240,20 @@ mod tests {
             length: bytes.len(),
         };
         assert_eq!(Change::decode(&bytes), Err(body));
+    }
+
+    // The byte form of a spec change with no home, before the homes: with no count of
+    // homes.
+    fn unhomed(change: &Change) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        change.encode(&mut bytes);
+        assert_eq!([bytes.pop(), bytes.pop()], [Some(0), Some(0)]);
+        bytes
+    }
+
+    // The byte form `unhomed` gave, with a count of 0 homes.
+    fn homed(unhomed: &[u8]) -> Vec<u8> {
+        [unhomed, &[0, 0]].concat()
     }
 
     fn at(term: u64, index: u64) -> Position {

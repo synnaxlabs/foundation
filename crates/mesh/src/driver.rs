@@ -1173,6 +1173,7 @@ mod tests {
         root: Digest,
         chunks: BTreeSet<Digest>,
         holders: BTreeSet<node::Key>,
+        homes: BTreeMap<channel::Key, node::Key>,
     }
 
     /// What the voters of a cluster did and what they do next.
@@ -1552,8 +1553,9 @@ mod tests {
                 root,
                 chunks,
                 holders,
+                homes,
             } = spec;
-            let result = mesh.settle_spec(base, root, chunks, holders).await;
+            let result = mesh.settle_spec(base, root, chunks, holders, homes).await;
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
         }
@@ -1858,6 +1860,7 @@ mod tests {
             root: common::digest(byte),
             chunks: [common::digest(byte)].into(),
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         let changes = [change(1), change(2), home(1)];
         cluster.script_each(&changes.map(|change| encoded(&change)));
@@ -1898,6 +1901,7 @@ mod tests {
             root: common::digest(1),
             chunks,
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         cluster.script_each(&[encoded(&change), encoded(&home(1))]);
         cluster.start_voter(1);

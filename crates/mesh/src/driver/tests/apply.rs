@@ -1,27 +1,30 @@
 //! Tests of `Mesh::apply` on one node, and of its spec change on a cluster of three
 //! voters, where each voter holds the chunks.
 
+use spec::channel::Channel;
 use spec::definition::Kind;
 use spec::region::Problem;
 use spec::subject::Subject;
 
 use super::send::stop;
 use super::*;
+use crate::change::HOMES_MAX;
 
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
     /// tick, with each node as a holder.
     fn apply(&self, node: u8, base: Pointer, definitions: &BTreeMap<Name, Definition>) {
-        self.apply_held(node, base, definitions, IDS.into());
+        self.apply_held(node, base, definitions, IDS.into(), BTreeMap::new());
     }
 
-    /// As [`Cluster::apply`], with `holders`.
+    /// As [`Cluster::apply`], with `holders` and `homes`.
     fn apply_held(
         &self,
         node: u8,
         base: Pointer,
         definitions: &BTreeMap<Name, Definition>,
         holders: BTreeSet<u8>,
+        homes: BTreeMap<channel::Key, node::Key>,
     ) {
         let update = spec::region::tree(&mut Chunks::default(), definitions);
         let spec = Proposal {
@@ -29,6 +32,7 @@ impl Cluster {
             root: update.root,
             chunks: update.chunks.into_iter().collect(),
             holders: holders.into_iter().map(key).collect(),
+            homes,
         };
         self.board.lock().unwrap().applies.insert(node, spec);
     }
@@ -107,7 +111,7 @@ fn apply_gives_each_problem_of_the_spec_and_proposes_nothing() {
         let misplaced = name("plant.b");
         let subject = definitions.values().next().unwrap().clone();
         definitions.insert(misplaced.clone(), subject);
-        let applied = now(pin!(mesh.apply(base(), definitions))).await;
+        let applied = now(pin!(mesh.apply(base(), definitions, BTreeMap::new()))).await;
         let problems = vec![
             Problem::Ungoverned {
                 name: name("other.a.@subject"),
@@ -141,16 +145,21 @@ fn apply_on_a_node_that_is_not_a_voter_gives_problems_and_large_before_no_vote()
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
         let valid = create_subjects(&["plant.a"], 1);
-        let applied = now(pin!(mesh.apply(base(), valid))).await;
+        let applied = now(pin!(mesh.apply(base(), valid, BTreeMap::new()))).await;
         assert_eq!(applied, Poll::Ready(Err(Error::NoVote)));
         let ungoverned = create_subjects(&["other"], 1);
-        let applied = now(pin!(mesh.apply(base(), ungoverned))).await;
+        let applied = now(pin!(mesh.apply(base(), ungoverned, BTreeMap::new()))).await;
         let problem = Problem::Ungoverned {
             name: name("other.@subject"),
             region: "plant".parse().unwrap(),
         };
         assert_eq!(applied, Poll::Ready(Err(Error::Problems(vec![problem]))));
-        let applied = now(pin!(mesh.apply(base(), create_large(1951)))).await;
+        let applied = now(pin!(mesh.apply(
+            base(),
+            create_large(1951),
+            BTreeMap::new()
+        )))
+        .await;
         assert!(matches!(applied, Poll::Ready(Err(Error::Large { .. }))));
     });
 }
@@ -162,12 +171,17 @@ fn apply_on_a_stopped_group_gives_problems_and_large_before_the_stop() {
         let stopped = stop(&node, &mesh);
         node.clock().sleep(Span::MILLISECOND).await;
         let ungoverned = create_subjects(&["other"], 1);
-        let applied = now(pin!(mesh.apply(base(), ungoverned))).await;
+        let applied = now(pin!(mesh.apply(base(), ungoverned, BTreeMap::new()))).await;
         assert!(matches!(applied, Poll::Ready(Err(Error::Problems(_)))));
-        let applied = now(pin!(mesh.apply(base(), create_large(1951)))).await;
+        let applied = now(pin!(mesh.apply(
+            base(),
+            create_large(1951),
+            BTreeMap::new()
+        )))
+        .await;
         assert!(matches!(applied, Poll::Ready(Err(Error::Large { .. }))));
         let valid = create_subjects(&["plant.a"], 1);
-        let applied = now(pin!(mesh.apply(base(), valid))).await;
+        let applied = now(pin!(mesh.apply(base(), valid, BTreeMap::new()))).await;
         assert_eq!(applied, Poll::Ready(Err(Error::Stopped(stopped))));
     });
 }
@@ -179,7 +193,7 @@ fn apply_on_a_stopped_group_of_a_node_that_is_not_a_voter_gives_stopped() {
         let stopped = stop(&node, &mesh);
         node.clock().sleep(Span::MILLISECOND).await;
         let valid = create_subjects(&["plant.a"], 1);
-        let applied = now(pin!(mesh.apply(base(), valid))).await;
+        let applied = now(pin!(mesh.apply(base(), valid, BTreeMap::new()))).await;
         assert_eq!(applied, Poll::Ready(Err(Error::Stopped(stopped))));
     });
 }
@@ -192,7 +206,7 @@ fn an_apply_opens_no_floor_while_it_puts_its_chunks() {
         let before = mesh.group.borrow().applied.clone();
         let definitions = create_subjects(&["plant.a"], 1);
         let moved = pointer(1, &definitions);
-        let mut call = pin!(mesh.apply(base(), definitions));
+        let mut call = pin!(mesh.apply(base(), definitions, BTreeMap::new()));
         assert_eq!(now(call.as_mut()).await, Poll::Pending);
         assert_eq!(mesh.group.borrow().applied, before);
         assert_eq!(call.await, Ok(moved));
@@ -203,7 +217,12 @@ fn an_apply_opens_no_floor_while_it_puts_its_chunks() {
 fn apply_refuses_a_tree_of_more_chunks_than_one_change_lists() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let applied = now(pin!(mesh.apply(base(), create_large(1951)))).await;
+        let applied = now(pin!(mesh.apply(
+            base(),
+            create_large(1951),
+            BTreeMap::new()
+        )))
+        .await;
         let error = Error::Large {
             chunks: 1025,
             most: CHUNKS_MAX,
@@ -224,7 +243,10 @@ fn a_lone_voter_applies_a_tree_of_the_most_chunks() {
         let update = spec::region::tree(&mut Chunks::default(), &definitions);
         assert_eq!(update.chunks.len(), CHUNKS_MAX);
         let moved = pointer(1, &definitions);
-        assert_eq!(mesh.apply(base(), definitions).await, Ok(moved));
+        assert_eq!(
+            mesh.apply(base(), definitions, BTreeMap::new()).await,
+            Ok(moved)
+        );
         assert_eq!(mesh.pointer(), moved);
     });
 }
@@ -385,15 +407,21 @@ fn an_apply_that_finds_a_later_pointer_of_its_own_root_is_stale() {
             create_subjects(&["plant.a"], 1),
             create_subjects(&["plant.b"], 1),
         );
-        let first = mesh.apply(base(), a.clone()).await.unwrap();
-        let second = mesh.apply(first, b).await.unwrap();
-        let third = mesh.apply(second, a.clone()).await.unwrap();
+        let first = mesh
+            .apply(base(), a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
+        let second = mesh.apply(first, b, BTreeMap::new()).await.unwrap();
+        let third = mesh
+            .apply(second, a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(third, pointer(3, &a));
         let stale = Error::Stale {
             base: base(),
             pointer: third,
         };
-        assert_eq!(mesh.apply(base(), a).await, Err(stale));
+        assert_eq!(mesh.apply(base(), a, BTreeMap::new()).await, Err(stale));
     });
 }
 
@@ -411,7 +439,10 @@ fn an_apply_on_a_base_at_the_last_version_gives_stale() {
             pointer: base(),
         };
         for definitions in [create_subjects(&["plant.a"], 1), BTreeMap::new()] {
-            assert_eq!(mesh.apply(last, definitions).await, Err(stale.clone()));
+            assert_eq!(
+                mesh.apply(last, definitions, BTreeMap::new()).await,
+                Err(stale.clone())
+            );
         }
         assert_eq!(mesh.pointer(), base());
     });
@@ -426,7 +457,10 @@ fn a_lone_voter_puts_each_chunk_of_its_change_in_its_store_and_lists_it() {
     let digests = update.chunks.clone();
     let entries = solo_stored(move |node, tasks| async move {
         let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
-        assert_eq!(mesh.apply(base(), applied).await, Ok(moved));
+        assert_eq!(
+            mesh.apply(base(), applied, BTreeMap::new()).await,
+            Ok(moved)
+        );
         for digest in digests {
             let chunk = store.get(digest).await.unwrap().unwrap();
             assert_eq!(Some(&*chunk), tree.get(digest), "{digest}");
@@ -459,8 +493,8 @@ fn a_change_lists_only_the_chunks_that_the_tree_of_its_base_lacks() {
     );
     let entries = solo_stored(move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let moved = mesh.apply(base(), first).await.unwrap();
-        mesh.apply(moved, second).await.unwrap();
+        let moved = mesh.apply(base(), first, BTreeMap::new()).await.unwrap();
+        mesh.apply(moved, second, BTreeMap::new()).await.unwrap();
     });
     let [_, change] = specs(&entries).try_into().unwrap();
     let Change::Spec { chunks, .. } = change else {
@@ -489,14 +523,14 @@ fn a_change_puts_a_lost_chunk_that_its_base_shares_with_the_new_tree() {
     let listed = lacked.clone();
     let entries = solo_stored(move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let moved = mesh.apply(base(), first).await.unwrap();
+        let moved = mesh.apply(base(), first, BTreeMap::new()).await.unwrap();
         drop(mesh);
         node.clock().sleep(Span::MILLISECOND).await;
         let path = Path::new(BLOB).join(shared.to_string());
         node.files().remove(&path).await.unwrap();
         let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
         assert!(store.get(shared).await.unwrap().is_none());
-        mesh.apply(moved, second).await.unwrap();
+        mesh.apply(moved, second, BTreeMap::new()).await.unwrap();
         let held = store.get(shared).await.unwrap();
         assert_eq!(held.as_deref(), tree.get(shared));
     });
@@ -517,14 +551,19 @@ fn a_change_to_the_tree_of_its_base_puts_a_lost_root() {
     let root = spec::region::tree(&mut tree, &definitions).root;
     let entries = solo_stored(move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let moved = mesh.apply(base(), definitions.clone()).await.unwrap();
+        let moved = mesh
+            .apply(base(), definitions.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         drop(mesh);
         node.clock().sleep(Span::MILLISECOND).await;
         let path = Path::new(BLOB).join(root.to_string());
         node.files().remove(&path).await.unwrap();
         let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
         assert!(store.get(root).await.unwrap().is_none());
-        mesh.apply(moved, definitions).await.unwrap();
+        mesh.apply(moved, definitions, BTreeMap::new())
+            .await
+            .unwrap();
         let held = store.get(root).await.unwrap();
         assert_eq!(held.as_deref(), tree.get(root));
     });
@@ -553,7 +592,10 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
                 base: at,
                 pointer: base(),
             };
-            assert_eq!(mesh.apply(at, definitions.clone()).await, Err(stale));
+            assert_eq!(
+                mesh.apply(at, definitions.clone(), BTreeMap::new()).await,
+                Err(stale)
+            );
         }
     });
     let all: BTreeSet<Digest> = update.chunks.into_iter().collect();
@@ -573,7 +615,10 @@ fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing(
         let definitions = create_subjects(&["plant.a"], 1);
         let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
         let quorum = Error::Quorum { held: 1, voters: 3 };
-        assert_eq!(mesh.apply(base(), definitions).await, Err(quorum.clone()));
+        assert_eq!(
+            mesh.apply(base(), definitions, BTreeMap::new()).await,
+            Err(quorum.clone())
+        );
         assert!(store.get(root).await.unwrap().is_none());
         assert_eq!(
             quorum.to_string(),
@@ -596,7 +641,7 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
     cluster.configure(1, [1, 2].into());
     cluster.run(seconds(5));
     let definitions = create_subjects(&["plant.a"], 1);
-    cluster.apply_held(1, base(), &definitions, [1].into());
+    cluster.apply_held(1, base(), &definitions, [1].into(), BTreeMap::new());
     cluster.run(seconds(5));
     cluster.script(|_| home(9));
     cluster.run(seconds(5));
@@ -622,7 +667,10 @@ fn a_failed_put_gives_the_error_of_the_store_and_proposes_nothing() {
             code: 5,
         };
         let failed = Error::Blob(blob::Error::Files(cause));
-        assert_eq!(mesh.apply(base(), definitions).await, Err(failed.clone()));
+        assert_eq!(
+            mesh.apply(base(), definitions, BTreeMap::new()).await,
+            Err(failed.clone())
+        );
         assert_eq!(
             failed.to_string(),
             "the chunk store failed: sync_dir of blob failed with OS error 5"
@@ -636,10 +684,16 @@ fn a_failed_put_gives_the_error_of_the_store_and_proposes_nothing() {
 fn a_change_counts_only_the_chunks_it_lists_against_the_most() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let moved = mesh.apply(base(), create_large(1950)).await.unwrap();
+        let moved = mesh
+            .apply(base(), create_large(1950), BTreeMap::new())
+            .await
+            .unwrap();
         let larger = create_large(1951);
         let expected = pointer(2, &larger);
-        assert_eq!(mesh.apply(moved, larger).await, Ok(expected));
+        assert_eq!(
+            mesh.apply(moved, larger, BTreeMap::new()).await,
+            Ok(expected)
+        );
     });
 }
 
@@ -660,7 +714,7 @@ fn a_pool_with_no_block_for_a_chunk_gives_pool_and_proposes_nothing() {
         };
         let mesh = Mesh::start(config).await.unwrap();
         let _held = fill(&pool);
-        let applied = mesh.apply(base(), definitions).await;
+        let applied = mesh.apply(base(), definitions, BTreeMap::new()).await;
         assert_eq!(applied, Err(exhausted(requested)));
         assert_eq!(mesh.pointer(), base());
     });
@@ -673,7 +727,7 @@ fn a_failed_read_of_the_base_tree_gives_the_error_of_the_store() {
     let moved = pointer(1, &first);
     let entries = solo_stored(move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        assert_eq!(mesh.apply(base(), first).await, Ok(moved));
+        assert_eq!(mesh.apply(base(), first, BTreeMap::new()).await, Ok(moved));
         let path = Path::new(BLOB).join(moved.root.to_string());
         node.fail_file(&path, Operation::Open);
         let second = create_subjects(&["plant.b"], 1);
@@ -683,7 +737,10 @@ fn a_failed_read_of_the_base_tree_gives_the_error_of_the_store() {
             code: 5,
         };
         let failed = Error::Blob(blob::Error::Files(cause));
-        assert_eq!(mesh.apply(moved, second).await, Err(failed));
+        assert_eq!(
+            mesh.apply(moved, second, BTreeMap::new()).await,
+            Err(failed)
+        );
         assert_eq!(mesh.pointer(), moved);
     });
     assert_eq!(specs(&entries).len(), 1);
@@ -701,4 +758,164 @@ fn specs(entries: &[Entry]) -> Vec<Change> {
 
 fn name(text: &str) -> Name {
     text.parse().unwrap()
+}
+
+/// An index channel of key `7 + at` at the tree key `plant.i<at>`, for each `at` below
+/// `count`.
+fn create_indexes(count: u128) -> BTreeMap<Name, Definition> {
+    let index = |at: u128| {
+        let channel = Channel {
+            key: channel::Key::from_u128(at.checked_add(7).unwrap()),
+            kind: spec::channel::Kind::Index {
+                error: None,
+                control: None,
+            },
+        };
+        let key = Kind::Channel.key(&format!("plant.i{at}")).unwrap();
+        (key, Definition::Channel(channel))
+    };
+    (0..count).map(index).collect()
+}
+
+/// The home `node` for the index at `plant.i<at>`, for each `at` below `count`.
+fn create_homes(count: u128, node: &str) -> BTreeMap<Name, Name> {
+    let home = |at: u128| {
+        (
+            Kind::Channel.key(&format!("plant.i{at}")).unwrap(),
+            name(node),
+        )
+    };
+    (0..count).map(home).collect()
+}
+
+#[test]
+fn apply_gives_each_listed_index_the_member_of_its_name_as_its_home() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let definitions = create_indexes(2);
+        let homes = [(Kind::Channel.key("plant.i1").unwrap(), name("plant.node2"))];
+        let moved = pointer(1, &definitions);
+        let applied = mesh.apply(base(), definitions, homes.into()).await;
+        assert_eq!(applied, Ok(moved));
+        let state = mesh.group.borrow().state.clone();
+        assert_eq!(state.home(INDEX), None);
+        assert_eq!(state.home(channel::Key::from_u128(8)), Some(key(2)));
+    });
+}
+
+#[test]
+fn apply_refuses_a_home_of_a_name_that_is_not_an_index_and_proposes_nothing() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home(1)).await;
+        let mut definitions = create_indexes(1);
+        definitions.extend(create_subjects(&["plant.a"], 1));
+        let subject = name("plant.a.@subject");
+        let absent = Kind::Channel.key("plant.i1").unwrap();
+        for index in [subject, absent] {
+            let homes = [(index.clone(), name("plant.node1"))].into();
+            let applied = mesh.apply(base(), definitions.clone(), homes).await;
+            assert_eq!(applied, Err(Error::NotIndex(index.clone())));
+        }
+        assert_eq!(
+            Error::NotIndex(name("plant.a.@subject")).to_string(),
+            "a home names plant.a.@subject, which the spec does not hold as an index \
+             channel"
+        );
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+#[test]
+fn apply_refuses_a_home_on_a_node_that_is_not_a_member_and_proposes_nothing() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home(1)).await;
+        let homes = create_homes(1, "plant.node2");
+        let applied = mesh.apply(base(), create_indexes(1), homes).await;
+        let error = Error::UnknownNode(name("plant.node2"));
+        assert_eq!(applied, Err(error.clone()));
+        assert_eq!(
+            error.to_string(),
+            "a home names the node plant.node2, which is not a member of the region"
+        );
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+#[test]
+fn apply_refuses_more_homes_than_one_change_gives_before_no_vote() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
+        let most = u128::try_from(HOMES_MAX).unwrap();
+        let homes = create_homes(most + 1, "plant.node1");
+        let applied = mesh.apply(base(), create_indexes(most + 1), homes).await;
+        let error = Error::Homes {
+            homes: 513,
+            most: 512,
+        };
+        assert_eq!(applied, Err(error.clone()));
+        assert_eq!(
+            error.to_string(),
+            "the change gives 513 homes, more than the 512 that one change can give"
+        );
+        let homes = create_homes(most, "plant.node3");
+        let applied = mesh.apply(base(), create_indexes(most), homes).await;
+        assert_eq!(applied, Err(Error::NoVote));
+    });
+}
+
+#[test]
+fn apply_gives_problems_before_a_home_that_is_not_an_index() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let ungoverned = create_subjects(&["other"], 1);
+        let homes = create_homes(1, "plant.node1");
+        let applied = mesh.apply(base(), ungoverned, homes).await;
+        let problem = Problem::Ungoverned {
+            name: name("other.@subject"),
+            region: "plant".parse().unwrap(),
+        };
+        assert_eq!(applied, Err(Error::Problems(vec![problem])));
+    });
+}
+
+// The second change is stale, so its homes wait for the third, which keeps the home
+// of `INDEX` that the first gave and gives one to the index that it adds. A board
+// takes a state only when the home of `INDEX` moves, so a set of it ends the run.
+#[test]
+fn each_member_reads_the_homes_of_a_spec_change_and_a_later_change_keeps_them() {
+    let mut cluster = Cluster::new(0);
+    cluster.start();
+    cluster.run(seconds(5));
+    let (a, b) = (create_indexes(1), create_indexes(2));
+    let (moved, next) = (pointer(1, &a), pointer(2, &b));
+    let second = channel::Key::from_u128(8);
+    let first = BTreeMap::from([(INDEX, key(2))]);
+    let both = BTreeMap::from([(INDEX, key(3)), (second, key(3))]);
+    cluster.apply_held(1, base(), &a, IDS.into(), first);
+    cluster.run(seconds(5));
+    cluster.apply_held(3, base(), &b, IDS.into(), both.clone());
+    cluster.run(seconds(5));
+    cluster.apply_held(3, moved, &b, IDS.into(), both);
+    cluster.run(seconds(5));
+    cluster.script(|_| home(9));
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let stale = Error::Stale {
+        base: base(),
+        pointer: moved,
+    };
+    let applied = [
+        (1, moved, Ok(moved)),
+        (3, moved, Err(stale)),
+        (3, next, Ok(next)),
+    ];
+    assert_eq!(board.applied, applied);
+    for id in IDS {
+        let homes = [None, Some(key(2)), Some(key(9))];
+        assert_eq!(board.homes[&id], homes, "node {id}");
+        assert_eq!(board.states[&id].home(second), Some(key(3)), "node {id}");
+        assert_eq!(board.pointers[&id], next, "node {id}");
+    }
 }

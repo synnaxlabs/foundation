@@ -3768,6 +3768,20 @@ How to read this record:
   the block has one, else at the block. `copies = []` next to a home or a standby is
   valid (architect, #1150,
   https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037713864).
+  The spec change that adds an index carries its home as `(channel::Key, node::Key)`,
+  in the same entry as the pointer move. `mesh` never runs `place`: `plan` places each
+  new index, and `Mesh::apply` takes the homes by index name and node name. At the
+  apply, each listed index that has no home gets the listed one. A placement never
+  moves a home: a move is `set_home`. The homes are runtime state in the change
+  record, not in the tree. One change gives at most `HOMES_MAX` = 512 homes, of 32
+  bytes each, after a count of 2 bytes that adds to the 33 869 of `HOLDERS_MAX`. So a
+  change at each bound is 50 255 bytes. Decided by `laptop.architect`,
+  2026-10-07T14:25:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6040051975), and
+  its plan review, 2026-10-08T17:01:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210).
+  Trigger: before a founding spec can hold an index, it gives each index a home
+  (#1931).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.

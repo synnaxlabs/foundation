@@ -1,5 +1,6 @@
 //! The region state that the voters agree on.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -95,6 +96,13 @@ impl State {
         self.tickets.get(&public_key.to_bytes())
     }
 
+    /// The key of the member named `name`, or `None` when no member has that name.
+    pub(crate) fn named(&self, name: &Name) -> Option<node::Key> {
+        let mut members = self.members.iter();
+        let (&key, _) = members.find(|(_, member)| member.card.card().name == *name)?;
+        Some(key)
+    }
+
     /// The home of `index`, or `None` when none is set.
     pub(crate) fn home(&self, index: channel::Key) -> Option<node::Key> {
         self.homes.get(&index).copied()
@@ -126,8 +134,19 @@ impl State {
                 base,
                 root,
                 holders,
+                homes,
                 ..
-            } => self.move_pointer(base, root, &holders).map(|()| false),
+            } => {
+                self.move_pointer(base, root, &holders)?;
+                let mut moved = false;
+                for (index, home) in homes {
+                    if let Entry::Vacant(vacant) = self.homes.entry(index) {
+                        vacant.insert(home);
+                        moved = true;
+                    }
+                }
+                Ok(moved)
+            }
         }
     }
 
@@ -525,6 +544,51 @@ mod tests {
         assert_eq!(state.pointer().version, 2);
     }
 
+    /// `spec` with the home `[(index, home)]` of each pair of `homes`.
+    fn homed(change: Change, homes: &[(u128, u8)]) -> Change {
+        let Change::Spec {
+            base,
+            root,
+            chunks,
+            holders,
+            ..
+        } = change
+        else {
+            unreachable!()
+        };
+        let homes = homes.iter().map(|&(i, h)| (index(i), node(h))).collect();
+        Change::Spec {
+            base,
+            root,
+            chunks,
+            holders,
+            homes,
+        }
+    }
+
+    #[test]
+    fn a_spec_change_gives_a_home_only_to_an_index_that_has_none() {
+        let mut state = state();
+        assert_eq!(state.apply(home(7, 1)), Ok(true));
+        let first = homed(spec(0, 1, 2, &[]), &[(7, 2), (8, 2)]);
+        assert_eq!(state.apply(first), Ok(true));
+        assert_eq!(state.home(index(7)), Some(node(1)));
+        assert_eq!(state.home(index(8)), Some(node(2)));
+        let second = homed(spec(1, 2, 3, &[]), &[(7, 2), (8, 1)]);
+        assert_eq!(state.apply(second), Ok(false));
+        assert_eq!(state.pointer().version, 2);
+        assert_eq!(state.home(index(7)), Some(node(1)));
+        assert_eq!(state.home(index(8)), Some(node(2)));
+    }
+
+    #[test]
+    fn named_gives_the_key_of_the_member_with_the_name() {
+        let state = state();
+        assert_eq!(state.named(&name("plant.node2")), Some(node(2)));
+        assert_eq!(state.named(&name("plant.node3")), None);
+        assert_eq!(state.named(&name("plant")), None);
+    }
+
     fn keys<'a>(ids: impl IntoIterator<Item = &'a u8>) -> BTreeSet<node::Key> {
         ids.into_iter().map(|&id| node(id)).collect()
     }
@@ -566,8 +630,12 @@ mod tests {
         let mut state = state();
         state.set_voters(voters(&[1, 2], &[1]));
         let short = Refused::Quorum { held: 1, voters: 2 };
-        assert_eq!(state.apply(spec(0, 1, 2, &[])), Err(short));
-        assert_eq!(state.pointer().version, 0);
+        let before = state.clone();
+        assert_eq!(
+            state.apply(homed(spec(0, 1, 2, &[]), &[(7, 1)])),
+            Err(short)
+        );
+        assert_eq!(state, before);
         let mut held = spec(0, 1, 2, &[]);
         let Change::Spec { holders, .. } = &mut held else {
             unreachable!()
@@ -585,7 +653,7 @@ mod tests {
         let before = state.clone();
         let moved = state.pointer();
         let cases = [
-            (spec(0, 1, 3, &[]), 0, digest(1)),
+            (homed(spec(0, 1, 3, &[]), &[(7, 1)]), 0, digest(1)),
             (spec(1, 1, 3, &[]), 1, digest(1)),
             (spec(0, 2, 3, &[]), 0, digest(2)),
             (spec(2, 2, 3, &[]), 2, digest(2)),
@@ -1197,8 +1265,13 @@ mod tests {
             any::<bool>(),
         )
             .prop_map(|(id, prefix, reusable)| record(id, options(prefix, reusable)));
-        let specs = (0..3_u64, 1..3_u8, 1..4_u8)
-            .prop_map(|(version, base, root)| spec(version, base, root, &[]));
+        let homes = prop::collection::btree_map(0..3_u128, 1..3_u8, 0..3);
+        let specs = (0..3_u64, 1..3_u8, 1..4_u8, homes).prop_map(
+            |(version, base, root, homes)| {
+                let homes: Vec<_> = homes.into_iter().collect();
+                homed(spec(version, base, root, &[]), &homes)
+            },
+        );
         prop_oneof![joins, tickets, specs]
     }
 
@@ -1222,10 +1295,16 @@ mod tests {
                         prop_assert!(before.member(join.card.key).is_none());
                         prop_assert!(state.member(join.card.key).is_some());
                     }
-                    (Ok(_), Change::Spec { base, root, .. }) => {
+                    (Ok(moved), Change::Spec { base, root, homes, .. }) => {
                         prop_assert_eq!(before.pointer(), base);
                         let next = base.version.checked_add(1).unwrap();
                         prop_assert_eq!(state.pointer(), Pointer { version: next, root });
+                        for (&index, &home) in &homes {
+                            let kept = before.home(index).unwrap_or(home);
+                            prop_assert_eq!(state.home(index), Some(kept));
+                        }
+                        let given = homes.keys().any(|&i| before.home(i).is_none());
+                        prop_assert_eq!(moved, given);
                     }
                     (Ok(_), _) => {}
                 }
