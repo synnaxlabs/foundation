@@ -17,13 +17,20 @@ use crate::message::Message;
 use crate::region::Refused;
 
 impl Mesh {
-    // Starts one try of a proposal, when the group runs and this node is a voter.
-    pub(super) fn attempt(&self) -> Result<Try<'_>, Error> {
-        let mut group = self.group.borrow_mut();
+    // `Stopped` when the group stopped, and `NoVote` when this node is not a voter.
+    pub(super) fn check_proposer(&self) -> Result<(), Error> {
+        let group = self.group.borrow();
         group.running()?;
         if !group.voter(group.raft.key()) {
             return Err(Error::NoVote);
         }
+        Ok(())
+    }
+
+    // Starts one try of a proposal, when the group runs and this node is a voter.
+    pub(super) fn attempt(&self) -> Result<Try<'_>, Error> {
+        self.check_proposer()?;
+        let mut group = self.group.borrow_mut();
         Ok(Try {
             mesh: self,
             slot: group.slot(),
