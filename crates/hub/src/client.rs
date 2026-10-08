@@ -54,9 +54,10 @@ pub struct Config {
     pub tasks: env::tasks::Tasks,
     /// The pool that the client sends from. It can be the pool of the program's
     /// transport. Each message that the client sends takes a block from it, which the
-    /// stream holds until the node has it. So a request needs room for the part of
-    /// its body that the node's flow control lets the stream hold, and gives
-    /// [`Error::Pool`] when the pool has none.
+    /// stream holds until the node has it. So a request needs room for the bytes
+    /// that the session holds in flight, up to the node's
+    /// [`transport::Config::window_bytes`], and gives [`Error::Pool`] when the pool
+    /// has none.
     pub pool: Rc<block::Pool>,
 }
 
@@ -165,16 +166,16 @@ impl Client {
             .ok()
             .filter(|&length| length <= BODY_BYTES_MAX)
             .ok_or(Error::Body { length: body.len() })?;
-        let mut held = Held {
+        let mut open = Open {
             taken: Some(shared.turn.take().await),
-            open: None,
+            receiver: None,
             tasks: &shared.tasks,
         };
         if let Some(error) = shared.ended.borrow().clone() {
             return Err(error);
         }
         let (mut sender, receiver) = shared.session.open(Class::Complete).await?;
-        let receiver = held.open.insert(receiver);
+        let receiver = open.receiver.insert(receiver);
         shared
             .send(&mut sender, &wire::header::encode(Protocol::Hub))
             .await?;
@@ -201,7 +202,7 @@ impl Client {
             reply.extend_from_slice(rest.take(&message)?);
         }
         rest.end()?;
-        held.open = None;
+        open.receiver = None;
         Ok(reply)
     }
 }
@@ -289,26 +290,27 @@ async fn renew(
     shared.session.close(Code(code));
 }
 
-/// Holds the turn for one request.
-struct Held<'a> {
+/// A request, which keeps the turn until the node frees it.
+struct Open<'a> {
+    /// `Some` until the drop.
     taken: Option<Taken>,
     /// The receiver of a request whose response has not ended. The node holds the
     /// request open until its response begins, so a drop gives the turn only once
     /// the next message or the end of the stream comes.
-    open: Option<Receiver>,
+    receiver: Option<Receiver>,
     tasks: &'a env::tasks::Tasks,
 }
 
-impl Drop for Held<'_> {
+impl Drop for Open<'_> {
     fn drop(&mut self) {
-        let (Some(taken), Some(mut receiver)) = (self.taken.take(), self.open.take())
-        else {
-            return;
-        };
-        self.tasks.spawn(async move {
-            drop(receiver.recv().await);
-            drop(taken);
-        });
+        let taken = self.taken.take();
+        match self.receiver.take() {
+            None => drop(taken),
+            Some(mut receiver) => self.tasks.spawn(async move {
+                drop(receiver.recv().await);
+                drop(taken);
+            }),
+        }
     }
 }
 
