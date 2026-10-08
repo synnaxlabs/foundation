@@ -4665,9 +4665,11 @@ How to read this record:
   `config.split-placement` reads them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
   2026-10-08T15:21:54Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, and
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126,
   2026-10-08T15:31:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171).
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171, and
+  2026-10-08T16:04:09Z, for "another" and the placements of the indexes,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123).
   `config.split-placement` (BQ10) is at each index when the placement that wins for it
   is not the one that wins for its nearest connector, the connector with the longest
   name above the index (`Name::starts_with`): at the label of the index's placement, or
