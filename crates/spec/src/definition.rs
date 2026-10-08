@@ -16,6 +16,7 @@
 //! time          := select:patterns peers:optional_names                     tag 7
 //! channel       := key kind                                                 tag 8
 //! retention     := select:patterns keep:i64                                 tag 9
+//! subject       := count:u64 public_key*                                    tag 10
 //! kind          := 0 error:optional_key control:optional_key                index
 //!                | 1 index:key quality:optional_key data_type unit:optional  data
 //! data_type     := 0 scalar:u8 | 1 scalar:u8 len:u32 | 2 scalar:u8 max:u32 | 3 | 4 | 5
@@ -27,6 +28,7 @@
 //! optional      := 0 | 1 text
 //! optional_names := 0 | 1 names
 //! key           := u128
+//! public_key    := 32 bytes
 //! optional_key  := 0 | 1 key
 //! ```
 //!
@@ -49,6 +51,9 @@
 //!
 //! A retention `keep` is in nanoseconds, zero or more.
 //!
+//! A subject has at least one Ed25519 public key, in strict byte order, and none is of
+//! small order.
+//!
 //! A `data_type` is a scalar, an array, a list, a string, bytes, quality, or a matrix,
 //! in that order from 0. A `scalar` is bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6,
 //! u32 7, u64 8, f32 9, f64 10, stamp 11, span 12, or uuid 13. Only a scalar from 1
@@ -67,6 +72,7 @@ use document::encoding;
 use types::authority::Authority;
 use types::byte;
 use types::channel::Key;
+use types::ed25519::{PublicKey, SmallOrder};
 use types::name::{self, Name, Selector, Written};
 use types::sample::{self, Scalar};
 use types::time::Span;
@@ -80,6 +86,7 @@ use crate::node_settings;
 use crate::placement;
 use crate::region::{Delegation, NoVoters};
 use crate::retention;
+use crate::subject::{self, Subject};
 use crate::time;
 use crate::unit::{self, Unit};
 
@@ -93,10 +100,13 @@ const PLACEMENT: u8 = 6;
 const TIME: u8 = 7;
 const CHANNEL: u8 = 8;
 const RETENTION: u8 = 9;
+const SUBJECT: u8 = 10;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
 const PATTERN_MIN: usize = 9;
+/// The bytes of a public key.
+const PUBLIC_KEY: usize = 32;
 
 /// One definition: the value of one name in the spec tree. The name is the tree key,
 /// so it is not part of the definition.
@@ -120,6 +130,8 @@ pub enum Definition {
     Channel(Channel),
     /// A retention policy.
     Retention(retention::Policy),
+    /// A subject and its keys.
+    Subject(Subject),
 }
 
 /// The kind of a definition. Its tree key names it, except for a connector or a
@@ -144,6 +156,8 @@ pub enum Kind {
     Time,
     /// A retention policy.
     Retention,
+    /// A subject.
+    Subject,
 }
 
 impl Definition {
@@ -212,6 +226,10 @@ impl Definition {
                 patterns(&mut out, policy.select());
                 out.extend_from_slice(&policy.keep().nanos().to_le_bytes());
             }
+            Self::Subject(subject) => {
+                out.push(SUBJECT);
+                public_keys(&mut out, subject.keys());
+            }
         }
         out
     }
@@ -244,6 +262,7 @@ impl Definition {
             TIME => Self::Time(reader.time()?),
             CHANNEL => Self::Channel(reader.channel()?),
             RETENTION => Self::Retention(reader.retention()?),
+            SUBJECT => Self::Subject(reader.subject()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -400,6 +419,13 @@ fn names(out: &mut Vec<u8>, names: &[Name]) {
     count(out, names.len());
     for name in names {
         text(out, name.as_str());
+    }
+}
+
+fn public_keys(out: &mut Vec<u8>, keys: &[PublicKey]) {
+    count(out, keys.len());
+    for key in keys {
+        out.extend_from_slice(&key.to_bytes());
     }
 }
 
@@ -638,6 +664,33 @@ impl<'a> Reader<'a> {
             .map_err(|error| Error::Retention { at, error })
     }
 
+    /// Reads a subject's keys, each after the one before it in byte order.
+    fn subject(&mut self) -> Result<Subject, Error> {
+        let start = self.at();
+        let n = self.count(PUBLIC_KEY)?;
+        let mut keys: Vec<PublicKey> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let at = self.at();
+            let (&bytes, rest) = self
+                .rest
+                .split_first_chunk()
+                .ok_or(Error::Truncated { at })?;
+            self.rest = rest;
+            if keys.last().is_some_and(|last| last.to_bytes() >= bytes) {
+                return Err(Error::KeyOrder { at });
+            }
+            keys.push(
+                PublicKey::new(bytes).map_err(|SmallOrder| Error::SmallOrder { at })?,
+            );
+        }
+        Subject::new(keys).map_err(|error| match error {
+            subject::Error::Empty => Error::NoKeys { at: start },
+            subject::Error::Duplicate(_) => {
+                unreachable!("the keys are in strict order")
+            }
+        })
+    }
+
     fn channel(&mut self) -> Result<Channel, Error> {
         let key = self.key()?;
         let at = self.at();
@@ -873,6 +926,21 @@ pub enum Error {
         /// Why it makes no policy.
         error: retention::Error,
     },
+    /// A subject has no public key.
+    NoKeys {
+        /// Where the count of keys is.
+        at: usize,
+    },
+    /// A subject's public key is not after the key before it in byte order.
+    KeyOrder {
+        /// Where the key is.
+        at: usize,
+    },
+    /// A subject's public key is a point of small order.
+    SmallOrder {
+        /// Where the key is.
+        at: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -954,6 +1022,16 @@ impl fmt::Display for Error {
             }
             Self::Retention { at, error } => {
                 write!(f, "the retention at byte {at}: {error}")
+            }
+            Self::NoKeys { at } => {
+                write!(f, "the subject at byte {at} has no public key")
+            }
+            Self::KeyOrder { at } => write!(
+                f,
+                "the public key at byte {at} is not after the key before it"
+            ),
+            Self::SmallOrder { at } => {
+                write!(f, "the public key at byte {at} is a point of small order")
             }
         }
     }
