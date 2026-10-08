@@ -3653,6 +3653,19 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6046284871), and
   the crate by the person on 2026-10-08T01:48:32Z
   (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6050501586).
+  A value is text that InfluxDB 1, 2, and 3 each store, so the writer writes no `u`
+  integer. A `u8`, `u16`, or `u32` sample is an `i` integer. The kind refuses a `u64`
+  channel with `Error::Config` and `influx.unsigned` where the run first learns the
+  type, before it writes a line of that frame: InfluxDB 1 OSS refuses `u`, and an
+  `i64` holds no value above `i64::MAX`. When `connector::Kind::check` gets the types
+  of the channels that a reader selects, the refusal moves to plan. Lost: each
+  unsigned value as `i`, with an error at a sample above `i64::MAX`, as one value then
+  stops the ack until a person acts, also on InfluxDB 2 and 3; a `u64` as a float or
+  as its bits in an `i64`, as each changes the value with no error; a `u64` as a
+  string field, as its queries then differ from each other integer; and an `unsigned`
+  setting for InfluxDB 2 and 3, as it gives one server two rules. Decided by
+  `laptop.architect-2` on 2026-10-08T08:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1210#issuecomment-6055802089).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -3678,8 +3691,8 @@ How to read this record:
   a tab in a measurement name; the writer refuses them too. It splits lines, and skips
   blank lines and comments, as InfluxDB 3 does, so a writer that writes a measurement
   name with a leading `#` loses that line with no error; a test that reads the points
-  sees the loss. It stores a `u` integer, which InfluxDB 1 OSS refuses, until the writer
-  stops writing `u` (#1210). Lost: a store that gives a time to a line with none, and
+  sees the loss. It refuses a `u` integer with `Error::Unsigned`, as InfluxDB 1 OSS
+  does (#1210). Lost: a store that gives a time to a line with none, and
   one that takes a type conflict, as each hides a writer bug; and a test that a line is
   refused if and only if the writer refuses its input, as the writer also refuses some
   names that InfluxDB stores, such as a backslash or NUL, so the two sets differ by
