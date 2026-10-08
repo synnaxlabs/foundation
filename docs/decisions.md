@@ -4086,10 +4086,10 @@ How to read this record:
   and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
-  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and a draw on a thread with none aborts
+  2026-10-08 12:03 UTC). A draw on a thread with no start value aborts
   (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
-  2026-10-08 16:51 UTC). So `connector-opcua` (PR 4 of #435) sets the start value
+  2026-10-08 16:51 UTC). Nothing in the library sets a start value, also in
+  production. So `connector-opcua` (PR 4 of #435) sets the start value
   with `UA_random_seed_deterministic`, taken from the randomness of `env`, and never
   calls `UA_random_seed`, which reads the clock. It does so on each thread before that
   thread calls open62541, and runs each server and each client on one thread. Its
@@ -4106,8 +4106,8 @@ How to read this record:
   calls each of the two draws on a thread with none, and the test asserts the abort
   and its exact output. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
-  2026-10-08 16:51 UTC). Supersedes "each thread with none draws the same fixed
-  values" of
+  2026-10-08 16:51 UTC). Supersedes the record text "each thread with none draws the
+  same fixed values", which cited
   https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. The
   line of `UA_random_seed` that sets the flag has no test: no path of our build
   reaches it, and a test needs a driver whose clock does not abort. Approved by
