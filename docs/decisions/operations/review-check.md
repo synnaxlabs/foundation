@@ -37,7 +37,8 @@
   https://github.com/synnaxlabs/foundation/issues/1783, with the rulings of the
   director at 2026-10-08T21:47:24Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
-  approved by the director at DIRECTOR.
+  approved by the director at
+  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069844452.
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
