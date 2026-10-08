@@ -196,7 +196,11 @@ impl Dialer {
         let mut state = self.0.borrow_mut();
         let now = state.clock.now();
         let key = state.endpoint.connect(now, peer, remote);
-        state.sessions.insert(key, Slot::default());
+        let slot = Slot {
+            dialed: true,
+            ..Slot::default()
+        };
+        state.sessions.insert(key, slot);
         state.wake();
         Ok(Session {
             state: Rc::clone(&self.0),
@@ -305,6 +309,12 @@ impl State {
                     waker.wake();
                 }
             }
+            Event::Acked { key } => {
+                if let Some(slot) = self.sessions.get_mut(&key) {
+                    slot.acks += 1;
+                    slot.wake_status();
+                }
+            }
             // No session takes datagrams yet.
             Event::Datagram { .. } => {}
         }
@@ -336,6 +346,10 @@ impl State {
 struct Slot {
     /// The peer, once the handshake finishes.
     peer: Option<Peer>,
+    /// This side dialed it.
+    dialed: bool,
+    /// How many [`Event::Acked`] came.
+    acks: u64,
     /// How many dials connected before this one, once `peer` is set.
     connected: u64,
     /// Why the connection ended.
@@ -393,6 +407,36 @@ impl Session {
     /// Whether the session is open: no caller closed it, and it has not ended.
     pub(crate) fn live(&self) -> bool {
         self.state.borrow().endpoint.live(self.key)
+    }
+
+    /// Whether this side dialed the session.
+    pub(crate) fn dialed(&self) -> bool {
+        self.state.borrow_mut().slot(self.key).dialed
+    }
+
+    /// Pings the peer, and waits until it acknowledges the ping or a later packet.
+    ///
+    /// # Errors
+    ///
+    /// Why the session ended, as [`Session::closed`] gives it.
+    pub(crate) async fn ping(&self) -> Result<(), Error> {
+        let acks = self.with(|endpoint, clock, slot, _| {
+            endpoint.ping(clock.now(), self.key);
+            slot.acks
+        });
+        poll_fn(|cx| {
+            let mut state = self.state.borrow_mut();
+            let slot = state.slot(self.key);
+            if slot.acks > acks {
+                return Poll::Ready(Ok(()));
+            }
+            if let Some(error) = &slot.end {
+                return Poll::Ready(Err(error.clone()));
+            }
+            register(&mut slot.status, cx.waker());
+            Poll::Pending
+        })
+        .await
     }
 
     /// Waits until the session ends, and gives why.

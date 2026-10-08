@@ -113,7 +113,6 @@ pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
     table: Rc<RefCell<Table>>,
-    tasks: env::tasks::Tasks,
 }
 
 impl Transport {
@@ -140,8 +139,7 @@ impl Transport {
         Ok(Self {
             carrier: quic::Carrier::new(config.setup()?, part),
             public_key,
-            table: Rc::default(),
-            tasks,
+            table: Table::new(public_key, tasks),
         })
     }
 
@@ -169,6 +167,8 @@ impl Transport {
     /// address where some other key answers counts as a failure, because addresses
     /// can be stale.
     ///
+    /// When `peer` dials this node at the same time, both nodes keep the session that
+    /// the node with the lower key dialed, and close the other with `Code(0)`.
     /// A dial that fails gives the session that `peer` opened meanwhile, if one did.
     ///
     /// # Errors
@@ -194,7 +194,7 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        table::dial(&self.table, &self.carrier, &self.tasks, peer, addresses).await
+        table::dial(&self.table, &self.carrier, peer, addresses).await
     }
 
     /// Waits for the next new session: one that a dial on this transport made, or

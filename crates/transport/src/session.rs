@@ -43,6 +43,25 @@ impl Session {
         Weak(Rc::downgrade(&self.0))
     }
 
+    /// Whether this node dialed the session.
+    pub(crate) fn dialed(&self) -> bool {
+        self.0.dialed()
+    }
+
+    /// Whether the session is open: no caller closed it, and it has not ended.
+    pub(crate) fn live(&self) -> bool {
+        self.0.live()
+    }
+
+    /// Pings the peer, and waits until it acknowledges the ping or a later packet.
+    ///
+    /// # Errors
+    ///
+    /// Why the session ended, as [`Session::closed`] gives it.
+    pub(crate) async fn ping(&self) -> Result<(), Error> {
+        self.0.ping().await
+    }
+
     /// Who is on the other end.
     ///
     /// ```
@@ -199,6 +218,11 @@ impl Weak {
             .upgrade()
             .filter(|session| session.live())
             .map(Session)
+    }
+
+    /// Whether this is a handle to `session`.
+    pub(crate) fn is(&self, session: &Session) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Rc::as_ptr(&session.0))
     }
 }
 

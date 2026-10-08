@@ -24,8 +24,6 @@
      ends: the held one wins, and goes to the waiters and to `accept`. The loser closes
      with `Code(0)`. A restarted peer answers a ping on an old session with a
      stateless reset (`cid::Issuer`), so the old session ends within one round trip.
-     The second PR of #1363 builds this rule. Until then, a newer session does not
-     replace the open one in the table.
   5. Clients. A client session never enters the table, and `dial` never gives one. Two
      sessions from one client both stay open.
   6. Shards. The table is per `Transport`, so per shard. Until #77, a node runs one
