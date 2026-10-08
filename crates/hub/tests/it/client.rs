@@ -537,12 +537,11 @@ fn gives_the_turn_past_a_request_that_left_the_line() {
 
 /// Runs a program whose client connects to a home that serves the hello stream by
 /// hand with `hello`, with no hub.
-fn raw<H, P>(
-    seed: u64,
-    hello: impl FnOnce(transport::Session, Incoming, sim::node::Node) -> H + Send + 'static,
-    program: impl FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
-) where
+fn raw<F, H, G, P>(seed: u64, hello: F, program: G)
+where
+    F: FnOnce(transport::Session, Incoming, sim::node::Node) -> H + Send + 'static,
     H: Future<Output = ()> + 'static,
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
     P: Future<Output = ()> + 'static,
 {
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
@@ -584,45 +583,14 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
     raw(
         135,
         |session, mut hello, node| async move {
+            let renewal = admit(&mut hello, &node.clock()).await;
+            assert!(
+                renewal >= HALF
+                    && renewal.nanos() < HALF.nanos() + Span::SECOND.nanos(),
+                "the renewal comes at half of LIFE: {renewal:?}"
+            );
             let sender = hello.sender.as_mut().expect("two-way");
-            let pool = own_pool();
-            let mut challenge = [0; Challenge::LEN];
-            Challenge {
-                nonce: [7; 16],
-                now: Interval {
-                    earliest: Stamp::from_nanos(0),
-                    latest: Stamp::from_nanos(0),
-                },
-            }
-            .encode(&mut challenge);
-            let mut came = Vec::new();
-            for _ in 0..2 {
-                let sent = node.clock().now();
-                sender
-                    .send(pool.copy(&challenge).expect("room"))
-                    .await
-                    .expect("sends");
-                hello
-                    .receiver
-                    .recv()
-                    .await
-                    .expect("a hello")
-                    .expect("not finished");
-                came.push(node.clock().now() - sent);
-            }
-            let half = Span::from_nanos(5 * Span::MINUTE.nanos());
-            assert!(
-                came[0] < Span::SECOND,
-                "the hello comes at once: {:?}",
-                came[0]
-            );
-            assert!(
-                came[1] >= half
-                    && came[1].nanos() < half.nanos() + Span::SECOND.nanos(),
-                "the renewal comes at half of LIFE: {:?}",
-                came[1]
-            );
-            let refused = pool.copy(&[0xff]).expect("room");
+            let refused = own_pool().copy(&[0xff]).expect("room");
             sender.send(refused).await.expect("sends");
             assert_eq!(
                 session.closed().await,
@@ -640,6 +608,43 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
             );
         },
     );
+}
+
+/// Half of `LIFE`, as the record states it.
+const HALF: Span = Span::from_nanos(5 * Span::MINUTE.nanos());
+
+/// Sends a challenge on `hello` and takes the hello, then admits it with the next
+/// challenge and takes the renewal. Gives the time from the admission to the renewal.
+async fn admit(hello: &mut Incoming, clock: &env::clock::Clock) -> Span {
+    let sender = hello.sender.as_mut().expect("two-way");
+    let mut challenge = [0; Challenge::LEN];
+    Challenge {
+        nonce: [7; 16],
+        now: Interval {
+            earliest: Stamp::from_nanos(0),
+            latest: Stamp::from_nanos(0),
+        },
+    }
+    .encode(&mut challenge);
+    let mut came = [Span::from_nanos(0); 2];
+    for slot in &mut came {
+        let sent = clock.now();
+        let message = own_pool().copy(&challenge).expect("room");
+        sender.send(message).await.expect("sends");
+        hello
+            .receiver
+            .recv()
+            .await
+            .expect("a hello")
+            .expect("not finished");
+        *slot = clock.now() - sent;
+    }
+    assert!(
+        came[0] < Span::SECOND,
+        "the hello comes at once: {:?}",
+        came[0]
+    );
+    came[1]
 }
 
 /// Takes each block of `pool` that it has room for.
@@ -685,6 +690,147 @@ fn renews_the_hello_once_the_pool_has_room() {
         home.served[0],
         Ok(Got::Request(name(SUBJECT), b"late".to_vec()))
     );
+}
+
+/// A renewal that finds the pool full tries again each second, so it comes the
+/// second after the pool has room.
+#[test]
+fn retries_a_renewal_each_second_while_the_pool_is_full() {
+    raw(
+        140,
+        |session, mut hello, node| async move {
+            let renewal = admit(&mut hello, &node.clock()).await;
+            let late = Span::from_nanos(renewal.nanos() - HALF.nanos());
+            assert!(
+                late >= Span::from_nanos(3 * Span::SECOND.nanos())
+                    && late
+                        < Span::from_nanos(3 * Span::SECOND.nanos() + QUIET.nanos()),
+                "the renewal comes 3 seconds late: {late:?}"
+            );
+            drop(session);
+        },
+        |node, tasks, at| async move {
+            let pool = own_pool();
+            let client = connect_with(&node, tasks, at, AGENT, Rc::clone(&pool))
+                .await
+                .expect("connects");
+            node.clock()
+                .sleep(Span::from_nanos(HALF.nanos() - Span::SECOND.nanos()))
+                .await;
+            let held = fill(&pool);
+            node.clock()
+                .sleep(Span::from_nanos(3 * Span::SECOND.nanos() + QUIET.nanos()))
+                .await;
+            drop(held);
+            node.clock().sleep(Span::SECOND).await;
+            drop(client);
+        },
+    );
+}
+
+/// A client splits a body into blocks that its pool holds.
+#[test]
+fn sends_a_body_over_the_largest_block_of_its_pool() {
+    let home = serve_session(
+        141,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let config = block::Config { budget: 1 << 16 };
+            let pool = block::Pool::new(
+                config.clone(),
+                block::Heap::new(config.reservation()),
+            );
+            let body = body(pool.largest() + 1);
+            let client = connect_with(&node, tasks, at, AGENT, Rc::new(pool))
+                .await
+                .expect("connects");
+            assert_eq!(client.request(&body).await, Ok(reversed(&body)));
+        },
+    );
+    assert!(
+        matches!(home.served[0], Ok(Got::Request(..))),
+        "{:?}",
+        home.served
+    );
+}
+
+/// A request that the turn gave to and that dropped before it polled again hands the
+/// turn on.
+#[test]
+fn hands_on_a_turn_given_to_a_dropped_request() {
+    run_program(139, slow, |node, tasks, at| async move {
+        let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+        let mut first = pin!(client.request(b"ab"));
+        let mut second = Box::pin(client.request(b"cd"));
+        let mut waits = false;
+        let got = poll_fn(|cx| {
+            if let Poll::Ready(got) = first.as_mut().poll(cx) {
+                return Poll::Ready(got);
+            }
+            if !waits {
+                assert!(second.as_mut().poll(cx).is_pending());
+                waits = true;
+            }
+            Poll::Pending
+        })
+        .await;
+        assert_eq!(got, Ok(b"ba".to_vec()));
+        drop(second);
+        assert_eq!(client.request(b"ef").await, Ok(b"fe".to_vec()));
+    });
+}
+
+/// Three requests that wait for the turn take it in the order they began, also when
+/// the last is polled first.
+#[test]
+fn gives_the_turn_in_the_order_requests_began() {
+    let home = serve_session(
+        142,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            let mut requests: Vec<_> = [[1], [2], [3]]
+                .iter()
+                .map(|body| Some(Box::pin(client.request(body))))
+                .collect();
+            poll_fn(|cx| {
+                for request in requests.iter_mut().flatten() {
+                    assert!(request.as_mut().poll(cx).is_pending());
+                }
+                Poll::Ready(())
+            })
+            .await;
+            poll_fn(|cx| {
+                for slot in requests.iter_mut().rev() {
+                    if let Some(request) = slot
+                        && let Poll::Ready(got) = request.as_mut().poll(cx)
+                    {
+                        assert!(got.is_ok(), "{got:?}");
+                        *slot = None;
+                    }
+                }
+                if requests.iter().all(Option::is_none) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+        },
+    );
+    let requests: Vec<_> = home
+        .served
+        .into_iter()
+        .filter(|got| matches!(got, Ok(Got::Request(..))))
+        .collect();
+    let order: Vec<_> = [1, 2, 3]
+        .map(|tag| Ok(Got::Request(name(SUBJECT), vec![tag])))
+        .into();
+    assert_eq!(requests, order);
 }
 
 #[test]
