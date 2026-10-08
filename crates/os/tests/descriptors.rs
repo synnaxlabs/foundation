@@ -1,6 +1,7 @@
 //! A name lookup with no free descriptor. It takes each descriptor of the process, so
-//! it runs in a test binary of its own. glibc loads its name service modules at the
-//! first lookup of a process, and gives `EAI_NONAME` when it cannot.
+//! it runs in a test binary of its own, with this one test only: the harness runs the
+//! tests of a binary on threads of one process. glibc loads its name service modules
+//! at the first lookup of a process, and gives `EAI_NONAME` when it cannot.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]

@@ -47,7 +47,8 @@ impl Failure {
     /// always an errno: EAI codes differ between systems.
     fn error(self, host: &str) -> Error {
         let errno = match (self.code, self.errno) {
-            // glibc gives `EAI_NONAME` when it cannot load its name service modules.
+            // A full table: glibc ran the lookup without part of its configuration
+            // or its modules, so the answer is not final.
             (libc::EAI_SYSTEM, errno)
             | (libc::EAI_NONAME, errno @ (Errno::MFILE | Errno::NFILE)) => errno,
             (libc::EAI_NONAME | libc::EAI_NODATA, _) => {
