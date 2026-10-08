@@ -392,11 +392,10 @@ proptest! {
         let key = name(&key);
         let definitions = BTreeMap::from([(key.clone(), definition)]);
         let problems = check(&Prefix::ROOT, &definitions);
-        let misplaced = match kind {
-            Kind::Subject | Kind::Access => None,
-            _ => Some(&Problem::Misplaced { name: key, kind }),
-        };
-        prop_assert_eq!(problems.first(), misplaced);
+        let admin = types::ed25519::PublicKey::new([7; 32]).unwrap();
+        let founding = crate::founding::create(admin).contains_key(&key);
+        let misplaced = (!founding).then_some(Problem::Misplaced { name: key, kind });
+        prop_assert_eq!(problems.first(), misplaced.as_ref());
     }
 
     #[test]

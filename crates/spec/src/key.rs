@@ -56,7 +56,7 @@ impl Kind {
                 .parse()
                 .ok()?,
         };
-        (!label.reserved() || crate::founding::founds(self, &label)).then_some(label)
+        (!label.reserved() || crate::founding::holds(self, &label)).then_some(label)
     }
 
     /// The segment of the kind in its tree key, or `None` for a connector or a channel,

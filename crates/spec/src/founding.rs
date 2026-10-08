@@ -15,7 +15,13 @@ const ADMIN: &str = "@admin";
 
 /// The kind and label of each founding definition. A later build can add an entry and
 /// never removes one: a committed spec holds the keys that an earlier build made.
-const LABELS: [(Kind, &str); 2] = [(Kind::Subject, ADMIN), (Kind::Access, ADMIN)];
+const LABELS: [(Kind, &str); 2] = [SUBJECT, ACCESS];
+
+/// The first admin's subject.
+const SUBJECT: (Kind, &str) = (Kind::Subject, ADMIN);
+
+/// The first admin's access policy.
+const ACCESS: (Kind, &str) = (Kind::Access, ADMIN);
 
 /// The definitions that Foundation makes at the first start of a mesh, by tree key:
 /// the subject `@admin`, which holds `admin`, and the access policy `@admin`, which
@@ -36,19 +42,23 @@ pub fn create(admin: PublicKey) -> BTreeMap<Name, Definition> {
         Authority(0),
     );
     BTreeMap::from([
-        (key(Kind::Subject), Definition::Subject(subject)),
-        (key(Kind::Access), Definition::Access(policy)),
+        (key(SUBJECT), Definition::Subject(subject)),
+        (key(ACCESS), Definition::Access(policy)),
     ])
 }
 
 /// Whether a founding definition of kind `kind` has the label `label`: a key that
 /// [`create`] makes, or that an earlier build made.
-pub(crate) fn founds(kind: Kind, label: &Name) -> bool {
+pub(crate) fn holds(kind: Kind, label: &Name) -> bool {
     LABELS.contains(&(kind, label.as_str()))
 }
 
-fn key(kind: Kind) -> Name {
-    kind.join(ADMIN.parse().expect("invariant: `@admin` is a name"))
+fn key((kind, label): (Kind, &str)) -> Name {
+    kind.join(
+        label
+            .parse()
+            .expect("invariant: a founding label is a name"),
+    )
 }
 
 #[cfg(test)]
