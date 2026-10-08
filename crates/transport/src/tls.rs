@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aws_lc_rs::signature::Ed25519KeyPair;
 use rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
@@ -20,7 +19,7 @@ use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName,
     ServerConfig, SignatureScheme,
 };
-use types::ed25519::{PrivateKey, PublicKey};
+use types::ed25519::{Pair, PrivateKey, PublicKey};
 
 use crate::session::Peer;
 
@@ -75,11 +74,8 @@ impl Tls {
     /// Makes a self-signed certificate for the node key. The same key always gives
     /// the same bytes.
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
-            .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let certificate = issue(&private_key.public().to_bytes(), |tbs| {
-            pair.sign(tbs).as_ref().to_vec()
-        });
+        let pair = Pair::new(private_key);
+        let certificate = issue(&pair.public().to_bytes(), |tbs| pair.sign(tbs));
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
         let key = any_eddsa_type(&pkcs8)
             .expect("invariant: the PKCS#8 template holds an Ed25519 key");
@@ -160,7 +156,7 @@ fn provider() -> CryptoProvider {
 
 /// The template certificate for `key`, with the signature `sign` gives for its
 /// to-be-signed part.
-fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> [u8; 64]) -> Vec<u8> {
     let mut tbs = Vec::with_capacity(TBS_BYTES);
     for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
         tbs.extend_from_slice(part);
@@ -468,8 +464,7 @@ mod tests {
             let len = u16::try_from(content.len()).expect("under 64 KiB");
             [&[0x30, 0x82], len.to_be_bytes().as_slice(), content].concat()
         }
-        let pair =
-            Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
+        let pair = Pair::new(private_key);
         let subject = seq(&vec![0xa5; subject_bytes]);
         // `TBS` without its header.
         let tbs = seq(&[
@@ -479,11 +474,11 @@ mod tests {
             VALIDITY,
             &subject,
             SPKI,
-            &private_key.public().to_bytes(),
+            &pair.public().to_bytes(),
         ]
         .concat());
         let signature = pair.sign(&tbs);
-        seq(&[&tbs[..], ED25519, SIGNATURE, signature.as_ref()].concat())
+        seq(&[&tbs[..], ED25519, SIGNATURE, &signature].concat())
     }
 
     /// The subject bytes that make [`padded_der`] `bytes` long.
@@ -573,7 +568,7 @@ mod tests {
 
     /// TLS for `key`, a point of small order, made with no private key.
     fn keyless(key: [u8; 32]) -> Tls {
-        let certificate = issue(&key, |_| vec![0; 64]);
+        let certificate = issue(&key, |_| [0; 64]);
         Tls::with(CertifiedKey::new(
             vec![certificate.into()],
             Arc::new(Forged),
