@@ -3,7 +3,8 @@
 use std::fmt;
 
 use types::channel;
-use types::node::{self, PublicKey};
+use types::ed25519::PublicKey;
+use types::node;
 use types::time::Stamp;
 
 use crate::bytes::{

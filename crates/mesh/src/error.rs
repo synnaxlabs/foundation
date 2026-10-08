@@ -1,7 +1,8 @@
 use std::fmt;
 
 use raft::Position;
-use types::node::{self, PublicKey};
+use types::ed25519::PublicKey;
+use types::node;
 
 use crate::change::Unknown;
 use crate::region::Unfit;

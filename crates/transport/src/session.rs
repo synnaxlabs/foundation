@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::rc::Rc;
 
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
 use crate::class::Class;
 use crate::code::Code;
@@ -184,7 +184,7 @@ impl fmt::Debug for Session {
 /// ```
 /// use transport::Peer;
 ///
-/// fn key(peer: Peer) -> Option<types::node::PublicKey> {
+/// fn key(peer: Peer) -> Option<types::ed25519::PublicKey> {
 ///     match peer {
 ///         Peer::Node(key) => Some(key),
 ///         Peer::Client => None,

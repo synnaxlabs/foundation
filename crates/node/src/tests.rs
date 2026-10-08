@@ -2305,7 +2305,7 @@ mod port {
     }
 
     /// The node's key, as a peer sees it.
-    fn node_key(sim: &mut sim::Sim) -> types::node::PublicKey {
+    fn node_key(sim: &mut sim::Sim) -> types::ed25519::PublicKey {
         let host = sim.node(sim::node::Config::default());
         let key = sim.run_on(&host, |host, tasks| async move {
             transport(&host, tasks, KEY).0.public_key()

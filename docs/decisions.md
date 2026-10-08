@@ -1999,9 +1999,12 @@ How to read this record:
   it as a contract on 2026-10-05 ("yes to both"). The golden certificate, the ALPN name,
   and the suite and group lists are an oracle in `oracles/conformance/transport/`. A key
   of small order is not a node key: a signature for it passes with no private key, so
-  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
-  when it is built, so no check site needs its own test. The person decided on
-  2026-10-05 ("Yeah that's fine"), #227, #277.
+  every Ed25519 check refuses it (BQ12). `types::ed25519::PublicKey` refuses such a
+  key when it is built, so no check site needs its own test. The person decided on
+  2026-10-05 ("Yeah that's fine"), #227, #277. `types::ed25519::PublicKey` holds the
+  Ed25519 public key of a node and of a subject. Decided by `laptop.architect` at
+  2026-10-08T04:03:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -2418,25 +2421,29 @@ How to read this record:
   never crosses a `SECTOR`: a record whose header would cross one starts at the next
   sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
   whole or absent. At a restart, zeros where a record should start, or a good header
-  with a torn body, are the end of the log. Anything else, or a record after a torn one,
-  is `Error::Corrupt`, and the node does not start. Open writes again, whole, the end
-  file that it finds: the records as it read them, then zeros to the end of the file. So
-  a torn record leaves nothing that a later open reads as a header. Each read and each
-  write of the open is whole sectors, so a header gets one write. An open with a pool
-  whose largest block is less than one sector gives `Error::Pool(TooLarge)` before it
-  reads or makes a file. Then it syncs the end file, the directory, and its parent,
-  because `raft` acts on what open gives and a crash can leave any of them with no sync.
-  The write is there because a read sees, from the cache, the writes that a failed sync
-  of this boot lost, and a later sync does not write them (SIM CRASH): an open that only
-  syncs gives records, or keeps zeros, that the disk does not hold (#1066; the ring has
-  the same rule, #698). Each file before the end file is durable, because a failed write
-  poisons the log, and the next open has the file of that write as its end file or
-  removes it. An open of a log that has a file thus writes and syncs 1 MiB or more, for
-  each region. P1 gives a Raspberry Pi 4 under 1 s to start, and no one has measured
-  this cost there (#1140). Lost: zeros only after a torn end (the first shape), which is
-  the defect; and a read with direct I/O, which not each driver can give: macOS does not
-  promise a read that skips the cache (decided by the architect, #1128,
-  2026-10-07T05:37:30Z:
+  with a torn body, are the end of the log. Anything else is `Error::Corrupt`, and the
+  node does not start. So is a record that starts right after a torn one, or at the
+  start of the next file: the error is at the torn record, whatever the version of the
+  record after it. A record of another version that is the first defect in file order
+  is `Error::Version` (#1784, approved by the architect, 2026-10-08T04:26:06Z:
+  https://github.com/synnaxlabs/foundation/pull/1776#issuecomment-6052206016). Open
+  writes again, whole, the end file that it finds: the records as it read them, then
+  zeros to the end of the file. So a torn record leaves nothing that a later open reads
+  as a header. Each read and each write of the open is whole sectors, so a header gets
+  one write. An open with a pool whose largest block is less than one sector gives
+  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
+  the directory, and its parent, because `raft` acts on what open gives and a crash can
+  leave any of them with no sync. The write is there because a read sees, from the
+  cache, the writes that a failed sync of this boot lost, and a later sync does not
+  write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
+  the disk does not hold (#1066; the ring has the same rule, #698). Each file before the
+  end file is durable, because a failed write poisons the log, and the next open has the
+  file of that write as its end file or removes it. An open of a log that has a file
+  thus writes and syncs 1 MiB or more, for each region. P1 gives a Raspberry Pi 4 under
+  1 s to start, and no one has measured this cost there (#1140). Lost: zeros only after
+  a torn end (the first shape), which is the defect; and a read with direct I/O, which
+  not each driver can give: macOS does not promise a read that skips the cache (decided
+  by the architect, #1128, 2026-10-07T05:37:30Z:
   https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
   check over the whole record lost: a damaged length then reads as a torn end, and the
   log drops the good records after it. Zeros over the header of a durable record, which
@@ -2822,19 +2829,19 @@ How to read this record:
   cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
   A `Stopped` that holds a text for each cause lost, because a caller cannot match a
   text. The surface holds types of other crates, among them `raft::Position`,
-  `block::Error`, `env::files::Error`, and `types::node::PublicKey`, which the card of a
-  `Member` holds. A caller whose line of the crate map does not hold the crate of such a
-  type reads it only through `Display` and `Debug`. A caller that must match one gets
-  the crate in its line through an `interface` issue first. `mesh` does not re-export
-  such a type: a re-export makes each change to `raft` a change to the surface of
-  `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its index
-  only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and gives
-  it each stream of a peer with `Mesh::serve`. The three are public since the senders
-  (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them, because
-  `open` and `serve` give them. `claim::Error` is the `grant::Error` of the rulings:
-  #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
-  to the types of other crates. `Config` and `serve` add types that the caller builds:
-  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  `block::Error`, `env::files::Error`, and `types::ed25519::PublicKey`, which the card
+  of a `Member` holds. A caller whose line of the crate map does not hold the crate of
+  such a type reads it only through `Display` and `Debug`. A caller that must match one
+  gets the crate in its line through an `interface` issue first. `mesh` does not
+  re-export such a type: a re-export makes each change to `raft` a change to the surface
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
+  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
+  gives it each stream of a peer with `Mesh::serve`. The three are public since the
+  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
+  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
+  rulings: #1460 gave the module its new name. `Error` adds `raft::Error` and
+  `transport::Error` to the types of other crates. `Config` and `serve` add types that
+  the caller builds: `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
@@ -5706,7 +5713,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
