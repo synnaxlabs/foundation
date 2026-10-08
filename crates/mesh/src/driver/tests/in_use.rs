@@ -60,7 +60,7 @@ async fn commit(
         .unwrap();
     let listed = update.chunks.into_iter().collect();
     let holders = [key(1)].into();
-    mesh.settle_spec(base, update.root, listed, holders)
+    mesh.settle_spec(base, update.root, listed, holders, BTreeMap::new())
         .await
         .unwrap()
 }
@@ -102,9 +102,12 @@ fn a_lone_voter_uses_the_spec_of_each_change_that_it_applies() {
         assert_eq!(mesh.spec().await, Ok(in_use(base(), &BTreeMap::new())));
         let a = create_subjects(&["plant.a"], 1);
         let b = create_subjects(&["plant.b"], 1);
-        let first = mesh.apply(base(), a.clone()).await.unwrap();
+        let first = mesh
+            .apply(base(), a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(first, &a)));
-        let second = mesh.apply(first, b.clone()).await.unwrap();
+        let second = mesh.apply(first, b.clone(), BTreeMap::new()).await.unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(second, &b)));
     });
 }
@@ -135,8 +138,11 @@ fn a_replayed_pointer_at_or_below_the_one_in_use_leaves_the_spec_in_use() {
     let next = b.clone();
     sim.run_on(&node, move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        assert_eq!(mesh.apply(base(), a).await, Ok(first));
-        assert_eq!(mesh.apply(first, next.clone()).await, Ok(second));
+        assert_eq!(mesh.apply(base(), a, BTreeMap::new()).await, Ok(first));
+        assert_eq!(
+            mesh.apply(first, next.clone(), BTreeMap::new()).await,
+            Ok(second)
+        );
         assert_eq!(mesh.spec().await, Ok(in_use(second, &next)));
     })
     .unwrap();
@@ -171,7 +177,10 @@ fn a_founding_spec_with_problems_gives_no_spec_in_use_until_a_valid_change() {
         };
         assert_eq!(mesh.spec().await, Ok(none));
         let a = create_subjects(&["plant.a"], 1);
-        let moved = mesh.apply(founded, a.clone()).await.unwrap();
+        let moved = mesh
+            .apply(founded, a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(moved, &a)));
     });
 }
@@ -195,7 +204,7 @@ fn a_committed_spec_with_a_subject_at_admin_keeps_the_last_spec_across_a_power_c
     sim.run_on(&node, move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         let a = create_subjects(&["plant.a"], 1);
-        assert_eq!(mesh.apply(base(), a).await, Ok(first));
+        assert_eq!(mesh.apply(base(), a, BTreeMap::new()).await, Ok(first));
         assert_eq!(commit(&mesh, first, &create_admin()).await, second);
         assert_eq!(mesh.spec().await, Ok(before()));
         assert!(
@@ -214,7 +223,10 @@ fn a_committed_spec_with_a_subject_at_admin_keeps_the_last_spec_across_a_power_c
         reach(&mesh, &node.clock(), second).await;
         assert_eq!(mesh.spec().await, Ok(kept()));
         let b = create_subjects(&["plant.b"], 1);
-        let third = mesh.apply(second, b.clone()).await.unwrap();
+        let third = mesh
+            .apply(second, b.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(third, &b)));
     })
     .unwrap();
@@ -226,7 +238,10 @@ fn a_committed_spec_with_a_misplaced_subject_keeps_the_last_spec() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         let a = create_subjects(&["plant.a"], 1);
-        let first = mesh.apply(base(), a.clone()).await.unwrap();
+        let first = mesh
+            .apply(base(), a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         let name: Name = "plant.@x.@subject".parse().unwrap();
         let subject = a.values().next().unwrap().clone();
         let second = commit(&mesh, first, &[(name.clone(), subject)].into()).await;
@@ -261,7 +276,13 @@ fn a_retry_gets_only_the_missed_chunk_and_keeps_the_chunks_it_read() {
         let held: Vec<Digest> = held.collect();
         put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let moved = settled.await.unwrap();
         let missing = spec::region::Error::Tree(tree::Error::Missing(lacked));
         let behind = Spec {
@@ -297,7 +318,13 @@ fn a_failed_get_of_the_store_leaves_the_node_behind_until_a_retry() {
         let path = Path::new(BLOB).join(update.root.to_string());
         node.fail_file(&path, Operation::Open);
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let moved = settled.await.unwrap();
         let cause = files::Error::Io {
             path,
@@ -326,7 +353,7 @@ fn a_read_gets_no_listed_chunk_that_the_tree_in_use_holds() {
             create_subjects(&["plant.a"], 1),
             create_subjects(&["plant.b"], 1),
         );
-        let first = mesh.apply(base(), a).await.unwrap();
+        let first = mesh.apply(base(), a, BTreeMap::new()).await.unwrap();
         let mut chunks = Chunks::default();
         let update = spec::region::tree(&mut chunks, &b);
         put(&mesh.store, &mesh.pool, &chunks, &update.chunks)
@@ -338,7 +365,8 @@ fn a_read_gets_no_listed_chunk_that_the_tree_in_use_holds() {
         );
         let holders = [key(1)].into();
         let listed = [first.root].into();
-        let settled = mesh.settle_spec(first, update.root, listed, holders);
+        let settled =
+            mesh.settle_spec(first, update.root, listed, holders, BTreeMap::new());
         let moved = settled.await.unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(moved, &b)));
     });
@@ -358,7 +386,13 @@ fn a_retry_keeps_the_cause_of_the_read_before_it() {
         let held: Vec<Digest> = held.copied().collect();
         put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         settled.await.unwrap();
         let first = mesh.spec().await.unwrap();
         let Some(Behind {
@@ -393,7 +427,13 @@ fn a_call_at_a_later_pointer_waits_for_no_retry_of_an_older_one() {
         let held: Vec<Digest> = held.collect();
         put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let second = settled.await.unwrap();
         let missing = spec::region::Error::Tree(tree::Error::Missing(lacked));
         let behind = Some(Behind {
@@ -429,7 +469,13 @@ fn keep_ends_when_the_group_stops_during_a_retry() {
         let held: Vec<Digest> = held.collect();
         put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let second = settled.await.unwrap();
         assert_eq!(mesh.spec().await.unwrap().behind.unwrap().pointer, second);
         let block = mesh.pool.copy(chunks.get(lacked).unwrap()).unwrap();
@@ -444,7 +490,8 @@ fn keep_ends_when_the_group_stops_during_a_retry() {
             .await
             .unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(second, b.root, BTreeSet::new(), holders);
+        let settled =
+            mesh.settle_spec(second, b.root, BTreeSet::new(), holders, BTreeMap::new());
         assert_eq!(settled.await, Err(Error::Stopped(stopped)));
         node.clock().sleep(seconds(3)).await;
         assert_eq!(Rc::strong_count(&store), 2, "keep runs after the stop");
@@ -468,7 +515,13 @@ fn a_first_read_ends_when_the_group_stops() {
         let mut stuck = pin!(store.put(update.root, &block));
         assert!(now(stuck.as_mut()).await.is_pending());
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let first = settled.await.unwrap();
         node.clock().sleep(seconds(2)).await;
         assert_eq!(Rc::strong_count(&store), 3, "keep runs");
@@ -479,6 +532,7 @@ fn a_first_read_ends_when_the_group_stops() {
             pointer(2, &c).root,
             BTreeSet::new(),
             [key(1)].into(),
+            BTreeMap::new(),
         );
         assert_eq!(settled.await, Err(Error::Stopped(stopped)));
         node.clock().sleep(seconds(3)).await;
@@ -501,7 +555,13 @@ fn a_call_at_a_later_pointer_waits_for_no_retry_read_of_an_older_one() {
         let held: Vec<Digest> = held.copied().collect();
         put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let second = settled.await.unwrap();
         let first = mesh.spec().await.unwrap();
         let Some(Behind {
@@ -548,7 +608,13 @@ fn a_first_read_goes_on_when_a_newer_pointer_commits() {
         let mut b_root = pin!(mesh.store.put(b_tree.root, &block));
         assert!(now(b_root.as_mut()).await.is_pending());
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(first, b_tree.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            first,
+            b_tree.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let second = settled.await.unwrap();
         let mut call = pin!(mesh.spec());
         assert!(now(call.as_mut()).await.is_pending());
@@ -559,7 +625,13 @@ fn a_first_read_goes_on_when_a_newer_pointer_commits() {
         let mut c_root = pin!(mesh.store.put(c_tree.root, &block));
         assert!(now(c_root.as_mut()).await.is_pending());
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(second, c_tree.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            second,
+            c_tree.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         settled.await.unwrap();
         node.clock().sleep(seconds(1)).await;
         b_root.await.unwrap();
@@ -583,7 +655,13 @@ fn each_get_of_the_missed_chunk_gives_the_cause_of_the_spec_behind() {
         let held: Vec<Digest> = held.collect();
         put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
         let holders = [key(1)].into();
-        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
         let moved = settled.await.unwrap();
         let behind = |cause| Spec {
             behind: Some(Behind {
@@ -628,7 +706,13 @@ fn a_newer_pointer_drops_the_chunks_got_for_the_one_it_replaces() {
             let held: Vec<Digest> = held.collect();
             put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
             let holders = [key(1)].into();
-            let settled = mesh.settle_spec(at, update.root, BTreeSet::new(), holders);
+            let settled = mesh.settle_spec(
+                at,
+                update.root,
+                BTreeSet::new(),
+                holders,
+                BTreeMap::new(),
+            );
             at = settled.await.unwrap();
             assert_eq!(mesh.spec().await.unwrap().behind.unwrap().pointer, at);
             let group = mesh.group.borrow();
@@ -718,10 +802,13 @@ fn a_failed_sync_of_the_new_file_leaves_the_node_behind_until_a_retry() {
             create_subjects(&["plant.a"], 1),
             create_subjects(&["plant.b"], 1),
         );
-        let first = mesh.apply(base(), a.clone()).await.unwrap();
+        let first = mesh
+            .apply(base(), a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(first, &a)));
         node.fail_file(Path::new(used::SPEC), Operation::SyncDir);
-        let second = mesh.apply(first, b.clone()).await.unwrap();
+        let second = mesh.apply(first, b.clone(), BTreeMap::new()).await.unwrap();
         let cause = files::Error::Io {
             path: used::SPEC.into(),
             operation: Operation::SyncDir,
@@ -759,10 +846,13 @@ fn a_power_cut_before_the_sync_of_the_new_file_keeps_the_old_file() {
         let (applied, next) = (a.clone(), b.clone());
         sim.run_on(&node, move |node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-            assert_eq!(mesh.apply(base(), applied).await, Ok(first));
+            assert_eq!(
+                mesh.apply(base(), applied, BTreeMap::new()).await,
+                Ok(first)
+            );
             assert_eq!(mesh.spec().await.unwrap().pointer, Some(first));
             node.fail_file(Path::new(used::SPEC), Operation::SyncDir);
-            assert_eq!(mesh.apply(first, next).await, Ok(second));
+            assert_eq!(mesh.apply(first, next, BTreeMap::new()).await, Ok(second));
             let spec = mesh.spec().await.unwrap();
             assert_eq!(spec.pointer, Some(first), "seed {seed}");
         })
@@ -799,10 +889,16 @@ fn a_power_cut_before_the_removal_of_the_old_file_uses_the_new_spec() {
     let next = b.clone();
     sim.run_on(&node, move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        assert_eq!(mesh.apply(base(), a.clone()).await, Ok(first));
+        assert_eq!(
+            mesh.apply(base(), a.clone(), BTreeMap::new()).await,
+            Ok(first)
+        );
         assert_eq!(mesh.spec().await, Ok(in_use(first, &a)));
         node.fail_file(&file(first), Operation::Remove);
-        assert_eq!(mesh.apply(first, next.clone()).await, Ok(second));
+        assert_eq!(
+            mesh.apply(first, next.clone(), BTreeMap::new()).await,
+            Ok(second)
+        );
         assert_eq!(mesh.spec().await, Ok(in_use(second, &next)));
     })
     .unwrap();
@@ -824,14 +920,23 @@ fn a_failed_removal_of_the_old_file_leaves_it_until_the_next_change() {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         let changes =
             ["plant.a", "plant.b", "plant.c"].map(|label| create_subjects(&[label], 1));
-        let first = mesh.apply(base(), changes[0].clone()).await.unwrap();
+        let first = mesh
+            .apply(base(), changes[0].clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await.unwrap().pointer, Some(first));
         node.fail_file(&file(first), Operation::Remove);
-        let second = mesh.apply(first, changes[1].clone()).await.unwrap();
+        let second = mesh
+            .apply(first, changes[1].clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(second, &changes[1])));
         let names = node.files().list(Path::new(used::SPEC)).await.unwrap();
         assert_eq!(names, [name(first), name(second)]);
-        let third = mesh.apply(second, changes[2].clone()).await.unwrap();
+        let third = mesh
+            .apply(second, changes[2].clone(), BTreeMap::new())
+            .await
+            .unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(third, &changes[2])));
         let names = node.files().list(Path::new(used::SPEC)).await.unwrap();
         assert_eq!(names, [name(third)]);
@@ -965,7 +1070,7 @@ fn a_call_at_a_pointer_replaced_before_its_read_began_ends_with_the_later_pointe
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         let clock = node.clock();
         let first = mesh
-            .apply(base(), create_subjects(&["plant.a"], 1))
+            .apply(base(), create_subjects(&["plant.a"], 1), BTreeMap::new())
             .await
             .unwrap();
         let x = create_subjects(&["plant.x"], 1);
@@ -980,7 +1085,13 @@ fn a_call_at_a_pointer_replaced_before_its_read_began_ends_with_the_later_pointe
         assert!(now(d_put.as_mut()).await.is_pending());
         let holders: BTreeSet<node::Key> = [key(1)].into();
         let second = mesh
-            .settle_spec(first, x_root, BTreeSet::new(), holders.clone())
+            .settle_spec(
+                first,
+                x_root,
+                BTreeSet::new(),
+                holders.clone(),
+                BTreeMap::new(),
+            )
             .await
             .unwrap();
         clock.sleep(TICK).await;
@@ -988,7 +1099,7 @@ fn a_call_at_a_pointer_replaced_before_its_read_began_ends_with_the_later_pointe
         let mut call = pin!(mesh.spec());
         assert_eq!(now(call.as_mut()).await, Poll::Pending);
         let fourth = mesh
-            .settle_spec(third, d_root, BTreeSet::new(), holders)
+            .settle_spec(third, d_root, BTreeSet::new(), holders, BTreeMap::new())
             .await
             .unwrap();
         x_put.await.unwrap();
@@ -1011,7 +1122,10 @@ fn a_call_ends_when_the_read_of_its_pointer_ends_after_a_later_pointer_commits()
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         let clock = node.clock();
         let a = create_subjects(&["plant.a"], 1);
-        let first = mesh.apply(base(), a.clone()).await.unwrap();
+        let first = mesh
+            .apply(base(), a.clone(), BTreeMap::new())
+            .await
+            .unwrap();
         let (admin_chunks, admin_root) = create_rootless(&mesh, &create_admin()).await;
         let b = create_subjects(&["plant.b"], 1);
         let (b_chunks, b_root) = create_rootless(&mesh, &b).await;
@@ -1026,14 +1140,20 @@ fn a_call_ends_when_the_read_of_its_pointer_ends_after_a_later_pointer_commits()
         assert!(now(b_put.as_mut()).await.is_pending());
         let holders: BTreeSet<node::Key> = [key(1)].into();
         let second = mesh
-            .settle_spec(first, admin_root, BTreeSet::new(), holders.clone())
+            .settle_spec(
+                first,
+                admin_root,
+                BTreeSet::new(),
+                holders.clone(),
+                BTreeMap::new(),
+            )
             .await
             .unwrap();
         clock.sleep(TICK).await;
         let mut call = pin!(mesh.spec());
         assert_eq!(now(call.as_mut()).await, Poll::Pending);
         let third = mesh
-            .settle_spec(second, b_root, BTreeSet::new(), holders)
+            .settle_spec(second, b_root, BTreeSet::new(), holders, BTreeMap::new())
             .await
             .unwrap();
         assert_eq!(third.version, 3);

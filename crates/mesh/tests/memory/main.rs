@@ -36,8 +36,12 @@ const KEY: node::Key = node::Key::from_u128(1);
 const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
 /// The applies after which the heap is read the first time.
 const FEW: usize = 8;
-/// The applies after which the heap is read the second time.
+/// The applies after which the heap is read the last time.
 const MANY: usize = 264;
+/// The bytes for each apply by which the heap of two runs can grow apart with no
+/// refusal kept: the periodic writes of the node fall at other applies in each run.
+/// A kept refusal holds its index and two pointers, more than 80 bytes.
+const SLACK: i128 = 8;
 
 fn main() {
     many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect();
@@ -45,17 +49,39 @@ fn main() {
 }
 
 // The raft log keeps each entry in memory until #253, so the heap grows with each
-// apply, and the test compares two runs. An apply that takes effect leaves no
-// refusal, so it grows the heap by its entry alone.
+// apply, and the test compares the slope of two runs. An apply that takes effect
+// leaves no refusal, so it grows the heap by its entry alone. One read of the heap
+// can fall just before or after a periodic write, so the slope uses each read.
 fn many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect() {
-    let stale = growth(Base::Founding);
-    let taken = growth(Base::Pointer);
+    let stale = slope(&held(Base::Founding));
+    let taken = slope(&held(Base::Pointer));
     assert!(
-        stale <= taken,
-        "{} applies on a stale base hold {stale} more bytes than {FEW}, and applies \
-         that take effect hold {taken} more",
-        MANY - FEW,
+        stale.bytes <= taken.bytes + SLACK * stale.applies,
+        "applies on a stale base grow the heap by {} bytes each, and applies that \
+         take effect by {}",
+        stale.bytes / stale.applies,
+        taken.bytes / taken.applies,
     );
+}
+
+/// The least squares slope of the heap, as `bytes / applies`.
+struct Slope {
+    bytes: i128,
+    applies: i128,
+}
+
+/// The slope of `held`, one read after each apply.
+fn slope(held: &[usize]) -> Slope {
+    let count = i128::try_from(held.len()).expect("a few reads");
+    // Twice the distance of each apply from the mean, so that each is an integer.
+    let spread = (0..count).map(|at| 2 * at - (count - 1));
+    let bytes = spread
+        .clone()
+        .zip(held)
+        .map(|(x, &y)| x * i128::try_from(y).expect("a heap size"))
+        .sum::<i128>();
+    let applies = spread.map(|x| x * x).sum::<i128>() / 2;
+    Slope { bytes, applies }
 }
 
 // Each call waits for the read of the new pointer, which runs only after the loop
@@ -70,7 +96,11 @@ fn dropped_calls_of_the_spec_hold_no_heap() {
         node.clock()
             .sleep(Span::from_nanos(Span::SECOND.nanos()))
             .await;
-        let applied = mesh.apply(mesh.pointer(), create_definitions("plant.app"));
+        let applied = mesh.apply(
+            mesh.pointer(),
+            create_definitions("plant.app"),
+            BTreeMap::new(),
+        );
         applied.await.expect("the change takes effect");
         let mut few = 0;
         for done in 1..=MANY {
@@ -103,10 +133,9 @@ enum Base {
     Pointer,
 }
 
-/// The heap that the node holds after `MANY` applies on `base`, less the heap after
-/// `FEW`.
-fn growth(base: Base) -> usize {
-    let held = Arc::new(Mutex::new(Vec::new()));
+/// The heap that the node holds after each apply on `base`, from `FEW` to `MANY`.
+fn held(base: Base) -> Vec<usize> {
+    let held = Arc::new(Mutex::new(Vec::with_capacity(MANY - FEW + 1)));
     let out = Arc::clone(&held);
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
@@ -118,7 +147,9 @@ fn growth(base: Base) -> usize {
             .sleep(Span::from_nanos(Span::SECOND.nanos()))
             .await;
         let founding = mesh.pointer();
-        let pointer = mesh.apply(founding, create_definitions("plant.app")).await;
+        let pointer = mesh
+            .apply(founding, create_definitions("plant.app"), BTreeMap::new())
+            .await;
         let pointer = pointer.expect("the first change takes effect");
         for done in 1..=MANY {
             match base {
@@ -128,17 +159,19 @@ fn growth(base: Base) -> usize {
                         base: founding,
                         pointer,
                     };
-                    let applied = mesh.apply(founding, other).await;
+                    let applied = mesh.apply(founding, other, BTreeMap::new()).await;
                     assert_eq!(applied, Err(stale), "the base is stale");
                 }
                 Base::Pointer => {
                     let name = ["plant.other", "plant.app"][done % 2];
                     let definitions = create_definitions(name);
-                    let applied = mesh.apply(mesh.pointer(), definitions).await;
+                    let applied = mesh
+                        .apply(mesh.pointer(), definitions, BTreeMap::new())
+                        .await;
                     applied.expect("the change takes effect");
                 }
             }
-            if done == FEW || done == MANY {
+            if done >= FEW {
                 // The node reads the spec of each new pointer after the apply.
                 drop(mesh.spec().await.expect("the mesh runs"));
                 out.lock().expect("not poisoned").push(ALLOCATOR.held());
@@ -147,10 +180,12 @@ fn growth(base: Base) -> usize {
     });
     assert_eq!(ran, Ok(()), "the run ends");
     let held = held.lock().expect("not poisoned");
-    let [few, many] = held[..] else {
-        panic!("the heap is read twice, not {} times", held.len());
-    };
-    many.saturating_sub(few)
+    assert_eq!(
+        held.len(),
+        MANY - FEW + 1,
+        "the heap is read after each apply"
+    );
+    held.clone()
 }
 
 /// The subject `name` with the public key of the node.

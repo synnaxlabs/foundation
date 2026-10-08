@@ -3,11 +3,10 @@
 use std::sync::Arc;
 
 use connector::kind::{Kind as _, Table};
-use connector::supervisor::Supervisor;
+use connector::supervisor::{self, Supervisor};
 use document::value::Kind as Value;
 use document::{Attribute, Block, Map, Position, Source, Span};
-use env::clock::Clock;
-use env::entropy::Entropy;
+use env::tasks::Tasks;
 
 use super::*;
 
@@ -263,27 +262,31 @@ fn discovers_nothing() {
 
 /// The result of supervising one influx connector with `config`.
 fn connector_run(config: Document) -> Result<(), Error> {
-    run(move |clock, entropy| async move {
-        let kinds = Arc::new(Table::new().with("influx", Kind));
-        Supervisor::new(kinds, clock, entropy)
-            .run(
-                "influx",
-                "influx".parse().expect("a name"),
-                &config,
-                &cancel::Token::new(),
-            )
-            .await
+    run(move |node, tasks| async move {
+        Supervisor::new(supervisor::Config {
+            kinds: Arc::new(Table::new().with("influx", Kind)),
+            clock: node.clock(),
+            entropy: node.entropy(),
+            net: node.net(),
+            tasks,
+        })
+        .run(
+            "influx",
+            "influx".parse().expect("a name"),
+            &config,
+            &cancel::Token::new(),
+        )
+        .await
     })
 }
 
 /// Runs `main` on a shard of one simulated node and returns its output.
-fn run<T, F>(main: impl FnOnce(Clock, Entropy) -> F + Send + 'static) -> T
+fn run<T, F>(main: impl FnOnce(::sim::node::Node, Tasks) -> F + Send + 'static) -> T
 where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
 {
     let mut sim = ::sim::Sim::new(::sim::Config::default());
     let node = sim.node(::sim::node::Config::default());
-    sim.run_on(&node, |node, _| main(node.clock(), node.entropy()))
-        .expect("the run ends")
+    sim.run_on(&node, main).expect("the run ends")
 }
