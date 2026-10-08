@@ -188,6 +188,24 @@ fn refuses_a_hold_with_no_name() {
 }
 
 #[test]
+fn refuses_a_negative_hold_at_its_value() {
+    let config = config(&[(60, "name", string("influx")), (80, "hold", string("-1s"))]);
+    let expected = refused(
+        "config.negative-span",
+        81,
+        "the reader holds -1s, which is below zero",
+        "Write a hold of zero or more",
+    );
+    assert_eq!(read(&config), Err(vec![expected]));
+}
+
+#[test]
+fn reads_a_zero_hold() {
+    let config = config(&[(60, "name", string("influx")), (80, "hold", string("0s"))]);
+    assert_eq!(read(&config).map(|settings| settings.hold), Ok(Span::ZERO));
+}
+
+#[test]
 fn refuses_a_hold_in_latest_mode() {
     let config = config(&[
         (60, "name", string("influx")),

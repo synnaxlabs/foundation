@@ -3118,7 +3118,8 @@ How to read this record:
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings
   of an out connector: the `select` attribute and one `reader` block with `name`,
   `mode` (`hub::reader::Mode`), and `hold`. With no block the reader is ad hoc and
-  complete. A `hold` with no `name` or in `latest` mode is a plan error
+  complete. A negative `hold` is a plan error (`config.negative-span`, READER RULES,
+  #94), and so is a `hold` with no `name` or in `latest` mode
   (`connector.unnamed-hold`, `connector.latest-hold`), since only a named complete
   reader holds. `reader::KEYS` (`select`) and `reader::BLOCKS` (`reader`) name what
   `read` reads, and a kind passes them with its own keys to `document::read::unknown`

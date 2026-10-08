@@ -11,6 +11,7 @@ const LABEL_COUNT: Code = Code::new("config.label-count");
 const REPEATED_BLOCK: Code = Code::new("config.repeated-block");
 const BAD_MODE: Code = Code::new("connector.bad-mode");
 const LATEST_HOLD: Code = Code::new("connector.latest-hold");
+const NEGATIVE_SPAN: Code = Code::new("config.negative-span");
 const UNNAMED_HOLD: Code = Code::new("connector.unnamed-hold");
 
 /// The attributes that [`read`] reads. A kind passes them with its own to
@@ -33,8 +34,8 @@ pub struct Settings {
     pub select: Selector,
     /// Which frames it gets.
     pub mode: Mode,
-    /// How long the buffer keeps samples it has not received after it closes. Zero
-    /// when `name` is `None` or `mode` is `Latest`.
+    /// How long the buffer keeps samples it has not received after it closes. Zero or
+    /// more, and zero when `name` is `None` or `mode` is `Latest`.
     pub hold: Span,
 }
 
@@ -46,9 +47,9 @@ pub struct Settings {
 /// # Errors
 ///
 /// One diagnostic for each problem: no `select`, a value that does not read, a label,
-/// attribute, or block in `reader` that it does not take, a second `reader` block,
-/// and a `hold` with no `name` or in `latest` mode, since only a named complete reader
-/// holds.
+/// attribute, or block in `reader` that it does not take, a second `reader` block, a
+/// negative `hold`, and a `hold` with no `name` or in `latest` mode, since only a
+/// named complete reader holds.
 pub fn read(config: &Document) -> Result<Settings, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     let select = keep(
@@ -117,7 +118,7 @@ fn reader(
         attribute("name").map(|name| keep(value::name(&name.value), diagnostics));
     let mode = attribute("mode").map(|mode| keep(self::mode(&mode.value), diagnostics));
     let hold = attribute("hold");
-    let span = hold.map(|hold| keep(value::span(&hold.value), diagnostics));
+    let span = hold.map(|hold| keep(self::hold(&hold.value), diagnostics));
     if let Some(hold) = hold {
         let at = hold.key_span;
         if name.is_none() {
@@ -146,6 +147,20 @@ fn reader(
         mode.flatten().unwrap_or(Mode::Complete),
         span.flatten().unwrap_or(Span::ZERO),
     )
+}
+
+/// Reads a span of zero or more.
+fn hold(value: &Value) -> Result<Span, Diagnostic> {
+    let span = value::span(value)?;
+    if span < Span::ZERO {
+        return Err(Diagnostic::new(
+            NEGATIVE_SPAN,
+            value.span,
+            format!("the reader holds {span}, which is below zero"),
+            "Write a hold of zero or more".into(),
+        ));
+    }
+    Ok(span)
 }
 
 /// Reads `"complete"` or `"latest"`, as a string or a reference.
