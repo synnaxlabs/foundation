@@ -1987,6 +1987,12 @@ How to read this record:
   predicate, `Raft::reads`, holds each refusal and drop by the header, and decides
   both. A grant or a proof that `step` reads past the header and then ignores is
   still a claim (#1613 holds the design that removes the class).
+  `Entry::claims`, `Proof::claims(term)` and `Link::claims` give the claims of one
+  entry, proof, or link in the same order, so `mesh` edits a message before `step`
+  reads it (decided by `laptop.architect`, 2026-10-07T18:57:55Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6044730486, and
+  2026-10-07T20:05:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6045861142).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -2249,9 +2255,24 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
   The signer in the bytes keeps two members that share a key from sharing a
   signature. Grants name no region; a second region adds the region key under
-  `foundation/grant/2`. The driver (#471)
-  checks each claim of a message against the public keys of the members before each
-  `step`. The format version stays 1: no log has shipped. A later record replaces the
+  `foundation/grant/2`. The driver (#471) checks each
+  claim of a message before each `step` against the key of its signer: the key of a
+  member in the applied state, else the key that each join of that node in the log as
+  `raft` holds it and not applied names, when all of them name one key (decided by
+  `laptop.director`, 2026-10-07T12:48:00Z and 2026-10-07T13:10:50Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423 and
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429). An
+  entry that replaces a join removes its key, at the step that replaces it. Two joins
+  that name two keys: MESH DRIVER states the rule. The log
+  is the one that `raft` reads its configuration from, so each `step` and each proposal
+  syncs the keys from `Raft::unstable` before the write (decided by `laptop.architect`,
+  2026-10-07T13:31:26Z:
+  https://github.com/synnaxlabs/foundation/pull/1400#issuecomment-6039027801). The same
+  key serves the check of the sender of a message (`Error::Spoofed`) and of the peer of
+  a forwarded proposal (`Error::PeerNotVoter`) (decided by `laptop.architect`,
+  2026-10-07T13:23:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1400#issuecomment-6038887227). The
+  format version stays 1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of the record that the
   log made it for when that is more. A record that does not fit starts the next file.
   In a file with no record, it makes that file again, larger, so each file but the last
@@ -2393,7 +2414,74 @@ How to read this record:
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242, 2026-10-07T04:20:40Z:
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135).
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135). A claim
+  in the proof whose signer has no key at the node, or whose signature does not hold
+  under a key from a join that is not applied, is removed before `step`. An append is
+  cut before the first entry with such a claim, and the entries after the cut are not
+  checked or stepped. A claim of an applied member with a bad signature refuses the
+  whole message (`Error::Claim` with `claim::Error::Forged`) (decided by
+  `laptop.director`, 2026-10-07T20:02:05Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6045806233. This
+  supersedes rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6042828979, which
+  superseded rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423). In
+  the chain, such a vote of a link is removed, and the chain is cut before the first
+  link whose change is such a claim. `mesh` makes each change before `Raft::claims`,
+  and steps the message that it checked (decided by `laptop.director`,
+  2026-10-07T17:18:49Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6043037608). A
+  grant of a reply that does not hold under the key of its sender refuses the reply
+  (`Error::Claim` with `claim::Error::Forged`), also when the key comes from a join
+  that is not applied: the sender check proved that the peer holds that key
+  (decided by `laptop.architect`, 2026-10-07T20:37:34Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046390090).
+  When the unapplied joins of a signer name two keys, its key is the key of the
+  joins below the first configuration entry, in the log as `raft` holds it, whose
+  incoming half names the signer, when those joins name one key, else none: the
+  leader applied the real join before it wrote that entry, so Log Matching puts the
+  real join below it in each log, and a join above it can be a forgery. The sender
+  check and the claim check both use this lookup (decided by `laptop.director`,
+  2026-10-07T20:44:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046503082.
+  Supersedes the two-keys sentence of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038611630).
+  The incoming half is enough: `raft` makes the outgoing half of an entry from the
+  incoming half of the configuration in force, so a signer that only an outgoing
+  half names is in the incoming half of an earlier entry, or of the applied
+  configuration, and then its join is applied (decided by `laptop.architect`,
+  2026-10-07T20:49:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046585323).
+  Triggers: a change kind that removes a member, or a change to how `raft` makes
+  the outgoing half, states this rule again. A link of the chain proves the entry
+  in the log of its sender, not the entries below its position in the log of the
+  receiver, so the lookup never reads a link as a configuration entry: when the
+  two joins are in the log and the entry that names the signer is in the chain
+  only, the vote of that signer is removed. With voters that do not lie, the limit
+  is in liveness only, and #1623 is the sound fix, designed with #336 (decided by
+  `laptop.director`, 2026-10-07T21:03:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046807570). A
+  voter that lies can write a join with a key that it holds, and when that join is
+  the only unapplied join of its node, the node takes that key, until #882 (decided
+  by `laptop.architect`, 2026-10-08T00:52:26Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6049888903.
+  Supersedes the sentence "the node never counts a wrong key" of
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046807570).
+  Two joins below that entry still strand a follower under a leader that the real
+  node elected, until #336 builds the voter that checks a join before it stamps it.
+  A hard proof that lost such a claim can be no quorum at a node with a newer
+  configuration, which then learns the term from the leader. A follower answers a
+  cut run with the last entry it kept, and the leader sends the rest from there.
+  `propose_voters` refuses a set with a node that is not a member in the applied
+  state of this node (`Error::NotMember`, the first such key), so each log
+  that holds the `Voters` entry holds the join of each of its voters before it, and the
+  join applies the same on each node (decided by `laptop.director`,
+  2026-10-07T12:48:00Z and 2026-10-07T13:10:50Z, with the error of `laptop.architect`,
+  2026-10-07T12:48:43Z and 2026-10-07T13:08:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038235423,
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038649429,
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038247134, and
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6038611630).
   `propose` returns the position of its entry only after the write that holds the entry
   ends: a lone voter leads before its term is on disk, and after a power cut the same
   position can hold another change. A second call that waits for the write lost: no
@@ -4487,6 +4575,10 @@ How to read this record:
 | Retired entry | Replaced by |
 | --- | --- |
 | A1 sketch: channel `home` field, epoch and seq pair, standby in the mesh file | S5, S12, A8 |
+| Rule 3 of #1382 (6038235423): `mesh` removes a claim whose signer has no key at the node, and a bad signature of a known signer refuses the message | "Rule 3 becomes" (6042828979): the append is cut before the first entry with a claim of a signer with no key, and the chain too (6043037608) |
+| Two-keys sentence of 6038611630: two joins of one node that name two keys give none until the apply decides | MESH DRIVER (6046503082): the joins below the first configuration entry that names the node decide, when they name one key |
+| "The node never counts a wrong key" of 6046807570 | MESH DRIVER (6049888903): a voter that lies can write a join with a key it holds, and when that join is the only unapplied join of its node, the node takes that key, until #882 |
+| Item 3 of rule 3 of 6042828979: a claim of a known signer with a bad signature refuses the whole message | MESH DRIVER (6045806233): a claim that does not hold under a key from a join that is not applied is removed, or cuts the append or the chain; only a bad signature of an applied member refuses |
 | A1 "control is a lease" (for every holder) | S11 (optional writer setting) |
 | A2 and A15 "mesh file" and placeholder commands | K1, K3 |
 | A5 tie rule (ties ordered by seq) | S6 strict increase |
