@@ -55,9 +55,10 @@
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907).
   A client's plan never changes a founding definition: the `ops` apply refuses a plan
   with a change at a reserved label through `config::plan::Plan::definitions`
-  (`Mismatch`, PLAN FILE), before it proposes anything, as `ops.bad-plan`. `ops` has no
-  label check of its own, as that is a second guard of one rule. Lost: the check in
-  `Mesh::apply`, a rule of a client's input and not of region state. Decided by
+  (`Mismatch`, PLAN FILE), before it proposes anything, as `ops.bad-plan` when its base
+  is the spec in use. `ops` has no label check of its own, as that is a second guard
+  of one rule. Lost: the check in `Mesh::apply`, a rule of a client's input and not of
+  region state. Decided by
   `laptop.architect` (2026-10-08T12:36:57Z, part 2 of
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621), changed
   by `laptop.architect` (2026-10-08T22:57:18Z,

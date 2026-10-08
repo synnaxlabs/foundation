@@ -56,6 +56,13 @@
   proposal or after another change applies first, is `ops.stale-plan`, status 1, fix
   `Plan again`. Each other error of `Mesh::apply` is `ops.apply`, status 1, with its
   `Display` as the message. There is no `ops.reserved-change`: `Plan::definitions`
-  refuses a change at a reserved label (FIRST ADMIN). Decided by `laptop.architect-2`
+  refuses a change at a reserved label (FIRST ADMIN). The order and the codes
+  `ops.stale-plan` and `ops.apply` are steps 3 and 4 of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586, approved
+  by `laptop.architect-2` (2026-10-08T16:00:18Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). The
+  `ops.bad-plan` fix and the order of the base compare decided by `laptop.architect-2`
   (2026-10-08T22:57:59Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432).
+  Supersedes the code, message, fix, and order of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6060043966.

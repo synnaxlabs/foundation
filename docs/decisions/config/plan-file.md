@@ -56,6 +56,6 @@
   `definitions`, as `definitions` reads the definitions at the base. So a stale plan
   with a reserved change gives `ops.stale-plan` (OPS OUTPUT). Decided by
   `laptop.architect-2` (2026-10-08T22:57:59Z,
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432), which
-  replaces
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432).
+  Supersedes the order of
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6060043966.
