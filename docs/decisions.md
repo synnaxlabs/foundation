@@ -2143,21 +2143,24 @@ How to read this record:
   than `CHUNKS_MAX` chunks, a `Spec` change can list them. The holders are the voters
   whose durable put of the listed chunks the proposer counted; until #1231 they are only
   the proposer. A record lists at most `HOLDERS_MAX` = 64 holders, and decode refuses a
-  larger count, so a record at both bounds is 33 869 bytes. Every member refuses, at
-  apply, a change whose holders are not a majority of each half of the voters as of the
-  entry (`Refused::Quorum`): the voters of the last `Voters` entry at or before it, or
-  the founding voters. So a `Voters` entry between the propose and the commit cannot
-  leave the pointer at chunks that no majority holds. The record lists only the chunks
-  that the base tree lacks, so the rule also needs the chunks of the base on a majority
-  after a change of voters (#1231). Every member applies a change whose base is the
-  pointer, and refuses one whose base is not (`Refused::Stale`), so of two changes from
-  one base only the first applies. The state machine never reads chunks and never runs a
-  check: a committed spec with problems moves the pointer, and the node keeps the last
-  spec it used (#1741). The pointer before the first change is version 0 at the root of
-  the tree of `Config::founding`. No BQ12 signature check on the change in this
-  milestone (#1213). Trigger: `mesh::Pointer` moves to a layer 1 crate in a refactor PR
-  before a `wire` message carries it. `Mesh::open` runs no check of `Config::founding`:
-  the founding is agreed region state, and a check at each open stops a node on a later
+  larger count, so a record at both bounds is 33 869 bytes. A majority of each half must
+  fit in `HOLDERS_MAX` holders, so a half has at most 62 voters; this binds only after
+  #1231. Before #1231 counts peers as holders, the rule of a majority of each half moves
+  to `raft::Voters::quorum` (#1875). Every member refuses, at apply, a change whose
+  holders are not a majority of each half of the voters as of the entry
+  (`Refused::Quorum`): the voters of the last `Voters` entry at or before it, or the
+  founding voters. So a `Voters` entry between the propose and the commit cannot leave
+  the pointer at chunks that no majority holds. The record lists only the chunks that
+  the base tree lacks, so the rule also needs the chunks of the base on a majority after
+  a change of voters (#1231). Every member applies a change whose base is the pointer,
+  and refuses one whose base is not (`Refused::Stale`), so of two changes from one base
+  only the first applies. The state machine never reads chunks and never runs a check: a
+  committed spec with problems moves the pointer, and the node keeps the last spec it
+  used (#1741). The pointer before the first change is version 0 at the root of the tree
+  of `Config::founding`. No BQ12 signature check on the change in this milestone
+  (#1213). Trigger: `mesh::Pointer` moves to a layer 1 crate in a refactor PR before a
+  `wire` message carries it. `Mesh::open` runs no check of `Config::founding`: the
+  founding is agreed region state, and a check at each open stops a node on a later
   build whose checks find more problems. The node that founds the region checks the
   founding with the `spec` function of #1841, and does not found a region whose founding
   has problems (#1744). A founding with problems at a later build follows the rule of a
@@ -2180,6 +2183,8 @@ How to read this record:
   holders, the refusal at apply, the quorum rule, and the trigger for `CHUNKS_MAX`,
   2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
+  `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
 - **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by tree
   key, the region's spec through the leader, as `set_home` does, and gives the new
   pointer. It first runs `spec::region::check` (REGION CHECK) at the region's prefix: a
@@ -2203,10 +2208,13 @@ How to read this record:
   the refusal of its own entry from `Applied`, which keeps the refusal of each applied
   entry above the lowest open floor of a try. Decided by `laptop.architect`,
   2026-10-08T08:22:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A
-  refusal at the pointer that the call makes, after a lost answer, gives that pointer; a
-  later pointer gives `Stale`. Decided by `laptop.architect`, 2026-10-08T10:19:54Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A call
+  whose entry finds the pointer that the call makes, after a lost answer or an equal
+  change of another call, returns that pointer; a later pointer gives `Stale`. Decided
+  by `laptop.architect`, 2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
+  equal change of another call, 2026-10-08T11:46:13Z
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
@@ -2216,7 +2224,10 @@ How to read this record:
   `laptop.architect`, 2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   Supersedes the list of each chunk of the new tree and `Large` on its count
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). The
+  put of each chunk of the new tree, the count before the put, the full list on a base
+  root that is not a tree node, and the name `Config::store`, 2026-10-08T11:53:51Z
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
@@ -3076,8 +3087,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
   Amended (2026-10-08, PR 1 of #1741): with a region, `node` opens the chunk store in
   `blob` in the data directory before the mesh, and gives it as
-  `mesh::Config::store`. A store that does not open stops the node with
-  `node::Error::Blob`.
+  `mesh::Config::store`. Approved by `laptop.architect-2`, 2026-10-08T11:50:17Z:
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059221889. A store
+  that does not open stops the node with `Error::Blob`. Decided by
+  `laptop.architect-2`, 2026-10-08T11:50:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -5372,9 +5386,11 @@ How to read this record:
   name in it, and shard 0 also writes `lock`, `shards-<n>`, and, with a region, `mesh`
   and each name in it (#585, by `laptop.architect`, 2026-10-08 03:37 UTC:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475), and
-  `blob` and each name in it (#1741). A change that gives a name a second writer first
-  changes the check of FILE RENAME, which relies on this (#1503, decided by
-  `laptop.architect-2`, 2026-10-07 19:12 UTC:
+  `blob` and each name in it (#1741, approved by `laptop.architect-2`, 2026-10-08
+  11:50 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059221889). A
+  change that gives a name a second writer first changes the check of FILE RENAME,
+  which relies on this (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory. Before
   the claim reads a name, shard 0 opens the file `lock` in the data directory to write
