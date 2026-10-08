@@ -161,3 +161,5 @@
   2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
   0 is the fix, as its own change" of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211.
+  Narrows, for this block, the condition "never edited by hand" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572.
