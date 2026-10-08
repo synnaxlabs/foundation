@@ -3750,11 +3750,13 @@ How to read this record:
   access changes separately. SSO comes later.
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
-  picks out the policies and connectors itself (#810). A policy reaches a name when
+  picks out the policies and connectors itself. A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
-  applied in #1402.
+  applied in #1402. The trees in place of the policies: `laptop.architect`,
+  2026-10-08T03:01:36Z
+  ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -5352,9 +5354,13 @@ Rules:
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
 8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
-   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
-   `buffer`, so its tests build a real `home::Shard`. A crate may also take itself, so
-   its tests and benches build with its own `sim` feature (STORED BENCH;
+   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, `hub` may take
+   `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
+   so its tests build a `spec::connector::Connector` (`laptop.architect`,
+   2026-10-08T03:01:36Z:
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A
+   crate may also take itself, so its tests and benches build with its own `sim`
+   feature (STORED BENCH;
    `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
    `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub

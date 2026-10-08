@@ -22,8 +22,11 @@ pub(crate) enum Deps {
 pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 
 /// Edges, each as `(user, dep)`, that `user` may take only as a dev-dependency.
-pub(crate) const TEST_EDGES: &[(&str, &str)] =
-    &[("connector-ni", "daqmx-stub"), ("hub", "buffer")];
+pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
+    ("connector-ni", "daqmx-stub"),
+    ("hub", "buffer"),
+    ("access", "document"),
+];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
@@ -323,6 +326,21 @@ mod tests {
             ("hub", "buffer", None, false),
             ("hub", "buffer", Some("build"), false),
             ("connector-modbus", "buffer", Some("dev"), false),
+        ] {
+            assert_eq!(
+                allowed(name, dep, kind),
+                expected,
+                "{name} -> {dep} {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_document_to_access_only_as_a_dev_dependency() {
+        for (name, dep, kind, expected) in [
+            ("access", "document", Some("dev"), true),
+            ("access", "document", None, false),
+            ("access", "document", Some("build"), false),
         ] {
             assert_eq!(
                 allowed(name, dep, kind),
