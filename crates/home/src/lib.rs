@@ -5,7 +5,7 @@ use std::fmt;
 
 use types::channel;
 
-#[cfg(feature = "bench")]
+#[cfg(feature = "sim")]
 #[doc(hidden)]
 pub mod bench;
 #[cfg(test)]

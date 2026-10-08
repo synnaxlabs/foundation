@@ -14,10 +14,10 @@ pub struct Entry {
 }
 
 impl Entry {
-    // Each claim a change carries, with its signature; nothing for other data.
-    pub(crate) fn claims(
-        &self,
-    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+    /// Each claim the entry carries, with its signature: for a change, its votes in
+    /// the entry's term in rising key order, then the leader's change. Nothing for
+    /// other data. A `Raft` keeps each signature as it came.
+    pub fn claims(&self) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
         let change = match &self.data {
             Data::Voters(change) => Some(change),
             Data::Empty | Data::Bytes(_) => None,
@@ -335,8 +335,13 @@ impl Log {
     }
 
     // The entries no `Ready` has given to write yet.
+    pub(crate) fn unstable(&self) -> &[Entry] {
+        let stable = usize::try_from(self.stable).unwrap_or(usize::MAX);
+        &self.entries[stable..]
+    }
+
     pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
-        let entries = self.slice(self.stable + 1, u64::MAX, usize::MAX);
+        let entries = self.unstable().to_vec();
         self.stable = self.last().index;
         entries
     }
@@ -561,6 +566,54 @@ mod tests {
             at: position(term, index),
             data: change(voters(id)),
         }
+    }
+
+    #[test]
+    fn claims_gives_the_votes_then_the_change_of_a_change_and_nothing_else() {
+        let entry = config(3, 2, 7);
+        let signature = Signature([9; 64]);
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
+        };
+        let vote = Claim::Grant {
+            voter: node::Key::from_u128(1),
+            grant: crate::Grant::Vote,
+            term: Term(3),
+            candidate: node::Key::from_u128(1),
+        };
+        let wrote = Claim::Change {
+            leader: node::Key::from_u128(1),
+            at: position(3, 2),
+            voters: &change.voters,
+        };
+        let mut signed = entry.clone();
+        signed.sign(&mut |_| signature);
+        let claims: Vec<_> = signed.claims().collect();
+        assert_eq!(claims, [(vote, Some(signature)), (wrote, Some(signature))]);
+        assert_eq!(entry.claims().count(), 2);
+        for data in [Data::Empty, Data::Bytes(vec![1])] {
+            let other = Entry {
+                at: position(3, 2),
+                data,
+            };
+            assert_eq!(other.claims().count(), 0);
+        }
+    }
+
+    #[test]
+    fn a_link_claims_what_the_entry_of_its_change_claims() {
+        let mut entry = config(3, 2, 7);
+        entry.sign(&mut |_| Signature([9; 64]));
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
+        };
+        let link = crate::Link {
+            at: entry.at,
+            change: change.clone(),
+        };
+        let claims: Vec<_> = link.claims().collect();
+        assert_eq!(claims, entry.claims().collect::<Vec<_>>());
+        assert_eq!(claims.len(), 2);
     }
 
     #[test]

@@ -22,5 +22,10 @@ sim = { path = "../sim" }
 name = "alloc"
 harness = false
 
+[[bench]]
+name = "reader"
+harness = false
+test = true
+
 [lints]
 workspace = true

@@ -149,6 +149,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
+    use crate::complete::Charge;
     use crate::readers::tests::{Frames, dropped, number};
     use crate::{Position, Reader, Record, Start, complete};
 
@@ -176,7 +177,9 @@ mod tests {
             name: self::name(name),
             hold: Span::from_nanos(10),
         };
-        readers.open(reader, Start::At(position), 0).key
+        readers
+            .open(reader, Start::At(position), 0, Charge::Whole)
+            .key
     }
 
     fn unnamed(readers: &mut Readers) -> Key {
@@ -278,7 +281,7 @@ mod tests {
                 presented: None,
                 otherwise: live(0),
             };
-            let opened = readers.open(reader, resume, 0);
+            let opened = readers.open(reader, resume, 0, Charge::Whole);
             assert_eq!(opened.replaced, Some(latest.into()));
             assert_eq!(opened.position, live(5));
         }
@@ -329,10 +332,12 @@ mod tests {
                 name: name("a"),
                 hold: Span::from_nanos(10),
             };
-            let new = readers.open(reader, Start::At(live(0)), first.charge()).key;
+            let new = readers
+                .open(reader, Start::At(live(0)), first.charge(), Charge::Whole)
+                .key;
             assert_eq!(readers.records().count(), 1);
-            readers.queue(&first, 0..1);
-            readers.queue(&frames.frame(2), 1..2);
+            readers.queue(&first, &frames.set, 0..1);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
             dropped(&mut readers, old.into());
             readers.flush();
             assert_eq!(readers.records().count(), 0);
@@ -356,8 +361,10 @@ mod tests {
                 hold: Span::from_nanos(10),
             };
             let limit = 2 * first.charge();
-            let new = readers.open(reader, Start::At(live(0)), limit).key;
-            readers.queue(&first, 0..1);
+            let new = readers
+                .open(reader, Start::At(live(0)), limit, Charge::Whole)
+                .key;
+            readers.queue(&first, &frames.set, 0..1);
             assert_eq!(readers.release(1), [new]);
             readers.records().for_each(drop);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
@@ -370,8 +377,8 @@ mod tests {
                 closed: None,
             };
             assert_eq!(readers.records().collect::<Vec<_>>(), [acked]);
-            readers.queue(&frames.frame(2), 1..2);
-            readers.queue(&frames.frame(3), 2..3);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(readers.release(3), []);
             assert!(readers.behind(new));
             dropped(&mut readers, old.into());
@@ -379,7 +386,9 @@ mod tests {
             let next = complete(&mut readers, "c", live(3));
             assert_eq!(next, complete::Key(2));
             assert!(!readers.behind(next));
-            let missed = readers.open(Reader::Unnamed, Start::At(live(2)), 0).key;
+            let missed = readers
+                .open(Reader::Unnamed, Start::At(live(2)), 0, Charge::Whole)
+                .key;
             assert!(readers.behind(missed));
             let reader = Reader::Named {
                 name: name("b"),
@@ -389,7 +398,10 @@ mod tests {
                 presented: None,
                 otherwise: live(9),
             };
-            assert_eq!(readers.open(reader, resume, 0).position, live(0));
+            assert_eq!(
+                readers.open(reader, resume, 0, Charge::Whole).position,
+                live(0)
+            );
         }
     }
 
@@ -648,8 +660,9 @@ mod tests {
                         model.mailboxes.insert(latest.key, model.newest);
                     }
                     Input::Complete => {
-                        let key =
-                            readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
+                        let key = readers
+                            .open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole)
+                            .key;
                         assert!(model.complete.insert(key), "{key} is new");
                     }
                     Input::Put => {

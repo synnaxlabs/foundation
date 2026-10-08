@@ -74,9 +74,9 @@ fn credit() {
     let mut out = [0; Credit::LEN];
     let ((), allocations) = ALLOCATOR.count(|| credit.encode(&mut out));
     assert_eq!(allocations, 0, "the credit encode allocated");
-    let mut open = [0; 5];
+    let mut open = [0; 13];
     Open {
-        mode: Mode::Latest,
+        mode: Mode::Complete { limit_bytes: 0 },
         channels: 1,
     }
     .encode(&mut open);
