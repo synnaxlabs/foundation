@@ -333,6 +333,28 @@ mod tests {
     }
 
     #[test]
+    fn lists_each_kind_once() {
+        let positions: Vec<usize> = ALL
+            .into_iter()
+            .map(|kind| match kind {
+                // A new kind goes here and in `ALL`, or `reserved` gives `true` for
+                // each of its keys.
+                Kind::Access => 0,
+                Kind::Connector => 1,
+                Kind::Channel => 2,
+                Kind::Region => 3,
+                Kind::NodeSettings => 4,
+                Kind::Compression => 5,
+                Kind::Placement => 6,
+                Kind::Time => 7,
+                Kind::Retention => 8,
+                Kind::Subject => 9,
+            })
+            .collect();
+        assert_eq!(positions, Vec::from_iter(0..ALL.len()));
+    }
+
+    #[test]
     fn gives_no_label_for_a_key_of_another_kind() {
         for key in [
             "plant.@subject",
