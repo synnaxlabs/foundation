@@ -4691,8 +4691,11 @@ How to read this record:
   moves the indexes of a nested connector. Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, the
+  check of an index against each connector above it of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, case 2 of
   the `config.connector-home` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556 and
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
   `chunks` input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
