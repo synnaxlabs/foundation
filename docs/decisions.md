@@ -5549,10 +5549,13 @@ How to read this record:
   the receive buffer of its listener, so `os` sets the options of the listener again
   on each accepted socket, on every OS. The listener still sets them before `listen`:
   the window scale of the SYN-ACK comes from its receive buffer. On macOS, a socket
-  option on a socket that a reset ended gives `EINVAL`. On `EINVAL`, `os` reads the
-  pending error: a pending error ends the stream, and with none the call gives `Io`
-  with `EINVAL`. Decided by `laptop.architect-2` (2026-10-08T17:19:48Z:
-  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065277473).
+  option on a socket that a reset ended gives `EINVAL`. On `ENOTCONN` or `EINVAL`
+  from a call on the socket, `os` reads the pending error and gives it: a pending
+  error ends the stream, and with none the call gives `Io` with the code. Decided by
+  `laptop.architect-2` (2026-10-08T17:19:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065277473; the
+  one rule for `ENOTCONN` or `EINVAL`, 2026-10-08T18:12:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
   Measured on macOS (#1921): a create of a path with a trailing slash gives `ENOTDIR`
   for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a directory
   gives `EPERM`, not `EISDIR`. No code reads these codes.
