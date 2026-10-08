@@ -58,10 +58,15 @@
   (NODE MESH), by `laptop.architect-2` (21:31 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456.
   Supersedes the #1780 clause of
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. So the
-  port is free once `lock` is, which a test pins. No test sees the drop of the
-  transport itself: the end of shard 0 drops the carrier's task, which frees the socket
-  also when a clone of the transport leaks, by `laptop.architect-2` (21:39 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Under
+  `sim`, the port is free once `lock` is, which a test pins. Under `os`, the carrier's
+  task frees the socket only when the runtime of shard 0 drops, before `Node::join`
+  returns; #2017 makes shard 0 wait for it before it drops `lock`, by
+  `laptop.architect-2` (21:58 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972. No test
+  sees the drop of the transport itself: the end of shard 0 drops the carrier's task,
+  which frees the socket also when a clone of the transport leaks, by
+  `laptop.architect-2` (21:39 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. Supersedes
   the drop of the transport of
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
