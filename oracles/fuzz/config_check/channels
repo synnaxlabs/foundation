@@ -1,0 +1,14 @@
+channel "edge.value" {
+  data_type = "f64"
+  index = "edge.time"
+  quality = "edge.q"
+  unit = "kPa"
+}
+channel "edge.q" {
+  data_type = "quality"
+  index = edge.time
+}
+channel "edge.time" {
+  kind = "index"
+  error = "edge.q"
+}
