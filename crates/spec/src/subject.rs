@@ -71,9 +71,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("the subject has no public key"),
-            Self::Duplicate { key, .. } => {
-                write!(f, "the public key {key} appears twice")
-            }
+            Self::Duplicate { .. } => f.write_str("a public key appears twice"),
         }
     }
 }
@@ -105,11 +103,11 @@ mod tests {
 
     #[test]
     fn refuses_the_second_copy_that_comes_first() {
-        let keys = vec![key(3), key(9), key(9), key(3)];
+        let keys = vec![key(3), key(9), key(7), key(9), key(3)];
         assert_eq!(
             Subject::new(keys),
             Err(Error::Duplicate {
-                index: 2,
+                index: 3,
                 key: key(9)
             })
         );
@@ -117,10 +115,7 @@ mod tests {
             index: 1,
             key: key(0xab),
         };
-        assert_eq!(
-            error.to_string(),
-            format!("the public key {} appears twice", "ab".repeat(32))
-        );
+        assert_eq!(error.to_string(), "a public key appears twice");
         assert_eq!(error.fix(), "Remove the second copy of the key");
     }
 
