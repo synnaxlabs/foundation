@@ -143,7 +143,7 @@ fn an_earlier_round_that_names_a_hot_path_needs_performance() {
 fn raw(line: &str) -> String {
     format!(
         "review round 3 has raw HTML, which can hide text on GitHub, in the line \
-         `{line}`. Put code in a code span, in the format of \
+         `{line}`. Put the line in a code span, in the format of \
          .claude/skills/review/SKILL.md, \"Round comment\"."
     )
 }
@@ -1155,10 +1155,7 @@ fn fails_a_round_with_raw_html() {
         ("-\t<source", "-\t<source"),
         ("[^1]: <source", "[^1]: <source"),
         ("> [^a]: <source", "> [^a]: <source"),
-        ("[^a\\]: <source", "[^a\\]: <source"),
-        ("[^\\]: <source", "[^\\]: <source"),
         ("[^a\\\\]: <source", "[^a\\\\]: <source"),
-        ("[^a[b]: <source", "[^a[b]: <source"),
         ("- [^a]:<source", "- [^a]:<source"),
     ];
     for (html, line) in cases {
@@ -1241,6 +1238,72 @@ fn passes_a_round_whose_text_github_shows_as_text() {
     }
     let old = old("## Review round 1\n\nNo fields.\n\n<div>");
     assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
+}
+
+/// The problem of a round 3 with a footnote label that only GitHub reads in `line`.
+fn label(line: &str) -> String {
+    format!(
+        "review round 3 has a footnote label that GitHub reads and pulldown-cmark does \
+         not, which can hide text on GitHub, in the line `{line}`. Put the line in a \
+         code span, in the format of .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
+#[test]
+fn fails_a_round_whose_fields_github_reads_as_a_footnote() {
+    let hidden = ROUND.replace("\nReviewers:", "\n[^a\\]: x\nReviewers:");
+    assert_ne!(hidden, ROUND);
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
+}
+
+#[test]
+fn fails_a_round_with_a_footnote_label_that_only_github_reads() {
+    let cases = [
+        ("[^a\\]: x", "[^a\\]: x"),
+        ("[^\\]: x", "[^\\]: x"),
+        ("[^`\\]: <source x`", "[^`\\]: <source x`"),
+        ("[^a\\]: <source", "[^a\\]: <source"),
+        ("[^\\]: <source", "[^\\]: <source"),
+        ("[^a[b]: <source", "[^a[b]: <source"),
+        ("[^a[b]: x", "[^a[b]: x"),
+        ("> [^a\\]: x", "> [^a\\]: x"),
+        ("- [^a\\]: x", "- [^a\\]: x"),
+        ("[^1]: [^a\\]: x", "[^1]: [^a\\]: x"),
+        ("a\n[^a\\]: x", "[^a\\]: x"),
+        ("[^a\\]: x](https://x.y)", "[^a\\]: x](https://x.y)"),
+    ];
+    for (text, line) in cases {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![label(line)],
+            "{text}"
+        );
+    }
+    let old = old("## Review round 1\n\nNo fields.\n\n[^a\\]: x");
+    assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
+}
+
+#[test]
+fn passes_a_footnote_label_that_both_parsers_read() {
+    for text in [
+        "[^1]: x",
+        "> [^a]: x",
+        "[^a]: x\n[^b]: y",
+        "[^a\\\\]:x",
+        "`[^a\\]: x`",
+    ] {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
 }
 
 #[test]

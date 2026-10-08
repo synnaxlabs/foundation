@@ -322,10 +322,10 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
-        if let Some(line) = shown.html.filter(|_| !old) {
+        if let Some((line, what)) = shown.hidden.filter(|_| !old) {
             return Err(format!(
-                "review round {number} has raw HTML, which can hide text on GitHub, in \
-                 the line `{line}`. Put code in a code span, {FORMAT}"
+                "review round {number} has {what}, which can hide text on GitHub, in the \
+                 line `{line}`. Put the line in a code span, {FORMAT}"
             ));
         }
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
@@ -418,6 +418,9 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
     (values, lines.len())
 }
 
+/// What a line holds that starts with a footnote label that only GitHub reads.
+const NOTE: &str = "a footnote label that GitHub reads and pulldown-cmark does not";
+
 /// The GitHub extensions that `pulldown-cmark` has.
 const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_FOOTNOTES)
@@ -438,10 +441,12 @@ struct Shown<'a> {
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
     /// shows them: without the indent or the marks of a list item or a quote.
     text: Vec<Vec<&'a str>>,
-    /// The first line of the comment with raw HTML: an HTML block, inline HTML, or a
-    /// line of text that starts with `<` and a letter, `!`, `/`, or `?`. GitHub can
-    /// read such a line in a different way, or hide the text after it.
-    html: Option<&'a str>,
+    /// The first line of the comment that can hide text on GitHub, and what it holds:
+    /// raw HTML (an HTML block, inline HTML, or a line of text that starts with `<` and
+    /// a letter, `!`, `/`, or `?`), or a line of text that starts with a footnote label
+    /// that GitHub reads and `pulldown-cmark` does not. GitHub hides a footnote with no
+    /// reference.
+    hidden: Option<(&'a str, &'static str)>,
     /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
@@ -463,18 +468,20 @@ impl<'a> Shown<'a> {
             let source = &body[start..range.start + line.len()];
             let paragraph = open.last().copied().flatten().filter(|_| fresh);
             let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
-            let raw = match &event {
-                Event::Html(_) | Event::InlineHtml(_) => true,
-                Event::Text(_) => {
-                    !code
-                        && marks(&body[start..range.start])
-                        && line.strip_prefix('<').is_some_and(|l| l.starts_with(opens))
-                }
+            let block = match &event {
+                Event::Start(tag) => !inline(tag.to_end()),
+                Event::End(_) => true,
                 _ => false,
             };
-            if raw && shown.html.is_none() {
-                shown.html = Some(source.trim());
-            }
+            let first = !code && !block && marks(&body[start..range.start]);
+            let html = line.strip_prefix('<').is_some_and(|l| l.starts_with(opens));
+            let hides = match &event {
+                Event::Html(_) | Event::InlineHtml(_) => Some("raw HTML"),
+                Event::Text(_) if first && html => Some("raw HTML"),
+                _ if first && note(line).is_some() => Some(NOTE),
+                _ => None,
+            };
+            shown.hidden = shown.hidden.or(hides.map(|what| (source.trim(), what)));
             // An `Html` event ends at `\n` only, so it can hold more than one line.
             if matches!(event, Event::Html(_)) && open.len() == 1 {
                 let number = || lines(&body[start..range.end]).find_map(heading);
@@ -601,7 +608,7 @@ fn heading(line: &str) -> Option<&str> {
 /// Whether `prefix`, the source of a line before some text, holds only the indent and
 /// the marks of quotes, list items, and footnote labels, so that the text starts a line
 /// of a block. An escaped `<` has its backslash in `prefix`. A footnote label is as
-/// GitHub reads it: no backslash escapes, and no space or tab.
+/// [`note`] reads it.
 fn marks(prefix: &str) -> bool {
     let mut rest = prefix;
     loop {
@@ -613,16 +620,23 @@ fn marks(prefix: &str) -> bool {
             rest.strip_prefix(['-', '+', '*'])
         };
         let item = item.filter(|after| after.starts_with([' ', '\t']));
-        let note = || {
-            let (label, after) = rest.strip_prefix("[^")?.split_once(']')?;
-            let label = !label.is_empty() && !label.contains([' ', '\t']);
-            after.strip_prefix(':').filter(|_| label)
-        };
-        match item.or_else(|| rest.strip_prefix('>')).or_else(note) {
+        match item
+            .or_else(|| rest.strip_prefix('>'))
+            .or_else(|| note(rest))
+        {
             Some(after) => rest = after,
             None => return rest.is_empty(),
         }
     }
+}
+
+/// The text after the footnote label at the start of `text`, as GitHub reads a label:
+/// `[^`, one or more characters other than `]`, space, or tab, then `]:`, with no
+/// backslash escapes.
+fn note(text: &str) -> Option<&str> {
+    let (label, after) = text.strip_prefix("[^")?.split_once(']')?;
+    let label = !label.is_empty() && !label.contains([' ', '\t']);
+    after.strip_prefix(':').filter(|_| label)
 }
 
 /// The offset in `text` of the end of the line that holds offset `start`.

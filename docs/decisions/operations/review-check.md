@@ -34,18 +34,23 @@
   the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
   block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source,
   after the indent and the marks of quotes, list items, and footnote labels, starts
-  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. A footnote label
-  here is as GitHub reads it: `[^`, one or more characters other than `]`, space, or
-  tab, then `]:`, with no backslash escapes. The message names the line. GitHub reads
-  some of these lines in a different way, and an open `<!--` or `<details>` hides the
-  text after it. A round comment that fails by this rule gets an edit that puts the
-  line in a code span, and the cutoff stays. In an old round, a `Hot path:` line, or a
-  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
-  line of text of a paragraph, at any depth and any indent. A line of a code block or an
-  HTML block does not count. Changed by
-  https://github.com/synnaxlabs/foundation/issues/1783, with the rulings of the
-  director at 2026-10-08T21:47:24Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
+  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. It also fails
+  when such a line of text starts with a footnote label that `pulldown-cmark` does not
+  read as a footnote definition. GitHub reads that label as a footnote, and does not
+  show a footnote with no reference. A footnote label here is as GitHub reads it: `[^`,
+  one or more characters other than `]`, space, or tab, then `]:`, with no backslash
+  escapes. The message names the line. GitHub reads some of these lines in a different
+  way, and an open `<!--` or `<details>` hides the text after it. A round comment that
+  fails by this rule gets an edit that puts the line in a code span, and the cutoff
+  stays. In an old round, a `Hot path:` line, or a `Reviewers:` line of a round that
+  does not parse, counts where GitHub shows it as a line of text of a paragraph, at any
+  depth and any indent. A line of a code block or an HTML block does not count. Changed
+  by https://github.com/synnaxlabs/foundation/issues/1783 and
+  https://github.com/synnaxlabs/foundation/issues/2037, with the rulings of the director
+  at 2026-10-08T21:47:24Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983) and
+  2026-10-08T23:46:02Z
+  (https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522),
   approved by the director at 2026-10-08T22:52:30Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6070638383).
   Supersedes the code block and indent rules of
