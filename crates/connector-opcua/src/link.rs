@@ -93,8 +93,9 @@ fn each_posix_constructor_prints_its_name_and_aborts() {
 }
 
 /// Compiles `shim.c` with `line` added after the line `after`, with the build of the
-/// shim. Gives the compiler's errors, which are empty when it compiles. A warning is an
-/// error in the shim.
+/// shim at `-O3`, the release level, where GCC gives the most warnings. Gives the
+/// compiler's errors, which are empty when it compiles. A warning is an error in the
+/// shim.
 fn check_shim(after: &str, line: &str) -> String {
     use std::io::Write;
     use std::path::Path;
@@ -108,7 +109,7 @@ fn check_shim(after: &str, line: &str) -> String {
     let tool = shim
         .target(target)
         .host(target)
-        .opt_level(0)
+        .opt_level(3)
         .cargo_metadata(false)
         .cargo_warnings(false)
         .get_compiler();
@@ -140,8 +141,17 @@ fn check_shim(after: &str, line: &str) -> String {
 
 #[test]
 fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
+    // `cc` reads C flags from the environment, and `-w` there hides each warning.
+    if !crate::child::running() {
+        let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
+        crate::child::run(name, env!("CONNECTOR_OPCUA_TARGET"), None);
+        return;
+    }
     let text = include_str!("shim.c");
-    let pragmas: Vec<_> = text.lines().filter(|l| l.starts_with("#pragma")).collect();
+    let lines = text.lines().map(str::trim);
+    let pragmas: Vec<_> = lines
+        .filter(|l| l.to_lowercase().contains("pragma"))
+        .collect();
     assert_eq!(
         pragmas,
         [
@@ -162,6 +172,10 @@ fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
     // GCC gives this one only when it compiles, not with `-fsyntax-only`.
     let function = check_shim(headers, "static int in_the_headers(void) { return 0; }");
     assert!(function.contains("unused-function"), "{function}");
+    // GCC gives this one only when it optimizes.
+    let bounds = "int in_the_headers(void) { int a[2] = {0, 0}; return a[3]; }";
+    let bounds = check_shim(headers, bounds);
+    assert!(bounds.contains("array-bounds"), "{bounds}");
     let body = check_shim(
         "#include <stdlib.h>",
         "int in_the_body(int unused) { return 0; }",

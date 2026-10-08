@@ -9,6 +9,9 @@ mod ffi;
 #[cfg(feature = "open62541")]
 mod link;
 
+#[cfg(test)]
+mod child;
+
 // `build.rs` calls it, and a build script has no test harness.
 #[cfg(test)]
 #[path = "../build/compiler.rs"]
@@ -17,17 +20,19 @@ mod compiler;
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::process::Command;
 
-    use super::compiler;
+    use super::{child, compiler};
+
+    /// The target of each build that these tests make.
+    const TARGET: &str = "x86_64-unknown-linux-gnu";
 
     /// Gives the tool that `build` picks for `path`. No such file exists, so `cc`
     /// takes the family from the name, as it does for a compiler it cannot run.
     fn tool(mut build: cc::Build, path: &str) -> cc::Tool {
         build
             .compiler(path)
-            .target("x86_64-unknown-linux-gnu")
-            .host("x86_64-unknown-linux-gnu")
+            .target(TARGET)
+            .host(TARGET)
             .opt_level(0)
             .cargo_metadata(false)
             .cargo_warnings(false)
@@ -69,28 +74,13 @@ mod tests {
         pairs.map(|pair| pair[1].as_str()).collect()
     }
 
-    /// The variable that runs `builds_in_this_environment` in a child process.
-    const CHILD: &str = "CONNECTOR_OPCUA_BUILDS";
-
-    /// The variables from which `cc` takes C flags for this target.
-    const CFLAGS: [&str; 4] = [
-        "CFLAGS",
-        "HOST_CFLAGS",
-        "CFLAGS_x86_64-unknown-linux-gnu",
-        "CFLAGS_x86_64_unknown_linux_gnu",
-    ];
-
-    /// Checks the builds in the environment of the process, and does nothing when
-    /// `CHILD` is not set. `cc` adds its default warnings only when no `CFLAGS` is
+    /// Checks the builds in the environment of the process, and does nothing outside a
+    /// child process. `cc` adds its default warnings only when no `CFLAGS` is
     /// set, so `the_shim_fails_on_a_warning_with_or_without_cflags` runs it in child
     /// processes with each environment.
     #[test]
     fn builds_in_this_environment() {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the parent test sets the environment of its child process"
-        )]
-        if std::env::var_os(CHILD).is_none() {
+        if !child::running() {
             return;
         }
         let copy = Path::new("/copy");
@@ -129,22 +119,7 @@ mod tests {
     #[test]
     fn the_shim_fails_on_a_warning_with_or_without_cflags() {
         for cflags in [None, Some("-O1")] {
-            let mut child = Command::new(std::env::current_exe().unwrap());
-            child
-                .args(["--exact", "tests::builds_in_this_environment"])
-                .env(CHILD, "1");
-            for var in CFLAGS {
-                child.env_remove(var);
-            }
-            if let Some(cflags) = cflags {
-                child.env("CFLAGS", cflags);
-            }
-            let output = child.output().unwrap();
-            let stdout = String::from_utf8(output.stdout).unwrap();
-            assert!(
-                output.status.success() && stdout.contains("test result: ok. 1 passed"),
-                "CFLAGS={cflags:?}: {stdout}"
-            );
+            child::run("tests::builds_in_this_environment", TARGET, cflags);
         }
     }
 }
