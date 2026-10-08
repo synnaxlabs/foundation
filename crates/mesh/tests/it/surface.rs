@@ -18,11 +18,12 @@ use mesh::{
 };
 use raft::{Position, Term};
 use sim::Sim;
+use spec::definition::Definition;
 use transport::stream::Incoming;
 use transport::{Address, Class, Code, Peer, Port, Transport};
 use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
-use types::name::Prefix;
+use types::name::{Name, Prefix};
 use types::node::{self, SealKey};
 use types::time::Span;
 use wire::Protocol;
@@ -46,6 +47,11 @@ fn assert_serves<'a, F: Future<Output = Result<(), Error>>>(
 
 fn assert_sets<'a, F: Future<Output = Result<(), Error>>>(
     _: fn(&'a Mesh, channel::Key, node::Key) -> F,
+) {
+}
+
+fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
+    _: fn(&'a Mesh, Pointer, BTreeMap<Name, Definition>) -> F,
 ) {
 }
 
@@ -421,6 +427,7 @@ fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
     assert_gives_a_home(Watch::next);
     assert_serves(Mesh::serve);
     assert_sets(Mesh::set_home);
+    assert_applies(Mesh::apply);
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -441,7 +448,10 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Pool(_)
         | Error::Malformed
         | Error::Stream(_)
-        | Error::Stopped(_) => {}
+        | Error::Stopped(_)
+        | Error::Stale { .. }
+        | Error::Large { .. }
+        | Error::Problems(_) => {}
     };
     let _: fn(&Error) = cases;
 }

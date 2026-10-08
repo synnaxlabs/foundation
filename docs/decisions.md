@@ -1531,6 +1531,27 @@ How to read this record:
   `node`, because the peer exchange adds and removes sources, and `node` would pass its
   events through. Decided by the `time` builder (#144, #600). The coordinator approved
   it on #144 and #600.
+- **CLOCK REACH (2026-10-08)** `clock::Reader::reach(at) -> impl Future<Output = ()>`
+  waits until the latest edge of mesh time is at or after `at`, and is never early: a
+  read inside the wait gave such an edge. A later read can give an earlier edge, when
+  the error shrinks. A drop cancels the wait. (1) One edge, the latest, as SUBJECT
+  PROOF ends a hello; if #274 ends a hold on the earliest edge, it adds an edge
+  argument through an interface change. (2) It reads mesh time, sleeps on the
+  monotonic clock until the soonest reading at which the slew of that read moves the
+  latest edge to `at`, and reads again. Under one slew it is late only by the timer;
+  a new slew shows at the next read. (3) Before the first mesh time it reads again
+  each second, the period of the OS source. (4) `estimate::Slew::reach(now, at,
+  drift) -> Monotonic` gives that reading. It has no `None`: at the last reading the
+  edge is at the end of a stamp's range. The edge is not monotonic (a downward slew
+  moves it back at each tick), so it steps by the most the edge can rise: `j * (1 +
+  rate) + 1` ns over `j` ns, with `rate` the larger of the drift and 500 ppm. Lost:
+  an edge argument now; a wake from the writer on each change of the discipline (a
+  wake for each waiter each second, and a waker list between shards); a cap on each
+  sleep, such as 1 s (about 900 wakeups for each 15-minute hello on each link); a
+  `Sleep` type with `reset` for a renewal; `Reader::when(at) -> Option<Monotonic>`,
+  which keeps the loop in each caller; an accessor of the monotonic clock on
+  `Reader`, and `hub::Config::clock`. Decided by `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1870.
 
 ### 1.7 Transport
 
@@ -2193,6 +2214,28 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with
   "member" for "voter", 2026-10-08T08:46:16Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056189352).
+- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by
+  tree key, the region's spec through the leader, as `set_home` does, and gives the new
+  pointer. It first runs `spec::region::check` (REGION CHECK) at the region's prefix: a
+  problem gives `Error::Problems`, which holds each problem as `check` gives it, and
+  proposes nothing. `mesh` defines no problem of its own. It then builds the tree with
+  `spec::region::tree`, and the change lists each chunk of the new tree. A tree of more
+  than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing;
+  #1741 decides how a change of more new chunks applies. A change that the state
+  refuses gives `Error::Stale { base, pointer }`. A call learns the refusal of its own
+  entry from `Applied`, which keeps the refusal of each applied entry above the lowest
+  open floor of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  A refusal at the pointer that the call makes, after a lost answer, gives that
+  pointer; a later pointer gives `Stale`. Decided by `laptop.architect`,
+  2026-10-08T10:19:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427).
+  The build with `spec::region::tree`, and the build of the root of
+  `Config::founding` with it in `Mesh::open`, decided by `laptop.architect`,
+  2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
+  Supersedes the build with `spec::tree::apply` from `tree::empty()`
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
