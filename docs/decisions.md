@@ -5012,15 +5012,17 @@ How to read this record:
   The bytes hold no span. Another version is `plan::Error::Version`, which says to plan
   again; other bytes are `plan::Error::Malformed` at the offset of the field that holds
   the first wrong byte, or of the field that the bytes cut. `decode` checks only the
-  form; `definitions`, then `spec::region::check` of the definitions after the plan,
-  refuse the rest. `config::plan::Plan::definitions(applied, key)` gives those
-  definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
-  from `key`, which the check refuses as dangling. Each call of `key` must give a key
-  that no channel holds and that no earlier call gave. `definitions` is fallible: it
-  refuses with `plan::Error::Mismatch { name }` at the first change in one of these
-  cases, which `plan` never makes from `applied`, so only a hand-made file holds. The
-  change's `old` is not the digest of the stored definition at its name, or the stored
-  or new definition is of a kind that no block defines or is not at the tree key of an
+  form. `definitions` refuses the cases below, and `spec::region::check` refuses each
+  problem of the definitions after the plan. Neither checks `homes`, and neither refuses
+  a change whose new bytes equal the stored bytes.
+  `config::plan::Plan::definitions(applied, key)` gives those definitions with the key
+  rule of PLAN SURFACE, and an edge to no channel gets a key from `key`, which the check
+  refuses as dangling. Each call of `key` must give a key that no channel holds and that
+  no earlier call gave. `definitions` is fallible: it refuses with
+  `plan::Error::Mismatch { name }` at the first change in one of these cases, which
+  `plan` never makes from `applied`, so only a hand-made file holds. The change's `old`
+  is not the digest of the stored definition at its name, or the stored or new
+  definition is of a kind that no block defines or is not at the tree key of an
   unreserved label of its kind. The rule stays in `config`, in the one place that holds
   `applied`; apply still checks `base` first. The codec copies the channel kind layout
   of `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`, at the next
