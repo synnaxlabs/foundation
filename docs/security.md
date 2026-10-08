@@ -115,8 +115,10 @@ state on `main`.
 - The first message of a stream, and each datagram, starts with a `wire` header
   (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
   counts such a datagram. A client opens only hub streams; `node` refuses the other
-  protocols from a client. `node` stops and resets each stream until a protocol has a
-  server. It reads no datagram yet (#1661), and admits every peer (#1628).
+  protocols from a client. A node with a region gives each `Mesh` stream of a peer
+  that proved a node key to `Mesh::serve`, which checks each message (NODE MESH), and
+  rejects a client's. `node` stops and resets each other stream until its protocol has
+  a server. It reads no datagram yet (#1661), and admits every peer (#1628).
 
 ### Subject to owner
 
@@ -154,17 +156,16 @@ state on `main`.
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
-- `raft` does not check the sender of a request, by decision: the caller
-  authenticates the sender and decides which nodes may send (RAFT SURFACE).
-  `Mesh::receive` refuses a message whose sender is not the peer that holds the
-  stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
-  `raft` checks the index a heartbeat or an append answer names, the order of an
-  append's entries, and that no entry is above the append's term. A node that a
-  change removed and that missed its release campaigns; a voter whose log holds the
-  leave refuses the request, with `removed` once the leave commits, and the node stops
-  (#1105). A voter whose log lacks the leave entry admits the request until #1107, so
-  in `raft` alone such a node can win an election once no voter has a lease, and lead
-  until it commits the leave.
+- `raft` does not check the sender of a request, by decision: the caller authenticates
+  the sender and decides which nodes may send (RAFT SURFACE). `Mesh::receive` refuses a
+  message whose sender is not the peer that holds the stream (`Error::Spoofed`). `node`
+  serves mesh streams when it has a region (NODE MESH). Before it acts, `raft` checks
+  the index a heartbeat or an append answer names, the order of an append's entries, and
+  that no entry is above the append's term. A node that a change removed and that missed
+  its release campaigns; a voter whose log holds the leave refuses the request, with
+  `removed` once the leave commits, and the node stops (#1105). A voter whose log lacks
+  the leave entry admits the request until #1107, so in `raft` alone such a node can win
+  an election once no voter has a lease, and lead until it commits the leave.
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
@@ -187,8 +188,8 @@ state on `main`.
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
   code 17) only to a sender that a committed configuration removed, so a stranger
   cannot learn from the answer which nodes the log held, and a sender stops its group
-  only on that answer from a voter of its own configuration (#1105). No node serves
-  mesh streams yet (#471).
+  only on that answer from a voter of its own configuration (#1105). `node` serves
+  mesh streams when it has a region (NODE MESH).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
   voter that lies writes gives its node the key it names (MESH DRIVER). A signed
@@ -201,7 +202,8 @@ state on `main`.
   forge a link until #882 (the bullet above). `raft` counts the keys of a proof, and
   `mesh::claim` checks each signature against the voter's public key.
   `Mesh::receive` runs that check before `step`, and `Mesh::serve` runs it for each
-  `raft` message of a one-way stream. No node serves mesh streams yet (#471).
+  `raft` message of a one-way stream. `node` serves mesh streams when it has a
+  region (NODE MESH).
   `raft/tests/it/hostile.rs` pins the refusal and the gap.
 - A voter that was down through a configuration change holds the old configuration.
   The new leader's message carries the chain of configuration entries below its
