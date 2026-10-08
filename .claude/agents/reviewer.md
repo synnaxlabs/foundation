@@ -100,7 +100,8 @@ Check:
   test checks. Run the other tests of the crate with `--all-features`, as CI does. A
   change that only such a test catches is a finding, unless a `.cargo/mutants.toml`
   entry gives its reason, or, for a hand mutant that `cargo mutants` never makes, its
-  test doc gives it (`testing.md`). When the PR exists to remove work, which test
+  test doc gives it, and the report links that doc (`testing.md`). When the PR exists
+  to remove work, which test
   fails if it is reverted? For a bug fix, revert the fix, run its regression test, and
   name the call chain through which it fails. A test that passes, or whose call chain
   does not reach the cause that the PR names, is a finding. For a fix of a test that

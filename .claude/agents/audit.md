@@ -53,8 +53,9 @@ Check, with file and line at the merge commit:
    type under test (the test of a hand-written `Debug` impl itself excepted), unless a
    written reason holds and the assertion is not the only kill of a mutant whose reason
    no record gives: a `.cargo/mutants.toml` entry, or, for a hand mutant that
-   `cargo mutants` never makes, the doc of that test (`docs/claude/testing.md`). They
-   cover the failure paths, and each error is asserted by variant and message.
+   `cargo mutants` never makes, the doc of that test, which a round comment links
+   (`docs/claude/testing.md`). They cover the failure paths, and each error is asserted
+   by variant and message.
 2. **Review trail.** List each round: its reviewers, its range, and its end time. Each
    round ended before the merge. The trail meets "Done" in
    `.claude/skills/review/SKILL.md`. Each finding was fixed, or answered or deferred
