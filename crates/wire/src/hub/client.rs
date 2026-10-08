@@ -26,6 +26,8 @@
 //! - [`Request`]: kind 5, the body's length (`u64`), and the signature (64).
 //! - [`Response`]: kind 5 and the body's length (`u64`).
 
+use std::fmt;
+
 use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
@@ -33,8 +35,9 @@ use types::name::Name;
 use types::node;
 use types::time::{Interval, Stamp};
 
-use super::Error;
+use super::{BUSY, Error};
 use crate::common::{Fields, Writer};
+use crate::header::MALFORMED;
 
 const HELLO: u8 = 4;
 const REQUEST: u8 = 5;
@@ -62,6 +65,88 @@ pub const CAPPED: u32 = 25;
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
 /// hello it renews.
 pub const CHANGED: u32 = 26;
+
+/// A code that a node stops a client stream or closes a client session with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// [`MALFORMED`]: a message of the program does not decode, or breaks a rule of
+    /// the client wire.
+    Malformed,
+    /// [`BUSY`]: the node had no memory for a response.
+    Busy,
+    /// [`REFUSED`].
+    Refused,
+    /// [`UNSYNCED`].
+    Unsynced,
+    /// [`STALE`].
+    Stale,
+    /// [`VIA`].
+    Via,
+    /// [`EXPIRED`].
+    Expired,
+    /// [`CAPPED`].
+    Capped,
+    /// [`CHANGED`].
+    Changed,
+}
+
+impl Refusal {
+    const ALL: [Self; 9] = [
+        Self::Malformed,
+        Self::Busy,
+        Self::Refused,
+        Self::Unsynced,
+        Self::Stale,
+        Self::Via,
+        Self::Expired,
+        Self::Capped,
+        Self::Changed,
+    ];
+
+    /// The refusal of `code`, or `None` for 0 or a code outside the set.
+    #[must_use]
+    pub fn from_code(code: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|refusal| refusal.code() == code)
+    }
+
+    /// The code on the wire.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Malformed => MALFORMED,
+            Self::Busy => BUSY,
+            Self::Refused => REFUSED,
+            Self::Unsynced => UNSYNCED,
+            Self::Stale => STALE,
+            Self::Via => VIA,
+            Self::Expired => EXPIRED,
+            Self::Capped => CAPPED,
+            Self::Changed => CHANGED,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "a message of the program broke the client wire",
+            Self::Busy => "the node had no memory for a response",
+            Self::Refused => {
+                "the spec has no such subject, does not list the key for it, or the \
+                 signature is not valid"
+            }
+            Self::Unsynced => "the node has no mesh time yet",
+            Self::Stale => "the hello does not echo the nonce of the node's last challenge",
+            Self::Via => "the hello names another node as via",
+            Self::Expired => "the hello expired",
+            Self::Capped => "the hello expires later than the cap past the earliest mesh time",
+            Self::Changed => {
+                "a renewal names another subject, key, via, or connection than the hello \
+                 it renews"
+            }
+        })
+    }
+}
 
 /// The most bytes that the body of a request or a response holds: 16 MiB.
 pub const BODY_BYTES_MAX: u64 = 16 << 20;
