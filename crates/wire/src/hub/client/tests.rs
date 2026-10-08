@@ -259,6 +259,16 @@ mod request {
     }
 
     #[test]
+    fn checks_the_length_before_the_cap() {
+        let mut short = zeros(5, Response::LEN);
+        short[1..9].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(Request::decode(&short), Err(Error::Length { len: 9 }));
+        let mut long = zeros(5, Request::LEN);
+        long[1..9].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(Response::decode(&long), Err(Error::Length { len: 73 }));
+    }
+
+    #[test]
     fn takes_a_body_at_the_cap_and_refuses_one_over_it() {
         let at = encode_request(request(BODY_BYTES_MAX));
         assert_eq!(Request::decode(&at), Ok(request(BODY_BYTES_MAX)));

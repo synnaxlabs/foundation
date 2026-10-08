@@ -213,10 +213,13 @@ impl Request {
     /// [`Error::Length`], and [`Error::Oversize`].
     pub fn decode(message: &[u8]) -> Result<Self, Error> {
         let mut fields = fields(message, REQUEST)?;
-        let length = body(fields.take()?)?;
+        let length = fields.take()?;
         let signature = fields.take()?;
         fields.end()?;
-        Ok(Self { length, signature })
+        Ok(Self {
+            length: body(length)?,
+            signature,
+        })
     }
 
     /// The body that follows this request.
@@ -257,9 +260,11 @@ impl Response {
     /// As [`Request::decode`].
     pub fn decode(message: &[u8]) -> Result<Self, Error> {
         let mut fields = fields(message, REQUEST)?;
-        let length = body(fields.take()?)?;
+        let length = fields.take()?;
         fields.end()?;
-        Ok(Self { length })
+        Ok(Self {
+            length: body(length)?,
+        })
     }
 
     /// The body that follows this response.
