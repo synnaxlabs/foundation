@@ -455,14 +455,15 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             .get(segment.saturating_add(1))
             .map(|bytes| header(bytes));
         // A record after a torn one, in its file or the next, was written after the
-        // torn one was durable: the torn one is damaged.
+        // torn one was durable: the torn one is damaged. A write fills each file
+        // before the next one, so a file with no record before a record is damaged.
         let follows = |claimed: usize| {
             bytes
                 .get(start(claimed)..)
                 .is_some_and(|rest| matches!(header(rest), At::Header(_)))
         };
         if torn.is_some_and(follows)
-            || (torn.is_some() && matches!(first, Some(At::Header(_))))
+            || ((torn.is_some() || end == 0) && matches!(first, Some(At::Header(_))))
             || matches!(first, Some(At::Header(ref head)) if head.number > next)
         {
             let offset = wide(start(end));
@@ -2340,6 +2341,25 @@ mod tests {
         .unwrap();
         let expected = Error::Corrupt {
             path: file("log-1"),
+            offset: 0,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    // Record 0 in `log-1` is the record that `log-0` needs, so no number is wrong.
+    #[test]
+    fn refuses_a_first_file_with_no_record_before_a_file_with_records() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            let mode = Mode::Create { len: SEGMENT };
+            drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+            put(&node, "log-1", 0, &encode(0, None, &[bytes(1, 10)])).await;
+        })
+        .unwrap();
+        let expected = Error::Corrupt {
+            path: file("log-0"),
             offset: 0,
         };
         assert_eq!(stored(&mut sim, &node), Err(expected));
