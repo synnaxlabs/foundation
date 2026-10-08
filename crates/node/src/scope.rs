@@ -247,9 +247,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_future_whose_drop_at_completion_drops_its_scope_ends_its_task() {
-        let (scope, queued) = scope();
+    /// Spawns on `scope` a future that completes at its first poll and whose drop
+    /// drops the scope, then polls its task, which must end. Gives the scope's
+    /// `Option`.
+    fn drop_at_completion(
+        scope: Scope,
+        queued: &RefCell<Vec<Task>>,
+    ) -> Rc<RefCell<Option<Scope>>> {
         let owner = Rc::new(RefCell::new(Some(scope)));
         let guard = DropsScope(Rc::clone(&owner));
         let future: Task = Box::pin(poll_fn(move |_| {
@@ -257,10 +261,17 @@ mod tests {
             Poll::Ready(())
         }));
         owner.borrow_mut().as_mut().unwrap().spawn(future);
-        let mut task = take(&queued);
+        let mut task = take(queued);
         let (waker, _) = waker();
         let mut cx = Context::from_waker(&waker);
         assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
+        owner
+    }
+
+    #[test]
+    fn a_future_whose_drop_at_completion_drops_its_scope_ends_its_task() {
+        let (scope, queued) = scope();
+        let owner = drop_at_completion(scope, &queued);
         assert!(owner.borrow().is_none());
     }
 
@@ -301,7 +312,7 @@ mod tests {
     /// so that some drop before its slot, then a pending future that counts its polls,
     /// whose task polls once and goes into `other`. Gives what each poll of the task
     /// gave, and the count.
-    fn polled_on_drop(
+    fn create_polls_on_drop(
         scope: &mut Scope,
         queued: &RefCell<Vec<Task>>,
         other: &Rc<RefCell<Option<Task>>>,
@@ -338,7 +349,7 @@ mod tests {
     fn a_task_polled_in_a_drop_while_its_scope_drops_ends() {
         let (mut scope, queued) = scope();
         let other = Rc::default();
-        let (polled, runs) = polled_on_drop(&mut scope, &queued, &other);
+        let (polled, runs) = create_polls_on_drop(&mut scope, &queued, &other);
         drop(scope);
         assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
         assert_eq!(runs.get(), 1, "a future runs no more once its scope drops");
@@ -348,18 +359,8 @@ mod tests {
     fn a_task_polled_in_a_drop_while_a_completed_future_drops_its_scope_ends() {
         let (mut scope, queued) = scope();
         let other = Rc::default();
-        let (polled, runs) = polled_on_drop(&mut scope, &queued, &other);
-        let owner = Rc::new(RefCell::new(Some(scope)));
-        let guard = DropsScope(Rc::clone(&owner));
-        let future: Task = Box::pin(poll_fn(move |_| {
-            let _ = &guard;
-            Poll::Ready(())
-        }));
-        owner.borrow_mut().as_mut().unwrap().spawn(future);
-        let mut task = take(&queued);
-        let (waker, _) = waker();
-        let mut cx = Context::from_waker(&waker);
-        assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
+        let (polled, runs) = create_polls_on_drop(&mut scope, &queued, &other);
+        drop_at_completion(scope, &queued);
         assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
         assert_eq!(runs.get(), 1, "a future runs no more once its scope drops");
     }
