@@ -44,6 +44,21 @@ impl Kind {
         })
     }
 
+    /// The label of `key` when `key` is a tree key of this kind, as [`Kind::key`] gives
+    /// it, or `None` when it is not.
+    pub(crate) fn label(self, key: &Name) -> Option<Name> {
+        let label = match self {
+            Self::Connector | Self::Channel => key.clone(),
+            _ => key
+                .as_str()
+                .strip_suffix(self.as_str())?
+                .strip_suffix(".@")?
+                .parse()
+                .ok()?,
+        };
+        (!label.reserved()).then_some(label)
+    }
+
     /// The name of the kind, such as `node_settings`: the keyword a file format names
     /// it with, and the segment of its tree key. A connector's or a channel's key has
     /// no segment.
@@ -248,5 +263,44 @@ mod tests {
             prop_assert_eq!(key.segments().last(), Some(segment));
             prop_assert_eq!(key.segments().count(), segments.len() + 1);
         }
+
+        #[test]
+        fn gives_back_the_label_of_each_key(
+            segments in prop::collection::vec("[a-z0-9_-]{1,12}", 1..8),
+            kind in prop::sample::select(ALL.to_vec()),
+        ) {
+            let label = name(&segments.join("."));
+            let key = kind.key(label.as_str()).unwrap();
+            prop_assert_eq!(kind.label(&key), Some(label));
+        }
+    }
+
+    /// Each kind.
+    const ALL: [Kind; 10] = [
+        Kind::Access,
+        Kind::Connector,
+        Kind::Channel,
+        Kind::Region,
+        Kind::NodeSettings,
+        Kind::Compression,
+        Kind::Placement,
+        Kind::Time,
+        Kind::Retention,
+        Kind::Subject,
+    ];
+
+    #[test]
+    fn gives_no_label_for_a_key_of_another_kind() {
+        for key in [
+            "plant.@subject",
+            "plant.@access.x",
+            "@access",
+            "plant.access",
+        ] {
+            assert_eq!(Kind::Access.label(&name(key)), None, "{key}");
+        }
+        assert_eq!(Kind::Access.label(&name("plant.@x.@access")), None);
+        assert_eq!(Kind::Channel.label(&name("plant.@access")), None);
+        assert_eq!(Kind::Connector.label(&name("plant.@x.y")), None);
     }
 }

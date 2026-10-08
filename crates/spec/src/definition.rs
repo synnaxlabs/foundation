@@ -161,6 +161,22 @@ pub enum Kind {
 }
 
 impl Definition {
+    /// The kind of the definition.
+    pub(crate) const fn kind(&self) -> Kind {
+        match self {
+            Self::Access(_) => Kind::Access,
+            Self::Connector(_) => Kind::Connector,
+            Self::Region(_) => Kind::Region,
+            Self::NodeSettings(_) => Kind::NodeSettings,
+            Self::Compression(_) => Kind::Compression,
+            Self::Placement(_) => Kind::Placement,
+            Self::Time(_) => Kind::Time,
+            Self::Channel(_) => Kind::Channel,
+            Self::Retention(_) => Kind::Retention,
+            Self::Subject(_) => Kind::Subject,
+        }
+    }
+
     /// Writes the canonical bytes of the definition.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {

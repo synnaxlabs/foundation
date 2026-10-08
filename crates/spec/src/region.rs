@@ -1,8 +1,13 @@
-//! The record that a parent region keeps for each child region.
+//! A region of the spec: the record that a parent keeps for each child, and the check
+//! of a region's definitions.
 
 use std::fmt;
 
 use types::name::Name;
+
+mod check;
+
+pub use check::{Problem, check};
 
 /// The epoch and the first voters of a child region. Its tree key holds the prefix, so
 /// the prefix is not part of the record. The current voters live in the region's own
