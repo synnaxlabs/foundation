@@ -76,7 +76,8 @@ int main(int argc, char **argv) {
     print("alone", &alone);
     fflush(stdout);
     pthread_t thread;
-    if (pthread_create(&thread, NULL, draw, NULL) != 0 || pthread_join(thread, NULL) != 0)
+    if (pthread_create(&thread, NULL, draw, NULL) != 0 ||
+        pthread_join(thread, NULL) != 0)
         abort();
     return 0;
 }
