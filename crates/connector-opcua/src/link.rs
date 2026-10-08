@@ -49,62 +49,54 @@ unsafe extern "C" {
     fn UA_InterruptManager_new_POSIX(name: UaString) -> *mut c_void;
 }
 
-/// The constructors that abort, each with the test that calls it. Only
-/// `each_posix_constructor_prints_its_name_and_aborts` runs these tests, each in a
-/// child process.
-const REFUSED: [(&str, &str); 5] = [
-    ("link::refused::event_loop", "UA_EventLoop_new_POSIX"),
-    ("link::refused::tcp", "UA_ConnectionManager_new_POSIX_TCP"),
-    ("link::refused::udp", "UA_ConnectionManager_new_POSIX_UDP"),
-    (
-        "link::refused::ethernet",
-        "UA_ConnectionManager_new_POSIX_Ethernet",
-    ),
-    ("link::refused::interrupt", "UA_InterruptManager_new_POSIX"),
+/// The constructors that abort.
+const REFUSED: [&str; 5] = [
+    "UA_EventLoop_new_POSIX",
+    "UA_ConnectionManager_new_POSIX_TCP",
+    "UA_ConnectionManager_new_POSIX_UDP",
+    "UA_ConnectionManager_new_POSIX_Ethernet",
+    "UA_InterruptManager_new_POSIX",
 ];
 
-mod refused {
-    use super::*;
+/// The variable that names the constructor `call_refused` calls.
+const CHILD: &str = "CONNECTOR_OPCUA_REFUSED";
 
-    const EMPTY: UaString = UaString {
+/// Calls the constructor that `CHILD` names, and does nothing when it is not set.
+/// `each_posix_constructor_prints_its_name_and_aborts` sets it in a child process.
+#[test]
+fn call_refused() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent test picks the constructor that its child process calls"
+    )]
+    let Ok(name) = std::env::var(CHILD) else {
+        return;
+    };
+    let empty = || UaString {
         length: 0,
         data: std::ptr::null_mut(),
     };
-
-    #[test]
-    #[ignore = "a child process of each_posix_constructor_prints_its_name_and_aborts"]
-    fn event_loop() {
+    match name.as_str() {
         // SAFETY: it aborts before it reads its argument.
-        unsafe { UA_EventLoop_new_POSIX(std::ptr::null()) };
-    }
-
-    #[test]
-    #[ignore = "a child process of each_posix_constructor_prints_its_name_and_aborts"]
-    fn tcp() {
+        "UA_EventLoop_new_POSIX" => unsafe { UA_EventLoop_new_POSIX(std::ptr::null()) },
         // SAFETY: as above.
-        unsafe { UA_ConnectionManager_new_POSIX_TCP(EMPTY) };
-    }
-
-    #[test]
-    #[ignore = "a child process of each_posix_constructor_prints_its_name_and_aborts"]
-    fn udp() {
+        "UA_ConnectionManager_new_POSIX_TCP" => unsafe {
+            UA_ConnectionManager_new_POSIX_TCP(empty())
+        },
         // SAFETY: as above.
-        unsafe { UA_ConnectionManager_new_POSIX_UDP(EMPTY) };
-    }
-
-    #[test]
-    #[ignore = "a child process of each_posix_constructor_prints_its_name_and_aborts"]
-    fn ethernet() {
+        "UA_ConnectionManager_new_POSIX_UDP" => unsafe {
+            UA_ConnectionManager_new_POSIX_UDP(empty())
+        },
         // SAFETY: as above.
-        unsafe { UA_ConnectionManager_new_POSIX_Ethernet(EMPTY) };
-    }
-
-    #[test]
-    #[ignore = "a child process of each_posix_constructor_prints_its_name_and_aborts"]
-    fn interrupt() {
+        "UA_ConnectionManager_new_POSIX_Ethernet" => unsafe {
+            UA_ConnectionManager_new_POSIX_Ethernet(empty())
+        },
         // SAFETY: as above.
-        unsafe { UA_InterruptManager_new_POSIX(EMPTY) };
-    }
+        "UA_InterruptManager_new_POSIX" => unsafe {
+            UA_InterruptManager_new_POSIX(empty())
+        },
+        _ => panic!("no POSIX constructor is named {name}"),
+    };
 }
 
 #[test]
@@ -112,9 +104,10 @@ mod refused {
 fn each_posix_constructor_prints_its_name_and_aborts() {
     use std::os::unix::process::ExitStatusExt;
     const SIGABRT: i32 = 6;
-    for (test, name) in REFUSED {
+    for name in REFUSED {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--ignored"])
+            .args(["--exact", "link::call_refused"])
+            .env(CHILD, name)
             .output()
             .unwrap();
         assert_eq!(output.status.signal(), Some(SIGABRT), "{name}");
