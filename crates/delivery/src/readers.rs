@@ -114,12 +114,21 @@ const WAITING: usize = 4;
 struct Flow {
     credit: Credit,
     cost: complete::Cost,
-    /// The session missed a frame, so it gets no later frame.
-    behind: bool,
     /// The frames released to the session and not taken, oldest first.
     waiting: VecDeque<Frame>,
-    /// The next frame that waits for a grant, after the frames of `waiting`.
-    owed: Option<Owed>,
+    /// What keeps the session from a later frame.
+    lag: Lag,
+}
+
+/// What keeps a complete session from the next released frame.
+#[derive(Clone, Copy, Debug)]
+enum Lag {
+    /// Nothing: the session gets each frame it has credit for.
+    None,
+    /// The session waits for a grant on a held frame, after the frames of `waiting`.
+    Owed(Owed),
+    /// The session missed a frame, so it gets no later frame.
+    Behind,
 }
 
 /// A frame held in [`Readers::queue`] that a session waits for a grant on.
@@ -248,9 +257,12 @@ impl Readers {
         self.flows.push(Flow {
             credit: Credit::new(limit_bytes),
             cost: complete::Cost::new(charge),
-            behind: position.live < self.released,
             waiting: VecDeque::with_capacity(WAITING),
-            owed: None,
+            lag: if position.live < self.released {
+                Lag::Behind
+            } else {
+                Lag::None
+            },
         });
         self.woken_complete.clear();
         self.woken_complete.reserve(self.complete.len());
@@ -430,10 +442,10 @@ impl Readers {
     /// frame to take to the sessions to wake, and drops the held frames.
     fn miss_owed(&mut self) {
         for (session, flow) in iter::zip(&self.complete, &mut self.flows) {
-            if flow.owed.take().is_none() {
+            if !matches!(flow.lag, Lag::Owed(_)) {
                 continue;
             }
-            flow.behind = true;
+            flow.lag = Lag::Behind;
             // A session with frames to take sees the miss after it takes them.
             if flow.waiting.is_empty() {
                 self.woken_complete.push(session.key);
@@ -487,12 +499,10 @@ impl Readers {
     #[inline(never)]
     fn take_owed(&mut self, i: usize) -> Next {
         let flow = &mut self.flows[i];
-        let Some(owed) = &mut flow.owed else {
-            return if flow.behind {
-                Next::Behind
-            } else {
-                Next::Empty
-            };
+        let owed = match &mut flow.lag {
+            Lag::None => return Next::Empty,
+            Lag::Behind => return Next::Behind,
+            Lag::Owed(owed) => owed,
         };
         let (frame, _) = &self.queue[owed.frame];
         while self.sets[owed.set].key() != frame.key_set() {
@@ -508,7 +518,7 @@ impl Readers {
         let frame = frame.clone();
         owed.frame += 1;
         if owed.frame == self.held {
-            flow.owed = None;
+            flow.lag = Lag::None;
             self.paid();
         }
         Next::Frame(frame)
@@ -671,7 +681,7 @@ impl Readers {
     }
 
     fn remove(&mut self, i: usize) -> Session {
-        if self.flows.remove(i).owed.is_some() {
+        if matches!(self.flows.remove(i).lag, Lag::Owed(_)) {
             self.paid();
         }
         self.complete.remove(i)
@@ -694,11 +704,11 @@ fn give<'a>(
     let mut last: Option<&mut VecDeque<Frame>> = None;
     let mut owing = 0;
     for (session, flow) in iter::zip(complete, flows) {
-        if flow.behind || flow.owed.is_some() || seq.end <= session.position.live {
+        if !matches!(flow.lag, Lag::None) || seq.end <= session.position.live {
             continue;
         }
         if !flow.credit.spend(flow.cost.charge(frame, set, whole)) {
-            flow.owed = Some(at);
+            flow.lag = Lag::Owed(at);
             owing += 1;
             continue;
         }
