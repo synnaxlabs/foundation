@@ -161,8 +161,8 @@
   0 is the fix, as its own change" of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211.
   It is the one file outside the release that we edit by hand. Supersedes, for this
-  block, "never edited by hand. Our change edits only release files" of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572 (approved
-  by `laptop.architect-2`,
-  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6068593976,
-  2026-10-08 20:37 UTC).
+  block, "never edited by hand. Our change (PR 3, `UA_rng`) edits only release files"
+  of https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. This
+  text approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069205640,
+  2026-10-08 21:16 UTC).

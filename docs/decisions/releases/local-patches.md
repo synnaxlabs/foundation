@@ -32,8 +32,8 @@
   block of the open62541 `config.h`) is made again after each run of that command, as
   a change of a release file is, and a test fails when it is lost (`laptop.architect-2`,
   2026-10-08 20:03 UTC,
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912; the
-  text approved at 2026-10-08 20:37 UTC,
-  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6068593976).
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912; this
+  text approved by `laptop.architect` at 2026-10-08 21:16 UTC,
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069205640).
   Supersedes, for that block, "unchanged, plus the files that its build generates" of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572.
