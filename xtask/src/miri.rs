@@ -13,9 +13,9 @@ const PASSES: [&str; 2] = [
     "-Zmiri-strict-provenance -Zmiri-tree-borrows",
 ];
 
-/// Crates whose `unsafe` code only calls the OS, which Miri cannot run. Tests on the
-/// real OS check them (BLOCK MEMORY).
-pub(crate) const SKIPPED: [&str; 1] = ["os"];
+/// Crates whose `unsafe` code only calls the OS or C, which Miri cannot run. Tests on
+/// the real OS check `os` (BLOCK MEMORY). The sanitizer run checks `connector-opcua`.
+pub(crate) const SKIPPED: [&str; 2] = ["os", "connector-opcua"];
 
 /// The workspace crates whose source names `unsafe_code`, the lint that each `unsafe`
 /// use must expect, except those in [`SKIPPED`].
