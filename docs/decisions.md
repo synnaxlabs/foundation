@@ -2328,7 +2328,11 @@ How to read this record:
   of `Config::founding`. No BQ12 signature check on the change in this milestone
   (#1213). The pointer is `spec::Pointer`, and `mesh` has no pointer type of its own
   (#1887; `laptop.architect`, 2026-10-08T13:26:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734, and the
+  removal at 2026-10-08T16:04:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
+  supersedes the `mesh::Pointer` of
+  https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836.
   `Mesh::open` runs no check of `Config::founding`: the founding is agreed region state,
   and a check at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
