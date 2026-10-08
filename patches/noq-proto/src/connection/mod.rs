@@ -3069,7 +3069,7 @@ impl Connection {
         if self.peer_completed_handshake_address_validation() {
             let path_data = self.path_data_mut(path);
             path_data.pto_count = 0;
-            path_data.pto_fired = None;
+            path_data.time_of_last_pto = None;
         }
 
         // Explicit congestion notification
@@ -3277,7 +3277,7 @@ impl Connection {
         pns.loss_probes = pns.loss_probes.saturating_add(count);
         let path_data = self.path_data_mut(path_id);
         path_data.pto_count = path_data.pto_count.saturating_add(1);
-        path_data.pto_fired = Some(now);
+        path_data.time_of_last_pto = Some(now);
         self.set_loss_detection_timer(now, path_id);
     }
 
@@ -3660,7 +3660,8 @@ impl Connection {
             // Base the deadline on when the last probe was sent, so the PTO
             // doesn't fire before the response has had time to arrive, or on the
             // last PTO fire when later, so that one expired timer fires once.
-            let pto = last_ack_eliciting.max(path.pto_fired.unwrap_or(last_ack_eliciting))
+            let pto = last_ack_eliciting
+                .max(path.time_of_last_pto.unwrap_or(last_ack_eliciting))
                 + duration;
             if result.is_none_or(|(earliest_pto, _)| pto < earliest_pto) {
                 if path.anti_amplification_blocked(1) {

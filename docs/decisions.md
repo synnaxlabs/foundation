@@ -2227,9 +2227,9 @@ How to read this record:
   window, so that only a probe can send. The local patch of `noq-proto` 1.3.0
   (`docs/dependencies.md`) makes the PTO duration `min(pto_base * 2^pto_count,
   max(cap, pto_base))`, and starts the gap at the later of the last ack-eliciting send
-  and the last PTO fire (`pto_fired`). `pto_fired` is cleared on an ACK that sets
-  `pto_count` to 0. `handle_network_change` sets `pto_count` to 0 and keeps
-  `pto_fired`, so its first probe is at most one PTO base after the last fire.
+  and the last PTO fire (`time_of_last_pto`). `time_of_last_pto` is cleared on an ACK
+  that sets `pto_count` to 0. `handle_network_change` sets `pto_count` to 0 and keeps
+  `time_of_last_pto`, so its first probe is at most one PTO base after the last fire.
   Foundation does not call it. The release caps each step to the step before plus the
   cap, so the gap grew about 2 s for each probe.
   A cap with no start at the fire keeps an expired deadline in the past, and
@@ -2249,7 +2249,7 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6058428352,
   2026-10-08T11:02:00Z). The cap of a third of the idle timeout: architect-2
   (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6060065670,
-  2026-10-08T12:39:55Z). The `pto_fired` of a network change: architect-2
+  2026-10-08T12:39:55Z). The `time_of_last_pto` of a network change: architect-2
   (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6060090043,
   2026-10-08T12:41:22Z).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
