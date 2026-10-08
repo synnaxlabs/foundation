@@ -238,8 +238,8 @@ impl From<header::Error> for Error {
 /// `tasks`. The task idles while nothing is queued and no commit runs. A drop ends
 /// the task at once when it idles, else at the end of its last commit, which writes
 /// each entry queued at the drop, or earlier at the first file call that fails.
-/// Await a [`Commit`] held past the drop before a reopen, and before the shard ends,
-/// which cancels the task.
+/// Await an [`End`] past the drop before a reopen, and before the shard ends, which
+/// cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -306,6 +306,13 @@ impl State {
             self.taken
         } else {
             self.taken + 1
+        }
+    }
+
+    /// Wakes `waker` at the next end of a commit or of the task.
+    fn wait(&mut self, waker: &Waker) {
+        if !self.wakers.iter().any(|held| held.will_wake(waker)) {
+            self.wakers.push(waker.clone());
         }
     }
 
@@ -577,6 +584,16 @@ impl Buffer {
         Commit {
             shared: Rc::clone(&self.shared),
             until: self.shared.state.borrow().durable_at(),
+        }
+    }
+
+    /// Resolves once the commit task ended: after the drop, once nothing is queued,
+    /// or at a failed file call. Gives the error of that call, so `Ok` means that
+    /// each entry appended before the drop is durable.
+    #[must_use]
+    pub fn ended(&self) -> End {
+        End {
+            shared: Rc::clone(&self.shared),
         }
     }
 }
@@ -916,9 +933,27 @@ impl Future for Commit {
         if let Some(error) = &state.failed {
             return Poll::Ready(Err(error.clone()));
         }
-        if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-            state.wakers.push(cx.waker().clone());
+        state.wait(cx.waker());
+        Poll::Pending
+    }
+}
+
+/// The future of [`Buffer::ended`]. It does not borrow the buffer, and it holds the
+/// ring open until it drops.
+#[derive(Debug)]
+pub struct End {
+    shared: Rc<Shared>,
+}
+
+impl Future for End {
+    type Output = Result<(), files::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.shared.state.borrow_mut();
+        if state.ended {
+            return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
         }
+        state.wait(cx.waker());
         Poll::Pending
     }
 }

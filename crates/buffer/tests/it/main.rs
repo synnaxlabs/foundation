@@ -3394,6 +3394,117 @@ fn a_commit_held_past_the_drop_gives_ok_when_a_later_write_fails() {
     .expect("the buffer ends");
 }
 
+/// An `End` gives the error of the write that ended the task after the drop, while a
+/// `Commit` of the entries before it gives `Ok`.
+#[test]
+fn an_end_gives_the_error_of_a_write_after_the_drop() {
+    let (mut sim, node) = create_node(114);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let end = buffer.ended();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let early = buffer.committed();
+        assert_eq!(buffer.committed().await, Ok(()));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, Some(40), Parts::default())])
+            .expect("queues");
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(end.await, Err(failed));
+        assert_eq!(early.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// With no fault, an `End` gives `Ok` once the task wrote the entries queued at the
+/// drop, and a reopen recovers them.
+#[test]
+fn an_end_gives_ok_once_the_entries_queued_at_the_drop_are_durable() {
+    let (mut sim, node) = create_node(115);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer
+            .append([entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())])
+            .expect("queues");
+        let end = buffer.ended();
+        drop(buffer);
+        assert_eq!(end.await, Ok(()));
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(5, Some(50))));
+}
+
+/// A failed write ends the task while the buffer is held, and an `End` gives its
+/// error then.
+#[test]
+fn an_end_gives_the_error_of_a_write_before_the_drop() {
+    let (mut sim, node) = create_node(116);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let end = buffer.ended();
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(end.await, Err(failed.clone()));
+        assert_eq!(
+            buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
+            Err(Rejected::Files(failed))
+        );
+    })
+    .expect("the buffer ends");
+}
+
+/// An `End` held past the drop holds the ring after the task ended, so an open fails
+/// with `Busy` until the `End` drops.
+#[test]
+fn an_open_while_an_end_of_a_dropped_buffer_is_held_fails_with_busy() {
+    let (mut sim, node) = create_node(117);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let first = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        first
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let mut end = first.ended();
+        drop(first);
+        assert_eq!((&mut end).await, Ok(()));
+        let busy_open = Buffer::open(config(), &mut slots).await.map(drop);
+        assert_eq!(busy_open, Err(busy()));
+        drop(end);
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(1, Some(1))));
+}
+
 #[test]
 fn an_append_with_no_block_for_its_record_header_is_refused() {
     run(112, Memory::default(), |shard| async move {
