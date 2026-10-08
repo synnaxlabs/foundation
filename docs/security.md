@@ -162,7 +162,7 @@ state on `main`.
   append's entries, and that no entry is above the append's term. A node that a
   change removed and that missed its release campaigns; a voter whose log holds the
   leave refuses the request, with `removed` once the leave commits, and the node stops
-  (#1105). A voter whose log lacks the leave entry admits the request until #1106, so
+  (#1105). A voter whose log lacks the leave entry admits the request until #1107, so
   in `raft` alone such a node can win an election once no voter has a lease, and lead
   until it commits the leave.
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node

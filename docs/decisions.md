@@ -2237,9 +2237,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
   text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
   Supersedes the first version, which the person approved on 2026-10-06
-  (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638).
-  #1105 builds the `removed` answer and the held rule, #1106 the configuration that a
-  chain proves, and #1107 the key binding. Until #1106, a request proves no newer
+  (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638). #1105
+  builds the `removed` answer and the held rule, #1106 the key binding, and #1107 the
+  configuration that a chain proves. Until #1107, a request proves no newer
   configuration. A node answers `removed` only to a sender that `Start.voters` or a
   committed `Voters` entry held, when the last committed configuration lacks it. A
   sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
@@ -2249,16 +2249,16 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747). `mesh`
   asks `Raft::removed`, so the log that holds the configurations answers it (decided by
   `laptop.architect`, 2026-10-08T03:04:33Z:
-  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777). `raft`
-  counts a configuration entry only once its commit index covers it, so a node that
-  opened again answers `NotVoter` until a leader gives it the commit index. A request is
-  a PreVote, a Vote, a heartbeat, or an append. The rule covers requests only, and
-  `raft` decides which replies count (RAFT SURFACE). The coordinator gives the person's
-  words on the first version in its comment on #647, linked above. The removed node
-  takes that answer only from a voter of its own region, and stops its `raft` group for
-  that region. A voter of its region is a voter of the newest configuration in its log,
-  and an answer from any other node drops the stream, as any refusal does (decided by
-  `laptop.architect`, 2026-10-08T02:59:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777).
+  `Raft::removed` counts a configuration entry only once the commit index covers it, so
+  a node that opened again answers `NotVoter` until a leader gives it the commit index.
+  A request is a PreVote, a Vote, a heartbeat, or an append. The rule covers requests
+  only, and `raft` decides which replies count (RAFT SURFACE). The coordinator gives the
+  person's words on the first version in its comment on #647, linked above. The removed
+  node takes that answer only from a voter of its own region, and stops its `raft` group
+  for that region. A voter of its region is a voter of the newest configuration in its
+  log, and an answer from any other node drops the stream, as any refusal does (decided
+  by `laptop.architect`, 2026-10-08T02:59:07Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). `raft`
   sends such a node no entries, only answers. A voter with a lease drops its campaign or
   refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's term. In `raft`
@@ -2268,7 +2268,7 @@ How to read this record:
   follow it until their election timeout. That gap stays in `raft`, pinned by
   `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In `mesh`, the
   admission check and the `removed` answer close it for each voter whose log holds the
-  leave; a voter whose log lacks the leave entry admits the request until #1106. #483
+  leave; a voter whose log lacks the leave entry admits the request until #1107. #483
   keeps the stop on applying a committed configuration without itself. Keeping readmit
   until then lost. The person decided on 2026-10-05 ("(a)"), #482. Readmit in `raft`
   (#414) lost: it sent the log to a sender that `raft` cannot check. The person decided

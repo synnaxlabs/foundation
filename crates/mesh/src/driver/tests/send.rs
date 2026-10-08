@@ -727,11 +727,10 @@ fn a_proposal_whose_write_waits_gives_a_removed_stop() {
             now(call.as_mut()).await.is_pending(),
             "the write did not wait"
         );
-        assert!(mesh.group.borrow().waits.is_some());
-        assert_eq!(mesh.group.borrow().stopped.get(), None);
+        assert_eq!(mesh.propose_data(vec![2]).await, Err(exhausted(61)));
         let proposed = within(&clock, seconds(20), call).await;
         let watched = mesh.watch(INDEX).next().await;
-        *written.lock().unwrap() = Some(format!("{proposed:?} {watched:?}"));
+        *written.lock().unwrap() = Some((proposed, watched));
         pending::<()>().await;
     };
     let mut sim = Sim::new(sim::Config::default());
@@ -746,10 +745,6 @@ fn a_proposal_whose_write_waits_gives_a_removed_stop() {
     }));
     sim.run_for(seconds(90)).unwrap();
     let removed = Stopped::Removed { by: key(2) };
-    let expected = format!(
-        "{:?} {:?}",
-        Some(Err::<Position, _>(Error::Stopped(removed.clone()))),
-        Err::<Option<node::Key>, _>(removed)
-    );
+    let expected = (Some(Err(Error::Stopped(removed.clone()))), Err(removed));
     assert_eq!(outcome.lock().unwrap().take(), Some(expected));
 }

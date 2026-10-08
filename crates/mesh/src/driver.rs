@@ -991,7 +991,8 @@ async fn run(
 
 // Writes the hard state and the entries of `ready`, and tries again at each tick
 // while the pool gives no block. `None` when the last handle of the group drops, or a
-// sender stops the group, before the write ends: the entries then go nowhere.
+// sender stops the group, before the write ends: `run` then sends and applies none
+// of them.
 async fn write(
     group: &Weak<RefCell<Group>>,
     log: &mut Log,
@@ -1916,6 +1917,36 @@ mod tests {
             let cause = Unknown::Kind { kind: 9 };
             let stopped = Stopped::Change { at: bad, cause };
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+        });
+    }
+
+    // One `Ready` holds the entry of the second proposal and commits the first home.
+    // Its write is in a disk call when voter 2 stops the group, as a sender task does
+    // on a code 17. The write ends, and the group sends and applies none of it.
+    #[test]
+    fn a_proposal_whose_write_is_in_a_disk_call_gives_a_removed_stop() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            let first = elect(&mesh).await;
+            assert_eq!(mesh.propose(home(1)).await, Ok(after(first, 1)));
+            let mut proposal = pin!(mesh.propose(home(2)));
+            assert!(now(proposal.as_mut()).await.is_pending());
+            let last = first.index + 1;
+            let reply = raft::Message {
+                term: first.term,
+                ..message(2, 1, Body::AppendReply { last })
+            };
+            assert_eq!(mesh.receive(public(2), reply), Ok(()));
+            node.clock().sleep(Span::NANOSECOND).await;
+            let removed = Stopped::Removed { by: key(2) };
+            mesh.group.borrow_mut().stop(removed.clone());
+            node.clock().sleep(TICK).await;
+            assert_eq!(proposal.await, Err(Error::Stopped(removed.clone())));
+            assert_eq!(watch.next().await, Err(removed));
+            // No call shows the home after the stop.
+            assert_eq!(mesh.group.borrow().state.home(INDEX), None);
         });
     }
 
