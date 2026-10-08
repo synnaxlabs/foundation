@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 
 use super::key_set::{self, KeySet};
 use super::{
-    DESCRIPTOR, Form, Frame, Path, Range, bounds, descriptor_ends, lead, parts, spans,
-    to_u32, to_usize,
+    Form, Frame, Path, Range, bounds, descriptor_ends, lead, parts, spans, to_u32,
+    to_usize,
 };
 use crate::channel;
 
@@ -143,8 +143,8 @@ impl<'a> View<'a> {
         };
         let (_, descriptors, body) = parts(&self.frame.0);
         Series::Listed(Join::new(descriptors, &held.entries).map(move |n| {
-            let (entry, range) = at(descriptors, n);
-            (entry, &body[range])
+            let (start, end) = bounds(descriptors, n);
+            (to_usize(lead(&descriptors[n])), &body[start..end])
         }))
     }
 
@@ -161,17 +161,14 @@ impl<'a> View<'a> {
                 spans(descriptor_ends(descriptors))
                     .map(|(entry, start, end)| (entry, start..end)),
             ),
-            Held::Listed(held) => Series::Listed(
-                Join::new(descriptors, &held.entries).map(move |n| at(descriptors, n)),
-            ),
+            Held::Listed(held) => {
+                Series::Listed(Join::new(descriptors, &held.entries).map(move |n| {
+                    let (start, end) = bounds(descriptors, n);
+                    (to_usize(lead(&descriptors[n])), start..end)
+                }))
+            }
         }
     }
-}
-
-/// The entry of descriptor `n` and the bounds of its series in the series bytes.
-fn at(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, std::ops::Range<usize>) {
-    let (start, end) = bounds(descriptors, n);
-    (to_usize(lead(&descriptors[n])), start..end)
 }
 
 /// The series of a view: those of the whole frame, or those of the listed entries.
