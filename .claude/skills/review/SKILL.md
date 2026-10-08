@@ -178,7 +178,8 @@ risk crate, the `Public surface:` line of the last round comment links the archi
 approval of each item, each finding of an architect review has its fix commit or a
 linked answer, and each later step that a round, an architect review, an architect's
 ruling, or an issue that the PR closes names is stated on an open issue that does it (a
-new issue, or a comment on an existing one) or as a trigger in the decisions entry, and
+new issue, or a comment on an existing one) or as a trigger in the decisions entry, with
+a comment on each other open issue or PR whose work is that trigger, and
 each issue in `gh pr view <n> --json closingIssuesReferences`, or after a closing word
 in a commit message of the PR, is one that the PR finishes. GitHub closes each at the
 merge. It reads an issue link after a form of "close", "fix", or "resolve" as closing,
