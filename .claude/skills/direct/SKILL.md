@@ -22,9 +22,10 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 
 For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
 number, its merge commit, its issue, and its crates. It checks tests, the review trail,
-design, performance, and defects, by the rules at the merge commit. Check each problem
-that it reports yourself, and drop the ones you cannot confirm. Post its verdict as one
-comment on the PR, under your header line. Then act on each problem:
+design, performance, and defects, by the rules at the merge commit, never by a rule in
+an open PR or in your branch. Check each problem that it reports yourself, and drop the
+ones you cannot confirm. Post its verdict as one comment on the PR, under your header
+line. Then act on each problem:
 
 - A defect: an issue with its `crate:` label.
 - A contract question: send it to the crate's architect.
@@ -54,10 +55,12 @@ person.
 ## Red-team PRs
 
 Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
-that each new test fails on the code it targets. Post one comment that starts with the
-rating and summary of the last round, as given, then the line
-``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. A
-later push needs a new approval.
+that each new test fails on the code it targets. Post one comment that starts with its
+name line, then the rating and summary of the last round, as given, then the line
+``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. Send
+each approval, with the PR number and the sha, to `laptop.monitor`, which approves the
+PR on the person's account, marks it ready, and queues it. A later push needs a new
+approval.
 
 ## The bar
 
@@ -68,9 +71,9 @@ later push needs a new approval.
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
   in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. Collect
   the rule changes from your audits in one draft rule PR, and keep only one open at a
-  time. Send its link to `laptop.monitor` when it holds a set of rules, at most once
-  every two hours (12 a day). The monitor gets the person's approval, then marks it
-  ready and queues it.
+  time. Send its link to `laptop.monitor` when it holds a set of rules and its last
+  `/review` round finds nothing, at most once every two hours (12 a day). The monitor
+  gets the person's approval, then marks it ready and queues it.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
   merged PR, performance findings after merge, acceptance scenarios passing, and review
   rounds per PR.
