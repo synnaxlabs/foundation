@@ -293,7 +293,7 @@ pub(crate) fn digest(byte: u8) -> Digest {
 }
 
 /// A spec change on version `version` at root `[base; 32]`, to root `[root; 32]`, with
-/// each chunk `[chunk; 32]` of `chunks`.
+/// each chunk `[chunk; 32]` of `chunks`, held by node 1.
 pub(crate) fn spec(version: u64, base: u8, root: u8, chunks: &[u8]) -> Change {
     Change::Spec {
         base: Pointer {
@@ -302,6 +302,7 @@ pub(crate) fn spec(version: u64, base: u8, root: u8, chunks: &[u8]) -> Change {
         },
         root: digest(root),
         chunks: chunks.iter().copied().map(digest).collect(),
+        holders: [key(1)].into(),
     }
 }
 

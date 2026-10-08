@@ -1,4 +1,5 @@
-//! Tests of `Mesh::apply`: on a cluster of three voters, and on one node.
+//! Tests of `Mesh::apply` on one node, and of its spec change on a cluster of three
+//! voters, where each voter holds the chunks.
 
 use spec::definition::Kind;
 use spec::region::Problem;
@@ -8,7 +9,8 @@ use super::send::stop;
 use super::*;
 
 impl Cluster {
-    /// Node `node` applies `definitions` on `base` at its next tick.
+    /// Node `node` proposes the spec change of `definitions` on `base` at its next
+    /// tick.
     fn apply(&self, node: u8, base: Pointer, definitions: BTreeMap<Name, Definition>) {
         let spec = (base, definitions);
         self.board.lock().unwrap().applies.insert(node, spec);

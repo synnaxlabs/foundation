@@ -84,6 +84,17 @@ pub enum Error {
     /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
     /// each problem as [`spec::region::Problem::fix`] says.
     Problems(Vec<spec::region::Problem>),
+    /// The voters that hold the chunks of a spec change are not a majority of one
+    /// half of the voters, so the pointer did not move. This half comes first of the
+    /// halves that lack a majority, incoming before outgoing.
+    Quorum {
+        /// The voters of the half that hold the chunks.
+        held: usize,
+        /// The voters of the half.
+        voters: usize,
+    },
+    /// A call of this node's chunk store failed.
+    Blob(blob::Error),
 }
 
 impl fmt::Display for Error {
@@ -143,6 +154,12 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Self::Quorum { held, voters } => write!(
+                f,
+                "{held} of {voters} voters hold the chunks of the spec change, not a \
+                 majority"
+            ),
+            Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
         }
     }
 }

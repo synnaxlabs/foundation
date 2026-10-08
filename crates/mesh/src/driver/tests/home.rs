@@ -270,7 +270,7 @@ fn set_home_proposes_again_while_the_pool_has_no_block() {
         let pool = small_pool();
         let config = Config {
             pool: Rc::clone(&pool),
-            ..config(&node, &tasks, 1, &[1], &[1])
+            ..config(&node, &tasks, 1, &[1], &[1]).await
         };
         let mesh = Mesh::start(config).await.unwrap();
         let clock = node.clock();
@@ -368,6 +368,7 @@ fn the_pointer_after_a_stop_is_the_pointer_at_the_stop() {
             base,
             root: common::digest(1),
             chunks: [common::digest(1)].into(),
+            holders: IDS.map(key).into(),
         };
         mesh.propose_data(encoded(&change)).await.unwrap();
         let bad = mesh.propose_data(vec![9]).await.unwrap();
@@ -585,7 +586,7 @@ where
     let called = Arc::new(Mutex::new(None));
     let result = Arc::clone(&called);
     let mesh = move |node: sim::node::Node, tasks: Tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, streams) = (mesh.clone(), tasks.clone());

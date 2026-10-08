@@ -54,7 +54,7 @@ pub fn seal_log_record(bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ops::Range;
 
     use raft::{
@@ -102,8 +102,14 @@ mod tests {
 
     #[test]
     fn each_spec_change_input_is_what_its_name_says() {
-        let inputs =
-            inputs!("mesh_change": "spec", "spec_chunks_1024", "spec_chunks_1025");
+        let inputs = inputs!(
+            "mesh_change": "spec",
+            "spec_chunks_1024",
+            "spec_chunks_1025",
+            "spec_held",
+            "spec_held_chunks_1024",
+            "spec_holders_out_of_order",
+        );
         let digest = |at: usize| {
             let mut bytes = [0; 32];
             bytes[30..].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
@@ -116,23 +122,51 @@ mod tests {
             },
             root: Digest([3; 32]),
             chunks,
+            holders: [key(1)].into(),
         };
         for (name, chunks) in [
-            ("spec", [Digest([4; 32]), Digest([5; 32])].into()),
-            ("spec_chunks_1024", (0..CHUNKS_MAX).map(digest).collect()),
+            ("spec_held", [Digest([4; 32]), Digest([5; 32])].into()),
+            (
+                "spec_held_chunks_1024",
+                (0..CHUNKS_MAX).map(digest).collect(),
+            ),
         ] {
             assert_eq!(Change::decode(inputs[name]), Ok(spec(chunks)), "{name}");
             let round_trip = round_trip_change(inputs[name]);
             assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
+        }
+        // These two have the byte form before the holders, which ends where the count
+        // of holders starts.
+        for name in ["spec", "spec_chunks_1024"] {
+            let mut held = inputs[name].to_vec();
+            held.extend(1_u16.to_le_bytes());
+            held.extend(key(1).as_u128().to_le_bytes());
+            assert_eq!(held, inputs[&*format!("spec_held{}", &name[4..])], "{name}");
         }
         // The chunk count is after the kind, the base, and the root.
         let mut over = inputs["spec_chunks_1024"].to_vec();
         over[73..75].copy_from_slice(&1025_u16.to_le_bytes());
         over.extend(digest(CHUNKS_MAX).0);
         assert_eq!(inputs["spec_chunks_1025"], over);
-        let length = over.len();
-        let body = Malformed::Body { kind: 4, length };
-        assert_eq!(Change::decode(&over), Err(body));
+        for name in [
+            "spec",
+            "spec_chunks_1024",
+            "spec_chunks_1025",
+            "spec_holders_out_of_order",
+        ] {
+            let length = inputs[name].len();
+            let body = Malformed::Body { kind: 4, length };
+            assert_eq!(Change::decode(inputs[name]), Err(body), "{name}");
+        }
+        let mut order = spec(BTreeSet::new());
+        let Change::Spec { holders, .. } = &mut order else {
+            unreachable!()
+        };
+        *holders = [key(1), key(2)].into();
+        let mut bytes = Vec::new();
+        order.encode(&mut bytes);
+        bytes[77..].rotate_left(16);
+        assert_eq!(inputs["spec_holders_out_of_order"], bytes);
     }
 
     fn at(term: u64, index: u64) -> Position {

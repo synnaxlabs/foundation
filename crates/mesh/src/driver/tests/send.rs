@@ -123,7 +123,7 @@ async fn next(
 }
 
 /// The config of the mesh of node 1, which sends with `pool`.
-pub(super) fn create_config(
+pub(super) async fn create_config(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: Rc<Pool>,
@@ -131,7 +131,7 @@ pub(super) fn create_config(
     Config {
         members: IDS.map(create_voter).into(),
         pool,
-        ..config_at(node, tasks, 1, PORT, &IDS, &IDS)
+        ..config_at(node, tasks, 1, PORT, &IDS, &IDS).await
     }
 }
 
@@ -220,7 +220,7 @@ where
 
 /// Holds the mesh of node 1 open.
 async fn hold(node: sim::node::Node, tasks: Tasks) {
-    let config = create_config(&node, &tasks, create_pool());
+    let config = create_config(&node, &tasks, create_pool()).await;
     let _mesh = Mesh::open(config).await.unwrap();
     pending::<()>().await;
 }
@@ -311,7 +311,7 @@ fn a_session_that_fails_leaves_the_session_to_each_other_member() {
 fn a_message_that_the_pool_has_no_block_for_drops_and_its_stream_stays() {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
         let pool = small_pool();
-        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let config = create_config(&node, &tasks, Rc::clone(&pool)).await;
         let _mesh = Mesh::open(config).await.unwrap();
         let clock = node.clock();
         clock.sleep(seconds(4)).await;
@@ -344,7 +344,7 @@ fn a_message_that_the_pool_has_no_block_for_drops_and_its_stream_stays() {
 fn no_stream_comes_while_the_pool_has_no_block_for_its_header() {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
         let pool = small_pool();
-        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let config = create_config(&node, &tasks, Rc::clone(&pool)).await;
         let _mesh = Mesh::open(config).await.unwrap();
         let blocks = fill(&pool);
         node.clock().sleep(seconds(6)).await;
@@ -369,7 +369,7 @@ fn a_task_that_waits_in_a_dial_holds_no_block() {
     solo(|node, tasks| async move {
         let pool = small_pool();
         let free = fill(&pool).len();
-        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let config = create_config(&node, &tasks, Rc::clone(&pool)).await;
         let _mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(3)).await;
         assert_eq!(fill(&pool).len(), free);
@@ -386,11 +386,14 @@ fn at(index: u64) -> Position {
 
 /// The config of a node 1 with no record of node 4, and the append of node 2 whose
 /// voter set names node 4.
-fn create_stranger(node: &sim::node::Node, tasks: &Tasks) -> (Config, raft::Message) {
+async fn create_stranger(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+) -> (Config, raft::Message) {
     let members = vec![create_voter(1), common::member(2), common::member(3)];
     let config = Config {
         members,
-        ..config_at(node, tasks, 1, PORT, &IDS, &IDS)
+        ..config_at(node, tasks, 1, PORT, &IDS, &IDS).await
     };
     let voters = Voters {
         incoming: [1, 2, 4].map(key).into(),
@@ -409,7 +412,7 @@ fn create_stranger(node: &sim::node::Node, tasks: &Tasks) -> (Config, raft::Mess
 #[test]
 fn a_node_queues_a_message_for_a_voter_with_no_member_record() {
     solo(|node, tasks| async move {
-        let (config, append) = create_stranger(&node, &tasks);
+        let (config, append) = create_stranger(&node, &tasks).await;
         let mesh = Mesh::start(config).await.unwrap();
         assert_eq!(mesh.receive(public(2), append), Ok(()));
         let clock = node.clock();
@@ -425,7 +428,7 @@ fn a_node_queues_a_message_for_a_voter_with_no_member_record() {
 #[test]
 fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
-        let (config, append) = create_stranger(&node, &tasks);
+        let (config, append) = create_stranger(&node, &tasks).await;
         let mesh = Mesh::open(config).await.unwrap();
         assert_eq!(mesh.receive(public(2), append), Ok(()));
         let clock = node.clock();
@@ -464,7 +467,7 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
 /// messages, and again after node 2 stopped the stream and got a new one.
 fn large(limit: usize) -> (bool, [[bool; 2]; 2]) {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, streams) = (mesh.clone(), tasks.clone());
@@ -547,7 +550,7 @@ pub(super) fn stop(node: &sim::node::Node, mesh: &Mesh) -> Stopped {
 #[test]
 fn each_task_that_sends_ends_when_the_mesh_drops() {
     assert_ends(|node, tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(3)).await;
@@ -559,7 +562,7 @@ fn each_task_that_sends_ends_when_the_mesh_drops() {
 #[test]
 fn each_task_that_sends_ends_when_the_group_stops() {
     assert_ends(|node, tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(3)).await;
@@ -573,7 +576,7 @@ fn each_task_that_sends_ends_when_the_group_stops() {
 #[test]
 fn each_task_that_sends_ends_when_a_committed_entry_stops_the_group() {
     assert_ends(|node, tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let mut watch = mesh.watch(INDEX);
@@ -607,7 +610,7 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
     end: impl FnOnce(sim::node::Node, Mesh) -> E + Send + 'static,
 ) {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let clock = node.clock();
@@ -709,7 +712,7 @@ fn a_proposal_whose_write_waits_gives_a_removed_stop() {
     let written = Arc::clone(&outcome);
     let mesh = move |node: sim::node::Node, tasks: Tasks| async move {
         let pool = small_pool();
-        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let config = create_config(&node, &tasks, Rc::clone(&pool)).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let clock = node.clock();

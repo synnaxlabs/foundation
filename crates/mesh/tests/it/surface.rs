@@ -119,22 +119,22 @@ fn create_transport(
 }
 
 /// The config of the region `plant`, whose one member and one voter is the node `KEY`.
-fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
-    create_voter_config(node, tasks, 1, vec![create_member(1, Vec::new())])
+async fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
+    create_voter_config(node, tasks, 1, vec![create_member(1, Vec::new())]).await
 }
 
 /// The config of node `id` of the region `plant`. Each of `members` is a voter.
-fn create_voter_config(
+async fn create_voter_config(
     node: &sim::node::Node,
     tasks: &Tasks,
     id: u8,
     members: Vec<Member>,
 ) -> Config {
-    create_config_on(node, tasks, id, members, private_key(id))
+    create_config_on(node, tasks, id, members, private_key(id)).await
 }
 
 /// That config, on a transport that proves the public key of `transport_key`.
-fn create_config_on(
+async fn create_config_on(
     node: &sim::node::Node,
     tasks: &Tasks,
     id: u8,
@@ -143,6 +143,13 @@ fn create_config_on(
 ) -> Config {
     let pool = create_pool();
     let transport = create_transport(node, tasks, &pool, transport_key);
+    let chunks = blob::Store::open(blob::Config {
+        files: node.files(),
+        dir: "blob".into(),
+        pool: Rc::clone(&pool),
+    })
+    .await
+    .unwrap();
     Config {
         key: key(id),
         private_key: private_key(id),
@@ -157,6 +164,7 @@ fn create_config_on(
         tasks: tasks.clone(),
         transport: Rc::new(transport),
         pool,
+        chunks: Rc::new(chunks),
     }
 }
 
@@ -200,7 +208,9 @@ fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
 #[test]
 fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
     solo(|node, tasks| async move {
-        let mesh = Mesh::open(create_config(&node, &tasks)).await.unwrap();
+        let mesh = Mesh::open(create_config(&node, &tasks).await)
+            .await
+            .unwrap();
         let founding = Pointer {
             version: 0,
             root: spec::tree::empty(),
@@ -227,7 +237,7 @@ fn key_gives_the_key_of_the_config() {
                 let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
                 let config = Config {
                     voters: voters.map(key).collect(),
-                    ..create_voter_config(&node, &tasks, place, members.into())
+                    ..create_voter_config(&node, &tasks, place, members.into()).await
                 };
                 let mesh = Mesh::open(config).await.unwrap();
                 assert_eq!(mesh.key(), key(place));
@@ -240,7 +250,8 @@ fn key_gives_the_key_of_the_config() {
 fn open_panics_on_a_transport_that_proves_another_key() {
     let ran = run(|node, tasks| async move {
         let members = vec![create_member(1, Vec::new())];
-        let config = create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32]));
+        let config =
+            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32])).await;
         drop(Mesh::open(config).await);
     });
     assert_eq!(ran, mismatch(PUBLIC_3, PUBLIC_1));
@@ -251,7 +262,7 @@ fn open_panics_on_a_transport_that_proves_another_key() {
 #[test]
 fn open_panics_on_a_private_key_that_its_transport_does_not_prove() {
     let ran = run(|node, tasks| async move {
-        let mut config = create_config(&node, &tasks);
+        let mut config = create_config(&node, &tasks).await;
         config.private_key = PrivateKey([3; 32]);
         drop(Mesh::open(config).await);
     });
@@ -263,7 +274,7 @@ fn open_gives_wrong_key_when_the_transport_proves_the_private_key() {
     solo(|node, tasks| async move {
         let members = vec![create_member(1, Vec::new())];
         let mut config =
-            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32]));
+            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32])).await;
         config.private_key = PrivateKey([3; 32]);
         assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
     });
@@ -316,7 +327,7 @@ fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
     for (id, node) in IDS.into_iter().zip(&nodes) {
         let (own, members, read) = (node.clone(), members.clone(), Arc::clone(&read));
         let main = move |tasks: Tasks| async move {
-            let config = create_voter_config(&own, &tasks, id, members);
+            let config = create_voter_config(&own, &tasks, id, members).await;
             let transport = Rc::clone(&config.transport);
             let mesh = Mesh::open(config).await.unwrap();
             tasks.spawn(accept(mesh.clone(), transport, tasks.clone()));
@@ -350,7 +361,7 @@ fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
 #[test]
 fn a_region_with_two_records_of_one_node_does_not_open() {
     solo(|node, tasks| async move {
-        let mut config = create_config(&node, &tasks);
+        let mut config = create_config(&node, &tasks).await;
         config.members.push(create_member(1, Vec::new()));
         let unfit = region::Unfit::Duplicate { key: KEY };
         assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
@@ -360,7 +371,7 @@ fn a_region_with_two_records_of_one_node_does_not_open() {
 #[test]
 fn the_debug_of_a_config_does_not_show_the_private_key() {
     solo(|node, tasks| async move {
-        let debug = format!("{:?}", create_config(&node, &tasks));
+        let debug = format!("{:?}", create_config(&node, &tasks).await);
         assert!(debug.contains("private_key: PrivateKey(..)"), "{debug}");
     });
 }
@@ -379,7 +390,7 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
     };
     let (node, result) = (nodes[0].clone(), Arc::clone(&served));
     let main = move |tasks: Tasks| async move {
-        let config = create_config(&node, &tasks);
+        let config = create_config(&node, &tasks).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let session = transport.accept().await.unwrap();
@@ -451,7 +462,9 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Stopped(_)
         | Error::Stale { .. }
         | Error::Large { .. }
-        | Error::Problems(_) => {}
+        | Error::Problems(_)
+        | Error::Quorum { .. }
+        | Error::Blob(_) => {}
     };
     let _: fn(&Error) = cases;
 }
