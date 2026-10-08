@@ -691,9 +691,18 @@ placement \"a\" {{
     }
 }
 
+/// The fix of `config.connector-home` for `connector` on `node` when its placement
+/// `p` wins for a connector on another node.
+fn exclude(connector: &str, p: &str, node: &str) -> String {
+    format!(
+        "Exclude the connector `{connector}` and its indexes from the `select` of `{p}`, \
+         and select them with a placement whose `home` is `{node}`"
+    )
+}
+
 #[test]
 fn plans_connectors_after_the_connector_home_fix_of_a_placement_of_two_nodes() {
-    let text = |b: &str, home: &str, more: &str| {
+    let text = |b: &str, select: &str, home: &str, more: &str| {
         format!(
             "\
 channel \"p.a.time\" {{
@@ -715,21 +724,16 @@ connector \"p.c\" {{
   writes = []
 }}
 placement \"p\" {{
-  select = \"p.**\"
+  select = {select}
   home = \"{home}\"
 }}
 {more}"
         )
     };
-    let more = |connector: &str| {
-        format!(
-            "Select the connector `{connector}` and each index under its name with a \
-             more specific placement whose `home` is `n`"
-        )
-    };
+    let all = "\"p.**\"";
     let fixed = "\
 placement \"a\" {
-  select = \"p.a.**\"
+  select = [\"p.a\", \"p.a.time\"]
   home = \"n\"
 }
 placement \"c\" {
@@ -738,14 +742,106 @@ placement \"c\" {
 }
 ";
     plans_after_connector_home(
-        &text("m", "m", ""),
-        &[more("p.a"), more("p.c")],
-        &text("m", "m", fixed),
+        &text("m", all, "m", ""),
+        &[exclude("p.a", "p", "n"), exclude("p.c", "p", "n")],
+        &text(
+            "m",
+            "[\"p.**\", \"!p.a\", \"!p.a.time\", \"!p.c\"]",
+            "m",
+            fixed,
+        ),
     );
     plans_after_connector_home(
-        &text("n", "m", ""),
+        &text("n", all, "m", ""),
         &[RENAMED.into(), RENAMED.into(), RENAMED.into()],
-        &text("n", "n", ""),
+        &text("n", all, "n", ""),
+    );
+}
+
+#[test]
+fn plans_after_the_connector_home_fix_of_a_connector_that_its_placement_names() {
+    let text = |select: &str, more: &str| {
+        format!(
+            "\
+channel \"x.time\" {{
+  kind = \"index\"
+}}
+connector \"x\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"x.time\"]
+}}
+connector \"y\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = []
+}}
+placement \"p\" {{
+  select = [{select}]
+  home = \"m\"
+}}
+{more}"
+        )
+    };
+    let fixed = "\
+placement \"x\" {
+  select = [\"x\", \"x.time\"]
+  home = \"n\"
+}
+";
+    plans_after_connector_home(
+        &text("\"x\", \"x.*\", \"y\"", ""),
+        &[exclude("x", "p", "n")],
+        &text("\"y\"", fixed),
+    );
+}
+
+#[test]
+fn plans_nested_connectors_on_two_nodes_after_the_connector_home_fix() {
+    let text = |home: &str, select: &str, more: &str| {
+        format!(
+            "\
+channel \"d.e.time\" {{
+  kind = \"index\"
+}}
+connector \"d\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+connector \"d.e\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = [\"d.e.time\"]
+}}
+placement \"d\" {{
+  select = [{select}]
+  home = \"{home}\"
+}}
+{more}"
+        )
+    };
+    let e = "\
+placement \"e\" {
+  select = [\"d.e\", \"d.e.time\"]
+  home = \"m\"
+}
+";
+    plans_after_connector_home(
+        &text("n", "\"d.**\"", ""),
+        &[exclude("d.e", "d", "m")],
+        &text("n", "\"d.**\", \"!d.e\", \"!d.e.time\"", e),
+    );
+    let d = "\
+placement \"on_d\" {
+  select = \"d\"
+  home = \"n\"
+}
+";
+    plans_after_connector_home(
+        &text("m", "\"d.**\"", ""),
+        &[exclude("d", "d", "n")],
+        &text("m", "\"d.**\", \"!d\"", d),
     );
 }
 

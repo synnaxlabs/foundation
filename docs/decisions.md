@@ -4654,13 +4654,16 @@ How to read this record:
   `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
   (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
   `n` and names another node. Its fix is "Name `n` as the `home`, and keep `n` out of
-  `standby` and `copies`" when `p` wins for no connector on another node, else "Select
-  the connector `a` and each index under its name with a more specific placement whose
-  `home` is `n`", which changes no other connector of `p` (`laptop.architect`, #1901,
-  2026-10-08T15:12:13Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556, and
+  `standby` and `copies`" when `p` wins for no connector on another node, else "Exclude
+  the connector `a` and its indexes from the `select` of `p`, and select them with a
+  placement whose `home` is `n`", which changes no other connector of `p`. The indexes
+  of a connector are those whose nearest connector it is, as `config.split-placement`
+  reads them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
   2026-10-08T15:21:54Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126).
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, and
+  2026-10-08T15:31:52Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171).
   `config.split-placement` (BQ10) is at each index when the placement that wins for it
   is not the one that wins for its nearest connector, the connector with the longest
   name above the index (`Name::starts_with`): at the label of the index's placement, or
@@ -4682,11 +4685,15 @@ How to read this record:
   two nodes share one placement, the `config.connector-home` fixes "Leave out `home`",
   which can leave an empty placement or an index with no home, and "Name `n` as the
   `home`" in each case, which moves the problem between two connectors of one
-  placement, and the `config.split-placement` fix "and each name under it", which also
+  placement, and "Select the connector `a` and each index under its name with a more
+  specific placement", which no placement can follow when `p` names `a` by its exact
+  name, and the `config.split-placement` fix "and each name under it", which also
   moves the indexes of a nested connector. Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, the
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, case 2 of
+  the `config.connector-home` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
   `chunks` input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of

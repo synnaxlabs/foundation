@@ -303,10 +303,11 @@ fn connector_home(
     node: &Name,
     shared: bool,
 ) -> Diagnostic {
+    let p = label(placement);
     let fix = if shared {
         format!(
-            "Select the connector `{connector}` and each index under its name with a \
-             more specific placement whose `home` is `{node}`"
+            "Exclude the connector `{connector}` and its indexes from the `select` of \
+             `{p}`, and select them with a placement whose `home` is `{node}`"
         )
     } else {
         format!(
@@ -318,9 +319,8 @@ fn connector_home(
         CONNECTOR_HOME,
         span(found.blocks[placement], "home"),
         format!(
-            "the placement `{}` names the home `{home}`, but the connector \
-             `{connector}` runs on the node `{node}`",
-            label(placement)
+            "the placement `{p}` names the home `{home}`, but the connector \
+             `{connector}` runs on the node `{node}`"
         ),
         fix,
     )
