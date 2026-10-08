@@ -1275,6 +1275,79 @@ placement \"p\" {{
     }
 }
 
+#[test]
+fn plans_after_the_split_placement_fix_of_indexes_of_more_than_one_placement() {
+    let text = |placed: &[(&str, &str, &str)], excluded: bool| {
+        let mut parts = Vec::new();
+        let mut writes = Vec::new();
+        let mut out = Vec::new();
+        for (index, _, _) in placed {
+            parts.push(format!("channel \"{index}\" {{\n  kind = \"index\"\n}}\n"));
+            writes.push(format!("\"{index}\""));
+            out.push(format!(", \"!{index}\""));
+        }
+        let out = if excluded {
+            out.concat()
+        } else {
+            String::new()
+        };
+        let writes = writes.join(", ");
+        parts.push(format!(
+            "connector \"a\" {{\n  kind = \"writer\"\n  node = \"n\"\n  \
+             writes = [{writes}]\n}}\n"
+        ));
+        for (index, at, home) in placed {
+            parts.push(format!(
+                "placement \"{at}\" {{\n  select = [\"{index}\"{out}]\n  \
+                 home = \"{home}\"\n}}\n"
+            ));
+        }
+        if excluded {
+            parts.push(format!(
+                "placement \"a\" {{\n  select = [\"a\", {writes}]\n  home = \"n\"\n}}\n"
+            ));
+        }
+        parts.concat()
+    };
+    let cases: [(&[_], _); 4] = [
+        (
+            &[("a.time", "p", "m"), ("a.value", "q", "n")],
+            "`p` and `q`",
+        ),
+        (
+            &[("a.time", "p", "m"), ("a.value", "q", "k")],
+            "`p` and `q`",
+        ),
+        (
+            &[("a.time", "p", "n"), ("a.value", "q", "n")],
+            "`p` and `q`",
+        ),
+        (
+            &[
+                ("a.time", "p", "m"),
+                ("a.value", "q", "n"),
+                ("a.x", "r", "k"),
+            ],
+            "`p`, `q`, and `r`",
+        ),
+    ];
+    let nodes = ["k", "m", "n"];
+    for (placed, of) in cases {
+        let refused = text(placed, false);
+        let found = problems(Spec::create_empty().plan(&[&refused], &nodes));
+        let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+        let fix = format!(
+            "Exclude the indexes of the connector `a` from the `select` of {of}, and \
+             select the connector and its indexes with a placement whose `home` is `n`"
+        );
+        let expected = vec![("config.split-placement", fix); placed.len()];
+        assert_eq!(found, expected, "{refused}");
+        let fixed = text(placed, true);
+        let plan = Spec::create_empty().plan(&[&fixed], &nodes);
+        assert!(plan.is_ok(), "{fixed}: {plan:?}");
+    }
+}
+
 /// The `config.unplaced` problem at the label `at` of `text`, where the placements
 /// `first` and `second` tie.
 fn tie(text: &str, at: &str, first: &str, second: &str) -> Problem {

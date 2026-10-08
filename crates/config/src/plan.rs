@@ -278,18 +278,50 @@ fn connectors<'f>(
             Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
         }
     }
-    for (index, own) in indexes {
-        let nearest = connectors
-            .iter()
-            .filter(|(name, ..)| index.starts_with(name))
-            .max_by_key(|(name, ..)| name.segments().count());
-        let Some((connector, _, node, theirs)) = nearest else {
-            continue;
-        };
-        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
-            let split = split(found, placements, index, own, connector, node, theirs);
-            diagnostics.extend(split);
+    let nearest: Vec<_> = indexes
+        .iter()
+        .filter_map(|(index, own)| {
+            let connector = connectors
+                .iter()
+                .filter(|(name, ..)| index.starts_with(name))
+                .max_by_key(|(name, ..)| name.segments().count())?;
+            Some((*index, own, connector))
+        })
+        .collect();
+    let mut owners = BTreeMap::<_, BTreeSet<_>>::new();
+    for (_, own, (connector, ..)) in &nearest {
+        if let Ok(Some(own)) = winner(own) {
+            owners.entry(*connector).or_default().insert(own);
         }
+    }
+    let home = |placement: &Name| {
+        placements
+            .iter()
+            .find(|(key, _)| *key == placement)
+            .and_then(|(_, policy)| policy.home())
+    };
+    for (index, own, (connector, _, node, theirs)) in nearest {
+        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
+            let moved = owners.get(connector).filter(|owners| {
+                theirs.is_none()
+                    && (owners.len() > 1
+                        || owners.iter().any(|p| home(p).is_some_and(|h| h != *node)))
+            });
+            diagnostics
+                .extend(split(found, index, own, connector, node, theirs, moved));
+        }
+    }
+}
+
+/// Names each placement in `keys` by its label: "`p`", "`p` and `q`", or "`p`, `q`,
+/// and `r`".
+fn each(keys: &BTreeSet<&Name>) -> String {
+    let labels: Vec<_> = keys.iter().map(|key| format!("`{}`", label(key))).collect();
+    match labels.as_slice() {
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+        [] => unreachable!("invariant: a moved index has at least one winner"),
     }
 }
 
@@ -329,15 +361,16 @@ fn connector_home(
 
 /// A `config.split-placement` diagnostic when `own`, the placement that wins for
 /// `index`, is not `theirs`, the one that wins for the connector `connector` on
-/// `node`.
+/// `node`. `moved` holds the winners of the connector's indexes when no one of them can
+/// take the connector, so the fix moves each index to a placement at `node`.
 fn split(
     found: &Found<'_>,
-    placements: &[(&Name, &Policy)],
     index: &Name,
     own: Option<&Name>,
     connector: &Name,
     node: &Name,
     theirs: Option<&Name>,
+    moved: Option<&BTreeSet<&Name>>,
 ) -> Option<Diagnostic> {
     let (at, message) = match (own, theirs) {
         (Some(own), Some(theirs)) if own != theirs => (
@@ -367,23 +400,18 @@ fn split(
         ),
         _ => return None,
     };
-    let home = placements
-        .iter()
-        .find(|(key, _)| *key == at)
-        .and_then(|(_, policy)| policy.home());
-    let fix = if theirs.is_none() && home.is_some_and(|home| home != node) {
-        format!(
+    let fix = match moved {
+        Some(owners) => format!(
             "Exclude the indexes of the connector `{connector}` from the `select` of \
-             `{}`, and select the connector and its indexes with a placement whose \
+             {}, and select the connector and its indexes with a placement whose \
              `home` is `{node}`",
-            label(at)
-        )
-    } else {
-        format!(
+            each(owners)
+        ),
+        None => format!(
             "Make the placement `{}` win for the connector `{connector}` and the index \
              `{index}`",
             label(theirs.unwrap_or(at))
-        )
+        ),
     };
     Some(Diagnostic::new(
         SPLIT_PLACEMENT,
