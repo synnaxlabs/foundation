@@ -174,13 +174,31 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
+// This node is the second member and not a voter, so no other key of the config is
+// its key.
 #[test]
 fn key_gives_the_key_of_the_config() {
     solo(|node, tasks| async move {
-        let config = create_config(&node, &tasks);
-        let key = config.key;
+        let private_key = || PrivateKey([2; 32]);
+        let pair = Ed25519KeyPair::from_seed_unchecked(&private_key().0).unwrap();
+        let public_key = pair.public_key().as_ref().try_into().unwrap();
+        let card = Card {
+            name: "plant.node2".parse().unwrap(),
+            public_key: PublicKey::new(public_key).unwrap(),
+            seal_key: SealKey::new([9; 32]).unwrap(),
+            addresses: Addresses::new(Vec::new()).unwrap(),
+            version: 1,
+        };
+        let card = card::Signed::sign(OTHER, card, &private_key());
+        let mut config = create_config_on(&node, &tasks, private_key());
+        config.key = OTHER;
+        config.private_key = private_key();
+        config.members.push(Member {
+            card,
+            ..create_member()
+        });
         let mesh = Mesh::open(config).await.unwrap();
-        assert_eq!(mesh.key(), key);
+        assert_eq!(mesh.key(), OTHER);
     });
 }
 
@@ -286,7 +304,8 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 }
 
 #[test]
-fn watch_member_next_and_serve_have_the_signatures_that_a_caller_holds() {
+fn key_watch_member_next_and_serve_have_the_signatures_that_a_caller_holds() {
+    let _: fn(&Mesh) -> node::Key = Mesh::key;
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
     assert_gives_a_home(Watch::next);
