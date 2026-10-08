@@ -2443,8 +2443,12 @@ mod tests {
             |side| async move {
                 assert_eq!(side.transport.status().budget_waits, 0);
                 let mut senders = Vec::new();
-                for _ in 0..5 {
-                    let opened = side.session.open_sender(Class::Complete).await;
+                // The two that wait are of two classes, so each class counts.
+                let classes = [Class::Complete; 3]
+                    .into_iter()
+                    .chain([Class::CatchUp, Class::Complete]);
+                for class in classes {
+                    let opened = side.session.open_sender(class).await;
                     senders.push(opened.expect("a stream"));
                 }
                 let mut sends: Vec<Pin<Box<dyn Future<Output = _>>>> = Vec::new();
