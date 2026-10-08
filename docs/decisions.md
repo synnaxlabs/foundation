@@ -2254,7 +2254,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6060090043,
   2026-10-08T12:41:22Z). The probe with no data in flight: architect-2
   (https://github.com/synnaxlabs/foundation/pull/1963#issuecomment-6066780738,
-  2026-10-08T18:48:48Z).
+  2026-10-08T18:48:48Z). Supersedes the sentence "It is never less than the PTO base."
+  of https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6060065670.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
