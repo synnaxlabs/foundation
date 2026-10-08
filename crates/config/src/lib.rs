@@ -72,7 +72,9 @@ pub struct Entry {
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
-/// channel knows.
+/// channel knows. A `kind` of connector that is missing, is not a name, or is not in
+/// `kinds` hides each problem of the connector's config, and so does a config nested
+/// deeper than `document::encoding::Checked` takes.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
