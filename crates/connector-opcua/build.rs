@@ -5,20 +5,25 @@
 #[path = "build/compiler.rs"]
 mod compiler;
 
-#[cfg(feature = "open62541")]
 fn main() {
-    use std::path::Path;
-
-    let copy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/open62541");
-    println!("cargo::rerun-if-changed={}", copy.display());
-    println!("cargo::rerun-if-changed=src/shim.c");
-    // The tests of `link` compile variants of the shim for this target.
+    // The tests compile C for this target.
     #[expect(
         clippy::disallowed_methods,
         reason = "cargo gives a build script its target only in the environment"
     )]
     let target = std::env::var("TARGET").expect("cargo sets TARGET");
     println!("cargo::rustc-env=CONNECTOR_OPCUA_TARGET={target}");
+    #[cfg(feature = "open62541")]
+    build();
+}
+
+#[cfg(feature = "open62541")]
+fn build() {
+    use std::path::Path;
+
+    let copy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/open62541");
+    println!("cargo::rerun-if-changed={}", copy.display());
+    println!("cargo::rerun-if-changed=src/shim.c");
     let read = |name| {
         let path = copy.join(name);
         std::fs::read_to_string(&path)
@@ -33,6 +38,3 @@ fn main() {
     // The copy calls into the shim, so the shim links after it.
     shim.compile("shim");
 }
-
-#[cfg(not(feature = "open62541"))]
-fn main() {}

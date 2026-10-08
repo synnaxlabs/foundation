@@ -16,9 +16,17 @@ pub(crate) fn running() -> bool {
 }
 
 /// Runs the test `name` in a child process, and asserts that it passes. The child
-/// gets only `PATH` from this process, so `cc` reads no compiler or flags from the
-/// environment there, and `cflags` is its `CFLAGS`.
+/// gets only `PATH` and, as `CC`, the compiler that `cc` picks here without its flags,
+/// so `cflags` is the only C flags that `cc` reads there.
 pub(crate) fn run(name: &str, cflags: Option<&str>) {
+    let target = env!("CONNECTOR_OPCUA_TARGET");
+    let compiler = cc::Build::new()
+        .target(target)
+        .host(target)
+        .opt_level(0)
+        .cargo_metadata(false)
+        .cargo_warnings(false)
+        .get_compiler();
     #[expect(
         clippy::disallowed_methods,
         reason = "`cc` finds the compiler on the PATH of the child process"
@@ -29,6 +37,7 @@ pub(crate) fn run(name: &str, cflags: Option<&str>) {
         .args(["--exact", name])
         .env_clear()
         .env("PATH", path)
+        .env("CC", compiler.path())
         .env(MARK, "1");
     if let Some(cflags) = cflags {
         child.env("CFLAGS", cflags);

@@ -92,28 +92,57 @@ fn each_posix_constructor_prints_its_name_and_aborts() {
     }
 }
 
-/// Compiles `shim.c` with `line` added after the line `after`, with the build of the
-/// shim at `-O3`, the release level, where GCC gives the most warnings. Gives the
-/// compiler's errors, which are empty when it compiles. A warning is an error in the
-/// shim.
-fn check_shim(after: &str, line: &str) -> String {
-    use std::io::Write;
-    use std::path::Path;
-    use std::process::Stdio;
+/// The directory of this crate.
+const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let copy = root.join("../../patches/open62541");
+/// The compiler of the build of the shim, at `-O3`, the release level, where GCC gives
+/// the most warnings. A warning is an error in the shim.
+fn shim_compiler() -> cc::Tool {
+    let copy = std::path::Path::new(ROOT).join("../../patches/open62541");
     let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
     let target = env!("CONNECTOR_OPCUA_TARGET");
     let mut shim = crate::compiler::builds(&copy, &flags, "").shim;
-    let tool = shim
-        .target(target)
+    shim.target(target)
         .host(target)
         .opt_level(3)
         .cargo_metadata(false)
         .cargo_warnings(false)
-        .get_compiler();
-    let text = std::fs::read_to_string(root.join("src/shim.c")).unwrap();
+        .get_compiler()
+}
+
+/// Gives each pragma of `shim.c` after the preprocessor, which joins split lines and
+/// expands `_Pragma`.
+fn shim_pragmas() -> Vec<String> {
+    let path = std::path::Path::new(ROOT).join("src/shim.c");
+    let output = shim_compiler()
+        .to_command()
+        .arg("-E")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let mut in_shim = false;
+    let mut pragmas = Vec::new();
+    for line in String::from_utf8(output.stdout).unwrap().lines() {
+        // A line marker, `# <line> "<file>" <flags>`, names the file of the next lines.
+        if let Some(marker) = line.strip_prefix("# ") {
+            in_shim = marker.contains(&format!("\"{}\"", path.display()));
+        } else if in_shim && line.trim_start().starts_with("#pragma") {
+            pragmas.push(line.trim().to_owned());
+        }
+    }
+    pragmas
+}
+
+/// Compiles `shim.c` with `line` added after the line `after`, with `shim_compiler`.
+/// Gives the compiler's errors, which are empty when it compiles.
+fn check_shim(after: &str, line: &str) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let tool = shim_compiler();
+    let text =
+        std::fs::read_to_string(std::path::Path::new(ROOT).join("src/shim.c")).unwrap();
     let (at, _) = text
         .match_indices(after)
         .next()
@@ -147,14 +176,8 @@ fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
         crate::child::run(name, None);
         return;
     }
-    // The compiler joins a line that ends in a backslash to the next one.
-    let text = include_str!("shim.c").replace("\\\n", "");
-    let lines = text.lines().map(str::trim);
-    let pragmas: Vec<_> = lines
-        .filter(|l| l.to_lowercase().contains("pragma"))
-        .collect();
     assert_eq!(
-        pragmas,
+        shim_pragmas(),
         [
             "#pragma GCC diagnostic push",
             "#pragma GCC diagnostic ignored \"-Wunused-parameter\"",
@@ -199,4 +222,16 @@ fn the_shim_check_ignores_the_environment_of_cc() {
         output.status.success() && stdout.contains("test result: ok. 1 passed"),
         "{stdout}"
     );
+}
+
+#[test]
+fn the_shim_check_uses_the_compiler_of_cc() {
+    let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env("CC", "/missing/gcc")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("No such file or directory"), "{stdout}");
 }
