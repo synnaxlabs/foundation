@@ -8,10 +8,12 @@ use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Span};
 use env::clock::Clock;
 use env::entropy::Entropy;
+use env::net::Net;
 use env::rng::Rng;
+use env::tasks::Tasks;
 use types::name::Name;
 
-use crate::cancel;
+use crate::{cancel, supervisor};
 
 /// The noun of the document that [`Kind::parse`] gets, for the text of a diagnostic.
 pub const NOUN: &str = "the connector";
@@ -108,6 +110,8 @@ pub struct Context<C> {
     cancel: cancel::Token,
     clock: Clock,
     entropy: Entropy,
+    net: Net,
+    tasks: Tasks,
 }
 
 impl<C> Context<C> {
@@ -115,15 +119,16 @@ impl<C> Context<C> {
         name: Name,
         config: C,
         cancel: cancel::Token,
-        clock: Clock,
-        entropy: Entropy,
+        inputs: &supervisor::Config,
     ) -> Self {
         Self {
             name,
             config,
             cancel,
-            clock,
-            entropy,
+            clock: inputs.clock.clone(),
+            entropy: inputs.entropy.clone(),
+            net: inputs.net.clone(),
+            tasks: inputs.tasks.clone(),
         }
     }
 
@@ -135,6 +140,8 @@ impl<C> Context<C> {
             cancel: self.cancel,
             clock: self.clock,
             entropy: self.entropy,
+            net: self.net,
+            tasks: self.tasks,
         }
     }
 
@@ -166,6 +173,18 @@ impl<C> Context<C> {
     #[must_use]
     pub fn rng(&self) -> Rng {
         self.entropy.rng()
+    }
+
+    /// Connects streams and datagrams.
+    #[must_use]
+    pub fn net(&self) -> &Net {
+        &self.net
+    }
+
+    /// Runs the kind's own tasks on its shard.
+    #[must_use]
+    pub fn tasks(&self) -> &Tasks {
+        &self.tasks
     }
 }
 
@@ -327,7 +346,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::run;
+    use crate::common::{inputs, run, run_on};
 
     const MISSING: Code = Code::new("test.missing");
     const RANGE: Code = Code::new("test.range");
@@ -549,15 +568,11 @@ mod tests {
 
     #[test]
     fn runs_until_cancelled_with_its_context() {
-        let (early, late, out, ctx_name, n) = run(|clock, tasks, entropy| async move {
+        let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
-            let ctx = Context::new(
-                name("plant.counter"),
-                3,
-                token.clone(),
-                clock.clone(),
-                entropy,
-            );
+            let inputs = inputs(&node, tasks.clone(), Table::new());
+            let ctx = Context::new(name("plant.counter"), 3, token.clone(), &inputs);
+            let clock = node.clock();
             let (ctx_name, n) = (ctx.name().clone(), *ctx.config());
             let out = Rc::new(RefCell::new(None));
             let slot = Rc::clone(&out);
@@ -579,8 +594,9 @@ mod tests {
 
     #[test]
     fn gives_a_new_random_source_on_each_call() {
-        let (a, b) = run(|clock, _, entropy| async move {
-            let ctx = Context::new(name("a"), (), Token::new(), clock, entropy);
+        let (a, b) = run_on(|node, tasks| async move {
+            let inputs = inputs(&node, tasks, Table::new());
+            let ctx = Context::new(name("a"), (), Token::new(), &inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
         assert_ne!(a, b);
