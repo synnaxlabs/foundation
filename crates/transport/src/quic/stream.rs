@@ -3735,7 +3735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_sender_that_the_peer_stops_gives_no_event() {
+    fn a_reset_sender_that_the_peer_stops_gives_only_its_freed_stream() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -3747,7 +3747,10 @@ mod tests {
             pair.client.endpoint.reset(now, &mut sender, Code(9));
             pair.server.endpoint.stop(now, receiver, Code(9));
             pair.run(RUN);
-            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&available]);
         });
     }
 
@@ -4229,11 +4232,12 @@ mod tests {
             let id = sender.key().id;
             let now = pair.now();
             pair.client.endpoint.reset(now, &mut sender, Code(9));
-            // The stop goes before the client's reset arrives, and the link loses it.
+            // The stop goes before the client's reset arrives. The link loses it and
+            // the next datagram, so the resent stop comes after the reset's ACK.
             let over = VarInt::from_u64(1 << 32).expect("a varint");
             let stopped = pair.server.connection().recv_stream(id).stop(over);
             stopped.expect("stopped");
-            pair.server.drops = 1;
+            pair.server.drops = 2;
             pair.run(Duration::ZERO);
             assert_ignored_late_stop(&mut pair, false, id);
         });
@@ -4524,7 +4528,11 @@ mod tests {
             let writable = Event::Writable {
                 stream: sender.key(),
             };
-            assert_eq!(events(&pair.client).last(), Some(&&writable));
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            let given = events(&pair.client);
+            assert_eq!(given[given.len() - 2..], [&writable, &available]);
             let now = pair.now();
             for _ in 0..2 {
                 let written = pair::write(
@@ -4615,87 +4623,69 @@ mod tests {
         pair.run(RUN);
     }
 
+    /// Opens every stream the server allows from the client, each with "a", and
+    /// accepts each on the server.
+    fn open_all(pair: &mut Pair, shard: &Shard) -> (Vec<Sender>, Vec<Incoming>) {
+        let now = pair.now();
+        let senders = (0..testing::STREAMS_MAX)
+            .map(|_| {
+                let mut sender = open_sender(pair, Class::Complete);
+                write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+                sender
+            })
+            .collect();
+        pair.run(RUN);
+        let server = key(&pair.server);
+        let incoming = iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+        (senders, incoming)
+    }
+
+    /// Opens a stream from the client with no wait.
+    fn try_open(pair: &mut Pair) -> Option<Sender> {
+        let (now, key) = (pair.now(), key(&pair.client));
+        pair.client.endpoint.open_sender(now, key, Class::Complete)
+    }
+
     #[test]
-    fn a_freed_stream_goes_at_once_only_to_a_peer_that_waits_for_one() {
+    fn each_freed_stream_gives_a_max_streams_frame_with_or_without_a_wait() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let open = |pair: &mut Pair| {
-                let (now, key) = (pair.now(), key(&pair.client));
-                pair.client.endpoint.open_sender(now, key, Class::Complete)
-            };
-            let now = pair.now();
-            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
-                .map(|_| {
-                    let mut sender = open_sender(&mut pair, Class::Complete);
-                    write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
-                    sender
-                })
-                .collect();
-            pair.run(RUN);
-            let server = key(&pair.server);
-            let mut incoming: Vec<Incoming> =
-                iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+            let (mut senders, mut incoming) = open_all(&mut pair, shard);
             let before = announced(&mut pair);
             end(&mut pair, &mut senders[0], &mut incoming);
-            end(&mut pair, &mut senders[1], &mut incoming);
-            assert_eq!(announced(&mut pair), before, "two of 16 freed, and no wait");
-            end(&mut pair, &mut senders[2], &mut incoming);
-            assert_eq!(announced(&mut pair), before + 1, "three of 16 freed");
-            for _ in 0..3 {
-                assert!(open(&mut pair).is_some());
-            }
-            assert!(open(&mut pair).is_none());
+            assert_eq!(announced(&mut pair), before + 1, "a free, and no wait");
+            assert!(try_open(&mut pair).is_some());
+            assert!(try_open(&mut pair).is_none());
             pair.run(RUN);
             assert_eq!(announced(&mut pair), before + 1, "no stream is free");
-            end(&mut pair, &mut senders[3], &mut incoming);
+            end(&mut pair, &mut senders[1], &mut incoming);
             assert_eq!(announced(&mut pair), before + 2, "a wait, then a free");
-            assert!(open(&mut pair).is_some());
-            end(&mut pair, &mut senders[4], &mut incoming);
-            assert_eq!(announced(&mut pair), before + 2, "a free, and no wait");
-            assert!(open(&mut pair).is_none());
-            pair.run(RUN);
-            assert_eq!(announced(&mut pair), before + 3, "a free, then a wait");
-            assert!(open(&mut pair).is_some());
+            assert!(try_open(&mut pair).is_some());
         });
     }
 
     #[test]
-    fn a_late_streams_blocked_for_an_old_limit_keeps_the_wait_of_the_peer() {
+    fn a_burst_of_freed_streams_gives_one_max_streams_frame() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let open = |pair: &mut Pair| {
-                let (now, key) = (pair.now(), key(&pair.client));
-                pair.client.endpoint.open_sender(now, key, Class::Complete)
-            };
-            let now = pair.now();
-            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
-                .map(|_| {
-                    let mut sender = open_sender(&mut pair, Class::Complete);
-                    write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
-                    sender
-                })
-                .collect();
-            pair.run(RUN);
-            let server = key(&pair.server);
-            let mut incoming: Vec<Incoming> =
-                iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
-            assert!(open(&mut pair).is_none());
-            let held = pair.client.sent.len();
-            pair.client.drops = 1;
-            pair.run(RUN);
-            let late = pair.client.sent[held].2.clone();
+            let (mut senders, mut incoming) = open_all(&mut pair, shard);
             let before = announced(&mut pair);
-            end(&mut pair, &mut senders[0], &mut incoming);
-            assert_eq!(announced(&mut pair), before + 1, "a resent wait");
-            assert!(open(&mut pair).is_some());
-            assert!(open(&mut pair).is_none());
+            for sender in &mut senders[..4] {
+                let finished = pair.client.endpoint.finish(pair.now(), sender);
+                assert_eq!(finished, Ok(()));
+            }
             pair.run(RUN);
             let now = pair.now();
-            let meta = pair::meta(pair::CLIENT, &late);
-            pair.server.endpoint.receive(now, &meta, &late);
+            for incoming in &mut incoming[..4] {
+                let read = drain(&mut pair.server, now, &mut incoming.receiver);
+                assert_eq!(read, (vec![b"a".to_vec()], true));
+            }
             pair.run(RUN);
-            end(&mut pair, &mut senders[1], &mut incoming);
-            assert_eq!(announced(&mut pair), before + 2, "a late, old wait");
+            assert_eq!(announced(&mut pair), before + 1);
+            for _ in 0..4 {
+                assert!(try_open(&mut pair).is_some());
+            }
+            assert!(try_open(&mut pair).is_none());
         });
     }
 
@@ -5851,8 +5841,11 @@ mod tests {
             let writable = |sender: &Sender| Event::Writable {
                 stream: sender.key(),
             };
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
             let given = events(&pair.client).split_off(seen);
-            assert_eq!(given, [&writable(&second), &writable(&first)]);
+            assert_eq!(given, [&writable(&second), &writable(&first), &available]);
         });
     }
 
@@ -5961,7 +5954,10 @@ mod tests {
             let woken = Event::Writable {
                 stream: sender.key(),
             };
-            assert_eq!(events(&pair.client).split_off(seen), [&woken]);
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&woken, &available]);
         });
     }
 
