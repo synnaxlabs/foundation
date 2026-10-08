@@ -281,7 +281,8 @@ impl Node {
     /// values that are not `Send`, such as sessions; it sends its result back through a
     /// value it owns. Its future runs until it completes or shard 0 ends, which drops
     /// it. A panic in a task ends shard 0 and fails the node: [`Node::join`] gives
-    /// [`Error::Panicked`].
+    /// [`Error::Panicked`], unless the transport stopped first, which gives
+    /// [`Error::Transport`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
         F: Future<Output = ()> + 'static,
