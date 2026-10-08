@@ -36,6 +36,19 @@ impl From<latest::Key> for Key {
     }
 }
 
+/// What a session gets from [`Readers::take`].
+#[derive(Debug)]
+pub enum Next {
+    /// The session's next frame.
+    Frame(Frame),
+    /// No frame waits, or the session is closed.
+    Empty,
+    /// The complete session missed a live frame, so it gets no later frame. It comes
+    /// after the frames before the miss, on this and each later call. A latest session
+    /// never gives it.
+    Behind,
+}
+
 /// The readers of one index at its home, in both modes. For complete readers: their
 /// positions, the data they hold, the credit each session has, the live frames on
 /// their way to disk and the frames that wait for each session, and the records that
@@ -177,8 +190,8 @@ impl Readers {
     /// Starts a complete session with credit for `limit_bytes` since it opens, its
     /// first grant, that `charge` charges for each frame. A named reader's open session
     /// in either mode is taken over. A session that starts below a live frame that
-    /// memory no longer holds gets no live frame: it is [`behind`](Readers::behind) at
-    /// once, and no [`Readers::release`] names it.
+    /// memory no longer holds gets no live frame: [`Readers::take`] gives
+    /// [`Next::Behind`] at once, and no [`Readers::release`] names it.
     ///
     /// # Panics
     ///
@@ -361,19 +374,6 @@ impl Readers {
         &self.woken_complete
     }
 
-    /// Whether the complete session missed a live frame, so it gets no later live
-    /// frame. `false` for a closed session. A session can miss one at its open, which
-    /// no [`Readers::release`] names: when [`Readers::take`] gives `None`, check this
-    /// before the session waits.
-    ///
-    /// # Panics
-    ///
-    /// If this `Readers` never gave `key`.
-    #[must_use]
-    pub fn behind(&self, key: complete::Key) -> bool {
-        self.find(key).is_some_and(|i| self.flows[i].behind)
-    }
-
     /// Whether a queued live frame waits to be on disk. While one does, call
     /// [`Readers::release`] after each commit.
     #[must_use]
@@ -381,21 +381,29 @@ impl Readers {
         !self.queue.is_empty()
     }
 
-    /// Takes the session's next waiting frame, or `None` when it has none or is
-    /// closed. A latest session has at most one; a complete session has the frames
-    /// that [`Readers::release`] gave it, in seq order. A complete session with none
-    /// waiting may be [`behind`](Readers::behind).
+    /// Takes the session's next waiting frame. A latest session has at most one; a
+    /// complete session has the frames that [`Readers::release`] gave it, in seq
+    /// order, then [`Next::Behind`] once it missed a live frame. A session can miss
+    /// one at its open, which no `release` names.
     ///
     /// # Panics
     ///
     /// If this `Readers` never gave `key`.
-    pub fn take(&mut self, key: Key) -> Option<Frame> {
+    #[must_use]
+    pub fn take(&mut self, key: Key) -> Next {
         match key {
             Key::Complete(key) => {
-                let i = self.find(key)?;
-                self.flows[i].waiting.pop_front()
+                let Some(i) = self.find(key) else {
+                    return Next::Empty;
+                };
+                let flow = &mut self.flows[i];
+                match flow.waiting.pop_front() {
+                    Some(frame) => Next::Frame(frame),
+                    None if flow.behind => Next::Behind,
+                    None => Next::Empty,
+                }
             }
-            Key::Latest(key) => self.take_latest(key),
+            Key::Latest(key) => self.take_latest(key).map_or(Next::Empty, Next::Frame),
         }
     }
 
@@ -707,6 +715,46 @@ pub(super) mod tests {
         u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
     }
 
+    /// Each frame that the session `key` takes now, then the [`Next`] after them.
+    fn drain(readers: &mut Readers, key: impl Into<Key>) -> (Vec<Frame>, Next) {
+        let key = key.into();
+        let mut frames = Vec::new();
+        loop {
+            match readers.take(key) {
+                Next::Frame(frame) => frames.push(frame),
+                end @ (Next::Empty | Next::Behind) => return (frames, end),
+            }
+        }
+    }
+
+    /// The number of each frame that the session `key` takes before
+    /// [`Next::Empty`].
+    ///
+    /// # Panics
+    ///
+    /// If the session gets [`Next::Behind`].
+    #[track_caller]
+    pub(super) fn taken(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
+        let (frames, end) = drain(readers, key);
+        let numbers = frames.iter().map(number).collect();
+        assert!(matches!(end, Next::Empty), "behind after {numbers:?}");
+        numbers
+    }
+
+    /// The number of each frame that the session `key` takes before
+    /// [`Next::Behind`].
+    ///
+    /// # Panics
+    ///
+    /// If the session gets [`Next::Empty`].
+    #[track_caller]
+    pub(super) fn missed(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
+        let (frames, end) = drain(readers, key);
+        let numbers = frames.iter().map(number).collect();
+        assert!(matches!(end, Next::Behind), "not behind after {numbers:?}");
+        numbers
+    }
+
     fn at(nanos: i64) -> Stamp {
         Stamp::from_nanos(nanos)
     }
@@ -776,7 +824,7 @@ pub(super) mod tests {
             readers.grant(key, u64::MAX);
             assert_eq!(readers.ack(key, live(0)), Ok(()));
         }
-        assert!(readers.take(key).is_none());
+        assert!(matches!(readers.take(key), Next::Empty));
         readers.close(key);
         if let Key::Complete(key) = key {
             readers.close_named(key, at(i64::MAX));
@@ -1110,7 +1158,7 @@ pub(super) mod tests {
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.release(1), [new]);
-            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+            assert_eq!(taken(&mut readers, new), [1]);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
         }
 
@@ -1127,7 +1175,7 @@ pub(super) mod tests {
             drained(&mut readers);
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
-            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
+            assert_eq!(taken(&mut readers, new), [1]);
         }
 
         /// Queues frame 1 of `frames` at seq 0..2 to a named and an unnamed session,
@@ -1167,7 +1215,7 @@ pub(super) mod tests {
         fn take_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
             let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
-            readers.take(complete::Key(1).into());
+            drop(readers.take(complete::Key(1).into()));
         }
 
         #[test]
@@ -1543,15 +1591,6 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "complete session 1 was never open")]
-        fn behind_panics_on_a_session_never_open() {
-            let mut readers = Readers::new(0);
-            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
-            let behind = readers.behind(complete::Key(1));
-            unreachable!("behind is {behind}");
-        }
-
-        #[test]
         #[should_panic(expected = "complete session 2 was never open")]
         fn grant_panics_on_a_key_past_the_next() {
             let mut readers = Readers::new(0);
@@ -1577,13 +1616,6 @@ pub(super) mod tests {
 
         fn released(readers: &mut Readers, durable: u64) -> Vec<complete::Key> {
             readers.release(durable).to_vec()
-        }
-
-        fn taken(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
-            let key = key.into();
-            iter::from_fn(|| readers.take(key))
-                .map(|frame| number(&frame))
-                .collect()
         }
 
         #[test]
@@ -1682,14 +1714,12 @@ pub(super) mod tests {
             let frames = Frames::new(2);
             let mut readers = Readers::new(0);
             readers.queue(&frames.frame(1), &frames.set, 0..4);
-            let behind = opened(&mut readers, 2, 10);
+            let below = opened(&mut readers, 2, 10);
             let current = opened(&mut readers, 4, 10);
             readers.queue(&frames.frame(2), &frames.set, 4..6);
             assert_eq!(released(&mut readers, 6), [current]);
-            assert_eq!(taken(&mut readers, behind), []);
+            assert_eq!(missed(&mut readers, below), []);
             assert_eq!(taken(&mut readers, current), [2]);
-            assert!(readers.behind(behind));
-            assert!(!readers.behind(current));
         }
 
         #[test]
@@ -1702,7 +1732,7 @@ pub(super) mod tests {
             let behind = opened(&mut readers, 3, 10);
             readers.queue(&frames.frame(2), &frames.set, 4..6);
             assert_eq!(released(&mut readers, 6), []);
-            assert_eq!(taken(&mut readers, behind), []);
+            assert_eq!(missed(&mut readers, behind), []);
             assert_eq!(taken(&mut readers, first), [1, 2]);
         }
 
@@ -1713,7 +1743,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 5, 10);
             readers.queue(&frames.frame(1), &frames.set, 10..12);
             assert_eq!(released(&mut readers, 12), []);
-            assert_eq!(taken(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
@@ -1723,7 +1753,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 5, 10);
             readers.queue(&frames.frame(1), &frames.set, 10..12);
             assert_eq!(released(&mut readers, 12), []);
-            assert_eq!(taken(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
@@ -1742,7 +1772,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2]);
+            assert_eq!(missed(&mut readers, key), [1, 2]);
         }
 
         #[test]
@@ -1761,7 +1791,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2]);
+            assert_eq!(missed(&mut readers, key), [1, 2]);
         }
 
         #[test]
@@ -1776,7 +1806,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
+            assert_eq!(missed(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
@@ -1796,7 +1826,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
+            assert_eq!(missed(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
@@ -1810,7 +1840,7 @@ pub(super) mod tests {
             readers.grant(key, 10 * CHARGE);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(released(&mut readers, 3), []);
-            assert_eq!(taken(&mut readers, key), [1]);
+            assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
@@ -1823,7 +1853,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [short, long]);
-            assert_eq!(taken(&mut readers, short), [1]);
+            assert_eq!(missed(&mut readers, short), [1]);
             assert_eq!(taken(&mut readers, long), [1, 2, 3]);
         }
 
@@ -1842,8 +1872,7 @@ pub(super) mod tests {
                 .key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [new]);
-            assert!(readers.behind(new));
-            assert_eq!(taken(&mut readers, new), []);
+            assert_eq!(missed(&mut readers, new), []);
         }
 
         #[test]
@@ -1882,7 +1911,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [open]);
-            assert_eq!(taken(&mut readers, open), [1]);
+            assert_eq!(missed(&mut readers, open), [1]);
         }
 
         #[test]
@@ -1898,8 +1927,7 @@ pub(super) mod tests {
             readers.grant(old, 10 * CHARGE);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [new]);
-            assert!(readers.behind(new));
-            assert_eq!(taken(&mut readers, new), []);
+            assert_eq!(missed(&mut readers, new), []);
         }
 
         #[test]
@@ -1938,13 +1966,13 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
             assert_eq!(taken(&mut readers, key), [1]);
-            assert!(!readers.behind(key));
+            assert_eq!(taken(&mut readers, key), []);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [key]);
-            assert!(readers.behind(key));
+            assert_eq!(missed(&mut readers, key), []);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(released(&mut readers, 3), []);
-            assert_eq!(taken(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
@@ -1955,8 +1983,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [key]);
-            assert!(readers.behind(key));
-            assert_eq!(taken(&mut readers, key), [1]);
+            assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
@@ -1968,8 +1995,7 @@ pub(super) mod tests {
             assert_eq!(released(&mut readers, 1), [key]);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), []);
-            assert!(readers.behind(key));
-            assert_eq!(taken(&mut readers, key), [1]);
+            assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
@@ -1979,9 +2005,10 @@ pub(super) mod tests {
             let key = opened(&mut readers, 0, 0);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
-            assert!(readers.behind(key));
+            assert_eq!(missed(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
             readers.close(key.into());
-            assert!(!readers.behind(key));
+            assert_eq!(taken(&mut readers, key), []);
         }
 
         #[test]
@@ -2025,10 +2052,7 @@ pub(super) mod tests {
             let latest = readers.open_latest().key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert!(frames.spare());
-            assert_eq!(
-                readers.take(latest.into()).map(|frame| number(&frame)),
-                None
-            );
+            assert_eq!(taken(&mut readers, latest), []);
         }
 
         #[test]
@@ -2052,7 +2076,7 @@ pub(super) mod tests {
             assert!(frames.spare());
             let later = opened(&mut readers, 0, 10);
             assert_eq!(released(&mut readers, 1), []);
-            assert_eq!(taken(&mut readers, later), []);
+            assert_eq!(missed(&mut readers, later), []);
         }
 
         #[test]
@@ -2082,7 +2106,7 @@ pub(super) mod tests {
                 .key;
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), []);
-            assert_eq!(taken(&mut readers, later), []);
+            assert_eq!(missed(&mut readers, later), []);
         }
 
         #[test]
@@ -2142,7 +2166,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
-            assert_eq!(readers.take(key.into()).map(|frame| number(&frame)), None);
+            assert!(matches!(readers.take(key.into()), Next::Empty));
         }
 
         #[test]
@@ -2272,9 +2296,10 @@ pub(super) mod tests {
                     readers.queue(frame, set, seq.clone());
                 }
                 assert_eq!(readers.release(seq.end), [key]);
-                let taken = iter::from_fn(|| readers.take(key.into())).count();
-                assert_eq!(taken, frames.len() + usize::from(passes), "credit {limit}");
-                assert_eq!(readers.behind(key), !passes, "credit {limit}");
+                let (taken, end) = drain(&mut readers, key);
+                let count = frames.len() + usize::from(passes);
+                assert_eq!(taken.len(), count, "credit {limit}");
+                assert_eq!(matches!(end, Next::Behind), !passes, "credit {limit}");
             }
         }
 
@@ -2290,8 +2315,9 @@ pub(super) mod tests {
                 readers.queue(&sets.full(), &sets.wide, n..n + 1);
             }
             assert_eq!(readers.release(11), [key]);
-            assert_eq!(iter::from_fn(|| readers.take(key.into())).count(), 10);
-            assert!(readers.behind(key));
+            let (taken, end) = drain(&mut readers, key);
+            assert_eq!(taken.len(), 10);
+            assert!(matches!(end, Next::Behind));
         }
 
         #[test]
@@ -2389,11 +2415,11 @@ pub(super) mod tests {
                 }
                 let built = built(&sets.pool, &read);
                 // The parts too, as two errors in them could cancel in the charge.
-                let mut places = complete::Places::new(slots.clone().into());
-                prop_assert_eq!(
-                    places.size(&frame, &sets.wide),
-                    (read.len(), built.body().len())
-                );
+                let mut places = types::frame::Places::new(slots.clone().into());
+                let placed = places.lay(&frame, &sets.wide);
+                prop_assert_eq!(placed.len(), read.len());
+                let end = placed.last().map_or(0, |placed| placed.end);
+                prop_assert_eq!(end, built.body().len());
                 let charge = Charge::Places(slots.into());
                 spends(&charge, &[(&frame, &sets.wide)], built.charge());
             }
@@ -2884,11 +2910,16 @@ pub(super) mod tests {
                     .collect()
             }
 
-            fn take(&mut self, key: complete::Key) -> Option<u64> {
+            /// What a take gives `key`.
+            fn take(&mut self, key: complete::Key) -> Told {
                 let got = self.got(key);
                 let n = got.frames.get(got.taken).copied();
                 got.taken += usize::from(n.is_some());
-                n
+                match n {
+                    Some(n) => Told::Frame(n),
+                    None if got.behind => Told::Behind,
+                    None => Told::Empty,
+                }
             }
         }
 
@@ -2986,16 +3017,38 @@ pub(super) mod tests {
                     }
                     Live::Take(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        let taken =
-                            readers.take(key.into()).map(|frame| number(&frame));
-                        assert_eq!(taken, model.take(key));
+                        let taken = readers.take(key.into());
+                        assert_eq!(told(taken), model.take(key), "session {key:?}");
                     }
                 }
                 dropped_closed(&mut readers, &model.readers);
                 assert_eq!(readers.pending(), model.pending());
-                for (&key, got) in &model.open {
-                    assert_eq!(readers.behind(key), got.behind, "session {key:?}");
+            }
+            let keys: Vec<_> = model.open.keys().copied().collect();
+            for key in keys {
+                loop {
+                    let taken = told(readers.take(key.into()));
+                    assert_eq!(taken, model.take(key), "session {key:?}");
+                    if !matches!(taken, Told::Frame(_)) {
+                        break;
+                    }
                 }
+            }
+        }
+
+        /// A [`Next`] as the model states it, with a frame by its number.
+        #[derive(Debug, PartialEq)]
+        enum Told {
+            Frame(u64),
+            Empty,
+            Behind,
+        }
+
+        fn told(next: Next) -> Told {
+            match next {
+                Next::Frame(frame) => Told::Frame(number(&frame)),
+                Next::Empty => Told::Empty,
+                Next::Behind => Told::Behind,
             }
         }
 

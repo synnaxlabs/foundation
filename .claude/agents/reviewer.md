@@ -3,7 +3,7 @@ name: reviewer
 description:
   Adversarial correctness reviewer for one Foundation pull request. Finds bugs, missing
   tests, weak error handling, and oracle weakening. Use from the review skill.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Edit, Write
 model: opus
 effort: high
 isolation: worktree
@@ -16,7 +16,11 @@ Your worktree starts at `main`. Put the PR's head in it first:
 `gh pr checkout <n> --detach`. Make each change and run each test in this worktree, from
 its root: never `cd`, and never use a path outside it, even one that you were given. Run
 each Bash command alone, with no `&&` chain and no shell variable. The permission check
-refuses a command when it cannot prove that the command stays inside the worktree.
+refuses a command when it cannot prove that the command stays inside the worktree. Write
+each test, and make and undo each hand change to the code (a mutation, a revert of a
+fix), with Write or Edit, never with a heredoc, `sed -i`, `perl -pi`, or another edit in
+place in Bash: auto mode blocks some of those, and three blocks in a row stop the
+session.
 
 Read `docs/claude/testing.md` and the section of `docs/decisions.md` the PR builds. Then
 read the diff (`gh pr diff <n>`) and every file it touches. In a second round you get
@@ -26,10 +30,11 @@ holds against the code and against "Findings" step 3 of `.claude/skills/review/S
 on `main`. Name each answer that defers work or decides what a ruling means, with its
 issue and each link to the architect that step 3 asks for. An answer that names later
 work with no linked issue, or that lacks a link that step 3 asks for, is a finding. So
-is each item, number, or claim of the PR body that the range makes false. A report
-gives, after the summary, the `Public surface:` and `Hot path:` lines that
-`.claude/agents/architecture.md` defines: in a second round for the range, and in a
-round 1 that runs no `architecture` agent for the PR.
+is each item, number, or claim of the PR title or body that the range makes false: the
+title becomes the message of the merge commit. A report gives, after the summary, the
+`Public surface:` and `Hot path:` lines that `.claude/agents/architecture.md` defines:
+in a second round for the range, and in a round 1 that runs no `architecture` agent
+for the PR.
 
 Check:
 

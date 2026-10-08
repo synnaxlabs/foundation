@@ -64,22 +64,25 @@ command outside that worktree. Remove each worktree when its agent returns
    or, in a round with no `architecture` agent, the `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
-   another crate does the work. Before a deferral files a new issue, search the open
-   issues for its item (`gh issue list --state open --search '<function or file>'`). A
-   deferral to an existing issue is a comment on that issue that names the item and
-   links the round comment. A deferral in a risk crate (`raft`, `buffer`, `delivery`,
-   `block`, `ring`, `codec`, `wire`, `home`, `replica`, `transport`) needs the explicit
-   OK of the crate's architect: link its comment. A fix or an answer that makes such a
-   public surface change, or decides what a ruling means, needs the architect's approval
-   too: link its comment. So does a fix that reverses a finding of the architect. So
-   does an answer that accepts a regression over 5% (P1). An answer to a run that cannot
-   show the 5% check links the result of the coordinator's rerun: the comment with its
-   numbers, never a queued run. A dispute about what a rule in `CLAUDE.md` or
-   `docs/claude/` means goes to `laptop.director`. A refusal that names a trigger for
-   later work is a deferral: file its issue with the trigger, or write the trigger in
-   the decisions entry that the ruling cites. So is an answer that a later PR does the
-   work, also a later PR of the same issue. When the trigger is the work of another open
-   issue, also comment the deferral issue and its trigger on that issue.
+   another crate does the work. A finding whose fix is a small change in a crate or a
+   file that this PR changes is fixed in this PR. Another small one follows
+   `docs/coordination.md`, "Small changes". Search the open issues for the item of a
+   deferral before it files a new issue:
+   `gh issue list --state open --search '<function or file>'`. A deferral to an existing
+   issue is a comment on that issue that names the item and links the round comment. A
+   deferral in a risk crate (`raft`, `buffer`, `delivery`, `block`, `ring`, `codec`,
+   `wire`, `home`, `replica`, `transport`) needs the explicit OK of the crate's
+   architect: link its comment. A fix or an answer that makes such a public surface
+   change, or decides what a ruling means, needs the architect's approval too: link its
+   comment. So does a fix that reverses a finding of the architect. So does an answer
+   that accepts a regression over 5% (P1). An answer to a run that cannot show the 5%
+   check links the result of the coordinator's rerun: the comment with its numbers,
+   never a queued run. A dispute about what a rule in `CLAUDE.md` or `docs/claude/`
+   means goes to `laptop.director`. A refusal that names a trigger for later work is a
+   deferral: file its issue with the trigger, or write the trigger in the decisions
+   entry that the ruling cites. So is an answer that a later PR does the work, also a
+   later PR of the same issue. When the trigger is the work of another open issue, also
+   comment the deferral issue and its trigger on that issue.
 
 ## Rating
 
@@ -144,13 +147,17 @@ nothing checked again. So when round 1 led to fix commits:
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
    with the round 1 comment and each architect review attached. Only a range in which
    the check counts no code change (Round comment) skips `breaker`, and its round
-   comment says so. The `reviewer` also gets each answer that changed no code, and
-   checks it (`.claude/agents/reviewer.md`). The round comment puts each deferral that
-   its report names on its `Deferred:` line. Its report gives the `Public surface:` and
-   `Hot path:` lines for the range. The round comment adds each item of the first to its
-   own `Public surface:` line, and copies the second. When the `Hot path:` line names a
-   function, run `performance` again on the range, and update the Performance section
-   with its numbers.
+   comment says so. In a trial until 2026-10-09T04:00Z, `box1.builder-1`,
+   `box1.builder-2`, `box1.builder-4`, and `box2.builder-7` launch that `reviewer` with
+   the `model` of the Agent call set to `sonnet` on a range that does not skip
+   `breaker`, and the round comment adds the line `Reviewer model: sonnet` under its
+   `Reviewers:` line, with no blank line between. The `reviewer` also gets each answer
+   that changed no code, and checks it (`.claude/agents/reviewer.md`). The round
+   comment puts each deferral that its report names on its `Deferred:` line. Its
+   report gives the `Public surface:` and `Hot path:` lines for the range. The round
+   comment adds each item of the first to its own `Public surface:` line, and copies
+   the second. When the `Hot path:` line names a function, run `performance` again on
+   the range, and update the Performance section with its numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit, and its comment

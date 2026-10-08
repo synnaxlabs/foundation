@@ -290,4 +290,11 @@ impl Descriptor for Open {
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
         Box::pin(async move { drop(self) })
     }
+
+    fn remove(
+        self: Box<Self>,
+        _: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>> {
+        unreachable!("the buffer tests remove no file through a handle")
+    }
 }

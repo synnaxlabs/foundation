@@ -52,7 +52,8 @@ use sim::Sim;
 use sim::node::Node;
 use transport::stream::Sender;
 use transport::{Address, Class, Code, Config, Error, Port, Session, Transport};
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::PublicKey;
+use types::node::PrivateKey;
 use types::time::Span;
 
 #[global_allocator]

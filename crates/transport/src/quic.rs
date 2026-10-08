@@ -32,7 +32,7 @@ use env::net::udp::{Meta, Transmit};
 use noq_proto::{
     ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
 };
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 use types::time::Monotonic;
 
 use self::connection::Connection;

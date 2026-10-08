@@ -7,7 +7,7 @@
 
 use types::channel::Key;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Layout, Mask, Path, Range, View};
+use types::frame::{self, Draft, Form, Layout, Mask, Path, Places, Range, View};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -33,12 +33,15 @@ fn main() {
             data: &[],
         },
     ];
-    let set = Interner::new().intern(&groups);
+    let mut interner = Interner::new();
+    let set = interner.intern(&groups);
+    let other = interner.intern(&groups[..1]);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     read_a_frame(&pool, &set);
     read_a_view(&pool, &set);
     receive_a_frame(&pool, &set);
+    lay_places(&pool, &set, &other);
 }
 
 const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];
@@ -113,6 +116,15 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
     let slot = |entry: usize| set.entries()[entry].slot;
     // Leaves out key 3, so the frame's only series left is the index.
     let most = Mask::new(set, [0, 1, 3].map(slot));
+    // A mask holds the index of each channel it wants; places name it.
+    let mut places = [
+        Places::new([0, 2].map(slot).into()),
+        Places::new(set.entries().iter().map(|entry| entry.slot).collect()),
+        Places::new([0, 1, 3].map(slot).into()),
+    ];
+    for places in &mut places {
+        places.lay(&frame, set);
+    }
     let (read, allocations) = ALLOCATOR.count(|| {
         let view = View::new(&frame, &narrow);
         let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
@@ -123,10 +135,12 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
         for (_, bytes) in view.iter() {
             most_read += bytes.len();
         }
-        let bounded: usize = [&narrow, &full, &most]
-            .into_iter()
-            .flat_map(|mask| View::new(&frame, mask).bounds())
-            .map(|(_, bounds)| bounds.len())
+        let bounded: usize = places
+            .iter_mut()
+            .map(|places| {
+                let laid = places.lay(&frame, set).iter();
+                laid.map(|placed| placed.bounds.len()).sum::<usize>()
+            })
             .sum();
         (read, full_read, most_read, bounded)
     });
@@ -159,4 +173,88 @@ fn receive_a_frame(pool: &block::Pool, set: &KeySet) {
     });
     assert_eq!(allocations, 0, "the receive allocated");
     assert!(received, "the frame holds the bytes the home sent");
+}
+
+fn lay_places(pool: &block::Pool, set: &KeySet, other: &KeySet) {
+    let frames = [
+        (Draft::new(pool, set, Form::Raw, &SERIES), set),
+        (Draft::new(pool, other, Form::Raw, &[(0, 8), (1, 8)]), other),
+    ]
+    .map(|(draft, set)| (draft.expect("the pool holds it").freeze(Path::Live), set));
+    // Key 3, then key 1: not every entry, so the charge lays each frame.
+    let slot = |entry: usize| set.entries()[entry].slot;
+    let mut places = Places::new([slot(2), slot(0)].into());
+    let mut charged = 0;
+    for (frame, set) in &frames {
+        places.lay(frame, set);
+        charged += places.charge(frame, set);
+    }
+    let (laid, allocations) = ALLOCATOR.count(|| {
+        let (mut laid, mut again) = (0, 0);
+        for (frame, set) in &frames {
+            laid += places.lay(frame, set).len();
+            again += places.charge(frame, set);
+        }
+        (laid, again)
+    });
+    assert_eq!(allocations, 0, "the places allocated");
+    assert_eq!(laid, (3, charged), "key 3 and key 1, then key 1");
+    lay_sparse_and_dense_frames(pool);
+    walk_only_a_dense_frame(pool);
+}
+
+/// A frame of 2 series at the places is dense, so its first lay grows the bounds of
+/// each place, only while the places name at most 16 entries.
+fn walk_only_a_dense_frame(pool: &block::Pool) {
+    let data: Vec<(Key, Type)> = (2..62).map(|n| (Key::from_u128(n), F64)).collect();
+    let mut interner = Interner::new();
+    let set = interner.intern(&[Group {
+        index: Key::from_u128(1),
+        data: &data,
+    }]);
+    let make = |lens: &[(usize, usize)]| {
+        let draft = Draft::new(pool, &set, Form::Raw, lens);
+        draft.expect("the pool holds it").freeze(Path::Live)
+    };
+    let index = make(&[(0, 8)]);
+    let frame = make(&[(0, 8), (52, 8), (57, 8)]);
+    for (entries, grown) in [(16, 2), (17, 1)] {
+        let slots = set.entries()[61 - entries..].iter().rev().map(|e| e.slot);
+        let mut places = Places::new(slots.collect());
+        places.lay(&index, &set);
+        let (_, allocations) = ALLOCATOR.count(|| places.lay(&frame, &set).len());
+        assert_eq!(allocations, grown, "{entries} entries");
+    }
+}
+
+/// Laying a sparse frame, then a dense one of the same key set, allocates only for
+/// the first of each.
+fn lay_sparse_and_dense_frames(pool: &block::Pool) {
+    let data: Vec<(Key, Type)> = (2..42).map(|n| (Key::from_u128(n), F64)).collect();
+    let mut interner = Interner::new();
+    let set = interner.intern(&[Group {
+        index: Key::from_u128(1),
+        data: &data,
+    }]);
+    let frames = [
+        vec![(0, 8), (30, 8)],
+        (0..8).map(|entry| (entry, 8)).collect(),
+    ]
+    .map(|lens| {
+        let draft = Draft::new(pool, &set, Form::Raw, &lens);
+        draft.expect("the pool holds it").freeze(Path::Live)
+    });
+    let mut places = Places::new(set.entries().iter().rev().map(|e| e.slot).collect());
+    for frame in &frames {
+        places.lay(frame, &set);
+    }
+    let (laid, allocations) = ALLOCATOR.count(|| {
+        let mut laid = 0;
+        for frame in frames.iter().chain(&frames) {
+            laid += places.lay(frame, &set).len();
+        }
+        laid
+    });
+    assert_eq!(allocations, 0, "the places allocated");
+    assert_eq!(laid, 2 * (2 + 8), "both series, then each of 8");
 }

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 
+use ::home::reader::Next;
 use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
@@ -89,8 +90,8 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A reader session through the reader's channels, with a fixed credit window.
-/// Dropping it closes the session; frames that wait do not go out.
+/// A reader session through the reader's channels. Dropping it closes the session;
+/// frames that wait do not go out.
 #[derive(Debug)]
 pub struct Reader {
     session: Session,
@@ -175,14 +176,11 @@ impl Reader {
 }
 
 /// A session at the shard's home, through a mask of the reader's channels: the frames
-/// it takes, and why it ends. Each [`Reader`] drives one, and so does each stream of a
-/// remote reader.
+/// it takes, and why it ends. Each [`Reader`] drives one.
 #[derive(Debug)]
 pub(crate) struct Session {
     state: Rc<RefCell<State>>,
     key: ::home::reader::Key,
-    /// The key of a complete session.
-    complete: Option<::home::reader::complete::Key>,
     /// The slots of the reader's channels.
     slots: Box<[channel::Slot]>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
@@ -209,7 +207,7 @@ impl Session {
             state: Rc::clone(state),
             key,
         };
-        (Self::new(state, key.into(), Some(key), slots), credit)
+        (Self::new(state, key.into(), slots), credit)
     }
 
     /// Opens a latest session through `slots` on the index of `index`.
@@ -219,19 +217,17 @@ impl Session {
         index: channel::Slot,
     ) -> Self {
         let key = state.borrow_mut().home.open_latest(index);
-        Self::new(state, key, None, slots)
+        Self::new(state, key, slots)
     }
 
     fn new(
         state: &Rc<RefCell<State>>,
         key: ::home::reader::Key,
-        complete: Option<::home::reader::complete::Key>,
         slots: Box<[channel::Slot]>,
     ) -> Self {
         Self {
             state: Rc::clone(state),
             key,
-            complete,
             slots,
             mask: None,
             streak: 0,
@@ -259,14 +255,13 @@ impl Session {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            if let Some(frame) = state.home.take(self.key) {
-                self.streak += 1;
-                return Poll::Ready(Ok(frame));
-            }
-            if let Some(complete) = self.complete
-                && state.home.behind(complete)
-            {
-                return Poll::Ready(Err(Ended::Behind));
+            match state.home.take(self.key) {
+                Next::Frame(frame) => {
+                    self.streak += 1;
+                    return Poll::Ready(Ok(frame));
+                }
+                Next::Behind => return Poll::Ready(Err(Ended::Behind)),
+                Next::Empty => {}
             }
             if let Some(error) = &state.failed {
                 return Poll::Ready(Err(Ended::Buffer(error.clone())));
