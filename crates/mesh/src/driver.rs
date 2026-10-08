@@ -185,11 +185,11 @@ impl Mesh {
             voters,
             definitions,
         } = config.founding;
-        let founding = spec::region::tree(&mut chunks, &definitions);
-        let state = region::State::new(prefix, members, founding.root, voters.clone())
+        let tree = spec::region::tree(&mut chunks, &definitions);
+        let state = region::State::new(prefix, members, tree.root, voters.clone())
             .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
-        put(&config.store, &config.pool, &chunks, &founding.chunks).await?;
+        put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;

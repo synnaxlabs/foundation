@@ -3031,7 +3031,7 @@ mod port {
             let out = Arc::clone(&seen);
             let started = host.shards().start(shard, move |tasks| async move {
                 for open in 0..2 {
-                    // The port of the first transport can be held after its drop.
+                    // The task of the first transport holds its port until it drains.
                     let listen = SocketAddr::new(own.addresses()[0], PORT + open);
                     let bound =
                         transport::Port::bind(&own.net(), listen).expect("a port");
