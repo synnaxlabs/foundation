@@ -3595,8 +3595,9 @@ impl Connection {
             && idle <= MIN_IDLE_FOR_FAST_PTO
         {
             // If the idle timeout is relatively low, cap at 1s so we get plenty of retries
-            // before the idle timeout fires.
-            MAX_PTO_FAST_INTERVAL
+            // before the idle timeout fires, and at a third of the idle timeout so a
+            // probe reaches the peer before its idle timeout fires.
+            MAX_PTO_FAST_INTERVAL.min(idle / 3)
         } else {
             // Otherwise cap to 2s.
             MAX_PTO_INTERVAL
