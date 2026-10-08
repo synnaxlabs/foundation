@@ -1144,6 +1144,7 @@ fn fails_a_round_with_raw_html() {
         ("a\n<source\n---", "<source"),
         ("<source | b\n--- | ---\nc | d", "<source | b"),
         ("> 1. <source", "> 1. <source"),
+        ("- <source", "- <source"),
         ("- ```\n  a\n  ```\n  <source", "<source"),
         ("| a |\n| - |\n<source", "<source"),
         ("</source", "</source"),
@@ -1357,6 +1358,8 @@ fn reads_only_a_top_level_round_heading() {
         "> ## Review round 2",
         "- ## Review round 2",
         "    ## Review round 2",
+        "```\n## Review round 2\n```",
+        "<div>\n\n    ## Review round 2",
     ] {
         let comment = bot(&format!("{quoted}\n\nNo fields."));
         assert_eq!(
