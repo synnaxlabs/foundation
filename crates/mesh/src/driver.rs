@@ -2374,6 +2374,18 @@ mod tests {
             });
         }
 
+        // Only the outgoing set of the committed joint entry held node 3, as for a
+        // wiped voter whose first entry is a joint entry.
+        #[test]
+        fn answers_removed_to_a_node_that_only_an_outgoing_set_held() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
+                let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
+                take(&node, &mesh, changes(2, &sets), 2).await;
+                assert_eq!(answered(&mesh, 3), Err(Error::Removed { from: key(3) }));
+            });
+        }
+
         // Node 4 is a member that no configuration in the log held.
         #[test]
         fn answers_not_voter_to_a_request_from_a_node_that_no_configuration_held() {
