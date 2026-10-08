@@ -5572,7 +5572,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
   Supersedes the second item of
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346
-  (2026-10-08T17:20:09Z).
+  (2026-10-08T17:20:09Z), and the last sentence of the record text of
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469
+  (2026-10-08T17:46:08Z).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
