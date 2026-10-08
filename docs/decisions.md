@@ -461,7 +461,11 @@ How to read this record:
   2026-10-07T09:12:31Z), and the boundaries and the minimum of `Layout::new`, built in
   #1276 (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998,
-  2026-10-07T08:16:51Z).
+  2026-10-07T08:16:51Z). The blocks that a wrap skips are no record, so the headroom
+  leaves them out; the bound counts one skip on its own. A release past the last synced
+  record panics. Decided by the architect (#1345,
+  https://github.com/synnaxlabs/foundation/issues/1345#issuecomment-6036930649,
+  2026-10-07T11:26:39Z).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero

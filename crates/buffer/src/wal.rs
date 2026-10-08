@@ -19,6 +19,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::ops::Range;
 
 use crate::entry::{self, ENTRIES_MAX};
 use crate::record::{
@@ -449,6 +450,9 @@ pub(crate) struct Writer {
     /// first: the places a trim can move the tail to. A record of one block is the
     /// smallest, so it holds at most one boundary for each block of the area.
     ends: VecDeque<Position>,
+    /// The offsets of the last wrap skip, empty before the first. The live part
+    /// holds at most one wrap that is not synced, as it is at most one area long.
+    skip: Range<u64>,
 }
 
 impl Writer {
@@ -471,6 +475,9 @@ impl Writer {
         let (skipped, size) = self.cost(len)?;
         let wrap = (skipped > 0).then(|| self.layout.place(self.head));
         let start = self.head + skipped;
+        if skipped > 0 {
+            self.skip = self.head..start;
+        }
         self.head = start + size;
         Ok(Plan {
             wrap,
@@ -504,13 +511,14 @@ impl Writer {
     ///
     /// # Panics
     ///
-    /// When `tail` is outside the live part of the ring.
+    /// When `tail` is before the tail or past the last synced record.
     pub(crate) fn release(&mut self, tail: u64) {
+        let synced = self.synced_end();
         assert!(
-            (self.tail..=self.head).contains(&tail),
-            "invariant: release to {tail} is outside the live records from {} to {}",
-            self.tail,
-            self.head
+            (self.tail..=synced).contains(&tail),
+            "invariant: release to {tail} is outside the synced records from {} to \
+             {synced}",
+            self.tail
         );
         self.tail = tail;
         while self.ends.front().is_some_and(|end| end.offset <= tail) {
@@ -526,7 +534,7 @@ impl Writer {
     /// When a boundary is not after the last synced record, or is past the head.
     pub(crate) fn synced(&mut self, ends: Ends) {
         for end in ends.wrap.into_iter().chain([ends.record]) {
-            let last = self.ends.back().map_or(self.tail, |end| end.offset);
+            let last = self.synced_end();
             assert!(
                 last < end.offset && end.offset <= self.head,
                 "invariant: a record synced to {} is not after {last} and up to the \
@@ -551,8 +559,11 @@ impl Writer {
     #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
     pub(crate) fn trimmed(&self, kept: Option<u64>) -> Option<Position> {
         let window = self.layout.window;
-        let synced = self.ends.back().map_or(self.tail, |end| end.offset);
-        let queued = self.head - synced;
+        let synced = self.synced_end();
+        let mut queued = self.head - synced;
+        if synced <= self.skip.start {
+            queued -= self.skip.end - self.skip.start;
+        }
         let room = queued.max(window).saturating_mul(3);
         let spare = self.layout.area.saturating_sub(room);
         let want = self.head.saturating_sub(spare);
@@ -565,6 +576,11 @@ impl Writer {
             .partition_point(|end| kept.is_none_or(|kept| end.offset <= kept));
         let last = free.checked_sub(1)?;
         self.ends.get(enough.min(last)).copied()
+    }
+
+    /// The boundary after the last synced record, or the tail.
+    fn synced_end(&self) -> u64 {
+        self.ends.back().map_or(self.tail, |end| end.offset)
     }
 
     /// The bytes a record with a body of `len` bytes skips at the end of the area
@@ -908,6 +924,7 @@ impl Cursor {
             tail: self.tail,
             head: head.offset,
             ends,
+            skip: 0..0,
         };
         writer.release(tail);
         let plan = writer.append(RESTART_LEN)?;
@@ -1780,6 +1797,43 @@ mod tests {
             assert_eq!(writer.trimmed(Some(4096)), None);
         }
 
+        /// A ring of 32 blocks: one record of 4 blocks queued after it skips 3 blocks
+        /// leaves a headroom of 12 blocks, not 21. A record of one block after it
+        /// makes the headroom 15 blocks.
+        #[test]
+        fn trimmed_leaves_the_blocks_of_a_queued_wrap_out_of_the_headroom() {
+            let mut writer = opened(wide(), 0);
+            for chain in 1..=28 {
+                let ends = queue(&mut writer, 8, chain).expect("the ring has room");
+                writer.synced(ends);
+            }
+            writer.release(8 * 4096);
+            let ends = queue(&mut writer, BODY_MAX, 99).expect("the ring has room");
+            assert_eq!(ends.wrap.map(|wrap| wrap.offset), Some(32 * 4096));
+            assert_eq!(writer.head(), 36 * 4096);
+            assert_eq!(writer.trimmed(None), Some(at(16, 15)));
+            let next = queue(&mut writer, 8, 100).expect("the ring has room");
+            assert_eq!(writer.trimmed(None), Some(at(20, 19)));
+            writer.synced(ends);
+            writer.synced(next);
+            assert_eq!(writer.trimmed(None), Some(at(17, 16)), "all synced");
+        }
+
+        /// A record not synced before the wrap: the skip of 3 blocks stays out.
+        #[test]
+        fn trimmed_leaves_out_a_wrap_queued_after_a_record_not_synced() {
+            let mut writer = opened(wide(), 0);
+            for chain in 1..=27 {
+                let ends = queue(&mut writer, 8, chain).expect("the ring has room");
+                writer.synced(ends);
+            }
+            writer.release(8 * 4096);
+            queue(&mut writer, 8, 28).expect("the ring has room");
+            let ends = queue(&mut writer, BODY_MAX, 99).expect("the ring has room");
+            assert_eq!(ends.wrap.map(|wrap| wrap.offset), Some(32 * 4096));
+            assert_eq!(writer.trimmed(None), Some(at(19, 18)));
+        }
+
         /// The skipped blocks of a wrap are enough for the headroom, so the trim
         /// frees the wrap record and keeps the record after it.
         #[test]
@@ -2080,14 +2134,27 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "release to 8192 is outside the live records from 0")]
+        #[should_panic(
+            expected = "release to 8192 is outside the synced records from 0 to 4096"
+        )]
         fn panics_on_a_release_past_the_head() {
             writer(0, 1).release(2 * 4096);
         }
 
         #[test]
         #[should_panic(
-            expected = "release to 4096 is outside the live records from 8192"
+            expected = "release to 8192 is outside the synced records from 0 to 4096"
+        )]
+        fn panics_on_a_release_past_the_last_synced_record() {
+            let mut writer = opened(layout(), 0);
+            queue(&mut writer, 8, 1).expect("the ring has room");
+            let head = writer.head();
+            writer.release(head);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "release to 4096 is outside the synced records from 8192 to 12288"
         )]
         fn panics_on_a_release_before_the_tail() {
             writer(2, 3).release(4096);
@@ -2245,7 +2312,7 @@ mod tests {
         /// so a tail past the last data record is outside its records.
         #[test]
         #[should_panic(
-            expected = "release to 4096 is outside the live records from 0 to 0"
+            expected = "release to 4096 is outside the synced records from 0 to 0"
         )]
         fn panics_on_a_tail_past_the_last_data_record() {
             let (_, cursor) = Ring::new().walk();
