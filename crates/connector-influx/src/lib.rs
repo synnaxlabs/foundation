@@ -17,14 +17,12 @@ use std::future;
 use connector::kind::{self, Channels, Context, Error};
 use connector::{cancel, reader};
 use document::diagnostic::{Code, Diagnostic};
-use document::value::{self, Value};
+use document::value::Value;
 use document::{Document, read};
 use http::Uri;
 
 const BAD_ADDRESS: Code = Code::new("influx.bad-address");
 const NOT_YET: Code = Code::new("influx.not-yet");
-
-const OF: &str = "the connector";
 
 /// The `influx` kind: writes a reader's samples to InfluxDB.
 #[derive(Debug, Default)]
@@ -35,7 +33,8 @@ pub struct Kind;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Config {
-    /// The InfluxDB endpoint, a URI that [`connector::http::check`] takes.
+    /// The InfluxDB endpoint: a URI that [`connector::http::uri`] takes, with a path
+    /// of `/` or none, and no query.
     pub address: Uri,
     /// The reader whose samples it writes.
     pub reader: reader::Settings,
@@ -49,7 +48,7 @@ impl kind::Kind for Kind {
         let reader = reader::read(config, &["address"], &[]);
         let address = read::required(
             config,
-            OF,
+            kind::NOUN,
             None,
             "address",
             address,
@@ -92,27 +91,21 @@ impl kind::Kind for Kind {
     }
 }
 
-/// Reads an address as a URI that [`connector::http::check`] takes.
+/// Reads an address: a URI that [`connector::http::uri`] takes, with a path of `/`
+/// or none, and no query.
 fn address(value: &Value) -> Result<Uri, Diagnostic> {
-    let bad = |message: String| {
-        Diagnostic::new(
-            BAD_ADDRESS,
-            value.span,
-            message,
-            "Write an address such as \"http://influx:8086\"".into(),
-        )
+    let uri = connector::http::uri(value)?;
+    let part = match (uri.path(), uri.query()) {
+        (_, Some(_)) => "a query",
+        ("" | "/", None) => return Ok(uri),
+        (_, None) => "a path",
     };
-    let value::Kind::String(text) = &value.kind else {
-        return Err(bad(format!(
-            "an address is a string, not {}",
-            value.kind.noun()
-        )));
-    };
-    let uri: Uri = text
-        .parse()
-        .map_err(|error| bad(format!("the address is not a URI: {error}")))?;
-    connector::http::check(&uri).map_err(|error| bad(error.to_string()))?;
-    Ok(uri)
+    Err(Diagnostic::new(
+        BAD_ADDRESS,
+        value.span,
+        format!("the address has {part}, which the influx kind does not take"),
+        "Remove it, as in \"http://influx:8086\"".into(),
+    ))
 }
 
 #[cfg(test)]

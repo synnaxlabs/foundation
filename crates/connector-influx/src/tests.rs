@@ -80,7 +80,7 @@ fn bad_address(message: &str) -> Diagnostic {
         "influx.bad-address",
         1,
         message,
-        "Write an address such as \"http://influx:8086\"",
+        "Remove it, as in \"http://influx:8086\"",
     )
 }
 
@@ -104,47 +104,70 @@ fn checks_to_no_device_channel() {
 }
 
 #[test]
-fn refuses_an_address_that_send_refuses() {
+fn reads_an_address_with_a_path_of_slash() {
+    let config = config(string("http://influx:8086/"));
+    assert_eq!(
+        Kind.parse(&config).map(|config| config.address),
+        Ok("http://influx:8086/".parse().expect("a URI"))
+    );
+}
+
+#[test]
+fn refuses_an_address_that_uri_refuses() {
     for (address, message) in [
-        ("https://influx:8086", "the scheme of the URI is not http"),
         (
-            "http://admin:hunter2@influx:8086",
+            string("https://influx:8086"),
+            "the scheme of the URI is not http",
+        ),
+        (
+            string("http://admin:hunter2@influx:8086"),
             "the URI holds user info; give a credential through a secret",
         ),
+        (string("http://[influx]:8086"), "the URI has no valid host"),
         (
-            "http://[influx]:8086",
-            "the URI has no valid host: \"[influx]\"",
+            string("http://influx:0"),
+            "the port of the URI is not a number from 1 to 65535",
+        ),
+        (string("influx"), "the scheme of the URI is not http"),
+        (
+            string("http://influx:8086/#site"),
+            "the URI has a fragment, which no request sends",
         ),
         (
-            "http://influx:0",
-            "the port \"0\" of the URI is not a number from 1 to 65535",
+            string("http://in flux"),
+            "the text is not a URI: invalid uri character",
         ),
-        ("influx", "the scheme of the URI is not http"),
+        (Value::Integer(8086), "a URI is a string, not an integer"),
     ] {
         assert_eq!(
-            Kind.parse(&config(string(address))),
-            Err(vec![bad_address(message)]),
-            "{address}"
+            Kind.parse(&config(address.clone())),
+            Err(vec![refused(
+                "connector.bad-uri",
+                1,
+                message,
+                "Write an `http` URI such as \"http://10.0.0.2:8086\"",
+            )]),
+            "{address:?}"
         );
     }
 }
 
 #[test]
-fn refuses_an_address_that_is_not_a_uri() {
-    assert_eq!(
-        Kind.parse(&config(string("http://in flux"))),
-        Err(vec![bad_address(
-            "the address is not a URI: invalid uri character"
-        )])
-    );
-}
-
-#[test]
-fn refuses_an_address_that_is_not_a_string() {
-    assert_eq!(
-        Kind.parse(&config(Value::Integer(8086))),
-        Err(vec![bad_address("an address is a string, not an integer")])
-    );
+fn refuses_an_address_with_a_path_or_a_query() {
+    for (address, part) in [
+        ("http://influx:8086/api/v2", "a path"),
+        ("http://influx:8086//", "a path"),
+        ("http://influx:8086/?db=site", "a query"),
+        ("http://influx:8086?", "a query"),
+    ] {
+        assert_eq!(
+            Kind.parse(&config(string(address))),
+            Err(vec![bad_address(&format!(
+                "the address has {part}, which the influx kind does not take"
+            ))]),
+            "{address}"
+        );
+    }
 }
 
 #[test]

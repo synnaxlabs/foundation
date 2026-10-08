@@ -7,6 +7,8 @@ use hub::reader::Mode;
 use types::name::{Name, Selector};
 use types::time::Span;
 
+use crate::kind;
+
 const LABEL_COUNT: Code = Code::new("config.label-count");
 const REPEATED_BLOCK: Code = Code::new("config.repeated-block");
 const BAD_MODE: Code = Code::new("connector.bad-mode");
@@ -62,14 +64,14 @@ pub fn read(
     );
     let mut diagnostics = document::read::unknown(
         config,
-        "the connector",
+        kind::NOUN,
         &[&["select"], keys].concat(),
         &[&["reader"], blocks].concat(),
     );
     let select = keep(
         document::read::required(
             config,
-            "the connector",
+            kind::NOUN,
             None,
             "select",
             document::read::selector,

@@ -13,6 +13,9 @@ use types::name::Name;
 
 use crate::cancel;
 
+/// The noun of the document that [`Kind::parse`] gets, for the text of a diagnostic.
+pub const NOUN: &str = "the connector";
+
 /// One connector kind: it owns its config's fields and how it runs. `node` builds one
 /// value per kind for the life of the process; every connector of the kind shares it,
 /// so it holds registries, dialers, and vendor libraries.

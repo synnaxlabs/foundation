@@ -6,6 +6,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use document::diagnostic::{Code, Diagnostic};
+use document::value::{self, Value};
+use document::{Position, Source};
 use env::clock::Clock;
 use env::net::{self, Tcp, tcp};
 use env::thread::Handle;
@@ -13,7 +16,7 @@ use http::{Request, Response, StatusCode};
 use sim::{Sim, node};
 use types::time::Span;
 
-use super::{Client, Config, Error, check};
+use super::{Client, Config, Error, uri};
 
 const PORT: u16 = 8086;
 const TIMEOUT: Span = Span::from_nanos(10_000_000_000);
@@ -509,32 +512,92 @@ fn gives_the_connect_error_when_nothing_listens() {
     );
 }
 
-/// The error of a send to `uri`, and the error of `check` on it.
-fn refused(uri: &str) -> [Error; 2] {
-    let sent = Network::new(10).send(get(uri)).expect_err("a refused URI");
-    let checked = check(&uri.parse().expect("a URI")).expect_err("a refused URI");
-    [sent, checked]
+/// A string value at offset 3.
+fn value(kind: value::Kind) -> Value {
+    let position = |offset| Position {
+        offset,
+        line: 0,
+        column: offset,
+    };
+    Value {
+        kind,
+        span: document::Span::new(Source(0), position(3), position(4)),
+    }
+}
+
+/// `connector.bad-uri` at the value of [`value`], with `message`.
+fn bad(message: &str) -> Diagnostic {
+    Diagnostic::new(
+        Code::new("connector.bad-uri"),
+        value(value::Kind::Bool(true)).span,
+        message.into(),
+        "Write an `http` URI such as \"http://10.0.0.2:8086\"".into(),
+    )
+}
+
+/// The error of a send to `uri`, after it asserts that [`uri`] refuses `uri` with
+/// the same message.
+fn refused(text: &str) -> Error {
+    let error = Network::new(10).send(get(text)).expect_err("a refused URI");
+    assert_eq!(
+        uri(&value(value::Kind::String(text.into()))),
+        Err(bad(&error.to_string())),
+        "{text}"
+    );
+    error
 }
 
 #[test]
-fn checks_a_uri_that_send_takes() {
-    for uri in [
+fn reads_a_uri_that_send_takes() {
+    for text in [
         "http://influx:8086",
         "http://10.0.0.2/write?db=site",
         "http://[fd00::2]:65535/",
         "HTTP://Influx:1",
     ] {
-        assert!(check(&uri.parse().expect("a URI")).is_ok(), "{uri}");
+        assert_eq!(
+            uri(&value(value::Kind::String(text.into()))),
+            Ok(text.parse().expect("a URI")),
+        );
+    }
+}
+
+#[test]
+fn refuses_a_value_that_is_not_a_string() {
+    assert_eq!(
+        uri(&value(value::Kind::Integer(8086))),
+        Err(bad("a URI is a string, not an integer"))
+    );
+}
+
+#[test]
+fn refuses_text_that_is_not_a_uri() {
+    assert_eq!(
+        uri(&value(value::Kind::String("http://in flux".into()))),
+        Err(bad("the text is not a URI: invalid uri character"))
+    );
+}
+
+#[test]
+fn refuses_a_fragment() {
+    for text in [
+        "http://influx:8086/#site",
+        "http://admin:hun#ter2@influx:8086/",
+    ] {
+        assert_eq!(
+            uri(&value(value::Kind::String(text.into()))),
+            Err(bad("the URI has a fragment, which no request sends")),
+            "{text}"
+        );
     }
 }
 
 #[test]
 fn refuses_a_scheme_other_than_http() {
     for uri in ["https://10.0.0.2/", "/write", "https://admin:secret@[]:0/"] {
-        for error in refused(uri) {
-            assert!(matches!(error, Error::Scheme), "{uri}: {error:?}");
-            assert_eq!(error.to_string(), "the scheme of the URI is not http");
-        }
+        let error = refused(uri);
+        assert!(matches!(error, Error::Scheme), "{uri}: {error:?}");
+        assert_eq!(error.to_string(), "the scheme of the URI is not http");
     }
 }
 
@@ -544,74 +607,76 @@ fn refuses_user_info_and_keeps_none_of_it() {
         "http://admin:hunter2@10.0.0.2:8086/",
         "http://admin:hunter2@[influx]:99999/",
     ] {
-        for error in refused(uri) {
-            assert!(matches!(error, Error::UserInfo), "{uri}: {error:?}");
-            let message = error.to_string();
-            assert_eq!(
-                message,
-                "the URI holds user info; give a credential through a secret"
-            );
-            let shown = format!("{message} {error:?}");
-            assert!(
-                !shown.contains("admin") && !shown.contains("hunter2"),
-                "{shown}"
-            );
-        }
+        let error = refused(uri);
+        assert!(matches!(error, Error::UserInfo), "{uri}: {error:?}");
+        assert_eq!(
+            error.to_string(),
+            "the URI holds user info; give a credential through a secret"
+        );
+        assert_holds_no_credential(&error);
     }
+}
+
+// A `/` or `?` in a password ends the authority, so the password reads as a port.
+#[test]
+fn refuses_a_password_that_ends_the_authority_and_keeps_none_of_it() {
+    for uri in [
+        "http://admin:hunter2/x@influx:8086",
+        "http://admin:hunter2?x@influx:8086",
+    ] {
+        let error = refused(uri);
+        assert!(matches!(error, Error::Port), "{uri}: {error:?}");
+        assert_holds_no_credential(&error);
+    }
+}
+
+fn assert_holds_no_credential(error: &Error) {
+    let shown = format!("{error} {error:?}");
+    assert!(
+        !shown.contains("admin") && !shown.contains("hunter2"),
+        "{shown}"
+    );
 }
 
 #[test]
 fn refuses_a_host_that_is_not_valid() {
-    for (uri, host) in [
-        ("http://:8086/", ""),
-        ("http://[]/", "[]"),
-        ("http://[influx]/", "[influx]"),
-        ("http://[influx]:99999/", "[influx]"),
-        ("http://[fd00::2]x/", "[fd00::2]x"),
-        ("http://[fd00::2]8086/", "[fd00::2]8086"),
-        ("http://[fd00::2]x:80/", "[fd00::2]x"),
-        ("http://a[::1]/", "a[::1]"),
-        ("http://a[::1]:80/", "a[::1]"),
-        ("http://a:8[0]/", "a:8[0]"),
+    for uri in [
+        "http://:8086/",
+        "http://[]/",
+        "http://[influx]/",
+        "http://[influx]:99999/",
+        "http://[fd00::2]x/",
+        "http://[fd00::2]8086/",
+        "http://[fd00::2]x:80/",
+        "http://a[::1]/",
+        "http://a[::1]:80/",
+        "http://a:8[0]/",
     ] {
-        for error in refused(uri) {
-            assert!(
-                matches!(&error, Error::Host { host: h } if h == host),
-                "{uri}: {error:?}"
-            );
-            assert_eq!(
-                error.to_string(),
-                format!("the URI has no valid host: \"{host}\"")
-            );
-        }
+        let error = refused(uri);
+        assert!(matches!(error, Error::Host), "{uri}: {error:?}");
+        assert_eq!(error.to_string(), "the URI has no valid host");
     }
 }
 
 #[test]
 fn refuses_a_port_that_is_not_a_u16() {
-    for (authority, port) in [
-        ("10.0.0.2:99999", "99999"),
-        ("10.0.0.2:65536", "65536"),
-        ("10.0.0.2:8086x", "8086x"),
-        ("10.0.0.2:-1", "-1"),
-        ("influx:99999999", "99999999"),
-        ("influx:+80", "+80"),
-        ("influx:0", "0"),
-        ("[fd00::2]:80x", "80x"),
-        ("[::]:80x", "80x"),
+    for authority in [
+        "10.0.0.2:99999",
+        "10.0.0.2:65536",
+        "10.0.0.2:8086x",
+        "10.0.0.2:-1",
+        "influx:99999999",
+        "influx:+80",
+        "influx:0",
+        "[fd00::2]:80x",
+        "[::]:80x",
     ] {
-        for error in refused(&format!("http://{authority}/")) {
-            assert!(
-                matches!(&error, Error::Port { port: p } if p == port),
-                "{authority}: {error:?}"
-            );
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "the port \"{port}\" of the URI is not a number from 1 to 65535"
-                )
-            );
-        }
+        let error = refused(&format!("http://{authority}/"));
+        assert!(matches!(error, Error::Port), "{authority}: {error:?}");
+        assert_eq!(
+            error.to_string(),
+            "the port of the URI is not a number from 1 to 65535"
+        );
     }
 }
 
