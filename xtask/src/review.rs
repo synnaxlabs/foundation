@@ -437,9 +437,11 @@ impl<'a> Shown<'a> {
     /// heading on, or `None` when it has none.
     fn read(body: &'a str) -> Option<Self> {
         // The extensions of GitHub that change the blocks or the start of a line.
-        let options = Options::ENABLE_TABLES
-            | Options::ENABLE_FOOTNOTES
-            | Options::ENABLE_TASKLISTS;
+        let options = Options::from_iter([
+            Options::ENABLE_TABLES,
+            Options::ENABLE_FOOTNOTES,
+            Options::ENABLE_TASKLISTS,
+        ]);
         let mut events = Parser::new_ext(body, options).into_offset_iter();
         let mut depth = 0_usize;
         let number = events.by_ref().find_map(|(event, range)| match event {
