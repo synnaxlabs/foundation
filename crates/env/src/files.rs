@@ -489,9 +489,9 @@ impl File {
     ///
     /// # Errors
     ///
-    /// - [`Error::Poisoned`] when a sync or rename of the handle failed or was
-    ///   dropped: a dropped rename can still move the file, so the path of the handle
-    ///   may be stale. Nothing is removed.
+    /// - [`Error::Poisoned`] after a failed or dropped sync, or a dropped rename: a
+    ///   dropped rename can still move the file, so the path of the handle may be
+    ///   stale. Nothing is removed.
     /// - [`Error::NotFound`] when the path of the handle no longer names its file:
     ///   another call removed the path. Nothing is removed.
     /// - [`Error::Io`] when the OS cannot remove the file.
