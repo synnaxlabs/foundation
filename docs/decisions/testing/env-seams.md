@@ -75,10 +75,11 @@
   source on an IPv4 socket, mapped too, or an unspecified source in any form. Linux
   skips the `IPV6_PKTINFO` of the first and reads the second as no source, and sends
   each from an address of its choice. Decided by `laptop.architect-2` (2026-10-08
-  20:06, 20:32, and 20:38 UTC, #1965,
+  20:06 and 20:38 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545). On
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
+  which refused only `0.0.0.0`. On
   `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
   stream reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of
   the connect, an IPv4-mapped address as plain IPv4, and any other address as given,
