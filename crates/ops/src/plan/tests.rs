@@ -233,10 +233,12 @@ fn refuses_a_file_that_no_front_end_reads() {
     assert_eq!(
         problems.text(),
         "\
-error[ops.unknown-extension]: no config syntax reads `plant.yaml`
+error[ops.unknown-extension]: no config syntax reads this file
+  --> plant.yaml:1:1
 fix: Use a file that ends in `.hcl`
 
-error[ops.unknown-extension]: no config syntax reads `plant`
+error[ops.unknown-extension]: no config syntax reads this file
+  --> plant:1:1
 fix: Use a file that ends in `.hcl`
 "
     );
@@ -245,14 +247,16 @@ fix: Use a file that ends in `.hcl`
         serde_json::json!({ "errors": [
             {
                 "code": "ops.unknown-extension",
-                "message": "no config syntax reads `plant.yaml`",
+                "message": "no config syntax reads this file",
                 "fix": "Use a file that ends in `.hcl`",
+                "place": { "file": "plant.yaml", "line": 1, "column": 1 },
                 "notes": [],
             },
             {
                 "code": "ops.unknown-extension",
-                "message": "no config syntax reads `plant`",
+                "message": "no config syntax reads this file",
                 "fix": "Use a file that ends in `.hcl`",
+                "place": { "file": "plant", "line": 1, "column": 1 },
                 "notes": [],
             },
         ]})
@@ -263,10 +267,10 @@ fix: Use a file that ends in `.hcl`
 fn names_each_extension_of_the_table_in_the_fix() {
     let mut front_ends = front_ends();
     front_ends.insert("toml", FrontEnd { read: hcl });
-    let two = front_end::unknown("plant.json", &front_ends);
+    let two = front_end::unknown(Source(0), &front_ends);
     assert_eq!(two.fix, "Use a file that ends in `.hcl` or `.toml`");
     front_ends.insert("yaml", FrontEnd { read: hcl });
-    let diagnostic = front_end::unknown("plant.json", &front_ends);
+    let diagnostic = front_end::unknown(Source(0), &front_ends);
     assert_eq!(
         diagnostic.fix,
         "Use a file that ends in `.hcl`, `.toml`, or `.yaml`"
@@ -386,7 +390,8 @@ error[hcl.syntax]: the file needs a key, a block, or the end of the body here
   --> bad.hcl:2:1
 fix: Write it here, or correct the text here or before it
 
-error[ops.unknown-extension]: no config syntax reads `x.yaml`
+error[ops.unknown-extension]: no config syntax reads this file
+  --> x.yaml:1:1
 fix: Use a file that ends in `.hcl`
 "
     );
@@ -456,7 +461,7 @@ fn names_one_problem_or_the_count_and_exits_with_2() {
     );
     assert_eq!(
         problems(&[("x.yaml", "")]).to_string(),
-        "no config syntax reads `x.yaml`"
+        "no config syntax reads this file"
     );
 }
 
@@ -504,13 +509,20 @@ fn escapes_a_control_character_in_the_text_of_a_problem() {
 }
 
 #[test]
-fn quotes_a_path_that_no_front_end_reads() {
+fn escapes_the_place_of_a_file_that_no_front_end_reads() {
     assert_eq!(
         problems(&[("a\\\u{202e}\u{2028}b.yaml", "")]).text(),
-        "error[ops.unknown-extension]: no config syntax reads \
-         `a\\\\\\u{202e}\\u{2028}b.yaml`\n\
+        "error[ops.unknown-extension]: no config syntax reads this file\n  \
+         --> a\\\\\\u{202e}\\u{2028}b.yaml:1:1\n\
          fix: Use a file that ends in `.hcl`\n"
     );
+}
+
+#[test]
+fn gives_the_exact_path_in_the_json_of_a_place() {
+    let path = "a\u{1b}\\\u{202e}.hcl";
+    let problems = problems(&[(path, "channel {\n")]);
+    assert_eq!(problems.json()["errors"][0]["place"]["file"], path);
 }
 
 #[test]
@@ -525,10 +537,12 @@ fn gives_two_paths_that_differ_two_texts() {
     let problems = problems(&[("a\\n.yaml", ""), ("a\n.yaml", "")]);
     assert_eq!(
         problems.text(),
-        "error[ops.unknown-extension]: no config syntax reads `a\\\\n.yaml`\n\
+        "error[ops.unknown-extension]: no config syntax reads this file\n  \
+         --> a\\\\n.yaml:1:1\n\
          fix: Use a file that ends in `.hcl`\n\
          \n\
-         error[ops.unknown-extension]: no config syntax reads `a\\n.yaml`\n\
+         error[ops.unknown-extension]: no config syntax reads this file\n  \
+         --> a\\n.yaml:1:1\n\
          fix: Use a file that ends in `.hcl`\n"
     );
 }

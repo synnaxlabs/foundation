@@ -4851,9 +4851,11 @@ How to read this record:
   `#[non_exhaustive]`, so `node` builds it with a struct literal. An error from `read`
   holds at least one problem. The table is a `BTreeMap<&'static str, FrontEnd>`, keyed
   by the extension with no dot (`"hcl"`). The text after the last `.` of a file name
-  picks the front end. A file with no front end gives `ops.unknown-extension` with no
-  span, as no Document of the file exists (an exception to the span rule of
-  DIAGNOSTICS): the message names the path, and the fix names each extension. A
+  picks the front end. A file with no front end gives `ops.unknown-extension` at the
+  empty span at the start of the file, as DIAGNOSTICS says for a problem with a whole
+  file: the message is "no config syntax reads this file", and the fix names each
+  extension (`laptop.architect-2`, 2026-10-08T18:11:55Z,
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732). A
   directory gives each file in it that the table reads, in path order. `Source(i)` is
   the index of the file in the order `ops` reads it, and `ops` keeps the paths to
   print spans. `node` fills the table (#1756) with `config_hcl::read`, its errors
@@ -4881,12 +4883,15 @@ How to read this record:
   place and notes details: `laptop.architect-2` (2026-10-08T16:40:27Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064603605).
   `plan` refuses a path that is not UTF-8 with `ops.path-not-utf8`, before its
-  extension, so `Place::file` is the exact path. `ops.unknown-extension` writes the
-  path as the text of a place does, escaped, so a bidirectional control in a file name
-  does not reach the terminal (`laptop.architect-2`, 2026-10-08T18:06:38Z,
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872). Lost:
-  the lossy text, with which two files give one place; and the `Debug` form in
-  `Place::file`, which each JSON reader must decode.
+  extension, so `Place::file` is the exact path. `ops.path-not-utf8` has no span,
+  since a place cannot hold the path, and writes it with `{path:?}` until #941.
+  `ops.unknown-extension` gets a place and names no path in its message (FRONT ENDS),
+  so its path is exact too (`laptop.architect-2`, 2026-10-08T18:11:55Z,
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732, which
+  replaces https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872).
+  Lost: the lossy text, with which two files give one place; the `Debug` form in
+  `Place::file`, which each JSON reader must decode; and the escaped path in the
+  message of `ops.unknown-extension`, which an agent must decode.
   Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
 
