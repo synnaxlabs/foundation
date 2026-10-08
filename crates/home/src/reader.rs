@@ -22,8 +22,9 @@ pub struct Key {
     pub(crate) session: delivery::Key,
 }
 
-/// A named reader did not open: the node has no mesh time yet, and a named reader
-/// needs mesh time to close. Nothing changed. Open it again later.
+/// A named reader did not open: the node has no mesh time yet, and a named open can
+/// close a named complete session, whose hold starts at mesh time. Nothing changed.
+/// Open it again later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unsynced;
 
@@ -196,8 +197,8 @@ impl Set {
         }
     }
 
-    /// Drops the position records of the index at `place`, which the index log does
-    /// not append yet.
+    /// Drops the position records of the index at `place`, until #274 appends them to
+    /// the index log.
     fn drop_records(&mut self, place: usize) {
         self.entries[place].readers.records().for_each(drop);
     }

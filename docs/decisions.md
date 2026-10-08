@@ -1037,6 +1037,9 @@ How to read this record:
   PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
   Until then, the shard is the only writer (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6034204295).
+  It also names the `delivery` values that `home::reader` re-exports (`Next`,
+  `Position`, `Error`, `named::Key`, and `complete::Charge`) (`laptop.architect`,
+  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
   `home::Error` holds only what `write` gives, and each other call has its own error.
   Conversions from `control` errors are private. The `hub` row stays as it is. `Shard`
   gives no stored seq until a caller needs one (architect review,
@@ -1065,13 +1068,18 @@ How to read this record:
   surface was approved by `laptop.architect` (2026-10-08T07:01:09Z:
   https://github.com/synnaxlabs/foundation/pull/1824#issuecomment-6054411394).
 - **HOME NAMED READERS (#1742, #1851)** `Shard::open_named_complete` and
-  `open_named_latest` open a reader by its subject and name, and `Shard::ack` moves the
-  position of a named complete reader. Before the node first has mesh time, a named
+  `open_named_latest` open a reader by its `reader::named::Key`, and `Shard::ack` moves
+  the position of a named complete reader. Before the node first has mesh time, a named
   open gives `reader::Unsynced`, because a hold ends at a mesh time stamp. A named
   complete reader opens at its last ack within its hold, else at the live tail, and
-  ends `Behind` when a frame after that ack was released. Its close starts its hold.
-  An open of the same subject and name takes the old session over, and
-  `reader::Opened::replaced` names it. `home` drops the position records of
+  ends `Behind` when its position is below the frames that memory keeps. Until #274
+  reads from disk, it stays `Behind` at each open within its hold. Its close starts
+  its hold. A hold that ended goes at the next named complete open of its index, until
+  #274 ends it at `Readers::deadline`. An open of the same key takes the old session
+  over, and `reader::Opened::replaced` names it. `home::reader` re-exports
+  `delivery::{Error, Position, named}`, so `hub` does not depend on `delivery`
+  (`laptop.architect`,
+  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)). `home` drops the position records of
   `delivery` until #274 appends them to the index log, so a reopen after a restart
   starts at the live tail. Lost: one open that takes a `delivery::Reader`, because only
   a named open can fail. Decided by `laptop.architect` (2026-10-08T10:01:19Z:
@@ -4889,7 +4897,9 @@ How to read this record:
   a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
   re-exports, and only items its own signatures use. Layer 2 and `node` name the item
   at its home. Copies of the types lost: each change in `home` needs a change in
-  `hub`. Decided by the architect (#340).
+  `hub`. Decided by the architect (#340). `home` also re-exports the `delivery` values
+  that its surface names (`laptop.architect`,
+  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
