@@ -1830,8 +1830,8 @@ mod hub {
         }
     }
 
-    /// Defines each of `channels`, by its name, in one call, in the order of
-    /// `channels`: a map would sort them by name, and a test of slots needs the order.
+    /// Defines each of `channels`, by its name, in one call. It passes them in their
+    /// order: a map would sort them by name, and a test of slots needs the order.
     pub(super) fn define(hub: &Hub, channels: &[(&str, Channel)]) {
         let definitions: Vec<_> = channels
             .iter()
