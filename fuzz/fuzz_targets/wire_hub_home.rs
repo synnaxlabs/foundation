@@ -1,6 +1,6 @@
 //! `wire::hub::Home` never panics, each event encodes to its message and comes in the
-//! order of a session, each refusal is one that the order gives, and each valid
-//! message that the reader's node writes reads back.
+//! order of a session, each refusal is one that the order and the mode give, and each
+//! valid message that the reader's node writes reads back.
 //!
 //! Input: the messages from the reader's node (`fuzz::messages`).
 
@@ -17,18 +17,20 @@ use wire::hub::{Credit, Error, FromReader, Home, Mode, Open, keys};
 /// The most keys of a written run.
 const RUN_MAX: u32 = 4;
 
-/// What a home must take next, kept apart from the home.
+/// What a home must take next, kept apart from the home. `latest` holds for a
+/// latest session, which takes no credit.
 #[derive(Clone, Copy, Debug)]
 enum Next {
     Open,
-    Keys(Run),
-    Credit,
+    Keys { run: Run, latest: bool },
+    Credit { latest: bool },
 }
 
-/// A home that decoded an open of one channel and its key, so a credit is in order.
+/// A home that decoded a complete open of one channel and its key, so a credit is in
+/// order.
 fn keyed() -> Home {
     let open = Open {
-        mode: Mode::Latest,
+        mode: Mode::Complete { limit_bytes: 0 },
         channels: 1,
     };
     let mut out = vec![0; open.encoded_len()];
@@ -86,11 +88,15 @@ fn refused(next: Next, message: &[u8], error: Error) -> bool {
             Ok(_) => false,
             Err(other) => malformed(other) && error == other,
         },
-        Next::Keys(run) => run.refused(message, error),
-        Next::Credit => match alone(message) {
+        Next::Keys { run, .. } => run.refused(message, error),
+        Next::Credit { latest } => match alone(message) {
             Ok(FromReader::Open(open)) => {
                 let kind = open_kind(open);
                 error == Error::Reopen { kind }
+            }
+            Ok(FromReader::Credit(credit)) => {
+                let kind = credit_kind(credit);
+                latest && error == Error::Latest { kind }
             }
             Ok(_) => false,
             Err(other) => malformed(other) && error == other,
@@ -99,7 +105,8 @@ fn refused(next: Next, message: &[u8], error: Error) -> bool {
 }
 
 /// Each event of the session in `bytes` must encode to its message and come in the
-/// order of a session, and each refusal must be the one that the order gives.
+/// order of a session, and each refusal must be the one that the order or the mode
+/// gives.
 fn read(bytes: &[u8]) {
     let mut home = Home::default();
     let mut next = Next::Open;
@@ -109,20 +116,24 @@ fn read(bytes: &[u8]) {
                 let mut out = vec![0; open.encoded_len()];
                 open.encode(&mut out);
                 assert_eq!(out, message, "the open changed");
-                Next::Keys(Run::new(keys::LEN, open.channels))
+                Next::Keys {
+                    run: Run::new(keys::LEN, open.channels),
+                    latest: open.mode == Mode::Latest,
+                }
             }
-            (Next::Keys(run), Ok(FromReader::Keys { keys, last })) => {
+            (Next::Keys { run, latest }, Ok(FromReader::Keys { keys, last })) => {
                 let keys: Vec<_> = keys.collect();
                 let mut out = vec![0; message.len()];
                 keys::encode(&keys, &mut out);
                 assert_eq!(out, message, "the keys changed");
-                run.take(keys.len(), last).map_or(Next::Credit, Next::Keys)
+                run.take(keys.len(), last)
+                    .map_or(Next::Credit { latest }, |run| Next::Keys { run, latest })
             }
-            (Next::Credit, Ok(FromReader::Credit(credit))) => {
+            (Next::Credit { latest: false }, Ok(FromReader::Credit(credit))) => {
                 let mut out = [0; Credit::LEN];
                 credit.encode(&mut out);
                 assert_eq!(out, message, "the credit changed");
-                Next::Credit
+                Next::Credit { latest: false }
             }
             (next, Err(error)) => {
                 assert!(
@@ -155,7 +166,7 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
 
     let channels = input.int_in_range(1..=RUN_MAX)?;
     let open = Open {
-        mode: Mode::Latest,
+        mode: Mode::Complete { limit_bytes },
         channels,
     };
     let mut out = vec![0; open.encoded_len()];

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
 
-use document::Document;
 use document::diagnostic::{Code, Diagnostic};
+use document::{Document, Span};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::rng::Rng;
@@ -194,14 +194,23 @@ impl Table {
     ///
     /// # Errors
     ///
-    /// The diagnostics of the kind's `parse` or `check`. An unknown kind gives one
-    /// diagnostic, `connector.unknown-kind`, since the name comes from a file.
+    /// The diagnostics of the kind's `parse` or `check`, each with no span placed at
+    /// `at`, where the file names the kind. An unknown kind gives one diagnostic,
+    /// `connector.unknown-kind` at `at`.
     pub fn check(
         &self,
         kind: &str,
+        at: Option<Span>,
         config: &Document,
     ) -> Result<Channels, Vec<Diagnostic>> {
-        self.get(kind)?.check(config)
+        self.get(kind, at)?
+            .check(config)
+            .map_err(|mut diagnostics| {
+                for diagnostic in &mut diagnostics {
+                    diagnostic.span = diagnostic.span.or(at);
+                }
+                diagnostics
+            })
     }
 
     /// Finds connectors of `kind` that this node can run.
@@ -216,7 +225,7 @@ impl Table {
         kind: &str,
         cancel: &cancel::Token,
     ) -> Result<Vec<Document>, Error> {
-        self.get(kind)
+        self.get(kind, None)
             .map_err(Error::Config)?
             .discover(cancel)
             .await
@@ -229,10 +238,14 @@ impl Table {
         config: &Document,
         ctx: Context<()>,
     ) -> Result<Run<'a>, Vec<Diagnostic>> {
-        self.get(kind)?.run(config, ctx)
+        self.get(kind, None)?.run(config, ctx)
     }
 
-    fn get(&self, kind: &str) -> Result<&dyn Erased, Vec<Diagnostic>> {
+    fn get(
+        &self,
+        kind: &str,
+        at: Option<Span>,
+    ) -> Result<&dyn Erased, Vec<Diagnostic>> {
         let erased = self.kinds.get(kind).ok_or_else(|| {
             let names: Vec<_> = self.kinds.keys().copied().collect();
             let fix = if names.is_empty() {
@@ -242,7 +255,7 @@ impl Table {
             };
             vec![Diagnostic::new(
                 UNKNOWN_KIND,
-                None,
+                at,
                 format!("this build has no connector kind {kind:?}"),
                 fix,
             )]
@@ -303,7 +316,7 @@ impl<K: Kind> Erased for K {
 #[cfg(test)]
 mod tests {
     use document::value::{self, Value};
-    use document::{Attribute, Map};
+    use document::{Attribute, Map, Position, Source};
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -330,9 +343,18 @@ mod tests {
         type Config = i128;
 
         fn parse(&self, config: &Document) -> Result<i128, Vec<Diagnostic>> {
-            match config.attributes.get("n").map(|a| &a.value.kind) {
-                Some(value::Kind::Integer(n)) => Ok(*n),
-                _ => Err(vec![diagnostic(MISSING, "no integer n")]),
+            match config.attributes.get("n").map(|a| &a.value) {
+                Some(Value {
+                    kind: value::Kind::Integer(n),
+                    ..
+                }) => Ok(*n),
+                Some(value) => Err(vec![Diagnostic::new(
+                    MISSING,
+                    value.span,
+                    "n is not an integer".into(),
+                    "Fix it".into(),
+                )]),
+                None => Err(vec![diagnostic(MISSING, "no integer n")]),
             }
         }
 
@@ -385,7 +407,7 @@ mod tests {
 
     #[test]
     fn checks_a_config_through_its_kind() {
-        let channels = table().check("counter", &config(2));
+        let channels = table().check("counter", None, &config(2));
         let reads = vec![name("counter.c0"), name("counter.c1")];
         assert_eq!(
             channels,
@@ -398,13 +420,13 @@ mod tests {
 
     #[test]
     fn returns_the_diagnostics_of_parse() {
-        let result = table().check("counter", &Document::default());
+        let result = table().check("counter", None, &Document::default());
         assert_eq!(result, Err(vec![diagnostic(MISSING, "no integer n")]));
     }
 
     #[test]
     fn returns_the_diagnostics_of_check() {
-        let result = table().check("counter", &config(9));
+        let result = table().check("counter", None, &config(9));
         assert_eq!(result, Err(vec![diagnostic(RANGE, "n is over 8")]));
     }
 
@@ -421,7 +443,63 @@ mod tests {
     fn names_the_known_kinds_for_an_unknown_kind() {
         let table = table().with("other", Counter);
         let expected = unknown("modbus", "[\"counter\", \"other\"]");
-        assert_eq!(table.check("modbus", &config(1)), Err(vec![expected]));
+        assert_eq!(table.check("modbus", None, &config(1)), Err(vec![expected]));
+    }
+
+    /// The span from `start` to `end` on line 0 of source 2.
+    fn span(start: u32, end: u32) -> Option<Span> {
+        let position = |offset| Position {
+            offset,
+            line: 0,
+            column: offset,
+        };
+        Span::new(Source(2), position(start), position(end))
+    }
+
+    #[test]
+    fn puts_an_unknown_kind_where_the_file_names_it() {
+        let at = span(7, 15);
+        let mut expected = unknown("modbus", "[\"counter\"]");
+        expected.span = at;
+        assert_eq!(table().check("modbus", at, &config(1)), Err(vec![expected]));
+    }
+
+    #[test]
+    fn places_each_diagnostic_of_the_kind_with_no_span_at_the_kind() {
+        let at = span(7, 15);
+        let placed = |mut diagnostic: Diagnostic| {
+            diagnostic.span = at;
+            diagnostic
+        };
+        let missing = placed(diagnostic(MISSING, "no integer n"));
+        let range = placed(diagnostic(RANGE, "n is over 8"));
+        let table = table();
+        assert_eq!(
+            table.check("counter", at, &Document::default()),
+            Err(vec![missing])
+        );
+        assert_eq!(table.check("counter", at, &config(9)), Err(vec![range]));
+    }
+
+    #[test]
+    fn keeps_the_span_of_a_diagnostic_of_the_kind() {
+        let mut config = config(1);
+        let n = span(20, 24);
+        config.attributes = Map::new(vec![Attribute {
+            key: "n".into(),
+            key_span: None,
+            value: Value {
+                kind: value::Kind::String("x".into()),
+                span: n,
+            },
+        }])
+        .expect("one key");
+        let expected =
+            Diagnostic::new(MISSING, n, "n is not an integer".into(), "Fix it".into());
+        assert_eq!(
+            table().check("counter", span(7, 15), &config),
+            Err(vec![expected])
+        );
     }
 
     #[test]
@@ -455,7 +533,7 @@ mod tests {
 
     #[test]
     fn says_an_empty_table_has_no_kinds() {
-        let result = Table::new().check("modbus", &config(1));
+        let result = Table::new().check("modbus", None, &config(1));
         let expected = Diagnostic::new(
             UNKNOWN_KIND,
             None,

@@ -297,6 +297,105 @@ fn a_reply_from_a_node_that_is_not_a_peer_claims_nothing() {
     assert_eq!(raft.ready(), Ready::default());
 }
 
+// `step` refuses a message for another node by its header, before it reads a link.
+#[test]
+fn a_message_for_another_node_claims_nothing() {
+    let mut message = outside(7);
+    message.to = key(3);
+    message.chain = chain();
+    let mut raft = receiver(0);
+    assert_eq!(claims(&raft, &message), Vec::new());
+    assert_eq!(raft.step(message), Err(Error::Misrouted { to: key(3) }));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
+// `step` refuses a message from this node by its header, before it reads a link.
+#[test]
+fn a_message_from_this_node_claims_nothing() {
+    let mut message = outside(7);
+    message.from = key(2);
+    message.chain = chain();
+    let mut raft = receiver(0);
+    assert_eq!(claims(&raft, &message), Vec::new());
+    assert_eq!(raft.step(message), Err(Error::Loopback));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
+// A follower ignores a vote reply of its term, after the header. Its grant is still
+// a claim: only a refusal or a drop by the header gives none.
+#[test]
+fn a_reply_that_step_ignores_still_claims_its_grant() {
+    let body = Body::VoteReply {
+        answer: Answer::Granted(Some(signature(1))),
+    };
+    let message = message(7, body, None);
+    let mut raft = receiver(7);
+    let grant = Claim::Grant {
+        voter: key(1),
+        grant: Grant::Vote,
+        term: Term(7),
+        candidate: key(2),
+    };
+    assert_eq!(claims(&raft, &message), vec![(grant, Some(signature(1)))]);
+    assert_eq!(raft.step(message), Ok(()));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
+// `step` reads a PreVote past its header and ignores its proof.
+#[test]
+fn a_pre_vote_still_claims_the_proof_that_step_ignores() {
+    let mut pre_vote = outside(8);
+    pre_vote.body = Body::PreVote {
+        last: Position::default(),
+    };
+    let mut raft = receiver(7);
+    let want = vec![
+        (grant(1, Grant::Vote, 8, 1), Some(signature(1))),
+        (grant(4, Grant::Vote, 8, 1), Some(signature(4))),
+    ];
+    assert_eq!(claims(&raft, &pre_vote), want);
+    assert_eq!(raft.step(pre_vote), Ok(()));
+    let reply = Message {
+        from: key(2),
+        to: key(1),
+        term: Term(8),
+        body: Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        },
+        proof: None,
+        chain: Vec::new(),
+    };
+    let ready = Ready {
+        messages: vec![reply],
+        ..Ready::default()
+    };
+    assert_eq!(raft.ready(), ready);
+}
+
+// `step` refuses a second leader of its term by its header.
+#[test]
+fn a_second_leader_of_the_term_claims_nothing() {
+    let mut raft = receiver(7);
+    let proof = Proof {
+        grant: Grant::Vote,
+        candidate: key(3),
+        voters: [(key(2), Some(signature(2))), (key(3), Some(signature(3)))].into(),
+    };
+    let mut led = message(8, Body::Heartbeat { commit: 0 }, Some(proof));
+    led.from = key(3);
+    raft.step(led).unwrap();
+    drop(raft.ready());
+    let mut second = outside(8);
+    second.chain = chain();
+    assert_eq!(claims(&raft, &second), Vec::new());
+    let refused = Error::SecondLeader {
+        term: Term(8),
+        from: key(1),
+    };
+    assert_eq!(raft.step(second), Err(refused));
+    assert_eq!(raft.ready(), Ready::default());
+}
+
 #[test]
 fn a_message_claims_its_proof_in_its_term_then_its_grant() {
     let proof = Proof {

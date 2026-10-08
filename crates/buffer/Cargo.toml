@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes `wal::Writer` to the `wal` bench. Off by default.
+sim = []
+
 [dependencies]
 block = { path = "../block" }
 crc32c = { workspace = true }
@@ -12,13 +16,21 @@ env = { path = "../env" }
 types = { path = "../types" }
 
 [dev-dependencies]
+# Turns on `sim` for the bench, since the bench host runs no features.
+buffer = { path = ".", features = ["sim"] }
 counting = { path = "../counting" }
+divan = { workspace = true }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
 [[test]]
 name = "alloc"
 harness = false
+
+[[bench]]
+name = "wal"
+harness = false
+test = true
 
 [lints]
 workspace = true

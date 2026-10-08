@@ -21,18 +21,20 @@
 //!   (`u64`), then the channel count (`u32`).
 //! - [`Credit`]: kind 3, then `limit_bytes` (`u64`).
 //! - [`Reply`]: kind 1 (opened). Kind 2 (head): path (`u8`, live 0, backfill 1), seq
-//!   (`u64`), count (`u32`), and the series count (`u32`).
+//!   (`u64`), count (`u32`), and the series count (`u32`). Kind 3 (behind).
 //! - [`keys`]: each channel key (`u128`).
 //! - [`ends`]: place and end (each `u32`) for each series.
 
 mod home;
 mod reader;
 
-use std::{fmt, mem};
+use std::fmt;
 
 pub use home::{FromReader, Home};
 pub use reader::{FromHome, Reader};
 use types::frame::{Path, Range};
+
+use crate::common::{Fields, Writer};
 
 const LATEST: u8 = 1;
 const COMPLETE: u8 = 2;
@@ -40,6 +42,7 @@ const CREDIT: u8 = 3;
 
 const OPENED: u8 = 1;
 const HEAD: u8 = 2;
+const BEHIND: u8 = 3;
 
 /// Stop code: the home does not know a channel of the open.
 pub const UNKNOWN: u32 = 16;
@@ -97,7 +100,7 @@ impl Open {
     /// [`Error::Channels`] when the open names no channel.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
-        let mut fields = Fields::new(rest, bytes.len());
+        let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
         let mode = match kind {
             LATEST => Mode::Latest,
             COMPLETE => Mode::Complete {
@@ -161,7 +164,7 @@ impl Credit {
         if kind != CREDIT {
             return Err(Error::Kind { kind });
         }
-        let mut fields = Fields::new(rest, bytes.len());
+        let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
         let limit_bytes = u64::from_le_bytes(fields.take()?);
         fields.end()?;
         Ok(Self { limit_bytes })
@@ -175,6 +178,10 @@ pub enum Reply {
     Opened,
     /// The head of one frame. The run of its [`ends`] follows, then its body.
     Head(Head),
+    /// The session missed a frame, so the home ends it. It follows each frame
+    /// before the miss, and no message follows it: the home then finishes its
+    /// stream.
+    Behind,
 }
 
 /// The head of one frame that the home sends.
@@ -195,7 +202,7 @@ impl Reply {
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         match self {
-            Self::Opened => 1,
+            Self::Opened | Self::Behind => 1,
             Self::Head(_) => 18,
         }
     }
@@ -209,6 +216,7 @@ impl Reply {
         let mut out = Writer::new(out, self.encoded_len());
         match self {
             Self::Opened => out.put(&[OPENED]),
+            Self::Behind => out.put(&[BEHIND]),
             Self::Head(head) => {
                 assert!(head.series > 0, "a head names at least one series");
                 out.put(&[HEAD, path_byte(head.path)]);
@@ -229,11 +237,15 @@ impl Reply {
     /// no series.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
-        let mut fields = Fields::new(rest, bytes.len());
+        let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
         match kind {
             OPENED => {
                 fields.end()?;
                 Ok(Self::Opened)
+            }
+            BEHIND => {
+                fields.end()?;
+                Ok(Self::Behind)
             }
             HEAD => {
                 let [path] = fields.take()?;
@@ -265,7 +277,7 @@ pub mod keys {
 
     use types::channel;
 
-    use super::{Error, Writer, run};
+    use super::{Error, run, slots};
 
     /// The bytes of one key.
     pub const LEN: usize = 16;
@@ -276,8 +288,14 @@ pub mod keys {
     ///
     /// When `keys` is empty, or `out` is not 16 bytes for each key.
     pub fn encode(keys: &[channel::Key], out: &mut [u8]) {
-        let out = Writer::run(out, keys.len(), LEN);
-        for (out, key) in out.0.as_chunks_mut::<LEN>().0.iter_mut().zip(keys) {
+        let slots = slots::<LEN>(out);
+        assert!(
+            slots.len() == keys.len(),
+            "out holds {} keys, and the message has {}",
+            slots.len(),
+            keys.len()
+        );
+        for (out, key) in slots.iter_mut().zip(keys) {
             *out = key.as_u128().to_le_bytes();
         }
     }
@@ -322,7 +340,7 @@ pub mod keys {
 pub mod ends {
     use std::slice;
 
-    use super::{Error, run};
+    use super::{Error, run, slots};
 
     /// The bytes of one end.
     pub const LEN: usize = 8;
@@ -336,16 +354,7 @@ pub mod ends {
     /// When `out` is empty or not a whole count of ends, or when `ends` gives fewer ends
     /// than `out` holds.
     pub fn encode(ends: impl IntoIterator<Item = (u32, u32)>, out: &mut [u8]) {
-        let len = out.len();
-        let (slots, rest) = out.as_chunks_mut::<LEN>();
-        assert!(
-            rest.is_empty(),
-            "out has {len} bytes, not a whole count of ends"
-        );
-        assert!(
-            !slots.is_empty(),
-            "a message of a run holds at least one item"
-        );
+        let slots = slots::<LEN>(out);
         let count = slots.len();
         let written = slots
             .iter_mut()
@@ -435,7 +444,7 @@ pub enum Error {
         kind: u8,
     },
     /// A message comes before the session is open: a credit before the open, or a
-    /// head before opened.
+    /// head or a behind before opened.
     Unopened {
         /// The kind byte of the message.
         kind: u8,
@@ -460,6 +469,13 @@ pub enum Error {
         len: usize,
         /// The bytes that remain in the body.
         remain: usize,
+    },
+    /// A message comes after the home ended the session with `Behind`.
+    Ended,
+    /// A message that only a complete session has comes in a latest session.
+    Latest {
+        /// The kind byte of the message.
+        kind: u8,
     },
 }
 
@@ -503,66 +519,18 @@ impl fmt::Display for Error {
                 f,
                 "the body message has {len} bytes, and {remain} remain in the body"
             ),
+            Self::Ended => {
+                f.write_str("a hub message came after the home ended the session")
+            }
+            Self::Latest { kind } => write!(
+                f,
+                "the hub message has kind {kind}, which a latest session does not have"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
-
-/// Fills `out` from the front, one field at a time.
-struct Writer<'o>(&'o mut [u8]);
-
-impl<'o> Writer<'o> {
-    fn new(out: &'o mut [u8], len: usize) -> Self {
-        assert!(
-            out.len() == len,
-            "out has {} bytes, and the message has {len}",
-            out.len()
-        );
-        Self(out)
-    }
-
-    /// A writer for one message of a run: `items` of `size` bytes each.
-    fn run(out: &'o mut [u8], items: usize, size: usize) -> Self {
-        assert!(items > 0, "a message of a run holds at least one item");
-        Self::new(out, items.saturating_mul(size))
-    }
-
-    fn put(&mut self, bytes: &[u8]) {
-        let (field, rest) = mem::take(&mut self.0).split_at_mut(bytes.len());
-        field.copy_from_slice(bytes);
-        self.0 = rest;
-    }
-}
-
-/// Reads a message's fields from the front. Each error names the message's length.
-struct Fields<'b> {
-    rest: &'b [u8],
-    len: usize,
-}
-
-impl<'b> Fields<'b> {
-    fn new(rest: &'b [u8], len: usize) -> Self {
-        Self { rest, len }
-    }
-
-    fn take<const N: usize>(&mut self) -> Result<[u8; N], Error> {
-        let (&field, rest) = self
-            .rest
-            .split_first_chunk()
-            .ok_or(Error::Length { len: self.len })?;
-        self.rest = rest;
-        Ok(field)
-    }
-
-    fn end(&self) -> Result<(), Error> {
-        if self.rest.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Length { len: self.len })
-        }
-    }
-}
 
 /// The items that remain in a run of `remain` after a message of `items` items.
 fn rest_of_run(remain: u32, items: usize) -> Result<u32, Error> {
@@ -570,6 +538,25 @@ fn rest_of_run(remain: u32, items: usize) -> Result<u32, Error> {
         .ok()
         .and_then(|count| remain.checked_sub(count))
         .ok_or(Error::Run { items, remain })
+}
+
+/// The slots of one message of a run: `out` as items of `N` bytes, to fill.
+///
+/// # Panics
+///
+/// When `out` is empty or not a whole count of items.
+fn slots<const N: usize>(out: &mut [u8]) -> &mut [[u8; N]] {
+    let len = out.len();
+    let (slots, rest) = out.as_chunks_mut::<N>();
+    assert!(
+        rest.is_empty(),
+        "out has {len} bytes, not a whole count of {N}-byte items"
+    );
+    assert!(
+        !slots.is_empty(),
+        "a message of a run holds at least one item"
+    );
+    slots
 }
 
 /// The items of `N` bytes in `message`, one message of a run.
@@ -816,6 +803,7 @@ mod tests {
         #[test]
         fn pins_the_wire_values() {
             assert_eq!(encode_reply(Reply::Opened), [1]);
+            assert_eq!(encode_reply(Reply::Behind), [3]);
             let backfill = head(Path::Backfill, 0x0102_0304_0506_0708, 0x0a0b_0c0d, 3);
             assert_eq!(
                 encode_reply(backfill),
@@ -835,13 +823,14 @@ mod tests {
 
         #[test]
         fn refuses_unknown_kinds_before_the_length() {
-            check_kinds(Reply::decode, &[1, 2], &[1, 18]);
+            check_kinds(Reply::decode, &[1, 2, 3], &[1, 18]);
         }
 
         #[test]
         fn refuses_each_wrong_length() {
             check(Reply::decode, 1, &[2, 18]);
             check(Reply::decode, 2, &[1, 2, 17, 19]);
+            check(Reply::decode, 3, &[2, 18]);
         }
 
         #[test]
@@ -935,9 +924,23 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 15 bytes, and the message has 16")]
-        fn panics_when_out_has_the_wrong_length() {
+        #[should_panic(
+            expected = "out has 15 bytes, not a whole count of 16-byte items"
+        )]
+        fn panics_on_a_partial_key_in_out() {
             super::super::keys::encode(&[key(1)], &mut [0; 15]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out holds 2 keys, and the message has 1")]
+        fn panics_when_out_holds_another_count_of_keys() {
+            super::super::keys::encode(&[key(1)], &mut [0; 32]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out holds 1 keys, and the message has 2")]
+        fn panics_when_out_holds_fewer_keys_than_the_message() {
+            super::super::keys::encode(&[key(1), key(2)], &mut [0; 16]);
         }
     }
 
@@ -1009,13 +1012,13 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 9 bytes, not a whole count of ends")]
+        #[should_panic(expected = "out has 9 bytes, not a whole count of 8-byte items")]
         fn panics_on_a_partial_end_in_out() {
             super::super::ends::encode([(0, 1)], &mut [0; 9]);
         }
 
         #[test]
-        #[should_panic(expected = "out has 7 bytes, not a whole count of ends")]
+        #[should_panic(expected = "out has 7 bytes, not a whole count of 8-byte items")]
         fn panics_on_an_out_shorter_than_an_end() {
             super::super::ends::encode([(0, 1)], &mut [0; 7]);
         }
@@ -1055,7 +1058,9 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out has 17 bytes, not a whole count of ends")]
+        #[should_panic(
+            expected = "out has 17 bytes, not a whole count of 8-byte items"
+        )]
         fn panics_on_a_partial_end_after_two_ends() {
             super::super::ends::encode([(0, 1), (1, 2)], &mut [0; 17]);
         }
@@ -1141,6 +1146,14 @@ mod tests {
                 },
                 "the body message has 11 bytes, and 10 remain in the body",
             ),
+            (
+                Error::Ended,
+                "a hub message came after the home ended the session",
+            ),
+            (
+                Error::Latest { kind: 3 },
+                "the hub message has kind 3, which a latest session does not have",
+            ),
         ];
         for (error, text) in cases {
             assert_eq!(error.to_string(), text);
@@ -1159,6 +1172,7 @@ mod tests {
         let path = prop_oneof![Just(Path::Live), Just(Path::Backfill)];
         prop_oneof![
             Just(Reply::Opened),
+            Just(Reply::Behind),
             (path, any::<u64>(), any::<u32>(), 1..=u32::MAX)
                 .prop_map(|(path, seq, count, series)| head(path, seq, count, series)),
         ]

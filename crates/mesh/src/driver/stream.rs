@@ -2,31 +2,31 @@
 
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
-use super::Mesh;
+use super::{Mesh, REFUSED, REMOVED};
 use crate::bytes::block;
 use crate::error::Error;
 use crate::message::Message;
 
 /// The code of a stream that carried a message that is not valid for it.
 const MALFORMED: Code = Code(wire::header::MALFORMED);
-/// The code of a stream with a message that the mesh refused.
-const REFUSED: Code = Code(16);
 
 impl Mesh {
     /// Serves one stream of a session whose peer proved the key `peer`. The caller
     /// has read the header of the stream, which is its whole first message. `serve`
     /// returns when the stream ends, or at the first message it refuses. A refused
-    /// message changes nothing, and the stream stops with code 16.
+    /// message changes nothing, and the stream stops with code 16, or with code 17
+    /// for a request from a node that a committed configuration removed.
     ///
     /// # Errors
     ///
     /// - [`Error::Malformed`] when a message is the byte form of no message, or is not
     ///   one that its stream carries. The stream stops with code 2, but after the
     ///   answer only the half that `serve` reads stops.
-    /// - [`Error::Spoofed`], [`Error::NotVoter`], [`Error::PeerNotVoter`],
-    ///   [`Error::Claim`], and [`Error::Raft`] when the group refuses a message.
+    /// - [`Error::Spoofed`], [`Error::NotVoter`], [`Error::Removed`],
+    ///   [`Error::PeerNotVoter`], [`Error::Claim`], and [`Error::Raft`] when the group
+    ///   refuses a message.
     /// - [`Error::Pool`] when the pool has no block: while the group waits to write its
     ///   log, which refuses the message, or for the answer to a proposal, which the
     ///   peer then does not get, and the group can hold the entry of the proposal. A
@@ -130,6 +130,7 @@ fn code(error: &Error) -> Option<Code> {
     match error {
         Error::Stream(_) => None,
         Error::Malformed => Some(MALFORMED),
+        Error::Removed { .. } => Some(REMOVED),
         Error::Log(_)
         | Error::Raft(_)
         | Error::Spoofed { .. }
@@ -137,10 +138,9 @@ fn code(error: &Error) -> Option<Code> {
         | Error::PeerNotVoter { .. }
         | Error::Claim(_)
         | Error::NotMember(_)
+        | Error::NoVote
         | Error::Member(_)
         | Error::WrongKey
-        | Error::Unsynced
-        | Error::Status(_)
         | Error::Pool(_)
         | Error::Stopped(_) => Some(REFUSED),
     }

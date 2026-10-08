@@ -108,6 +108,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mesh_entries"
+path = "fuzz_targets/mesh_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_message"
+path = "fuzz_targets/mesh_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ops_mcp"
 path = "fuzz_targets/ops_mcp.rs"
 test = false
@@ -206,6 +220,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "spec_data_type"
+path = "fuzz_targets/spec_data_type.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "wire_clock"
 path = "fuzz_targets/wire_clock.rs"
 test = false
@@ -222,6 +243,13 @@ bench = false
 [[bin]]
 name = "wire_hub_home"
 path = "fuzz_targets/wire_hub_home.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_blob"
+path = "fuzz_targets/wire_blob.rs"
 test = false
 doc = false
 bench = false

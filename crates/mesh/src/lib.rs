@@ -10,6 +10,7 @@
     clippy::string_slice
 )]
 
+mod applied;
 mod bytes;
 pub mod card;
 pub mod change;

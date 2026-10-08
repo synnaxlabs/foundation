@@ -2182,7 +2182,7 @@ mod tests {
                 let read = pair.server.endpoint.read(now, receiver, |_, _| None);
                 assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
                 // Private: the copy outside the pool shows in no public count.
-                // tests/held.rs counts the heap that a read frees.
+                // tests/memory/held.rs counts the heap that a read frees.
                 assert_eq!(receiver.reader.held(), (Some((1_000, 1_000)), 0));
             }
             let (now, client) = (pair.now(), key(&pair.client));
@@ -2192,13 +2192,13 @@ mod tests {
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut before, |_, _| None);
             assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
-            // Private: tests/held.rs checks this drop through the heap.
+            // Private: tests/memory/held.rs checks this drop through the heap.
             assert_eq!(before.reader.held(), (None, 0));
             pair.run(Duration::from_secs(3));
             let now = pair.now();
             let read = pair.server.endpoint.read(now, &mut after, |_, _| None);
             assert_eq!(read.map(|_| ()), Err(Error::PeerClosed { code: Code(7) }));
-            // Private: tests/held.rs checks this drop through the heap.
+            // Private: tests/memory/held.rs checks this drop through the heap.
             assert_eq!(after.reader.held(), (None, 0));
         });
     }
@@ -4174,14 +4174,14 @@ mod tests {
 
     #[test]
     fn that_end_inside_a_message_break_the_connection() {
-        testing::run(1, |shard| {
-            let mut pair = connected(shard);
-            misframe(
-                &mut pair,
-                &[2, 3, b'a'],
-                "the stream ended inside a message",
-            );
-        });
+        let cuts = message::cut_prefixes();
+        for cut in iter::once(vec![3, b'a']).chain(cuts) {
+            let bytes = [&[2], cut.as_slice()].concat();
+            testing::run(1, move |shard| {
+                let mut pair = connected(shard);
+                misframe(&mut pair, &bytes, "the stream ended inside a message");
+            });
+        }
     }
 
     #[test]

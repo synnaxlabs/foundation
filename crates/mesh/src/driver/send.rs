@@ -12,10 +12,10 @@ use env::tasks::Tasks;
 use transport::stream::Sender;
 use transport::{Class, Session, Transport};
 use types::node;
-use wire::Protocol;
 
-use super::Group;
+use super::{Group, REMOVED, header};
 use crate::bytes::block;
+use crate::error::Stopped;
 use crate::message::Message;
 
 /// What sends the messages of one group: one task for each member, so a member that
@@ -86,7 +86,16 @@ impl Senders {
                 Failure::Pool | Failure::Unknown => {}
                 Failure::Transport(error) => match error {
                     transport::Error::TooLarge { .. } => {}
-                    transport::Error::Stopped { .. } => stream = None,
+                    // Only a voter of this node's own configuration tells it that
+                    // it is out.
+                    transport::Error::Stopped { code } => {
+                        let group = self.group();
+                        if code == REMOVED && group.borrow().voter(to) {
+                            group.borrow_mut().stop(Stopped::Removed { by: to });
+                            return;
+                        }
+                        stream = None;
+                    }
                     // The session failed, or no dial gave one. Other protocols can
                     // use the session, so only the handle drops.
                     transport::Error::Unreachable { .. }
@@ -171,8 +180,7 @@ impl Senders {
                 None => self.dial(to).await?,
             };
             let mut sender = session.open_sender(Class::Command).await?;
-            let header = block(&self.pool, &wire::header::encode(Protocol::Mesh))?;
-            sender.send(header).await?;
+            sender.send(header(&self.pool)?).await?;
             stream.insert(sender)
         };
         let block = block(&self.pool, &Message::Raft(message).encode())?;

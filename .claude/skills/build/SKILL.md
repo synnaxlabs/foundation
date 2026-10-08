@@ -48,7 +48,10 @@ or a line range.
 3. **Tests first.** Write the behavior from the issue and its decisions section as
    failing tests: property tests for codecs and pure logic, simulation tests for I/O.
 4. **Implement** until they pass. Keep the PR to a few hundred lines. When a second idea
-   appears, split.
+   appears, split. Handle each small change as `docs/coordination.md`, "Small
+   changes", says: one in this PR's crate or in a file that this PR changes goes into
+   this PR as its own commit. Before the first review round, fold in each item that the
+   issue's comments add, one commit each, and list each item in the PR body.
 5. **Local gate** (below). Fix every failure.
 6. Run `/eb-review` on the diff. Put its Complexity and Shape decisions in the PR body.
 7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.
@@ -95,11 +98,8 @@ cargo mutants --in-diff "$p" --jobs 4
 
 - Each missed mutant is a missing test. Exit 3 with an empty `mutants.out/missed.txt` is
   a pass: a timeout means a test caught the mutant.
-- On a box, run `cargo mutants` in a capped cgroup, so a mutant that allocates in a
-  loop cannot take the box down, as CI caps each runner (#803): prefix it with
-  `systemd-run --user --scope -p MemoryMax=<share> -p OOMPolicy=continue`. The share
-  of each box is in
-  [#803](https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6043431001).
+- On a box, run `cargo mutants` in the memory cgroup that `docs/claude/testing.md` gives
+  (mutation testing).
 - A changed `Cargo.toml` or `Cargo.lock`: also
   `cargo deny check advisories bans licenses sources`.
 - A change under a `models` path in `.github/workflows/ci.yaml`: also `cargo xtask

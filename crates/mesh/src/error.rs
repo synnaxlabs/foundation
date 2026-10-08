@@ -1,11 +1,12 @@
 use std::fmt;
 
 use raft::Position;
-use types::node::{self, PublicKey};
+use types::ed25519::PublicKey;
+use types::node;
 
 use crate::change::Unknown;
 use crate::region::Unfit;
-use crate::{claim, log, status};
+use crate::{claim, log};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,8 +21,17 @@ pub enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a member that is not a voter of this node's configuration.
+    /// A request from a member that is not a voter of this node's configuration, and
+    /// that no committed configuration removed.
     NotVoter {
+        /// The sender.
+        from: node::Key,
+    },
+    /// A request from `from`, which a committed configuration removed: an earlier
+    /// committed configuration held it, and the last one lacks it. The stream stops
+    /// with the `removed` code, and `from` stops its group when this node is a voter
+    /// of its configuration.
+    Removed {
         /// The sender.
         from: node::Key,
     },
@@ -35,15 +45,13 @@ pub enum Error {
     Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// This node is not a voter of its configuration, and only a voter proposes a
+    /// change. Call it on a voter.
+    NoVote,
     /// The region cannot hold a member record of the config.
     Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
-    /// This node has no mesh time that can stamp a join: none yet, one with an unknown
-    /// error, or one whose later edge is before the Unix epoch.
-    Unsynced,
-    /// A join request names more than 64 status channels.
-    Status(status::Many),
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
     /// write of the log, the group takes no proposal and no message until the write
     /// ends. For the answer to a forwarded proposal, the peer gets no answer, and the
@@ -72,6 +80,10 @@ impl fmt::Display for Error {
             Self::NotVoter { from } => {
                 write!(f, "node {from} sent a request, but it is not a voter")
             }
+            Self::Removed { from } => write!(
+                f,
+                "node {from} sent a request, but a committed configuration removed it"
+            ),
             Self::PeerNotVoter { peer } => write!(
                 f,
                 "the peer with the public key {peer} forwarded a change, but no voter \
@@ -81,15 +93,13 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::NoVote => f.write_str(
+                "this node is not a voter, and only a voter proposes a change",
+            ),
             Self::Member(refused) => refused.fmt(f),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
-            Self::Unsynced => f.write_str(
-                "this node has no mesh time with a known error at or after the Unix \
-                 epoch, so it stamps no join",
-            ),
-            Self::Status(many) => many.fmt(f),
             Self::Pool(cause) => {
                 write!(f, "the pool has no block for the mesh now: {cause}")
             }
@@ -139,6 +149,12 @@ pub enum Stopped {
         /// Why its bytes are not a change.
         cause: Unknown,
     },
+    /// Voter `by` answered `removed`: a committed configuration lacks this node. Open
+    /// the mesh again only after a join that gives a new configuration.
+    Removed {
+        /// The voter that answered.
+        by: node::Key,
+    },
     /// Each `Mesh` of the group dropped. Only `Watch::next` gives it: get a new watch
     /// from the mesh that opens next.
     Dropped,
@@ -152,6 +168,10 @@ impl fmt::Display for Stopped {
                 f,
                 "the committed entry at index {} of term {} is not a change: {cause}",
                 at.index, at.term.0
+            ),
+            Self::Removed { by } => write!(
+                f,
+                "voter {by} answered removed: a committed configuration lacks this node"
             ),
             Self::Dropped => f.write_str("each mesh of the group dropped"),
         }

@@ -2,22 +2,33 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod bench;
 mod directory;
 mod handoff;
+mod route;
+mod scope;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the publish task waits on hub writer sessions")
 )]
 mod status;
 mod stop;
+mod task;
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests;
 
 use std::fmt;
+use std::future::poll_fn;
 use std::iter;
+use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+use std::task::Poll;
 
 use env::thread::Handle;
 use types::frame::key_set::Interner;
@@ -57,6 +68,13 @@ pub struct Config<M> {
     /// also takes the remainder. Each ring that the start makes fits its part. A ring
     /// with a checkpoint keeps its size, which can be more than its part.
     pub disk: types::byte::Size,
+    /// The network. The node's port binds on it.
+    pub net: env::net::Net,
+    /// Where the node's one port binds: UDP, and TCP on the same port number once
+    /// the port carries TCP (#77).
+    pub listen: SocketAddr,
+    /// The node's key. Its transport proves the key to each peer.
+    pub private_key: types::node::PrivateKey,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -68,6 +86,7 @@ impl<M> fmt::Debug for Config<M> {
             .field("budget", &self.budget)
             .field("entropy", &self.entropy)
             .field("disk", &self.disk)
+            .field("listen", &self.listen)
             .finish_non_exhaustive()
     }
 }
@@ -78,12 +97,8 @@ pub struct Node {
     stop: Stop,
     shards: Vec<Shard>,
     failed: Option<Error>,
-    /// The node's interner, once every shard has opened its buffer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "hub sessions take the interner (#340)")
-    )]
-    interner: Take<Interner>,
+    /// The tasks for shard 0's hub.
+    queue: task::Queue<task::Task>,
 }
 
 /// A started shard, with its error once it fails.
@@ -102,23 +117,37 @@ const LIMITS: home::order::Limits = home::order::Limits {
     earliest: Stamp::from_nanos(946_684_800_000_000_000),
     ahead: Span::from_nanos(10_000_000_000),
 };
+/// The transport's flow window of each stream and session, a patch until it is a
+/// setting, as [`LIMITS`] is.
+const WINDOW: usize = 1 << 20;
+/// The most streams of each kind a peer may open, a patch as [`WINDOW`] is.
+const STREAMS: NonZeroU32 = NonZeroU32::new(64).expect("not zero");
+/// How long a silent peer keeps its session, a patch as [`WINDOW`] is.
+const IDLE: Span = Span::from_nanos(30_000_000_000);
+/// The largest message of a stream, when the pool holds it, a patch as [`WINDOW`]
+/// is.
+const MESSAGE: usize = 1 << 16;
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
-    /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
-    /// Each shard owns a `block::Pool` with an even part of the budget, and a ring
-    /// with an even part of the disk budget; shard 0 also takes each remainder.
-    /// Unless the node stops first, shard 0 locks the data directory with the file
-    /// `lock`, which it holds until each shard has closed its ring, then records the
-    /// shard count in the data directory, or checks the one there, and each shard
-    /// opens its buffer in directory `shard-<i>` of its files, and makes it there
-    /// when it is not there. The shards open their buffers one after another, in
-    /// order of core. Returns once each shard runs or one has failed to start. When
-    /// the disk budget holds no ring on each shard, no shard starts, and
-    /// [`Node::join`] gives [`Error::Disk`] with the budget, the shard count, and the
-    /// least budget. A failed start, a shard with no memory, a data directory that
-    /// another node holds or that was made for another shard count, or a buffer that
-    /// does not open stops the node, and [`Node::join`] returns its error.
+    /// Binds the node's port at [`Config::listen`], then starts one shard per core,
+    /// named `shard-<i>`. A port that does not bind starts no shard, and [`Node::join`]
+    /// gives [`Error::Port`]. Each shard is pinned to core `i` when the host can pin
+    /// ([`env::shards::Shards::pinnable`]); else the OS places it. Each shard owns a
+    /// `block::Pool` with an even part of the budget, and a ring with an even part of
+    /// the disk budget; shard 0 also takes each remainder. Unless the node stops first,
+    /// shard 0 locks the data directory with the file `lock`, which it holds until each
+    /// shard has closed its ring, then records the shard count in the data directory,
+    /// or checks the one there, and each shard opens its buffer in directory
+    /// `shard-<i>` of its files, and makes it there when it is not there. The shards
+    /// open their buffers one after another, in order of core. Once each buffer has
+    /// opened, shard 0 serves the port and admits every peer that proves its key,
+    /// until its transport stops, which stops the node.
+    /// Returns once each shard runs or one has failed to start. When the disk budget
+    /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
+    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
+    /// start, a shard with no memory, a data directory that another node holds or that
+    /// was made for another shard count, or a buffer that does not open stops the node,
+    /// and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -127,57 +156,79 @@ impl Node {
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
-        match parts(config.budget, config.disk, cores) {
-            Ok(parts) => {
-                let Ok(count) = u32::try_from(cores) else {
-                    panic!("the host has {cores} cores, more than a node numbers");
-                };
-                Self::spawn(config, parts.into_iter().zip(0..count))
-            }
+        let parts = match parts(config.budget, config.disk, cores) {
+            Ok(parts) => parts,
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
-                let error = Error::Disk {
+                return Self::failed(Error::Disk {
                     disk: config.disk,
                     cores,
                     min: types::byte::Size::from_bytes(small.min.saturating_mul(count)),
-                };
-                Self {
-                    stop: Stop::default(),
-                    shards: Vec::new(),
-                    failed: Some(error),
-                    interner: handoff::pair().1,
-                }
+                });
             }
+        };
+        let Ok(count) = u32::try_from(cores) else {
+            panic!("the host has {cores} cores, more than a node numbers");
+        };
+        let part = match transport::Port::bind(&config.net, config.listen) {
+            Ok(bound) => bound.split(NonZeroUsize::MIN).pop(),
+            Err(error) => {
+                let listen = config.listen;
+                return Self::failed(Error::Port { listen, error });
+            }
+        };
+        let endpoint = Endpoint {
+            part: part.expect("invariant: a port splits into the parts asked for"),
+            private_key: config.private_key.clone(),
+            clock: config.clock.clone(),
+            entropy: config.entropy.clone(),
+        };
+        Self::launch(config, endpoint, parts.into_iter().zip(0..count))
+    }
+
+    /// A node that failed with `error` before any shard started.
+    fn failed(error: Error) -> Self {
+        Self {
+            stop: Stop::default(),
+            shards: Vec::new(),
+            failed: Some(error),
+            queue: task::pair().0,
         }
     }
 
     /// Starts the shards of `config`, each with its part and its number in `parts`.
-    fn spawn<M: block::Memory + 'static>(
+    fn launch<M: block::Memory + 'static>(
         config: Config<M>,
+        endpoint: Endpoint,
         parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
         let Config {
             shards,
             clock: monotonic,
             wall,
-            budget: _,
             mut memory,
             mut files,
             entropy,
-            disk: _,
+            ..
         } = config;
         let stop = Stop::default();
-        let (give, mut interner) = handoff::pair();
+        let cores = shards.cores().get();
+        let handoff::Chain { first, last, links } = handoff::chain(cores);
+        let (queue, inbox) = task::pair();
+        let serve = Serve {
+            interner: last,
+            inbox,
+            endpoint,
+        };
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
-        let roles = Role::all(mesh, wall, give, shards.cores().get());
+        let roles = Role::all(mesh, wall, first, serve, cores);
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
-        for (core, (((config, layout), number), role)) in parts.zip(roles).enumerate() {
-            // A shard that does not start drops `give`, so `interner` gives `None`.
-            let (give, take) = handoff::pair();
-            let take = std::mem::replace(&mut interner, take);
+        for (core, ((((config, layout), number), role), (take, give))) in
+            parts.zip(roles).zip(links).enumerate()
+        {
             let pool = match memory(config.reservation()) {
                 Ok(m) => block::Pool::new(config, m),
                 Err(e) => {
@@ -218,8 +269,25 @@ impl Node {
             stop,
             shards: started,
             failed: error,
-            interner,
+            queue,
         }
+    }
+
+    /// Calls `task` with the node's hub on shard 0, once each shard has opened its
+    /// buffer and after each task given before it, then runs its future. So the code
+    /// in its closure body runs in the order of the calls; the futures that tasks give
+    /// run in no set order. Does not wait. A node that stops or fails before shard 0
+    /// calls a task drops it uncalled. A task runs on shard 0's thread, so it may hold
+    /// values that are not `Send`, such as sessions; it sends its result back through a
+    /// value it owns. Its future runs until it completes or shard 0 ends, which drops
+    /// it. A panic in a task ends shard 0 and fails the node: [`Node::join`] gives
+    /// [`Error::Panicked`], unless the transport stopped first, which gives
+    /// [`Error::Transport`].
+    pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -234,12 +302,13 @@ impl Node {
     ///
     /// # Errors
     ///
-    /// The first failure: [`Error::Disk`] for a disk budget that holds no ring on
-    /// each shard, [`Error::Start`] for a shard that could not start or pin, or
-    /// [`Error::Memory`] for a shard with no memory, else [`Error::Shards`] or
-    /// [`Error::Directory`] for a data directory that shard 0 could not claim, else
-    /// [`Error::Buffer`] for the first shard by core whose buffer did not open, else
-    /// [`Error::Panicked`] for the first shard by core that panicked. Any failed
+    /// The first failure: [`Error::Disk`] for a disk budget that holds no ring on each
+    /// shard, [`Error::Port`] for a port that did not bind, [`Error::Start`] for a
+    /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
+    /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
+    /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
+    /// whose buffer did not open or [`Error::Transport`] for a transport that stopped,
+    /// else [`Error::Panicked`] for the first shard by core that panicked. Any failed
     /// shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
@@ -247,16 +316,16 @@ impl Node {
             let joined = shard.handle.join();
             (joined, shard.failed.get().cloned())
         });
-        error(self.failed, shards)
+        error(self.failed, shards.collect())
     }
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
-/// the first panic by core. Takes each item of `shards`, which gives each shard's
-/// join and error in order of core.
+/// the first panic by core. `shards` gives each shard's join and error in order of
+/// core.
 fn error(
     failed: Option<Error>,
-    shards: impl Iterator<Item = (Result<(), env::thread::Panicked>, Option<Error>)>,
+    shards: Vec<(Result<(), env::thread::Panicked>, Option<Error>)>,
 ) -> Result<(), Error> {
     let mut first = failed;
     let mut panicked = None;
@@ -289,12 +358,13 @@ struct Open {
     stop: Stop,
 }
 
-/// Shard 0's own steps: it runs the mesh clock, and gives the first interner once it
-/// has claimed the data directory for the node's shards.
+/// Shard 0's own steps: it runs the mesh clock, gives the first interner once it has
+/// claimed the data directory for the node's shards, and serves the node's tasks.
 struct First {
     mesh: clock::Clock,
     wall: env::wall::Wall,
     give: Give<Interner>,
+    serve: Serve,
     /// One end for each other shard, which ends once that shard has closed its ring.
     closed: Vec<Take<()>>,
 }
@@ -314,6 +384,7 @@ impl Role {
         mesh: clock::Clock,
         wall: env::wall::Wall,
         give: Give<Interner>,
+        serve: Serve,
         cores: usize,
     ) -> impl Iterator<Item = Self> {
         let (ends, closed): (Vec<_>, Vec<_>) =
@@ -322,6 +393,7 @@ impl Role {
             mesh,
             wall,
             give,
+            serve,
             closed,
         };
         iter::once(Self::First(Box::new(first))).chain(ends.into_iter().map(Self::Next))
@@ -374,45 +446,56 @@ impl Open {
                     mesh,
                     wall,
                     give,
+                    serve,
                     closed,
                 } = *first;
                 tasks.spawn(async { mesh.run(wall).await });
                 let lock = self.claim(&files, closed.len() + 1, give).await;
-                self.keep(files, pool, tasks, guard).await;
+                let (shard, pool) = (tasks.clone(), Rc::new(pool));
+                let own = Rc::clone(&pool);
+                let failed = Arc::clone(&self.failed);
+                let hold = async move |home, guard| {
+                    serve.run(home, own, shard, guard, &failed).await;
+                };
+                self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
                     shard.await;
                 }
                 drop(lock);
             }
             Role::Next(ended) => {
-                self.keep(files, pool, tasks, guard).await;
+                let hold = async |home, guard: Guard| {
+                    guard.await;
+                    drop(home);
+                };
+                self.keep(files, Rc::new(pool), tasks, guard, hold).await;
                 drop(ended);
             }
         }
     }
 
-    /// Opens the shard's buffer and keeps its home until `guard` completes, then
-    /// returns once its ring has closed. A failed open drops `guard`, which stops
-    /// the node.
+    /// Opens the shard's buffer and gives its home and `guard` to `hold`, which drops
+    /// the home once `guard` completes, then returns once its ring has closed. A
+    /// failed open drops `guard`, which stops the node.
     async fn keep(
         self,
         files: env::files::Files,
-        pool: block::Pool,
+        pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
+        hold: impl AsyncFnOnce(home::Shard, Guard),
     ) {
-        match self.run(files, Rc::new(pool), tasks).await {
-            Some(home) => {
-                guard.await;
-                let commit = home.committed();
-                drop(home);
-                // Resolves once the buffer's task has written what was queued and
-                // ended, which closes the ring. Its error reaches no caller (#1329).
-                drop(commit.await);
-            }
+        let Some(home) = self.run(files, pool, tasks.clone()).await else {
             // Stops the node, so each other shard ends.
-            None => drop(guard),
-        }
+            drop(guard);
+            return;
+        };
+        // Resolves once the home has dropped and the buffer's task has written what
+        // was queued and ended, which closes the ring.
+        let commit = home.committed();
+        hold(home, guard).await;
+        // Its error reaches no caller (#1329).
+        drop(commit.await);
     }
 
     /// Claims the data directory for `cores` shards, gives the node's first interner,
@@ -489,6 +572,89 @@ impl Open {
     }
 }
 
+/// What shard 0 serves the node's tasks and port with: the interner, once the last
+/// shard has opened its buffer, the tasks given to the node, and its endpoint.
+struct Serve {
+    interner: Take<Interner>,
+    inbox: task::Inbox<task::Task>,
+    endpoint: Endpoint,
+}
+
+/// What shard 0 makes the node's transport from, but its pool and tasks.
+struct Endpoint {
+    /// The node's part of its port.
+    part: transport::port::Part,
+    private_key: types::node::PrivateKey,
+    clock: env::clock::Clock,
+    entropy: env::entropy::Entropy,
+}
+
+impl Endpoint {
+    /// The node's transport, on `pool` and `tasks`.
+    fn open(
+        self,
+        pool: Rc<block::Pool>,
+        tasks: env::tasks::Tasks,
+    ) -> transport::Transport {
+        let message = NonZeroUsize::new(MESSAGE.min(pool.largest()));
+        let config = transport::Config {
+            private_key: self.private_key,
+            message_bytes_max: message.expect("invariant: a pool holds a block"),
+            window_bytes: WINDOW,
+            streams_max: STREAMS,
+            idle: IDLE,
+            clock: self.clock,
+            entropy: self.entropy,
+            tasks,
+            pool,
+        };
+        transport::Transport::new(config, self.part)
+            .expect("invariant: a buffer's pool holds a block of a whole UDP payload")
+    }
+}
+
+impl Serve {
+    /// Runs each task given with a hub over `home`, and serves the node's port with
+    /// a transport on `pool`, until `guard` completes or the transport stops. A
+    /// transport that stops goes into `failed` before any task drops. Then drops the
+    /// tasks, the hub, `home`, and `guard`. Each session and the transport drop after
+    /// `guard` when `guard` completes, and before the tasks when the transport stops.
+    /// Runs no task and takes no session when a shard did not open.
+    async fn run(
+        self,
+        home: home::Shard,
+        pool: Rc<block::Pool>,
+        tasks: env::tasks::Tasks,
+        guard: Guard,
+        failed: &OnceLock<Error>,
+    ) {
+        let Some(interner) = self.interner.await else {
+            return;
+        };
+        let hub = hub::Hub::new(hub::Config {
+            home,
+            interner,
+            tasks: tasks.clone(),
+        });
+        let transport = self.endpoint.open(pool, tasks.clone());
+        let mut port = pin!(route::accept(transport, tasks.clone()));
+        let mut guard = pin!(guard);
+        let stop = poll_fn(|cx| {
+            if guard.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            // Set before the tasks drop, so that `join` ranks it above a panic in a
+            // task's drop.
+            port.as_mut().poll(cx).map(|error| {
+                failed.set(Error::Transport(error)).expect(
+                    "invariant: shard 0 serves only once its claim and open succeed",
+                );
+            })
+        });
+        self.inbox.serve(hub, tasks, stop).await;
+    }
+}
+
 /// Why a node failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -532,6 +698,16 @@ pub enum Error {
         /// `Size`.
         min: types::byte::Size,
     },
+    /// The transport of the node's port stopped, as when the OS breaks its socket.
+    /// The node stops.
+    Transport(transport::Error),
+    /// The node's port did not bind. No shard started.
+    Port {
+        /// The address of the bind.
+        listen: SocketAddr,
+        /// Why it did not bind.
+        error: env::net::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -558,6 +734,12 @@ impl fmt::Display for Error {
                 "the disk budget {disk} holds no ring on each of {cores} shards; it \
                  needs at least {min}"
             ),
+            Self::Transport(error) => {
+                write!(f, "the node's transport stopped: {error}")
+            }
+            Self::Port { listen, error } => {
+                write!(f, "cannot bind the node's port at {listen}: {error}")
+            }
         }
     }
 }

@@ -3,13 +3,13 @@
 use std::fmt;
 
 use types::channel;
-use types::sample::{self, Scalar};
 
+use crate::data_type::DataType;
 use crate::unit::Unit;
 
 mod check;
 
-pub use check::{Edge, Problem, check};
+pub use check::{Problem, check};
 
 /// A channel. Its name is the tree key, so it is not part of the definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +33,50 @@ pub enum Kind<R = channel::Key> {
     },
     /// A data channel.
     Data(Data<R>),
+}
+
+/// An edge from one channel to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// From a data channel to the index channel that times it.
+    Index,
+    /// From a data channel to the channel that holds its quality.
+    Quality,
+    /// From an index channel to the channel that holds its clock error bound.
+    Error,
+    /// From an index channel to the channel that holds its control handoffs, which is
+    /// on another index.
+    Control,
+}
+
+impl fmt::Display for Edge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Index => "index channel",
+            Self::Quality => "quality channel",
+            Self::Error => "error channel",
+            Self::Control => "control channel",
+        })
+    }
+}
+
+impl<R> Kind<R> {
+    /// Each edge that the channel has, and the channel that it points at, in this
+    /// order: the error then the control channel of an index, or the index then the
+    /// quality channel of a data channel.
+    pub fn edges(&self) -> impl Iterator<Item = (Edge, &R)> {
+        let edges = match self {
+            Self::Index { error, control } => [
+                error.as_ref().map(|to| (Edge::Error, to)),
+                control.as_ref().map(|to| (Edge::Control, to)),
+            ],
+            Self::Data(data) => [
+                Some((Edge::Index, data.index())),
+                data.quality().map(|to| (Edge::Quality, to)),
+            ],
+        };
+        edges.into_iter().flatten()
+    }
 }
 
 /// A data channel: what its values are, their unit, and the channels it points at.
@@ -95,46 +139,6 @@ impl<R> Data<R> {
     }
 }
 
-/// What the values of a data channel are.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DataType {
-    /// Values with this byte layout.
-    Sample(sample::Type),
-    /// OPC UA 32-bit status codes, which data channels point at with `quality`.
-    Quality,
-}
-
-impl DataType {
-    /// The byte layout of one value.
-    #[must_use]
-    pub const fn sample(&self) -> sample::Type {
-        match self {
-            Self::Sample(sample) => *sample,
-            Self::Quality => sample::Type::Scalar(Scalar::U32),
-        }
-    }
-
-    /// Reports whether the values are numbers, so they can have a unit.
-    const fn numeric(&self) -> bool {
-        let element = match self {
-            Self::Sample(
-                sample::Type::Scalar(element)
-                | sample::Type::Array { element, .. }
-                | sample::Type::Matrix { element, .. }
-                | sample::Type::List { element, .. },
-            ) => *element,
-            Self::Sample(sample::Type::String | sample::Type::Bytes)
-            | Self::Quality => {
-                return false;
-            }
-        };
-        !matches!(
-            element,
-            Scalar::Bool | Scalar::Stamp | Scalar::Span | Scalar::Uuid
-        )
-    }
-}
-
 /// A data channel that cannot exist. `Display` gives the message: a lower-case clause
 /// with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,37 +176,36 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use types::name::Name;
+    use types::sample::{self, Scalar};
 
     use super::*;
+    use crate::data_type::tests::{NUMBERS, OTHERS, shapes};
 
-    const NUMBERS: [Scalar; 10] = [
-        Scalar::I8,
-        Scalar::I16,
-        Scalar::I32,
-        Scalar::I64,
-        Scalar::U8,
-        Scalar::U16,
-        Scalar::U32,
-        Scalar::U64,
-        Scalar::F32,
-        Scalar::F64,
-    ];
-    const OTHERS: [Scalar; 4] =
-        [Scalar::Bool, Scalar::Stamp, Scalar::Span, Scalar::Uuid];
+    fn data_on_time(quality: Option<&'static str>) -> Kind<&'static str> {
+        let data_type = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+        Kind::Data(Data::new("edge.time", quality, data_type, None).unwrap())
+    }
 
-    fn shapes(element: Scalar) -> [DataType; 4] {
-        [
-            DataType::Sample(sample::Type::Scalar(element)),
-            DataType::Sample(sample::Type::Array { element, len: 3 }),
-            DataType::Sample(sample::Type::Matrix {
-                element,
-                sides: sample::Sides {
-                    rows: 2,
-                    columns: 3,
-                },
-            }),
-            DataType::Sample(sample::Type::List { element, max: 3 }),
-        ]
+    #[test]
+    fn gives_each_edge_in_order() {
+        let index = |error, control| Kind::Index { error, control };
+        for (kind, edges) in [
+            (index(None, None), vec![]),
+            (index(Some("e"), None), vec![(Edge::Error, "e")]),
+            (index(None, Some("c")), vec![(Edge::Control, "c")]),
+            (
+                index(Some("e"), Some("c")),
+                vec![(Edge::Error, "e"), (Edge::Control, "c")],
+            ),
+            (data_on_time(None), vec![(Edge::Index, "edge.time")]),
+            (
+                data_on_time(Some("q")),
+                vec![(Edge::Index, "edge.time"), (Edge::Quality, "q")],
+            ),
+        ] {
+            let found: Vec<_> = kind.edges().map(|(edge, &to)| (edge, to)).collect();
+            assert_eq!(found, edges, "{kind:?}");
+        }
     }
 
     fn data(data_type: DataType, unit: Option<&str>) -> Result<Data, Error> {
@@ -277,15 +280,5 @@ mod tests {
                 data_type: DataType::Quality
             })
         );
-    }
-
-    #[test]
-    fn stores_quality_as_u32() {
-        assert_eq!(
-            DataType::Quality.sample(),
-            sample::Type::Scalar(Scalar::U32)
-        );
-        let string = sample::Type::String;
-        assert_eq!(DataType::Sample(string).sample(), string);
     }
 }

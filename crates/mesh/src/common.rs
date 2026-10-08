@@ -10,8 +10,9 @@ use raft::{
 };
 use transport::Address;
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Name;
-use types::node::{self, PrivateKey, PublicKey, SealKey};
+use types::node::{self, PrivateKey, SealKey};
 use types::time::{Span, Stamp};
 
 use crate::bytes::{put_channel, put_count, put_name};
@@ -154,6 +155,18 @@ pub(crate) fn grant_in(
     grant: Grant,
     candidate: u8,
 ) -> Signature {
+    grant_signed(term, voter, voter, grant, candidate)
+}
+
+/// The signature of the `grant` of `voter` to `candidate` in `term`, made with the
+/// private key of `signer`: a forgery unless `signer` is `voter`.
+pub(crate) fn grant_signed(
+    term: Term,
+    voter: u8,
+    signer: u8,
+    grant: Grant,
+    candidate: u8,
+) -> Signature {
     let body = reply_body(grant, Answer::Granted(None));
     let mut ready = Ready {
         messages: vec![Message {
@@ -162,7 +175,7 @@ pub(crate) fn grant_in(
         }],
         ..Ready::default()
     };
-    signer(voter).sign(&mut ready);
+    Signer::new(key(voter), &private(signer)).sign(&mut ready);
     match ready.messages.remove(0).body {
         Body::PreVoteReply {
             answer: Answer::Granted(signature),
@@ -180,9 +193,45 @@ pub(crate) fn grant_in(
 ///
 /// When `leader` is not 1, 2 or 3: a proof holds its candidate as a voter.
 pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
+    proven_in(TERM, leader, to, body)
+}
+
+/// As [`proven`], in `term`.
+pub(crate) fn proven_in(term: Term, leader: u8, to: u8, body: Body) -> Message {
+    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
+    proven_at(
+        leader,
+        to,
+        term,
+        &[1, 2, 3].map(|voter| (voter, voter)),
+        body,
+    )
+}
+
+/// `body` from `leader` to `to` in `term`, signed, with the leader's vote from each
+/// `(voter, signer)`, which the private key of `signer` signs. The leader's own vote
+/// carries no signature.
+pub(crate) fn proven_at(
+    leader: u8,
+    to: u8,
+    term: Term,
+    votes: &[(u8, u8)],
+    body: Body,
+) -> Message {
+    let vote = |&(voter, signer): &(u8, u8)| {
+        let signed = (voter != leader)
+            .then(|| grant_signed(term, voter, signer, Grant::Vote, leader));
+        (key(voter), signed)
+    };
+    let proof = Proof {
+        grant: Grant::Vote,
+        candidate: key(leader),
+        voters: votes.iter().map(vote).collect(),
+    };
     let mut ready = Ready {
         messages: vec![Message {
-            proof: Some(votes(TERM, leader)),
+            term,
+            proof: Some(proof),
             ..message(leader, to, body)
         }],
         ..Ready::default()
@@ -244,10 +293,10 @@ pub(crate) fn with_status(mut join: Join, status: &[(&str, u128)]) -> Join {
     join
 }
 
-// The votes of 1, 2 and 3 for `leader` in `term`, each signed but the leader's own.
-fn votes(term: Term, leader: u8) -> Proof {
-    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
-    let vote = |voter| {
+// The vote of each of `voted` for `leader` in `term`, each signed but the leader's
+// own.
+fn votes(term: Term, leader: u8, voted: &[u8]) -> Proof {
+    let vote = |&voter: &u8| {
         let signed =
             (voter != leader).then(|| grant_in(term, voter, Grant::Vote, leader));
         (key(voter), signed)
@@ -255,7 +304,7 @@ fn votes(term: Term, leader: u8) -> Proof {
     Proof {
         grant: Grant::Vote,
         candidate: key(leader),
-        voters: [1, 2, 3].map(vote).into(),
+        voters: voted.iter().map(vote).collect(),
     }
 }
 
@@ -266,11 +315,23 @@ fn votes(term: Term, leader: u8) -> Proof {
 ///
 /// When `leader` is not 1, 2 or 3, as [`proven`].
 pub(crate) fn change(leader: u8, at: Position, voters: Voters) -> Entry {
+    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
+    change_voted(leader, at, voters, &[1, 2, 3])
+}
+
+/// The configuration entry `voters` that `leader` wrote at `at`, with the vote of
+/// each of `voted` in the term of `at`, signed as `sign` signs a change.
+pub(crate) fn change_voted(
+    leader: u8,
+    at: Position,
+    voters: Voters,
+    voted: &[u8],
+) -> Entry {
     let entry = Entry {
         at,
         data: Data::Voters(raft::Change {
             voters,
-            votes: votes(at.term, leader),
+            votes: votes(at.term, leader, voted),
             signature: None,
         }),
     };

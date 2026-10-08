@@ -149,8 +149,9 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::readers::tests::{Frames, dropped, number};
-    use crate::{Position, Reader, Record, Start, complete};
+    use crate::complete::Charge;
+    use crate::readers::tests::{Frames, dropped, missed, number};
+    use crate::{Next, Position, Reader, Record, Start, complete};
 
     fn at(nanos: i64) -> Stamp {
         Stamp::from_nanos(nanos)
@@ -176,7 +177,9 @@ mod tests {
             name: self::name(name),
             hold: Span::from_nanos(10),
         };
-        readers.open(reader, Start::At(position), 0).key
+        readers
+            .open(reader, Start::At(position), 0, Charge::Whole)
+            .key
     }
 
     fn unnamed(readers: &mut Readers) -> Key {
@@ -184,7 +187,11 @@ mod tests {
     }
 
     fn taken(readers: &mut Readers, key: Key) -> Option<u64> {
-        readers.take(key.into()).as_ref().map(number)
+        match readers.take(key.into()) {
+            Next::Frame(frame) => Some(number(&frame)),
+            Next::Empty => None,
+            Next::Behind => panic!("a latest session is behind"),
+        }
     }
 
     fn put(readers: &mut Readers, frame: Frame) -> Vec<Key> {
@@ -278,7 +285,7 @@ mod tests {
                 presented: None,
                 otherwise: live(0),
             };
-            let opened = readers.open(reader, resume, 0);
+            let opened = readers.open(reader, resume, 0, Charge::Whole);
             assert_eq!(opened.replaced, Some(latest.into()));
             assert_eq!(opened.position, live(5));
         }
@@ -329,18 +336,18 @@ mod tests {
                 name: name("a"),
                 hold: Span::from_nanos(10),
             };
-            let new = readers.open(reader, Start::At(live(0)), first.charge()).key;
+            let new = readers
+                .open(reader, Start::At(live(0)), first.charge(), Charge::Whole)
+                .key;
             assert_eq!(readers.records().count(), 1);
-            readers.queue(&first, 0..1);
-            readers.queue(&frames.frame(2), 1..2);
+            readers.queue(&first, &frames.set, 0..1);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
             dropped(&mut readers, old.into());
             readers.flush();
             assert_eq!(readers.records().count(), 0);
             assert_eq!(readers.release(2), [new]);
             dropped(&mut readers, old.into());
-            assert_eq!(readers.take(new.into()).as_ref().map(number), Some(1));
-            assert!(readers.take(new.into()).is_none());
-            assert!(readers.behind(new));
+            assert_eq!(missed(&mut readers, new), [1]);
         }
 
         #[test]
@@ -356,8 +363,10 @@ mod tests {
                 hold: Span::from_nanos(10),
             };
             let limit = 2 * first.charge();
-            let new = readers.open(reader, Start::At(live(0)), limit).key;
-            readers.queue(&first, 0..1);
+            let new = readers
+                .open(reader, Start::At(live(0)), limit, Charge::Whole)
+                .key;
+            readers.queue(&first, &frames.set, 0..1);
             assert_eq!(readers.release(1), [new]);
             readers.records().for_each(drop);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
@@ -370,17 +379,19 @@ mod tests {
                 closed: None,
             };
             assert_eq!(readers.records().collect::<Vec<_>>(), [acked]);
-            readers.queue(&frames.frame(2), 1..2);
-            readers.queue(&frames.frame(3), 2..3);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(readers.release(3), []);
-            assert!(readers.behind(new));
+            assert_eq!(missed(&mut readers, new), [1, 2]);
             dropped(&mut readers, old.into());
             assert_eq!(readers.open_latest().key, Key(1));
             let next = complete(&mut readers, "c", live(3));
             assert_eq!(next, complete::Key(2));
-            assert!(!readers.behind(next));
-            let missed = readers.open(Reader::Unnamed, Start::At(live(2)), 0).key;
-            assert!(readers.behind(missed));
+            assert!(matches!(readers.take(next.into()), Next::Empty));
+            let below = readers
+                .open(Reader::Unnamed, Start::At(live(2)), 0, Charge::Whole)
+                .key;
+            assert_eq!(missed(&mut readers, below), []);
             let reader = Reader::Named {
                 name: name("b"),
                 hold: Span::from_nanos(10),
@@ -389,7 +400,10 @@ mod tests {
                 presented: None,
                 otherwise: live(9),
             };
-            assert_eq!(readers.open(reader, resume, 0).position, live(0));
+            assert_eq!(
+                readers.open(reader, resume, 0, Charge::Whole).position,
+                live(0)
+            );
         }
     }
 
@@ -472,7 +486,9 @@ mod tests {
             let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
-            let sending = readers.take(key.into()).expect("frame 1 waits");
+            let Next::Frame(sending) = readers.take(key.into()) else {
+                panic!("frame 1 waits");
+            };
             assert_eq!(put(&mut readers, frames.frame(2)), [key]);
             assert!(matches!(
                 frames.make(3),
@@ -500,7 +516,7 @@ mod tests {
         fn panics_on_a_key_only_a_complete_session_had() {
             let mut readers = Readers::new(0);
             complete(&mut readers, "a", live(0));
-            readers.take(Key(0).into());
+            drop(readers.take(Key(0).into()));
         }
 
         #[test]
@@ -508,7 +524,7 @@ mod tests {
         fn panics_on_the_next_key() {
             let mut readers = Readers::new(0);
             unnamed(&mut readers);
-            readers.take(Key(1).into());
+            drop(readers.take(Key(1).into()));
         }
 
         #[test]
@@ -516,7 +532,7 @@ mod tests {
         fn panics_on_a_key_past_the_next() {
             let mut readers = Readers::new(0);
             unnamed(&mut readers);
-            readers.take(Key(2).into());
+            drop(readers.take(Key(2).into()));
         }
     }
 
@@ -648,8 +664,9 @@ mod tests {
                         model.mailboxes.insert(latest.key, model.newest);
                     }
                     Input::Complete => {
-                        let key =
-                            readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
+                        let key = readers
+                            .open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole)
+                            .key;
                         assert!(model.complete.insert(key), "{key} is new");
                     }
                     Input::Put => {
