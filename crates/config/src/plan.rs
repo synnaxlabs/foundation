@@ -377,8 +377,8 @@ fn each(keys: &[&Name]) -> String {
 
 /// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
 /// `placement` names `home`. `moved` is the fix of each diagnostic of `connector` when
-/// `placement` also wins for a connector on another node, which a new `home` would
-/// move the problem to.
+/// `placement` also wins for a connector, or an index of one, on another node, which a
+/// new `home` would move the problem to.
 fn connector_home(
     found: &Found<'_>,
     placement: &Name,
