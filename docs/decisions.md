@@ -311,7 +311,9 @@ How to read this record:
   channels never point at policies. Readers and connectors -> channels by name or
   selector. Calculation -> inputs, -> its own output index. Connector -> channels it
   reads and writes; channels never point at connectors. Region -> name prefix. Node,
-  connector, subject, and channel names share the one name tree.
+  connector, subject, and channel names share the one name tree. A channel's edges stay
+  in its region (REGION CHECK; `laptop.architect`, 2026-10-08T08:43:31Z,
+  https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056144931).
 
 ### 1.3 Delivery
 
@@ -3136,6 +3138,48 @@ How to read this record:
   to the code that encodes definitions. A chunk's address is a `types::digest::Digest`,
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
+- **REGION CHECK (#1841)** `spec::region::check(prefix, definitions)` gives each
+  problem of a region's definitions, by tree key, in tree key order: each
+  `spec::channel::check` problem, each name that the region does not govern (X2), and
+  each definition that is not at the tree key of its kind. `Mesh::apply`, #1741, the
+  node state of BQ11b, and `plan` (#1082) call it. A channel's edges point only at
+  channels of its own region, so a region checks its spec alone, also while cut off
+  (K5), and a change in one region breaks no edge of another. Two channels with one key
+  are `channel::Problem::Duplicate`, not a panic, as a committed spec comes from other
+  nodes. Lost: an input of the keys of other regions, so that an edge may cross
+  regions; a `spec::Region` that cannot hold a problem, as #1741 and BQ11b keep a
+  committed spec with problems; and a module `spec::problem`. The reach of a policy
+  (X26) is not in it yet: #1846 adds it, and `config` (#679) gives its diagnostic from
+  that problem (`laptop.architect-2`, 2026-10-08T09:11:05Z,
+  https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056600033).
+  `spec::region::tree(chunks, definitions)` builds the tree of a region's definitions,
+  and cannot fail. `mesh` calls it at open and at apply. Lost: the function in
+  `spec::tree`, which then points at the model above it; and the encode in the caller.
+  `plan` (#1082) maps a key to its region with the function of `spec::region`, and
+  keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
+  check of the key form accepts a reserved label only for a subject and an access
+  policy, the kinds of the founding definitions (FIRST ADMIN). Each other kind at a
+  reserved label is `Misplaced`, so a region there makes no child region. A file
+  still cannot hold a reserved label (`Kind::key`).
+  Lost: a check that skips each reserved key, as a channel at `@admin.@subject` is
+  then no problem and the check needs `spec::key::reserved`. Decided by
+  `laptop.architect-2`, 2026-10-08T09:15:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056664804), and
+  the kinds 2026-10-08T09:51:31Z
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316).
+  Supersedes: the panic for two channels with one key (architect, #756,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890).
+  Decided by `laptop.architect-2`: the check, 2026-10-08T08:41:52Z
+  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056118794); the
+  tree, 2026-10-08T08:47:57Z
+  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056217372). On
+  the checks in `spec` of `laptop.architect`, change 2, 2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836), and
+  the tree of the founding definitions, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151). The
+  supersede and the edge rule, agreed by `laptop.architect`, 2026-10-08T08:43:31Z
+  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056144931).
 - **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
   node's disk through `env::files`. A put returns only after the chunk is durable. A get
   gives bytes only when they hash to the digest; a chunk that fails the check (a write
@@ -5537,7 +5581,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls it; commits). Two channels with one key are a defect and panic (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls `region::check`, which runs it; commits). Two channels with one key are `channel::Problem::Duplicate`, not a panic (REGION CHECK; it supersedes the panic of the architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
 | Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
