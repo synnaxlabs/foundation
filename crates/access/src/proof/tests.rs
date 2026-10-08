@@ -545,17 +545,27 @@ mod renew {
     fn names_the_first_field_that_changed() {
         let rules =
             rules(&[("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))])]);
-        let hello = Hello {
+        let subject = Hello {
+            subject: name("ops.bob"),
+            key: public(&pair(TEST_2)),
+            ..renewal()
+        };
+        let key = Hello {
             key: public(&pair(TEST_2)),
             via: node::Key::from_u128(7),
             connection: connection::Key([0xc5; 16]),
             ..renewal()
         };
+        let via = Hello {
+            via: node::Key::from_u128(7),
+            connection: connection::Key([0xc5; 16]),
+            ..renewal()
+        };
 
-        assert_eq!(
-            renew(&rules, NOW, TEST_2, hello),
-            Err(Error::Changed { field: Field::Key })
-        );
+        let changed = |field| Err(Error::Changed { field });
+        assert_eq!(renew(&rules, NOW, TEST_2, subject), changed(Field::Subject));
+        assert_eq!(renew(&rules, NOW, TEST_2, key), changed(Field::Key));
+        assert_eq!(renew(&rules, NOW, TEST_1, via), changed(Field::Via));
     }
 
     #[test]
