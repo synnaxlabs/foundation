@@ -1016,15 +1016,19 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
-- **HOME TYPE REFUSAL (#963)** `Shard::open_writer` refuses a key set with a series of
-  a type the home does not write yet, with `writer::Error::Type` (the slot and the type
-  of the first such series). It decides after `Unsynced` and `Lease`, and changes no
-  state. `hub` adds no check of its own; it maps the variant to its own error and names
-  the channel. This is a patch: #1145 makes the home write every `sample::Type` and
-  removes the variant. Lost: a documented precondition on `hub` (a user can break it,
-  and each `hub` caller must keep it); a refusal in `config check` (a second place that
-  must track the home). Decided by the architect, #963
-  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HOME EVERY TYPE (#1145)** `Shard::open_writer` takes a key set with series of any
+  `sample::Type`, and the home writes and reads a series of each: `codec` checks and
+  encodes it as S3 says, and STORED BODY stores its type. `codec` does not check that
+  a `String` sample is UTF-8 (#556). Neither `home` nor `hub` has a
+  `writer::Error::Type`. Supersedes HOME TYPE REFUSAL (#963,
+  https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785), the
+  patch that refused a series of a type other than a scalar until this change. Lost:
+  an allow list in `home` that grows one type per PR, because it copies the list that
+  `codec` owns; a variant that no path gives, because it misleads each caller that
+  matches on it. Decided by `laptop.architect` (2026-10-08T06:36:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861). The
+  surface was approved by `laptop.architect` (2026-10-08T07:01:09Z:
+  https://github.com/synnaxlabs/foundation/pull/1824#issuecomment-6054411394).
 - **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
@@ -1070,9 +1074,7 @@ How to read this record:
   releases the frame at the next call, not at its first poll, and grants credit for it
   there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
   keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
-  A writer on a channel of a type the home does not write gets `writer::Error::Type`
-  with the channel's name (HOME TYPE REFUSAL). Decided by `laptop.architect`
-  (2026-10-07T05:53:24Z:
+  Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
@@ -5332,6 +5334,7 @@ How to read this record:
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
+| HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 
 ---
