@@ -2342,10 +2342,14 @@ How to read this record:
   in the log of its sender, not the entries below its position in the log of the
   receiver, so the lookup never reads a link as a configuration entry: when the
   two joins are in the log and the entry that names the signer is in the chain
-  only, the vote of that signer is removed. The limit is in liveness only: the
-  node never counts a wrong key, and #1623 is the sound fix, designed with #336
-  (decided by `laptop.director`, 2026-10-07T21:03:30Z:
-  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046807570).
+  only, the vote of that signer is removed. With voters that do not lie, the limit
+  is in liveness only, and #1623 is the sound fix, designed with #336 (decided by
+  `laptop.director`, 2026-10-07T21:03:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046807570). A
+  voter that lies can write a join with a key that it holds, and the one-join rule
+  takes that key, until #882 (decided by `laptop.architect`, 2026-10-08T00:52:26Z:
+  https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6049888903.
+  Supersedes "the node never counts a wrong key" of 6046807570).
   Two joins below that entry still strand a follower under a leader that the real
   node elected, until #336 builds the voter that checks a join before it stamps it.
   A hard proof that lost such a claim can be no quorum at a node with a newer
@@ -4443,6 +4447,7 @@ How to read this record:
 | A1 sketch: channel `home` field, epoch and seq pair, standby in the mesh file | S5, S12, A8 |
 | Rule 3 of #1382 (6038235423): `mesh` removes a claim whose signer has no key at the node, and a bad signature of a known signer refuses the message | "Rule 3 becomes" (6042828979): the append is cut before the first entry with a claim of a signer with no key, and the chain too (6043037608) |
 | Two-keys sentence of 6038611630: two joins of one node that name two keys give none until the apply decides | MESH DRIVER (6046503082): the joins below the first configuration entry that names the node decide, when they name one key |
+| "The node never counts a wrong key" of 6046807570 | MESH DRIVER (6049888903): a voter that lies can write a join with a key it holds, and the one-join rule takes that key, until #882 |
 | Item 3 of rule 3 of 6042828979: a claim of a known signer with a bad signature refuses the whole message | MESH DRIVER (6045806233): a claim that does not hold under a key from a join that is not applied is removed, or cuts the append or the chain; only a bad signature of an applied member refuses |
 | A1 "control is a lease" (for every holder) | S11 (optional writer setting) |
 | A2 and A15 "mesh file" and placeholder commands | K1, K3 |

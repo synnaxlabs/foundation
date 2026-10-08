@@ -170,7 +170,8 @@ state on `main`.
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
   refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
   A voter that lies can still break safety, because a false `AppendReply` counts as
-  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed
+  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
+  voter that lies writes gives its node the key it names (MESH DRIVER). A signed
   `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,

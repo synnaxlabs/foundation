@@ -3064,6 +3064,20 @@ mod tests {
             });
         }
 
+        // Only a leader writes a join, so a forged join alone in the log comes from
+        // a voter that lies, which `raft` trusts until #882: its key is the key of
+        // 4, and a vote under it counts.
+        #[test]
+        fn a_vote_under_the_key_of_the_one_forged_join_of_a_chain_only_node_counts() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[stale_join()])).await;
+                let elected = elected_through_chain(&[(2, 2), (4, 5)]);
+                assert_eq!(mesh.receive(public(2), elected), Ok(()));
+                assert_eq!(term(&mesh), Term(later().0 + 1));
+            });
+        }
+
         // With the real join alone, the same heartbeat is proven.
         #[test]
         fn takes_a_leader_whose_chain_only_names_a_node_with_one_join() {
