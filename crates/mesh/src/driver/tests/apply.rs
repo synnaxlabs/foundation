@@ -11,7 +11,7 @@ use super::*;
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
     /// tick, with each node as a holder.
-    fn apply(&self, node: u8, base: Pointer, definitions: BTreeMap<Name, Definition>) {
+    fn apply(&self, node: u8, base: Pointer, definitions: &BTreeMap<Name, Definition>) {
         self.apply_held(node, base, definitions, IDS.into());
     }
 
@@ -20,11 +20,17 @@ impl Cluster {
         &self,
         node: u8,
         base: Pointer,
-        definitions: BTreeMap<Name, Definition>,
+        definitions: &BTreeMap<Name, Definition>,
         holders: BTreeSet<u8>,
     ) {
-        let spec = (base, definitions, holders);
-        self.board.lock().unwrap().applies.insert(node, spec);
+        let update = spec::region::tree(&mut Chunks::default(), definitions);
+        let change = Change::Spec {
+            base,
+            root: update.root,
+            chunks: update.chunks.into_iter().collect(),
+            holders: holders.into_iter().map(key).collect(),
+        };
+        self.board.lock().unwrap().applies.insert(node, change);
     }
 
     /// Node `node` proposes `voters` at its next tick.
@@ -201,11 +207,11 @@ fn an_apply_on_a_stale_base_gives_the_pointer_through_a_follower_and_the_leader(
             create_subjects(&["plant.b"], 2),
         );
         let (moved, next) = (pointer(1, &a), pointer(2, &b));
-        cluster.apply(first, base(), a);
+        cluster.apply(first, base(), &a);
         cluster.run(seconds(5));
-        cluster.apply(second, base(), b.clone());
+        cluster.apply(second, base(), &b);
         cluster.run(seconds(5));
-        cluster.apply(second, moved, b);
+        cluster.apply(second, moved, &b);
         cluster.run(seconds(5));
         let stale = Error::Stale {
             base: base(),
@@ -238,8 +244,8 @@ fn of_two_applies_from_one_base_one_gives_the_pointer_and_the_other_stale() {
             create_subjects(&["plant.a"], 1),
             create_subjects(&["plant.b"], 1),
         );
-        cluster.apply(leader, base(), a.clone());
-        cluster.apply(follower, base(), b.clone());
+        cluster.apply(leader, base(), &a);
+        cluster.apply(follower, base(), &b);
         cluster.run(seconds(5));
         cluster.script(|_| home(9));
         cluster.run(seconds(5));
@@ -271,7 +277,7 @@ fn a_leader_that_loses_its_lead_applies_through_the_next_leader() {
     cluster.link_each(old, 1.0);
     let definitions = create_subjects(&["plant.a"], 1);
     let moved = pointer(1, &definitions);
-    cluster.apply(old, base(), definitions);
+    cluster.apply(old, base(), &definitions);
     cluster.run(seconds(5));
     assert_eq!(cluster.board().applied, []);
     cluster.link_each(old, 0.0);
@@ -297,7 +303,7 @@ fn a_call_whose_answer_is_cut_off_gives_the_pointer_of_its_own_change() {
         cluster.run(seconds(5));
         let definitions = create_subjects(&["plant.a"], 1);
         let moved = pointer(1, &definitions);
-        cluster.apply(follower, base(), definitions);
+        cluster.apply(follower, base(), &definitions);
         cluster.run(Span::from_nanos(3 * TICK.nanos()));
         cluster.link_each(follower, 1.0);
         cluster.run(seconds(5));
@@ -459,7 +465,7 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
     cluster.configure(1, [1, 2].into());
     cluster.run(seconds(5));
     let definitions = create_subjects(&["plant.a"], 1);
-    cluster.apply_held(1, base(), definitions, [1].into());
+    cluster.apply_held(1, base(), &definitions, [1].into());
     cluster.run(seconds(5));
     cluster.script(|_| home(9));
     cluster.run(seconds(5));

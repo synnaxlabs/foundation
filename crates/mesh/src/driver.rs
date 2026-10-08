@@ -195,17 +195,7 @@ impl Mesh {
             config.voters.clone(),
         )
         .map_err(Error::Member)?;
-        match state.member(config.key) {
-            None => return Err(Error::NotMember(config.key)),
-            Some(own) if own.public_key() != config.private_key.public() => {
-                return Err(Error::WrongKey);
-            }
-            Some(_) => {}
-        }
-        let mut voters = config.voters.iter();
-        if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
-            return Err(Error::NotMember(key));
-        }
+        check_members(&state, config.key, &config.private_key, &config.voters)?;
         put(&config.chunks, &config.pool, &chunks, &founding.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
@@ -978,6 +968,28 @@ fn request(body: &Body) -> bool {
     }
 }
 
+// Checks that `own` and each of `voters` are members of `state`, and that
+// `private_key` is the key of `own`.
+fn check_members(
+    state: &region::State,
+    own: node::Key,
+    private_key: &PrivateKey,
+    voters: &BTreeSet<node::Key>,
+) -> Result<(), Error> {
+    match state.member(own) {
+        None => return Err(Error::NotMember(own)),
+        Some(record) if record.public_key() != private_key.public() => {
+            return Err(Error::WrongKey);
+        }
+        Some(_) => {}
+    }
+    let mut voters = voters.iter();
+    if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
+        return Err(Error::NotMember(key));
+    }
+    Ok(())
+}
+
 // Puts each chunk of `digests`, which `chunks` holds, in `store`.
 async fn put(
     store: &blob::Store,
@@ -1191,9 +1203,8 @@ mod tests {
         set: Vec<(u8, Option<node::Key>, Result<(), Error>)>,
         /// The voters that each node proposes next.
         configurations: BTreeMap<u8, BTreeSet<u8>>,
-        /// The base, the definitions, and the holders of the spec change that each
-        /// node proposes next.
-        applies: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>, BTreeSet<u8>)>,
+        /// The spec change that each node proposes next.
+        applies: BTreeMap<u8, Change>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1521,16 +1532,8 @@ mod tests {
     async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
-            let spec = board.lock().unwrap().applies.remove(&id);
-            let Some((base, definitions, holders)) = spec else {
+            let Some(change) = board.lock().unwrap().applies.remove(&id) else {
                 continue;
-            };
-            let update = spec::region::tree(&mut Chunks::default(), &definitions);
-            let change = Change::Spec {
-                base,
-                root: update.root,
-                chunks: update.chunks.into_iter().collect(),
-                holders: holders.into_iter().map(key).collect(),
             };
             let result = match mesh.attempt() {
                 Ok(attempt) => mesh.settle_spec(attempt, change).await,
@@ -1625,6 +1628,46 @@ mod tests {
         }
     }
 
+    /// Spawns on `tasks` each task of node `id` that runs what `board` scripts.
+    fn script(
+        mesh: &Mesh,
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        id: u8,
+        board: &Arc<Mutex<Board>>,
+    ) {
+        let (proposing, clock, proposals) =
+            (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            propose(proposing, clock, id, proposals).await;
+        });
+        let (answering, clock, forwards) =
+            (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            answer(answering, clock, id, forwards).await;
+        });
+        let (stamping, clock, requests) =
+            (mesh.clone(), node.clock(), Arc::clone(board));
+        let time = synced(node);
+        tasks.spawn(async move {
+            stamp(stamping, clock, time, id, requests).await;
+        });
+        let (setting, clock, sets) = (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            set(setting, clock, id, sets).await;
+        });
+        let (applying, clock, applies) =
+            (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            apply(applying, clock, id, applies).await;
+        });
+        let (configuring, clock, configurations) =
+            (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            configure(configuring, clock, id, configurations).await;
+        });
+    }
+
     async fn voter(
         node: sim::node::Node,
         tasks: Tasks,
@@ -1654,39 +1697,11 @@ mod tests {
             ..base
         };
         let mesh = Mesh::open(config).await.unwrap();
-        let (serving, proposing, streams) = (mesh.clone(), mesh.clone(), tasks.clone());
+        let (serving, streams) = (mesh.clone(), tasks.clone());
         tasks.spawn(async move {
             accept(serving, transport, streams).await;
         });
-        let (clock, script) = (node.clock(), Arc::clone(&board));
-        tasks.spawn(async move {
-            propose(proposing, clock, id, script).await;
-        });
-        let (answering, clock, forwards) =
-            (mesh.clone(), node.clock(), Arc::clone(&board));
-        tasks.spawn(async move {
-            answer(answering, clock, id, forwards).await;
-        });
-        let (stamping, clock, requests) =
-            (mesh.clone(), node.clock(), Arc::clone(&board));
-        let time = synced(&node);
-        tasks.spawn(async move {
-            stamp(stamping, clock, time, id, requests).await;
-        });
-        let (setting, clock, sets) = (mesh.clone(), node.clock(), Arc::clone(&board));
-        tasks.spawn(async move {
-            set(setting, clock, id, sets).await;
-        });
-        let (applying, clock, applies) =
-            (mesh.clone(), node.clock(), Arc::clone(&board));
-        tasks.spawn(async move {
-            apply(applying, clock, id, applies).await;
-        });
-        let (configuring, clock, configurations) =
-            (mesh.clone(), node.clock(), Arc::clone(&board));
-        tasks.spawn(async move {
-            configure(configuring, clock, id, configurations).await;
-        });
+        script(&mesh, &node, &tasks, id, &board);
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();

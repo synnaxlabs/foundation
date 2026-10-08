@@ -137,11 +137,14 @@ mod tests {
         }
         // These two have the byte form before the holders, which ends where the count
         // of holders starts.
-        for name in ["spec", "spec_chunks_1024"] {
+        for (name, held_name) in [
+            ("spec", "spec_held"),
+            ("spec_chunks_1024", "spec_held_chunks_1024"),
+        ] {
             let mut held = inputs[name].to_vec();
             held.extend(1_u16.to_le_bytes());
             held.extend(key(1).as_u128().to_le_bytes());
-            assert_eq!(held, inputs[&*format!("spec_held{}", &name[4..])], "{name}");
+            assert_eq!(held, inputs[held_name], "{name}");
         }
         // The chunk count is after the kind, the base, and the root.
         let mut over = inputs["spec_chunks_1024"].to_vec();
