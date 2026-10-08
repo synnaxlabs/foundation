@@ -6,6 +6,7 @@ pub mod access;
 pub mod channel;
 pub mod compression;
 pub mod connector;
+pub mod data_type;
 pub mod definition;
 pub mod key;
 pub mod node_settings;

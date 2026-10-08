@@ -1,16 +1,18 @@
 //! Checks core definitions in Documents, expands templates, hands connector blocks to
 //! kinds, and computes plans, explains, and exports.
 
+mod channel;
 mod node_settings;
 mod placement;
 mod retention;
 
-use std::collections::{BTreeMap, btree_map};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
-use spec::definition::Definition;
+use spec::definition::Kind;
+use spec::key;
 use types::name::{Name, Selector};
 
 const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
@@ -25,26 +27,38 @@ const LONG_NAME: Code = Code::new("config.long-name");
 /// block gives none.
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
-/// Each kind of block, by keyword, and its check.
-const KINDS: [(&str, Check); 3] = [
-    ("node_settings", node_settings::check),
-    ("placement", placement::check),
-    ("retention", retention::check),
+/// Each kind of block, whose name is its keyword, and its check.
+const KINDS: [(Kind, Check); 4] = [
+    (Kind::Channel, channel::check),
+    (Kind::NodeSettings, node_settings::check),
+    (Kind::Placement, placement::check),
+    (Kind::Retention, retention::check),
 ];
+
+/// What one block defines. A channel's edges are names until `plan` gives each
+/// channel its key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Definition {
+    /// A definition other than a channel, as the spec tree stores it.
+    Spec(spec::definition::Definition),
+    /// A channel, with each edge as the name of the channel that it points at.
+    Channel(spec::channel::Kind<Name>),
+}
 
 /// A checked definition and the label that names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entry {
-    /// The definition, as the spec tree stores it.
+    /// The definition.
     pub definition: Definition,
     /// Where the label is.
     pub label_span: Option<Span>,
 }
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
-/// gives each by its tree key, `<label>.@<kind>`. Each order of `documents` gives the
-/// same entries, or each gives problems.
+/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for a policy.
+/// Each order of `documents` gives the same entries, or each gives problems.
 ///
 /// # Errors
 ///
@@ -55,7 +69,10 @@ pub struct Entry {
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
-    let mut found = Found::default();
+    let mut found = Found {
+        channels: channels(documents),
+        ..Found::default()
+    };
     for document in documents {
         let start = found.diagnostics.len();
         for attribute in document.attributes.iter() {
@@ -69,10 +86,10 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
         for block in &document.blocks {
             match KINDS
                 .iter()
-                .find(|(keyword, _)| *keyword == &*block.keyword)
+                .find(|(kind, _)| kind.as_str() == &*block.keyword)
             {
-                Some((_, check_block)) => {
-                    let key = found.key(block);
+                Some((kind, check_block)) => {
+                    let key = found.key(block, *kind);
                     let definition = check_block(&mut found, block);
                     if let (Some((key, label_span)), Some(definition)) =
                         (key, definition)
@@ -90,7 +107,7 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
                     format!("`{}` is not a kind of block", block.keyword),
                     format!(
                         "Use {}, or remove the block",
-                        one_of(&KINDS.map(|(keyword, _)| keyword))
+                        one_of(&KINDS.map(|(kind, _)| kind.as_str()))
                     ),
                 )),
             }
@@ -103,6 +120,19 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
     } else {
         Err(found.diagnostics)
     }
+}
+
+/// The name of each `channel` block in `documents` whose one label reads as a name.
+/// `check` reports each other label.
+fn channels(documents: &[Document]) -> BTreeSet<Name> {
+    let blocks = documents.iter().flat_map(|document| &document.blocks);
+    blocks
+        .filter(|block| &*block.keyword == Kind::Channel.as_str())
+        .filter_map(|block| match block.labels.as_slice() {
+            [label] => read::label(label).ok(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `words` in backticks, as a list that ends with "or".
@@ -119,7 +149,7 @@ fn one_of(words: &[&str]) -> String {
     }
 }
 
-/// What `check` has found so far.
+/// The channel names of the Documents, and what `check` has found so far.
 #[derive(Debug, Default)]
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
@@ -127,6 +157,8 @@ struct Found<'a> {
     /// The label of each tree key so far, by the key in lowercase, so that keys that
     /// differ only in case collide.
     labels: BTreeMap<Box<str>, &'a Label>,
+    /// The name of each channel that a `channel` block in any Document defines.
+    channels: BTreeSet<Name>,
 }
 
 /// A problem that is already in the diagnostics.
@@ -134,43 +166,44 @@ struct Found<'a> {
 struct Reported;
 
 impl<'a> Found<'a> {
-    /// Reads the one label of a policy block as its name, and gives the tree key,
+    /// Reads the one label of a block of `kind` as its name, and gives the tree key,
     /// unique in any case, and the label's span.
-    fn key(&mut self, block: &'a Block) -> Option<(Name, Option<Span>)> {
-        let keyword = &*block.keyword;
+    fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
+        let keyword = kind.as_str();
         let label = self.label(block)?;
-        let suffix = format!(".@{keyword}");
-        let most = Name::MAX_BYTES - suffix.len();
-        let bytes = label.text.len();
-        if bytes > most {
-            self.diagnostics.push(Diagnostic::new(
-                LONG_NAME,
-                label.span,
-                format!(
-                    "the name {:?} is {bytes} bytes, and the most for the `{keyword}` \
-                     block is {most}",
-                    label.text
-                ),
-                format!("Shorten the name to at most {most} bytes"),
-            ));
-            return None;
-        }
-        let name = self.report(read::label(label)).ok()?;
-        if name.reserved() {
-            self.diagnostics.push(Diagnostic::new(
-                RESERVED_NAME,
-                label.span,
-                format!(
-                    "{:?} has a segment that starts with `@`, which is reserved",
-                    name.as_str()
-                ),
-                "Remove the `@` from each segment".into(),
-            ));
-            return None;
-        }
-        let key: Name = format!("{name}{suffix}")
-            .parse()
-            .expect("a name and a reserved keyword segment make a name");
+        let key = match kind.key(&label.text) {
+            Ok(key) => key,
+            Err(key::Error::Long { most }) => {
+                self.diagnostics.push(Diagnostic::new(
+                    LONG_NAME,
+                    label.span,
+                    format!(
+                        "the name {:?} is {} bytes, and the most for the `{keyword}` \
+                         block is {most}",
+                        label.text,
+                        label.text.len()
+                    ),
+                    format!("Shorten the name to at most {most} bytes"),
+                ));
+                return None;
+            }
+            Err(key::Error::Name(_)) => {
+                self.report(read::label(label)).ok()?;
+                unreachable!("`read::label` refuses each label that `Kind::key` does");
+            }
+            Err(error @ key::Error::Reserved) => {
+                self.diagnostics.push(Diagnostic::new(
+                    RESERVED_NAME,
+                    label.span,
+                    format!(
+                        "{:?} has a segment that starts with `@`, which is reserved",
+                        label.text
+                    ),
+                    error.fix().into(),
+                ));
+                return None;
+            }
+        };
         let first = match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
             btree_map::Entry::Occupied(first) => *first.get(),
             btree_map::Entry::Vacant(entry) => {
@@ -183,8 +216,7 @@ impl<'a> Found<'a> {
             label.span,
             format!(
                 "the name {:?} repeats the earlier `{keyword}` name {:?}",
-                name.as_str(),
-                first.text
+                label.text, first.text
             ),
             format!(
                 "Give each `{keyword}` block a name that differs by more than case"
@@ -198,7 +230,7 @@ impl<'a> Found<'a> {
         None
     }
 
-    /// The one label of a policy block.
+    /// The one label of a block.
     fn label(&mut self, block: &'a Block) -> Option<&'a Label> {
         let [label] = block.labels.as_slice() else {
             let at = block
@@ -329,6 +361,7 @@ mod tests {
     use document::value::Kind;
     use document::{Attribute, Map, Position, Source};
     use proptest::prelude::*;
+    use spec::definition;
     use spec::node_settings::Policy;
     use types::byte;
 
@@ -453,7 +486,7 @@ mod tests {
     ) -> Entry {
         let policy = Policy::new(selector(select), disk, pool).unwrap();
         Entry {
-            definition: spec::definition::Definition::NodeSettings(policy),
+            definition: Definition::Spec(definition::Definition::NodeSettings(policy)),
             label_span: span,
         }
     }
@@ -533,7 +566,8 @@ mod tests {
                 "config.unknown-block",
                 at(0, 0),
                 "`nodes` is not a kind of block",
-                "Use `node_settings`, `placement`, or `retention`, or remove the block",
+                "Use `channel`, `node_settings`, `placement`, or `retention`, or \
+                 remove the block",
             )])
         );
     }
@@ -1018,7 +1052,7 @@ mod tests {
         fn placed(nodes: Nodes) -> BTreeMap<Name, Entry> {
             let policy = Policy::new(selector(&["edge.*"]), nodes).unwrap();
             let entry = Entry {
-                definition: spec::definition::Definition::Placement(policy),
+                definition: Definition::Spec(definition::Definition::Placement(policy)),
                 label_span: at(0, 1),
             };
             BTreeMap::from([(key("edge.@placement"), entry)])
@@ -1411,7 +1445,7 @@ mod tests {
         fn kept(keep: time::Span) -> BTreeMap<Name, Entry> {
             let policy = Policy::new(selector(&["edge.**"]), keep).unwrap();
             let entry = Entry {
-                definition: Definition::Retention(policy),
+                definition: Definition::Spec(definition::Definition::Retention(policy)),
                 label_span: at(0, 1),
             };
             BTreeMap::from([(key("edge.@retention"), entry)])
@@ -1615,6 +1649,717 @@ mod tests {
             for attributes in cases {
                 assert_inner_blocks_refused("retention", &attributes);
             }
+        }
+    }
+
+    mod channels {
+        use spec::channel::{self, Data};
+        use spec::data_type::DataType;
+        use spec::unit::Unit;
+        use types::sample::{self, Scalar};
+
+        use super::*;
+
+        /// A `channel` block in file `file` at `offset`, labeled `label`.
+        fn channel(
+            file: u32,
+            offset: u32,
+            label: &str,
+            attributes: &[(&str, Kind)],
+        ) -> Block {
+            block(file, offset, "channel", &[label], attributes)
+        }
+
+        fn reference(text: &str) -> Kind {
+            Kind::Reference(key(text))
+        }
+
+        fn scalar(element: Scalar) -> DataType {
+            DataType::Sample(sample::Type::Scalar(element))
+        }
+
+        fn data(index: &str, quality: Option<&str>, data_type: DataType) -> Definition {
+            let data =
+                Data::new(key(index), quality.map(key), data_type, None).unwrap();
+            Definition::Channel(channel::Kind::Data(data))
+        }
+
+        fn entry(definition: Definition, label_span: Option<Span>) -> Entry {
+            Entry {
+                definition,
+                label_span,
+            }
+        }
+
+        /// The data channel `edge.value` in file 0 with `attributes`.
+        fn value(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            let time = channel(0, 0, "edge.time", &[("kind", string("index"))]);
+            let value = channel(0, 100, "edge.value", attributes);
+            [document(vec![time, value])]
+        }
+
+        fn unknown(span: Option<Span>, message: &str) -> Diagnostic {
+            refused(
+                "config.unknown-channel",
+                span,
+                message,
+                "Name a channel that a `channel` block defines",
+            )
+        }
+
+        #[test]
+        fn reads_the_channels_of_the_edge_fixture() {
+            let documents = [document(vec![
+                channel(
+                    0,
+                    0,
+                    "edge.time",
+                    &[
+                        ("kind", string("index")),
+                        ("error", string("edge.time_error")),
+                    ],
+                ),
+                channel(
+                    0,
+                    100,
+                    "edge.time_error",
+                    &[("data_type", string("u64")), ("index", string("edge.time"))],
+                ),
+                channel(
+                    0,
+                    200,
+                    "edge.value",
+                    &[("data_type", string("f64")), ("index", string("edge.time"))],
+                ),
+                block(
+                    0,
+                    300,
+                    "placement",
+                    &["edge"],
+                    &[("select", string("edge.*")), ("home", string("edge"))],
+                ),
+            ])];
+            let index = channel::Kind::Index {
+                error: Some(key("edge.time_error")),
+                control: None,
+            };
+            let nodes = spec::placement::Nodes {
+                home: Some(key("edge")),
+                standby: None,
+                copies: Vec::new(),
+            };
+            let placement =
+                spec::placement::Policy::new(selector(&["edge.*"]), nodes).unwrap();
+            let placement = definition::Definition::Placement(placement);
+            assert_eq!(
+                check(&documents),
+                Ok(BTreeMap::from([
+                    (
+                        key("edge.time"),
+                        entry(Definition::Channel(index), at(0, 1)),
+                    ),
+                    (
+                        key("edge.time_error"),
+                        entry(data("edge.time", None, scalar(Scalar::U64)), at(0, 101)),
+                    ),
+                    (
+                        key("edge.value"),
+                        entry(data("edge.time", None, scalar(Scalar::F64)), at(0, 201)),
+                    ),
+                    (
+                        key("edge.@placement"),
+                        entry(Definition::Spec(placement), at(0, 301)),
+                    ),
+                ]))
+            );
+        }
+
+        #[test]
+        fn reads_each_attribute_from_a_reference() {
+            let documents = [document(vec![
+                channel(
+                    0,
+                    0,
+                    "t",
+                    &[("kind", reference("index")), ("control", reference("c"))],
+                ),
+                channel(
+                    0,
+                    100,
+                    "q",
+                    &[
+                        ("data_type", reference("quality")),
+                        ("index", reference("t")),
+                    ],
+                ),
+                channel(
+                    0,
+                    200,
+                    "c",
+                    &[
+                        ("kind", reference("data")),
+                        ("data_type", reference("f32")),
+                        ("index", reference("t")),
+                        ("quality", reference("q")),
+                        ("unit", reference("kPa")),
+                    ],
+                ),
+            ])];
+            let entries = check(&documents).unwrap();
+            let unit = Some(Unit::new("kPa").unwrap());
+            let c = Data::new(key("t"), Some(key("q")), scalar(Scalar::F32), unit);
+            let kinds = [
+                ("c", channel::Kind::Data(c.unwrap())),
+                (
+                    "q",
+                    channel::Kind::Data(
+                        Data::new(key("t"), None, DataType::Quality, None).unwrap(),
+                    ),
+                ),
+                (
+                    "t",
+                    channel::Kind::Index {
+                        error: None,
+                        control: Some(key("c")),
+                    },
+                ),
+            ];
+            for (name, kind) in kinds {
+                assert_eq!(
+                    entries[&key(name)].definition,
+                    Definition::Channel(kind),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn reads_a_channel_and_a_policy_with_one_label() {
+            let documents = [document(vec![
+                channel(0, 0, "edge", &[("kind", string("index"))]),
+                block(
+                    0,
+                    100,
+                    "placement",
+                    &["edge"],
+                    &[("select", string("edge.*")), ("home", string("edge"))],
+                ),
+            ])];
+            let keys: Vec<String> = check(&documents)
+                .unwrap()
+                .keys()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(keys, ["edge", "edge.@placement"]);
+        }
+
+        #[test]
+        fn takes_a_channel_name_of_the_full_length_as_its_key() {
+            let index = [("kind", string("index"))];
+            let fits = format!("a.{}", "b".repeat(253));
+            let long = format!("{fits}c");
+            let documents = [document(vec![
+                channel(0, 0, &fits, &index),
+                channel(0, 100, &long, &index),
+            ])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.long-name",
+                    at(0, 101),
+                    &format!(
+                        "the name {long:?} is 256 bytes, and the most for the \
+                         `channel` block is 255"
+                    ),
+                    "Shorten the name to at most 255 bytes",
+                )])
+            );
+            let documents = [document(vec![channel(0, 0, &fits, &index)])];
+            assert_eq!(
+                check(&documents).unwrap().into_keys().collect::<Vec<_>>(),
+                [key(&fits)]
+            );
+        }
+
+        #[test]
+        fn refuses_a_channel_name_that_repeats_in_other_case() {
+            let index = [("kind", string("index"))];
+            let documents = [
+                document(vec![channel(0, 0, "edge.time", &index)]),
+                document(vec![channel(1, 0, "Edge.time", &index)]),
+            ];
+            let mut repeat = refused(
+                "config.duplicate-name",
+                at(1, 1),
+                "the name \"Edge.time\" repeats the earlier `channel` name \
+                 \"edge.time\"",
+                "Give each `channel` block a name that differs by more than case",
+            );
+            repeat.notes.push(Note {
+                span: at(0, 1).unwrap(),
+                text: "the earlier name".into(),
+            });
+            assert_eq!(check(&documents), Err(vec![repeat]));
+        }
+
+        #[test]
+        fn finds_a_channel_that_a_later_file_defines() {
+            let documents = [
+                document(vec![channel(
+                    0,
+                    0,
+                    "edge.value",
+                    &[("data_type", string("f64")), ("index", string("edge.time"))],
+                )]),
+                document(vec![channel(
+                    1,
+                    0,
+                    "edge.time",
+                    &[("kind", string("index"))],
+                )]),
+            ];
+            let entries = check(&documents).unwrap();
+            assert_eq!(
+                entries[&key("edge.value")].definition,
+                data("edge.time", None, scalar(Scalar::F64))
+            );
+        }
+
+        #[test]
+        fn refuses_each_edge_of_an_index_to_an_unknown_channel() {
+            let documents = [document(vec![channel(
+                0,
+                0,
+                "edge.time",
+                &[
+                    ("kind", string("index")),
+                    ("control", string("edge.ctl")),
+                    ("error", string("edge.err")),
+                ],
+            )])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 13),
+                        "no `channel` block defines the control channel `edge.ctl`",
+                    ),
+                    unknown(
+                        at(0, 15),
+                        "no `channel` block defines the error channel `edge.err`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_each_edge_of_a_data_channel_in_source_order() {
+            let documents = value(&[
+                ("data_type", string("f64")),
+                ("quality", string("edge.q")),
+                ("index", string("edge.tim")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the quality channel `edge.q`",
+                    ),
+                    unknown(
+                        at(0, 115),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_unit_on_a_data_type_that_holds_no_number() {
+            let documents = value(&[
+                ("data_type", string("bool")),
+                ("index", string("edge.time")),
+                ("unit", string("V")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.bad-unit",
+                    at(0, 115),
+                    "a unit is on a data type that holds no number: the data type is \
+                     \"bool\"",
+                    "Remove the unit, or give the channel a numeric type",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_data_type_that_does_not_read() {
+            let cases = [
+                (
+                    "F64",
+                    "cannot read the data type \"F64\": expected a data type such as \
+                     f64, f32[3], list<u8, 16>, string, bytes, or quality",
+                    "Use one of the forms that the message names, with exact case and \
+                     a space only after the comma of a list",
+                ),
+                (
+                    "f32[2][3][4]",
+                    "cannot read the data type \"f32[2][3][4]\": expected one or two \
+                     array lengths",
+                    "Use one or two array lengths, such as f32[3] or f32[2][3]",
+                ),
+            ];
+            for (text, message, fix) in cases {
+                let documents = value(&[
+                    ("data_type", string(text)),
+                    ("index", string("edge.time")),
+                ]);
+                assert_eq!(
+                    check(&documents),
+                    Err(vec![refused(
+                        "config.bad-data-type",
+                        at(0, 111),
+                        message,
+                        fix
+                    )]),
+                    "{text}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_unit_that_does_not_read() {
+            let documents = value(&[
+                ("data_type", string("f64")),
+                ("index", string("edge.time")),
+                ("unit", string("k Pa")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.bad-unit",
+                    at(0, 115),
+                    "cannot read the unit \"k Pa\": a unit has the character ' ' at \
+                     byte 1, which is not printable ASCII",
+                    "Use only printable ASCII characters with no space, such as m/s2",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_value_that_is_not_text() {
+            let index = ("index", string("edge.time"));
+            let f64 = ("data_type", string("f64"));
+            let cases = [
+                (
+                    vec![index.clone(), ("data_type", Kind::Integer(7))],
+                    at(0, 113),
+                    "config.bad-data-type",
+                    "the data type is a string or a reference, not an integer",
+                    "Write a string such as \"f64\"",
+                ),
+                (
+                    vec![f64.clone(), index.clone(), ("unit", Kind::Bool(true))],
+                    at(0, 115),
+                    "config.bad-unit",
+                    "the unit is a string or a reference, not a bool",
+                    "Write a string such as \"kPa\"",
+                ),
+                (
+                    vec![f64, index, ("kind", Kind::List(Vec::new()))],
+                    at(0, 115),
+                    "config.bad-channel-kind",
+                    "the channel kind is a string or a reference, not a list",
+                    "Write a string such as \"index\"",
+                ),
+            ];
+            for (attributes, span, code, message, fix) in cases {
+                assert_eq!(
+                    check(&value(&attributes)),
+                    Err(vec![refused(code, span, message, fix)]),
+                    "{code}"
+                );
+            }
+        }
+
+        #[test]
+        fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
+            let documents = value(&[
+                ("kind", string("stream")),
+                ("other", string("x")),
+                ("index", string("edge.tim")),
+                ("quality", string("edge.q")),
+                ("error", string("edge.e")),
+                ("control", string("edge.c")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.bad-channel-kind",
+                        at(0, 111),
+                        "\"stream\" is not a kind of channel",
+                        "Write \"index\" or \"data\"",
+                    ),
+                    unknown(
+                        at(0, 115),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                    unknown(
+                        at(0, 117),
+                        "no `channel` block defines the quality channel `edge.q`",
+                    ),
+                    unknown(
+                        at(0, 119),
+                        "no `channel` block defines the error channel `edge.e`",
+                    ),
+                    unknown(
+                        at(0, 121),
+                        "no `channel` block defines the control channel `edge.c`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_of_the_other_kind() {
+            let documents = [document(vec![
+                channel(
+                    0,
+                    0,
+                    "edge.time",
+                    &[("kind", string("index")), ("index", string("edge.time"))],
+                ),
+                channel(
+                    0,
+                    100,
+                    "edge.value",
+                    &[
+                        ("data_type", string("f64")),
+                        ("index", string("edge.time")),
+                        ("error", string("edge.time")),
+                    ],
+                ),
+            ])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 12),
+                        "`index` is not an attribute of the `channel` block",
+                        "Use `kind`, `error`, or `control`, or remove it",
+                    ),
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 114),
+                        "`error` is not an attribute of the `channel` block",
+                        "Use `kind`, `data_type`, `index`, `quality`, or `unit`, or \
+                         remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_data_channel_without_its_index_or_data_type() {
+            assert_eq!(
+                check(&value(&[])),
+                Err(vec![
+                    refused(
+                        "config.missing-attribute",
+                        at(0, 100),
+                        "the `channel` block has no `index`",
+                        "Add an `index` attribute with the name of an index channel, \
+                         such as \"edge.time\"",
+                    ),
+                    refused(
+                        "config.missing-attribute",
+                        at(0, 100),
+                        "the `channel` block has no `data_type`",
+                        "Add a `data_type` attribute such as \"f64\"",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_channel() {
+            assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
+            assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
+        }
+
+        #[test]
+        fn refuses_an_edge_to_the_label_of_a_policy() {
+            let placement = block(
+                0,
+                0,
+                "placement",
+                &["site"],
+                &[("select", string("site.*")), ("home", string("site"))],
+            );
+            let documents = [document(vec![
+                placement,
+                channel(
+                    0,
+                    100,
+                    "v",
+                    &[("data_type", string("f64")), ("index", string("site"))],
+                ),
+            ])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![unknown(
+                    at(0, 113),
+                    "no `channel` block defines the index channel `site`",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_of_a_block_with_two_labels() {
+            let documents = [document(vec![block(
+                0,
+                0,
+                "channel",
+                &["v", "w"],
+                &[("data_type", string("f64")), ("index", string("nope"))],
+            )])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.label-count",
+                        at(0, 2),
+                        "the `channel` block has 2 labels, and it needs one, its name",
+                        "Give the block one label, its name, such as \"site_a.budget\"",
+                    ),
+                    unknown(
+                        at(0, 13),
+                        "no `channel` block defines the index channel `nope`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_beside_a_bad_data_type() {
+            let documents =
+                value(&[("data_type", string("F64")), ("index", string("nope"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.bad-data-type",
+                        at(0, 111),
+                        "cannot read the data type \"F64\": expected a data type such \
+                         as f64, f32[3], list<u8, 16>, string, bytes, or quality",
+                        "Use one of the forms that the message names, with exact case \
+                         and a space only after the comma of a list",
+                    ),
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the index channel `nope`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn checks_no_unit_after_an_unknown_edge() {
+            let documents = value(&[
+                ("data_type", string("string")),
+                ("index", string("nope")),
+                ("unit", string("kPa")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![unknown(
+                    at(0, 113),
+                    "no `channel` block defines the index channel `nope`",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_beside_a_bad_unit() {
+            let documents = value(&[
+                ("data_type", string("f64")),
+                ("index", string("edge.tim")),
+                ("unit", string("k Pa")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                    refused(
+                        "config.bad-unit",
+                        at(0, 115),
+                        "cannot read the unit \"k Pa\": a unit has the character ' ' \
+                         at byte 1, which is not printable ASCII",
+                        "Use only printable ASCII characters with no space, such as \
+                         m/s2",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_beside_an_unknown_attribute() {
+            let documents = [document(vec![channel(
+                0,
+                0,
+                "edge.time",
+                &[
+                    ("kind", string("index")),
+                    ("error", string("edge.err")),
+                    ("unit", string("s")),
+                ],
+            )])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 13),
+                        "no `channel` block defines the error channel `edge.err`",
+                    ),
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 14),
+                        "`unit` is not an attribute of the `channel` block",
+                        "Use `kind`, `error`, or `control`, or remove it",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_of_a_data_channel_beside_an_unknown_attribute() {
+            let documents = value(&[
+                ("data_type", string("f64")),
+                ("index", string("edge.tim")),
+                ("unit2", string("x")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 114),
+                        "`unit2` is not an attribute of the `channel` block",
+                        "Use `kind`, `data_type`, `index`, `quality`, or `unit`, or \
+                         remove it",
+                    ),
+                ])
+            );
         }
     }
 }

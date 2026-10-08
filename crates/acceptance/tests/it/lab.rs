@@ -17,6 +17,9 @@ use connector_influx::sim::Store;
 use env::net::udp;
 use types::time::Span;
 
+/// The port each node binds, on its host's first address.
+const PORT: u16 = 7000;
+
 /// A whole mesh on one deterministic simulation.
 #[derive(Debug)]
 pub(crate) struct Lab {
@@ -134,6 +137,7 @@ impl Lab {
     /// Starts a node named `name` on a new simulated host.
     pub(crate) fn start(&mut self, name: &str) -> Node {
         let host = self.sim.node(sim::node::Config::default());
+        let key = u8::try_from(self.members.len() + 1).expect("at most 255 nodes");
         let node = node::Node::start(node::Config {
             shards: host.shards(),
             clock: host.clock(),
@@ -149,6 +153,9 @@ impl Lab {
             },
             entropy: host.entropy(),
             disk: types::byte::Size::GIBIBYTE,
+            net: host.net(),
+            listen: SocketAddr::new(host.addresses()[0], PORT),
+            private_key: types::node::PrivateKey([key; 32]),
         });
         self.members.push(Member {
             name: name.into(),

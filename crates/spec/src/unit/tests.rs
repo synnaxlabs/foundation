@@ -7,6 +7,20 @@ fn unit(text: &str) -> Unit {
 }
 
 #[test]
+fn gives_the_fix_of_each_error() {
+    for (error, fix) in [
+        (Error::Empty, "Write a unit such as kPa, or remove the unit"),
+        (Error::Long { len: 33 }, "Use a shorter unit, such as kPa"),
+        (
+            Error::Character { at: 1, found: ' ' },
+            "Use only printable ASCII characters with no space, such as m/s2",
+        ),
+    ] {
+        assert_eq!(error.fix(), fix, "{error:?}");
+    }
+}
+
+#[test]
 fn refuses_an_empty_unit() {
     assert_eq!(Unit::new(""), Err(Error::Empty));
     assert_eq!(Error::Empty.to_string(), "a unit is empty");

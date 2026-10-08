@@ -28,7 +28,7 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
     };
     let Kind::String(text) = &value.kind else {
         return Err(bad(
-            format!("a byte size is a string, not {}", noun(&value.kind)),
+            format!("a byte size is a string, not {}", value.kind.noun()),
             "Write a string such as \"200GiB\"".into(),
         ));
     };
@@ -86,7 +86,7 @@ pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
     };
     let Kind::String(text) = &value.kind else {
         return Err(bad(
-            format!("a span is a string, not {}", noun(&value.kind)),
+            format!("a span is a string, not {}", value.kind.noun()),
             "Write a string such as \"3d\"".into(),
         ));
     };
@@ -132,7 +132,7 @@ pub fn name(value: &Value) -> Result<Name, Diagnostic> {
         kind => Err(Diagnostic::new(
             BAD_NAME,
             value.span,
-            format!("a name is a string or a reference, not {}", noun(kind)),
+            format!("a name is a string or a reference, not {}", kind.noun()),
             "Write a name such as \"site_a.node_1\"".into(),
         )),
     }
@@ -181,7 +181,10 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
                 return Err(Diagnostic::new(
                     BAD_SELECTOR,
                     pattern.span,
-                    format!("a pattern is a string or a reference, not {}", noun(kind)),
+                    format!(
+                        "a pattern is a string or a reference, not {}",
+                        kind.noun()
+                    ),
                     "Write a string such as \"site_a.*\"".into(),
                 ));
             }
@@ -209,20 +212,6 @@ fn items(value: &Value) -> &[Value] {
 
 fn diagnose(code: Code, span: Option<Span>, error: &Error) -> Diagnostic {
     Diagnostic::new(code, span, error.to_string(), error.fix().into())
-}
-
-/// The noun for a kind of value, with its article.
-fn noun(kind: &Kind) -> &'static str {
-    match kind {
-        Kind::Bool(_) => "a bool",
-        Kind::Integer(_) => "an integer",
-        Kind::Float(_) => "a float",
-        Kind::String(_) => "a string",
-        Kind::Reference(_) => "a reference",
-        Kind::List(_) => "a list",
-        Kind::Map(_) => "a map",
-        Kind::Call(_) => "a call",
-    }
 }
 
 #[cfg(test)]
@@ -397,11 +386,6 @@ mod tests {
                 "Use at most \"18446744073709551615B\"",
             ),
         ]);
-    }
-
-    #[test]
-    fn names_a_string_as_a_string() {
-        assert_eq!(noun(&Kind::String("200GiB".into())), "a string");
     }
 
     #[test]
