@@ -20,7 +20,8 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 
 ## Each merged PR
 
-For each code PR, launch a fresh subagent with the PR number. It checks, with file:line:
+For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
+number, its merge commit, its issue, and its crates. It checks, with file:line:
 
 - **Tests.** They fail when the change is reverted. They test behavior, not private
   state. They cover the failure paths, not only the happy path.
