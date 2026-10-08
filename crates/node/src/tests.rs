@@ -2954,10 +2954,11 @@ mod port {
 
         /// A stop at any point of the start and the run of a node whose mesh writes
         /// its log for each home that the peer sets, then a probe that takes the
-        /// lock as soon as it is free: the mesh's log has closed by then. The peer
-        /// ends once a set waits [`TEN`], so the probe's run ends.
+        /// lock as soon as it is free: the mesh's log is never busy then. The order
+        /// of the two closes waits on #1835. The peer ends once a set waits [`TEN`],
+        /// so the probe's run ends.
         #[test]
-        fn the_lock_outlives_the_log_of_the_mesh() {
+        fn the_log_of_the_mesh_is_free_once_the_lock_is() {
             let (mut held, mut logged) = (false, false);
             // The mesh opens at about 1.5 ms, and from 1.6 s the log writes a home
             // about each 0.7 ms.
