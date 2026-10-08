@@ -574,8 +574,8 @@ mod tests {
                             Err(Error::Broken {
                                 reason: "the stream ended inside a message".to_owned()
                             }),
-                            "admit {admits}, take {gives}: {cut:x?}, {split} per chunk, \
-                             limit {limit}"
+                            "admit {admits}, take {gives}, limit {limit}: {cut:x?}, \
+                             {split} per chunk"
                         );
                     }
                 }
