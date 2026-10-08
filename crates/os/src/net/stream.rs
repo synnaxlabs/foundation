@@ -161,6 +161,16 @@ impl tcp::Driver for Stream {
             .take_while(|buffer| buffer.is_empty())
             .count();
         let buffers = &buffers[skip..];
+        if buffers.is_empty() {
+            // macOS refuses a `writev` of no parts, and none reports a reset.
+            let ready = ready!(stream.poll_write_ready(cx)).map_err(|e| errno(&e));
+            return Poll::Ready(
+                match ready.err().or_else(|| Self::pending(&*stream)) {
+                    Some(code) => Err(self.fail(stream_error(code, peer))),
+                    None => Ok(0),
+                },
+            );
+        }
         #[cfg(not(target_os = "macos"))]
         let sent =
             ready!(stream.poll_write_vectored(cx, buffers)).map_err(|e| errno(&e));
