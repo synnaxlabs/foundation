@@ -417,8 +417,8 @@ impl Half {
             let mut sources = Sources { parts, at: *at };
             let written = match sources.next() {
                 None => return Ok(()),
-                Some(Source::Run(range)) if range.len() > COPIED_MAX => {
-                    let mut run = self.block.slice(range);
+                Some(first) if first.long() => {
+                    let mut run = self.block.slice_ref(first.bytes(&self.block));
                     send.write_chunks(&mut slice::from_mut(&mut run))?
                 }
                 Some(first) => {
