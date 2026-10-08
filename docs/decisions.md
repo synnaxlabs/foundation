@@ -4632,16 +4632,21 @@ How to read this record:
   `config.writer-nodes` is at the `node` of the first connector on a second node that
   writes one index. The first writer, the earlier of two names, and the first connector
   of a name come first by `Source`, then in source order, so the order of `documents`
-  changes no problem. The problems come in `Source` order, then in source order, as the
-  problems of `check` do. `config.connector-home` (X22) and `config.split-placement`
-  (BQ10) follow in a second PR of #1082. The region check and the region of each key
-  (REGION CHECK) come with #1029. Lost: a `Planned` with keys (A4), a home on each
-  change, a `config::Error` for a lazy fetch of chunks, a provisional tree and
-  `tree::diff`, which writes chunks that the plan drops, and the chunks of the applied
-  tree as an input, with which `ops` reads the tree a second time and a missing chunk
-  panics in `config`, though #1741 names that case (`Cause::Tree`). Supersedes the
-  `chunks` input and its panic of 6053787187, the provisional tree of 6040866688, and
-  its "which no stored v7 key can be". Decided by `laptop.architect-2`
+  changes no problem. Only a tie, with no span or with one `Source` in two Documents,
+  keeps the order of `documents` (#1886 round 2, 2026-10-08T14:14:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). The
+  problems come in `Source` order, then in source order, as the problems of `check` do.
+  `config.connector-home` (X22) and `config.split-placement` (BQ10) follow in a second
+  PR of #1082. The region check and the region of each key (REGION CHECK) come with
+  #1029. Lost: a `Planned` with keys (A4), a home on each change, a `config::Error` for
+  a lazy fetch of chunks, a provisional tree and `tree::diff`, which writes chunks that
+  the plan drops, and the chunks of the applied tree as an input, with which `ops` reads
+  the tree a second time and a missing chunk panics in `config`, though #1741 names that
+  case (`Cause::Tree`). Supersedes the `chunks` input and its panic of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
+  provisional tree of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
+  "which no stored v7 key can be". Decided by `laptop.architect-2`
   (2026-10-07T15:17:11Z,
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688, and
   2026-10-08T06:24:09Z,
@@ -4690,18 +4695,19 @@ How to read this record:
   algorithm and key header (`30 05 06 03 2B 65 70 04 22 04 20`) of each Ed25519 PKCS #8
   body, v1 and v2, at each of its offsets modulo 3, which the length of the body moves
   (#1886 round 1, 2026-10-08T13:34:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061047969, and
-  round 2, under the ruling of `laptop.architect-2` at 2026-10-08T10:33:30Z that the
-  marks are text that only a private key holds,
-  https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6057957877).
-  Supersedes the mark `MC4CAQAwBQYDK2VwBCIE` of
-  https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219. Each is
-  whole 3-byte groups at an offset of whole groups, so the bytes around it do not
-  change it. An Ed25519 public key (`MCowBQYDK2VwAyEA`) does not hold it. Lost: a mark
-  for the body of another algorithm, such as RSA (`MIIE...`), whose start is also the
-  start of a certificate. As OpenSSH reads a `.pub` line, the comment is the rest of
-  the line, so a line with a second key in its comment gives the first key. Decided by
-  `laptop.architect-2` at 2026-10-08T12:06:26Z
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061047969, and round
+  2, 2026-10-08T14:14:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143, under the
+  rule of `laptop.architect-2` at 2026-10-08T12:06:26Z that the marks are text that only
+  a private key holds,
+  https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219).
+  Supersedes the mark `MC4CAQAwBQYDK2VwBCIE` of that rule. Each is whole 3-byte groups
+  at an offset of whole groups, so the bytes around it do not change it. An Ed25519
+  public key (`MCowBQYDK2VwAyEA`) does not hold it. Lost: a mark for the body of another
+  algorithm, such as RSA (`MIIE...`), whose start is also the start of a certificate. As
+  OpenSSH reads a `.pub` line, the comment is the rest of the line, so a line with a
+  second key in its comment gives the first key. Decided by `laptop.architect-2` at
+  2026-10-08T12:06:26Z
   (https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219).
   `config::check` first looks at each string of each Document, in any block
   (keywords, labels, keys, and values at any depth). When one holds a private key, it
