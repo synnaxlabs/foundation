@@ -75,14 +75,14 @@ How to read this record:
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
 - **DEVX (2026-10-08)** Design each user surface for the person, agent, or program
-  that uses it. A user surface is any surface that a user reaches: the CLI, MCP, the
-  config language, the client protocol and each SDK, and each file that a user reads
-  or writes. Each plan for one compares its options by the steps of each common task,
-  the first use after a new install among them. It also compares them by the error and
-  fix that each wrong step gives (C7). A step that Foundation can do itself is not a
-  step for the user (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when
-  we're designing public APIs like this, we really need to think about devx"
-  (2026-10-08T02:43:43Z,
+  that uses it. A user surface is any surface that a user reaches. These are the CLI,
+  MCP, the config language, the client protocol and each SDK, and each file that a
+  user reads or writes. Each plan for one compares its options by the steps of each
+  common task, the first use after a new install among them. It also compares them by
+  the error and fix that each wrong step gives (C7). A step that Foundation can do
+  itself is not a step for the user (FIRST ADMIN). The person, relayed by
+  `laptop.monitor`: "when we're designing public APIs like this, we really need to
+  think about devx" (2026-10-08T02:43:43Z,
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981). The
   plan rule is decided by `laptop.architect-2` and `laptop.architect` from those words
   (2026-10-08T02:46:51Z,
@@ -2891,9 +2891,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   other calls that change the region and the change records stay private. The surface
   is approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
-  above). The surface as built, with the types that the caller
-  builds, `Config.time`, and the sentence that `open` does not check the key of the
-  transport (the last two superseded above), is approved by the architect,
+  above). The surface as built, with the types that the caller builds, `Config.time`,
+  and the sentence that `open` does not check the key of the transport (the last two
+  superseded above), is approved by the architect,
   2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
@@ -3898,15 +3898,18 @@ How to read this record:
   `config.bad-action`. `authority` is optional, an integer from 0 to 255
   (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
   the least, as default deny gives the least. The gate gives authority 0 no special
-  meaning: such a writer outranks no writer and follows GATE RULES, so it takes control
+  meaning. Such a writer outranks no writer and follows GATE RULES, so it takes control
   when it opens on an index that no writer holds. Lost: an `authority` that `write`
   makes required, a rule that C8 does not have. The action words are a table in
   `config` until a second reader needs them, such as the `plan` output of access; then
   they move to `spec` as `Action::as_str`. Decided by `laptop.architect-2`
   (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
-  `laptop.architect` approved the default cap and wrote the sentence on the gate. It
-  supersedes the sentence on the gate in that comment (2026-10-08T05:21:56Z,
+  `control` and `home` must not read `Authority(0)` as "may not write" or "may not take
+  control". A change to that is a change to GATE RULES, and it goes to
+  `laptop.architect`. The sentence on the gate supersedes the one in
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+  `laptop.architect` decided it and approved the default cap (2026-10-08T05:21:56Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6052936198).
   An `authority` with no `write` in an `allow` that reads is
   `config.authority-without-write`, also `authority = 0`: only a write uses an
@@ -5923,15 +5926,20 @@ decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fi
 the system is solid.
 
 Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps
-priority. ONE NODE is the milestone that the person approved on 2026-10-08
-(https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089). FIRST
-SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
-Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
-2026-10-05, which has no link). For ONE NODE work, features, access, and config files
-do not wait until the acceptance scenario of FIRST SLICE passes (#462). The
-person decided ("Yes, that's fine. I really think that first slice should try to focus
-on the 'guts' the internals while ONE NODE work should be focused on developer APIs and
-connectors."), relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+priority. ONE NODE is a milestone: one `foundation` node reads an OPC UA server
+through `connector-opcua` and pushes the samples to InfluxDB through
+`connector-influx`. Its acceptance runs a simulated OPC UA server, the node, and a
+simulated InfluxDB. The person approved it ("Yes"), relayed by `laptop.monitor` at
+2026-10-08T01:52:14Z:
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
+approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order.
+FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
+connectors. Supersedes, for ONE NODE work only, the order of this entry (the person's
+decision of 2026-10-05, which has no link). For ONE NODE work, features, access, and
+config files do not wait until the acceptance scenario of FIRST SLICE passes (#462).
+The person decided ("Yes, that's fine. I really think that first slice should try to
+focus on the 'guts' the internals while ONE NODE work should be focused on developer
+APIs and connectors."), relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
 https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
