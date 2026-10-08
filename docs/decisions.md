@@ -4053,11 +4053,13 @@ How to read this record:
   reads a code block so: a fence of three or more backticks or tildes, after at most
   three spaces, opens it, and a like fence closes it, or it runs to the end of the
   comment. It does not see an HTML block or HTML comment, or a fence after a list marker
-  or a quote mark. In an old round, it does not see a `Reviewers:` or `Hot path:` line
-  with four or more spaces of indent, or a tab in its indent, that continues a
-  paragraph or is a paragraph in a list item, which GitHub shows as text; such a
-  `Hot path:` line does not ask for `performance`. On 2026-10-08, no old round of the
-  28 open PRs hit any of these cases (58 rounds read). Decided by the director at
+  or a quote mark. In an old round, it does not see a `Hot path:` line, or a
+  `Reviewers:` line of a round that does not parse, with four or more spaces of indent
+  or a tab in its indent, where GitHub shows the line as text: for example, a line
+  that continues a paragraph, or a paragraph in a list item or a footnote. Such a
+  `Hot path:` line does not ask for `performance`. On 2026-10-08, the 58 old rounds of
+  the 12 open PRs that had one (#1245, #1487, #1554, #1561, #1600, #1626, #1636, #1643,
+  #1650, #1691, #1739, #1752) hit none of these cases. Decided by the director at
   2026-10-08T05:13:45Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147) and
   2026-10-08T05:31:31Z
