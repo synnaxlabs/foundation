@@ -423,6 +423,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Raft(_)
         | Error::Spoofed { .. }
         | Error::NotVoter { .. }
+        | Error::Removed { .. }
         | Error::PeerNotVoter { .. }
         | Error::Claim(_)
         | Error::NotMember(_)
@@ -465,6 +466,11 @@ fn an_error_of_open_or_serve_names_its_cause() {
         Error::Stopped(Stopped::Dropped).to_string(),
         "the group stopped: each mesh of the group dropped"
     );
+    assert_eq!(
+        Error::Removed { from: OTHER }.to_string(),
+        "node 00000000-0000-0000-0000-000000000002 sent a request, but a committed \
+         configuration removed it"
+    );
 }
 
 #[test]
@@ -504,5 +510,10 @@ fn a_stop_names_its_cause() {
     assert_eq!(
         Stopped::Dropped.to_string(),
         "each mesh of the group dropped"
+    );
+    assert_eq!(
+        Stopped::Removed { by: OTHER }.to_string(),
+        "voter 00000000-0000-0000-0000-000000000002 answered removed: a committed \
+         configuration lacks this node"
     );
 }

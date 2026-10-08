@@ -160,8 +160,11 @@ state on `main`.
   stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
   `raft` checks the index a heartbeat or an append answer names, the order of an
   append's entries, and that no entry is above the append's term. A node that a
-  change removed and that missed its release can win an election once no voter has
-  a lease, and lead until it commits the leave (#483).
+  change removed and that missed its release campaigns; a voter whose log holds the
+  leave refuses the request, with `removed` once the leave commits, and the node stops
+  (#1105). A voter whose log lacks the leave entry admits the request until #1107, so
+  in `raft` alone such a node can win an election once no voter has a lease, and lead
+  until it commits the leave.
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
@@ -181,7 +184,11 @@ state on `main`.
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
-  refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
+  refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
+  code 17) only to a sender that a committed configuration removed, so a stranger
+  cannot learn from the answer which nodes the log held, and a sender stops its group
+  only on that answer from a voter of its own configuration (#1105). No node serves
+  mesh streams yet (#471).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
   voter that lies writes gives its node the key it names (MESH DRIVER). A signed
