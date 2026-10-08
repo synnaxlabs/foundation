@@ -172,6 +172,33 @@ mod tests {
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
     }
 
+    #[test]
+    fn each_holder_bound_input_is_what_its_name_says() {
+        let inputs = inputs!("mesh_change": "spec_holders_64", "spec_holders_65");
+        let at_bound = Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks: BTreeSet::new(),
+            holders: (1..=64).map(key).collect(),
+        };
+        let mut bytes = Vec::new();
+        at_bound.encode(&mut bytes);
+        assert_eq!(inputs["spec_holders_64"], bytes);
+        assert_eq!(Change::decode(&bytes), Ok(at_bound));
+        // The count of holders is after the count of chunks, which is 0.
+        bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
+        bytes.extend(key(65).as_u128().to_le_bytes());
+        assert_eq!(inputs["spec_holders_65"], bytes);
+        let body = Malformed::Body {
+            kind: 4,
+            length: bytes.len(),
+        };
+        assert_eq!(Change::decode(&bytes), Err(body));
+    }
+
     fn at(term: u64, index: u64) -> Position {
         Position {
             term: Term(term),

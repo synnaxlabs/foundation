@@ -2142,26 +2142,27 @@ How to read this record:
   more than one member. Trigger: before a milestone applies a change that lists more
   than `CHUNKS_MAX` chunks, a `Spec` change can list them. The holders are the voters
   whose durable put of the listed chunks the proposer counted; until #1231 they are only
-  the proposer. Every member refuses, at apply, a change whose holders are not a
-  majority of each half of the voters as of the entry (`Refused::Quorum`): the voters of
-  the last `Voters` entry at or before it, or the founding voters. So a `Voters` entry
-  between the propose and the commit cannot leave the pointer at chunks that no majority
-  holds. The record lists only the chunks that the base tree lacks, so the rule also
-  needs the chunks of the base on a majority after a change of voters (#1231). Every
-  member applies a change whose base is the pointer, and refuses one whose base is not
-  (`Refused::Stale`), so of two changes from one base only the first applies. The state
-  machine never reads chunks and never runs a check: a committed spec with problems
-  moves the pointer, and the node keeps the last spec it used (#1741). The pointer
-  before the first change is version 0 at the root of the tree of `Config::founding`. No
-  BQ12 signature check on the change in this milestone (#1213). Trigger: `mesh::Pointer`
-  moves to a layer 1 crate in a refactor PR before a `wire` message carries it.
-  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region state,
-  and a check at each open stops a node on a later build whose checks find more
-  problems. The node that founds the region checks the founding with the `spec` function
-  of #1841, and does not found a region whose founding has problems (#1744). A founding
-  with problems at a later build follows the rule of a committed spec with problems
-  (#1741). Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
-  2026-10-07T06:42:23Z
+  the proposer. A record lists at most `HOLDERS_MAX` = 64 holders, and decode refuses a
+  larger count, so a record at both bounds is 33 869 bytes. Every member refuses, at
+  apply, a change whose holders are not a majority of each half of the voters as of the
+  entry (`Refused::Quorum`): the voters of the last `Voters` entry at or before it, or
+  the founding voters. So a `Voters` entry between the propose and the commit cannot
+  leave the pointer at chunks that no majority holds. The record lists only the chunks
+  that the base tree lacks, so the rule also needs the chunks of the base on a majority
+  after a change of voters (#1231). Every member applies a change whose base is the
+  pointer, and refuses one whose base is not (`Refused::Stale`), so of two changes from
+  one base only the first applies. The state machine never reads chunks and never runs a
+  check: a committed spec with problems moves the pointer, and the node keeps the last
+  spec it used (#1741). The pointer before the first change is version 0 at the root of
+  the tree of `Config::founding`. No BQ12 signature check on the change in this
+  milestone (#1213). Trigger: `mesh::Pointer` moves to a layer 1 crate in a refactor PR
+  before a `wire` message carries it. `Mesh::open` runs no check of `Config::founding`:
+  the founding is agreed region state, and a check at each open stops a node on a later
+  build whose checks find more problems. The node that founds the region checks the
+  founding with the `spec` function of #1841, and does not found a region whose founding
+  has problems (#1744). A founding with problems at a later build follows the rule of a
+  committed spec with problems (#1741). Decided by `laptop.architect`: chunks through
+  `blob` and no BQ12 check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
