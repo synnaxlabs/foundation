@@ -3042,7 +3042,8 @@ mod port {
         }
 
         /// Of a transport and a group that stop, `join` gives the one that the node
-        /// sees first, which at one instant can be either.
+        /// sees first, which at one instant can be either. A transport that stops
+        /// drops the mesh, so the node sees the group's `Dropped` at the same poll.
         #[test]
         fn join_gives_the_stop_that_the_node_sees_first() {
             let error = transport::Error::Network {
@@ -3062,45 +3063,28 @@ mod port {
             );
         }
 
-        /// A private call: no sim test makes the transport and the group ready at one
-        /// poll.
+        /// A stop of the node from a task on shard 0, at the instant the group stops:
+        /// the node sees both at one poll, and its stop ranks first.
         #[test]
-        fn a_stop_of_the_node_ranks_first_then_the_transport() {
-            let error = transport::Error::Network {
-                error: env::net::Error::Io { code: 5 },
-            };
-            let port = Poll::Ready(error.clone());
-            let group = Poll::Ready(write_failed());
-            let cases = [
-                (
-                    Poll::Ready(()),
-                    port.clone(),
-                    group.clone(),
-                    Poll::Ready(None),
-                ),
-                (
-                    Poll::Ready(()),
-                    Poll::Pending,
-                    Poll::Pending,
-                    Poll::Ready(None),
-                ),
-                (
-                    Poll::Pending,
-                    port.clone(),
-                    group.clone(),
-                    Poll::Ready(Some(Error::Transport(error))),
-                ),
-                (
-                    Poll::Pending,
-                    Poll::Pending,
-                    group,
-                    Poll::Ready(Some(Error::Group(write_failed()))),
-                ),
-                (Poll::Pending, Poll::Pending, Poll::Pending, Poll::Pending),
-            ];
-            for (guard, port, group, ended) in cases {
-                assert_eq!(crate::end(guard, port, group), ended);
-            }
+        fn a_stop_as_the_group_stops_gives_no_error() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = Arc::new(std::sync::Mutex::new(start_alone(&host)));
+            let at =
+                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            let (own, stops) = (host.clone(), Arc::clone(&node));
+            node.lock()
+                .expect("no panic holds the lock")
+                .spawn(move |_| async move {
+                    own.clock().sleep_until(at).await;
+                    stops.lock().expect("no panic holds the lock").stop();
+                });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run(), Ok(()));
+            let node = Arc::into_inner(node).expect("shard 0 dropped the task");
+            let node = node.into_inner().expect("no panic holds the lock");
+            assert_eq!(node.join(), Ok(()));
         }
 
         /// A chunk store that does not open stops the node, and `join` gives why.
