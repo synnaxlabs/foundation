@@ -121,12 +121,17 @@ nothing checked again. So when round 1 led to fix commits:
 
 1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
    with the round 1 comment and each architect review attached. Only a range that
-   changes no `.rs` line but comments skips `breaker`, and its round comment says so.
-   The `reviewer` also gets each answer that changed no code, and checks it against the
-   code. Its report gives the `Public surface:` and `Hot path:` lines for the range. The
-   round comment adds each item of the first to its own `Public surface:` line, and
-   copies the second. When the `Hot path:` line names a function, run `performance`
-   again on the range, and update the Performance section with its numbers.
+   changes no `.rs` line but comments skips `breaker`, and its round comment says so. In
+   a trial until 2026-10-09T04:00Z, `box1.builder-1`, `box1.builder-2`,
+   `box1.builder-4`, and `box2.builder-7` launch that `reviewer` with the `model` of the
+   Agent call set to `sonnet` on a range that does not skip `breaker`, and the round
+   comment adds the line `Reviewer model: sonnet` under its `Reviewers:` line, with no
+   blank line between. The `reviewer` also gets each answer that changed no code, and
+   checks it against the code. Its report gives the `Public surface:` and `Hot path:`
+   lines for the range. The round comment adds each item of the first to its own `Public
+   surface:` line, and copies the second. When the `Hot path:` line names a function,
+   run `performance` again on the range, and update the Performance section with its
+   numbers.
 2. Handle their findings as above. Fix commits from this round get another round, until
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit. When each finding
