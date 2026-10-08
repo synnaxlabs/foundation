@@ -383,6 +383,9 @@ fn sends_behind_and_finishes_when_a_complete_session_misses_a_frame() {
             clock.sleep(SETTLE).await;
             super::write_wide(&mut writer, now, 0);
             clock.sleep(SETTLE).await;
+            // The first frame waits for credit, so it misses at this commit.
+            super::write_wide(&mut writer, now, 1);
+            clock.sleep(SETTLE).await;
         });
         let served = test.hub.serve(incoming).await;
         *kept.lock().expect("not poisoned") = Some(served);
