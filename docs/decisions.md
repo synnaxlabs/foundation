@@ -819,20 +819,26 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
   Supersedes the `columns` table of
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6042293625.
-- **STORED BENCH (#1547, 2026-10-07)** The cargo feature `bench` of `home`, off by
+- **STORED BENCH (#1547, 2026-10-07)** The cargo feature `sim` of `home`, off by
   default, adds `#[doc(hidden)] pub mod bench`: `entry` calls `stored::entry`, and
   `read` calls `stored::read` and gives each series' channel, type, and bytes. Only the
-  bench `benches/stored.rs` (`test = true`) uses it, as `transport::fuzzing` serves the
-  fuzz crate. `read` gives all three fields, so the compiler cannot skip a decode that
-  production does, and the bench passes each item to `divan::black_box`. Run it with
-  `cargo bench -p home --bench stored`. Lost: a copy of `stored` in the bench through
-  `#[path]`, which breaks at its first `crate::` item, and a time of `Shard` writes and
-  reads, which hides the cost of the body in the cost of the write. Decided by
-  `laptop.architect` (2026-10-07T18:46:13Z):
+  bench `benches/stored.rs` (`test = true`) uses it. `read` gives all three fields, so
+  the compiler cannot skip a decode that production does, and the bench passes each item
+  to `divan::black_box`. Run it with `cargo bench -p home --bench stored`. Lost: a copy
+  of `stored` in the bench through `#[path]`, which breaks at its first `crate::` item,
+  and a time of `Shard` writes and reads, which hides the cost of the body in the cost
+  of the write. Decided by `laptop.architect` (2026-10-07T18:46:13Z):
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576.
-  `cargo bench -p home` turns on `bench` through a dev-dependency of `home` on itself,
+  `cargo bench -p home` turns on `sim` through a dev-dependency of `home` on itself,
   since the bench host runs no features. Decided by `laptop.architect`
   (2026-10-07T19:05:26Z):
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850. Amended
+  by `laptop.architect` (2026-10-08T01:01:28Z):
+  https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224. The
+  feature is `sim`, not `bench`, since the feature says that the module is test-only,
+  and the module keeps the name `bench`, since it says what the module serves.
+  Supersedes the feature name of
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576 and
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
 - **NODE BENCH (#1637, 2026-10-07)** The cargo feature `sim` of `node`, off by default
   (`node`'s dev-dependency on itself turns it on for the bench), adds `#[doc(hidden)]
@@ -5199,9 +5205,13 @@ Rules:
    companion samples.
 8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
    take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
-   `buffer`, so its tests build a real `home::Shard`. The `hub` edge was decided by
-   the architect (#340). Lost: `buffer` in the `hub` row (hub code could call the
-   ring), the hub tests in `node`, and a second way to build a shard in `home`.
+   `buffer`, so its tests build a real `home::Shard`. A crate may also take itself, so
+   its tests and benches build with its own `sim` feature (STORED BENCH;
+   `laptop.architect`, 2026-10-08T01:01:28Z:
+   https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
+   `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
+   code could call the ring), the hub tests in `node`, and a second way to build a shard
+   in `home`.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
