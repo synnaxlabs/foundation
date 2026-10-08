@@ -16,10 +16,10 @@
 
 mod bits;
 mod int;
+mod text;
 mod vector;
 mod word;
 
-use std::cmp::Ordering;
 use std::{fmt, iter, mem};
 
 use types::sample::{Scalar, Sides, Type};
@@ -142,7 +142,9 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
             let (elements, rest) = ends(count, bytes, max, None)?;
             let after = element.check(elements, rest, vectors(count))?;
             if utf8 {
-                encoded_text(count, bytes, elements, rest, after)?;
+                let ends = bytes.split_at(bytes.len().strict_sub(rest.len())).0;
+                let vectors = rest.split_at(rest.len().strict_sub(after.len())).0;
+                text::encoded(count, ends, elements, vectors)?;
             }
             (front.raw_len(elements)?, after)
         }
@@ -212,7 +214,7 @@ fn decode_shape(
             }
             let rest = element.fill(elements, rest, vectors(count), out)?;
             if utf8 {
-                text(ends_out, out)?;
+                text::raw(ends_out, out)?;
             }
             rest
         }
@@ -362,188 +364,6 @@ fn ends<'a>(
     Ok((ends.elements(), rest))
 }
 
-/// Checks that each sample of a `String` series is UTF-8, given its raw `ends`, which
-/// are valid, and its `elements`.
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "each expect is an invariant that the caller checked"
-)]
-fn text(ends: &[u8], elements: &[u8]) -> Result<(), Error> {
-    if elements.is_ascii() {
-        return Ok(());
-    }
-    let mut text = Text::default();
-    text.take(elements);
-    text.finish();
-    for (sample, end) in ends.as_chunks::<4>().0.iter().enumerate() {
-        let end = usize::try_from(u32::from_le_bytes(*end))
-            .expect("invariant: a usize holds a u32");
-        if !text.splits(end, elements.get(end).copied()) {
-            return Err(Error::Utf8 { sample });
-        }
-    }
-    Ok(())
-}
-
-/// Checks that each sample of an encoded `String` series of `count` samples is UTF-8.
-/// The series starts at `bytes`, its `elements` start at `rest`, and its last vector
-/// ends at `after`. Its vectors and ends are valid. It decodes one vector of ends and
-/// one vector of elements at a time, on the stack.
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "each expect is an invariant that the caller checked"
-)]
-fn encoded_text(
-    count: usize,
-    bytes: &[u8],
-    elements: usize,
-    rest: &[u8],
-    after: &[u8],
-) -> Result<(), Error> {
-    let ends_len = bytes.len().strict_sub(rest.len());
-    let elements_len = rest.len().strict_sub(after.len());
-    let elements_bytes = rest.split_at(elements_len).0;
-    if ascii(elements, elements_bytes) {
-        return Ok(());
-    }
-    let mut ends = Decoder::new(Scalar::U32, count, bytes.split_at(ends_len).0);
-    let mut vectors = Decoder::new(Scalar::U8, elements, elements_bytes);
-    let mut ends_out = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
-    let mut vector_out = [0; VECTOR_LEN];
-    let mut text = Text::default();
-    let mut piece: &[u8] = &[];
-    let mut base = 0;
-    let mut sample = 0;
-    while let Some(decoded) = ends.next(&mut ends_out) {
-        let decoded = decoded.expect("invariant: the ends were checked");
-        for end in decoded.as_chunks::<4>().0 {
-            let end = usize::try_from(u32::from_le_bytes(*end))
-                .expect("invariant: a usize holds a u32");
-            let byte = loop {
-                if let Some(&byte) = piece.get(end.strict_sub(base)) {
-                    break Some(byte);
-                }
-                base = base.strict_add(piece.len());
-                piece = &[];
-                let Some(next) = vectors.next(&mut vector_out) else {
-                    text.finish();
-                    break None;
-                };
-                piece = next.expect("invariant: the vectors were checked");
-                text.take(piece);
-            };
-            if !text.splits(end, byte) {
-                return Err(Error::Utf8 { sample });
-            }
-            sample = sample.strict_add(1);
-        }
-    }
-    Ok(())
-}
-
-/// Whether each of the `elements` of the encoded vectors at `bytes`, which are valid,
-/// is ASCII. Each sample of ASCII text is UTF-8.
-fn ascii(elements: usize, bytes: &[u8]) -> bool {
-    let mut vectors = Decoder::new(Scalar::U8, elements, bytes);
-    let mut out = [0; VECTOR_LEN];
-    while let Some(vector) = vectors.next(&mut out) {
-        if !vector
-            .expect("invariant: the vectors were checked")
-            .is_ascii()
-        {
-            return false;
-        }
-    }
-    true
-}
-
-/// Finds the first byte of a text that UTF-8 cannot hold, given the text a piece at a
-/// time, so that a char may span pieces.
-#[derive(Debug, Default)]
-struct Text {
-    /// The bytes taken.
-    len: usize,
-    /// The first bytes of a char that the last piece ended inside.
-    char: [u8; 4],
-    /// The bytes of `char` held, or 0.
-    held: usize,
-    /// The bytes of the char in `char`.
-    width: usize,
-    /// The bytes before the first byte that UTF-8 cannot hold, or before the end once
-    /// finished, once known.
-    valid: Option<usize>,
-}
-
-impl Text {
-    /// Takes `piece`, the next bytes of the text.
-    fn take(&mut self, piece: &[u8]) {
-        let mut at = self.len;
-        self.len = self.len.strict_add(piece.len());
-        if self.valid.is_some() {
-            return;
-        }
-        let mut piece = piece;
-        if self.held > 0 {
-            let missing = self.width.strict_sub(self.held);
-            let (head, tail) = piece.split_at(missing.min(piece.len()));
-            let filled = self.held.strict_add(head.len());
-            self.char
-                .get_mut(self.held..filled)
-                .expect("invariant: a char takes at most 4 bytes")
-                .copy_from_slice(head);
-            let char = self
-                .char
-                .get(..filled)
-                .expect("invariant: a char fills 4 bytes at most");
-            match str::from_utf8(char) {
-                Ok(_) => self.held = 0,
-                Err(error) if error.error_len().is_none() => {
-                    self.held = filled;
-                    return;
-                }
-                Err(_) => {
-                    self.valid = Some(at.strict_sub(self.held));
-                    return;
-                }
-            }
-            at = at.strict_add(head.len());
-            piece = tail;
-        }
-        match str::from_utf8(piece) {
-            Ok(_) => {}
-            Err(error) if error.error_len().is_none() => {
-                // The piece ends inside a char, whose first byte gives its width.
-                let tail = piece.split_at(error.valid_up_to()).1;
-                let first = tail.first().expect("invariant: a char starts the tail");
-                self.width = usize::try_from(first.leading_ones())
-                    .expect("invariant: a usize holds a u32");
-                self.held = tail.len();
-                self.char
-                    .get_mut(..self.held)
-                    .expect("invariant: a char takes at most 4 bytes")
-                    .copy_from_slice(tail);
-            }
-            Err(error) => self.valid = Some(at.strict_add(error.valid_up_to())),
-        }
-    }
-
-    /// Ends the text.
-    fn finish(&mut self) {
-        self.valid.get_or_insert(self.len.strict_sub(self.held));
-    }
-
-    /// Whether a UTF-8 sample may end at byte `end` of the text, given the byte there,
-    /// or `None` at the end of the text, once each byte up to it is taken. Each sample
-    /// is UTF-8 exactly when each may end at its end.
-    fn splits(&self, end: usize, byte: Option<u8>) -> bool {
-        match self.valid.map(|valid| end.cmp(&valid)) {
-            Some(Ordering::Greater) => false,
-            Some(Ordering::Equal) => true,
-            Some(Ordering::Less) | None => byte.is_none_or(|byte| byte & 0xc0 != 0x80),
-        }
-    }
-}
-
 /// How a series of a sample type holds its elements.
 #[derive(Clone, Copy, Debug)]
 enum Shape {
@@ -617,7 +437,7 @@ impl Shape {
                 }
                 let elements = values.split_at(front.start).1;
                 if utf8 {
-                    text(ends, elements)?;
+                    text::raw(ends, elements)?;
                 }
                 Ok((ends, elements))
             }
@@ -2288,35 +2108,6 @@ mod tests {
             elements.extend(b"\xf0\x9fA\x80\x80bb");
             let ends = [1_025, 1_030];
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 0 });
-        }
-
-        #[test]
-        fn takes_a_char_a_byte_at_a_time() {
-            let mut text = Text::default();
-            for byte in "\u{1f600}".bytes() {
-                text.take(&[byte]);
-            }
-            assert_eq!(text.valid, None);
-            assert!(text.splits(0, Some(0xf0)));
-            assert!(!text.splits(1, Some(0x9f)));
-            for piece in [b"\xf0", b"\x9f", b"A"] {
-                text.take(piece);
-            }
-            assert_eq!(text.valid, Some(4));
-            text.take(b"\xff");
-            text.finish();
-            assert_eq!(text.valid, Some(4));
-            assert!(text.splits(4, Some(0xf0)));
-            assert!(!text.splits(5, Some(0x9f)));
-        }
-
-        #[test]
-        fn finds_a_char_that_the_text_ends_inside() {
-            let mut text = Text::default();
-            text.take(b"ab\xe2\x82");
-            assert_eq!(text.valid, None);
-            text.finish();
-            assert_eq!(text.valid, Some(2));
         }
 
         #[test]
