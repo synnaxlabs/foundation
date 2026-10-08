@@ -249,8 +249,10 @@ impl Tcp {
     ///
     /// # Errors
     ///
-    /// [`Error::Reset`] when the peer reset the stream, and [`Error::Io`] for other
-    /// failures.
+    /// [`Error::Reset`] when the peer reset the stream, also after this end's
+    /// [`Tcp::poll_close`]. [`Error::Io`] with the code of `EPIPE` for a write after this
+    /// end's `poll_close` to a stream that the peer did not reset, and [`Error::Io`] for
+    /// other failures.
     ///
     /// # Panics
     ///
