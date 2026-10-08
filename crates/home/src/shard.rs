@@ -3930,7 +3930,7 @@ mod tests {
         }
 
         /// The ring is full, so the handoff of the close waits, and the shed drops it.
-        /// No durable entry follows the lost frames, so their gap goes.
+        /// No entry is appended after the lost frames, so their gap goes.
         #[test]
         fn gives_the_first_lost_seq_again_after_a_shed_and_a_carry_as_after_a_restart()
         {
@@ -4018,13 +4018,34 @@ mod tests {
                 drop(blocks);
                 assert_eq!(shard.write(a, LIVE, again), Ok(&[applied(0, 1, 1)][..]));
                 shard.close_writer(a);
-                let durable = shard.buffer.durable(Slot::new(0), Path::Live).seq;
-                assert_eq!(durable, 0, "no later live entry is on disk");
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
                 shard.shed(Slot::new(0));
                 shard.carry(Slot::new(0));
                 let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
                 let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
                 assert_eq!(shard.write(b, LIVE, next), Ok(&[applied(0, 2, 1)][..]));
+            });
+        }
+
+        /// The handoff of the close is the only entry after the lost seq, and it is not
+        /// yet on disk, so the lost seq is not given again.
+        #[test]
+        fn continues_after_a_later_handoff_not_yet_on_disk_after_a_shed_and_a_carry() {
+            run(151, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let blocks = test.fill();
+                assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 0, 1)][..]));
+                drop(blocks);
+                shard.close_writer(a);
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
+                shard.shed(Slot::new(0));
+                shard.carry(Slot::new(0));
+                let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+                let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+                assert_eq!(shard.write(b, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
             });
         }
 
