@@ -24,11 +24,11 @@
 //! waiting`, whose send must wait in each round. Each poll has a timing cost, so
 //! compare the two lines with their polls per send.
 //!
-//! The `parts` lines time, in rounds that take turns on one stream, a `send` of one
-//! block, a `send_parts` of the same bytes as ranges of a larger block, and a copy of
-//! those ranges into a new block, then a `send` of it. A `send_parts` allocates as a
-//! `send`, plus one allocation for each copied stretch of ranges over 1452 bytes and
-//! for each growth of the segment queue of noq-proto, which it drops after each
+//! The `parts` lines time, in rounds that take turns, each on its own stream, a `send`
+//! of one block, a `send_parts` of the same bytes as ranges of a larger block, and a
+//! copy of those ranges into a new block, then a `send` of it. A `send_parts` allocates
+//! as a `send`, plus one allocation for each copied stretch of ranges over 1452 bytes
+//! and for each growth of the segment queue of noq-proto, which it drops after each
 //! acknowledgement.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
@@ -273,10 +273,12 @@ fn main() {
                 }
             }
             for shape in &SHAPES {
-                let mut sender = session.open_sender(Class::Complete).await;
-                let sender = sender.as_mut().expect("a stream");
-                lines.extend(measure_parts(&clock, &pool, sender, shape).await);
-                sender.finish().expect("the stream finishes");
+                let mut senders =
+                    open(&session, Load::Streams(&[Class::Complete; 3])).await;
+                lines.extend(measure_parts(&clock, &pool, &mut senders, shape).await);
+                for sender in &mut senders {
+                    sender.finish().expect("the stream finishes");
+                }
             }
             session.close(Code(0));
             let session = transport
@@ -396,12 +398,14 @@ async fn measure(
         .collect()
 }
 
-/// Runs the rounds of `shape` on `sender`: in alternating rounds, a `send` of one block
-/// of the message's bytes and a `send_parts` of the message. Gives a line for each.
+/// Runs the rounds of `shape`, in turn: a `send` of one block of the message's bytes,
+/// a `send_parts` of the message, and a copy of its parts, then a `send`. Each kind
+/// sends on its own stream of `senders`, so that one does not change the cost of
+/// another. Gives a line for each.
 async fn measure_parts(
     clock: &env::clock::Clock,
     pool: &Pool,
-    sender: &mut Sender,
+    senders: &mut [Sender],
     shape: &Shape,
 ) -> Vec<Measured> {
     let parts = shape.parts();
@@ -412,6 +416,7 @@ async fn measure_parts(
         for (at, nanos) in nanos.iter_mut().enumerate() {
             clock.sleep(PAUSE).await;
             let block = shape.ranges * shape.stride;
+            let sender = &mut senders[at];
             let (span, counted) = match at {
                 0 => {
                     let blocks =
