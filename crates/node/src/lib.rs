@@ -702,17 +702,13 @@ impl Serve {
                 Ok(identity) => identity,
                 Err(error) => return fail(error),
             };
-        let hub = hub::Hub::new(hub::Config {
-            home,
-            interner,
-            tasks: tasks.clone(),
-            node: identity.key,
-            time: self.time,
-            entropy: self.endpoint.entropy.clone(),
-        });
-        if let Some(region) = &self.endpoint.region {
-            hub.define(&region.definitions);
-        }
+        let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
+        // The endpoint's open takes the founding, so the definitions go first.
+        let definitions = self
+            .endpoint
+            .region
+            .as_ref()
+            .map(|region| region.definitions.clone());
         let (transport, mesh) = match self
             .endpoint
             .open(identity, files, pool, tasks.clone())
@@ -721,6 +717,22 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let region = mesh.clone().map(|mesh| hub::Region {
+            mesh,
+            transport: Rc::clone(&transport),
+        });
+        let hub = hub::Hub::new(hub::Config {
+            home,
+            interner,
+            tasks: tasks.clone(),
+            node: key,
+            time: self.time,
+            entropy,
+            region,
+        });
+        if let Some(definitions) = &definitions {
+            hub.define(definitions);
+        }
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // `next` gives the stop of the group on a watch of any index.
         let watch = mesh
@@ -761,8 +773,8 @@ impl Serve {
 
 /// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of
 /// the node (`guard`), which gives `None`, then a transport that stopped (`port`),
-/// then a group that stopped. The port's end drops the mesh, which stops the group
-/// with `Dropped` at the same poll, so the port ranks above the group.
+/// then a group that stopped. The order of the port and the group is a fixed
+/// tie-break, with no contract.
 fn end(
     guard: Poll<()>,
     port: Poll<transport::Error>,

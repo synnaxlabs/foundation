@@ -2153,6 +2153,7 @@ mod hub {
                     node: types::node::Key::from_u128(1),
                     time,
                     entropy,
+                    region: None,
                 });
                 define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;
@@ -3090,7 +3091,8 @@ mod port {
         }
 
         /// The region of the node [`OWN`] on `host` alone, whose founding spec holds
-        /// the index `plant.time` (key 1) and the data channel `plant.value` (key 2).
+        /// the index `plant.time` (key 1), with its home at [`OWN`], and the data
+        /// channel `plant.value` (key 2).
         fn founded(host: &sim::node::Node) -> Founding {
             use super::super::hub::{I64, data, index};
             let mut founding = region(&[member(OWN, &KEY, host)]);
@@ -3101,6 +3103,9 @@ mod port {
                     .definitions
                     .insert(name, Definition::Channel(channel));
             }
+            founding
+                .homes
+                .insert(types::channel::Key::from_u128(1), OWN);
             founding
         }
 
@@ -3565,8 +3570,7 @@ mod port {
         }
 
         /// Of a transport and a group that stop, `join` gives the one that the node
-        /// sees first, which at one instant can be either. A transport that stops
-        /// drops the mesh, so the node sees the group's `Dropped` at the same poll.
+        /// sees first, which at one instant can be either.
         #[test]
         fn join_gives_the_stop_that_the_node_sees_first() {
             let error = transport::Error::Network {
