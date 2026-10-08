@@ -3166,8 +3166,7 @@ mod port {
         }
 
         /// Of a transport and a group that stop, `join` gives the one that the node
-        /// sees first, which at one instant can be either. A transport that stops
-        /// drops the mesh, so the node sees the group's `Dropped` at the same poll.
+        /// sees first, which at one instant can be either.
         #[test]
         fn join_gives_the_stop_that_the_node_sees_first() {
             let error = transport::Error::Network {

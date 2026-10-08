@@ -768,8 +768,8 @@ impl Serve {
 
 /// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of
 /// the node (`guard`), which gives `None`, then a transport that stopped (`port`),
-/// then a group that stopped. The port's end drops the mesh, which stops the group
-/// with `Dropped` at the same poll, so the port ranks above the group.
+/// then a group that stopped. The order of the port and the group is a fixed
+/// tie-break, with no contract.
 fn end(
     guard: Poll<()>,
     port: Poll<transport::Error>,
