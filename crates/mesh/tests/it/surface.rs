@@ -160,6 +160,7 @@ async fn create_config_on(
             voters: members.iter().map(|member| member.card.key()).collect(),
             members,
             definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
         },
         files: node.files(),
         dir: PathBuf::new(),

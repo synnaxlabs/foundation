@@ -184,10 +184,12 @@ impl Mesh {
             members,
             voters,
             definitions,
+            homes,
         } = config.founding;
         let tree = spec::region::tree(&mut chunks, &definitions);
-        let state = region::State::new(prefix, members, tree.root, voters.clone())
-            .map_err(Error::Member)?;
+        let state =
+            region::State::new(prefix, members, tree.root, voters.clone(), homes)
+                .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
@@ -1269,6 +1271,7 @@ mod tests {
                 members: common::create_members(members),
                 voters: voters.iter().map(|&id| key(id)).collect(),
                 definitions: BTreeMap::new(),
+                homes: BTreeMap::new(),
             },
             files: node.files(),
             dir: PathBuf::new(),

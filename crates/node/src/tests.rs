@@ -2685,6 +2685,7 @@ mod port {
                 members: members.to_vec(),
                 voters: members.iter().map(|member| member.card.key()).collect(),
                 definitions: BTreeMap::new(),
+                homes: BTreeMap::new(),
             }
         }
 
