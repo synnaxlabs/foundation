@@ -2867,6 +2867,7 @@ mod tests {
                 (string(openssh), at(0, 11)),
                 (string(rsa), at(0, 11)),
                 (list(&[string(ALICE), string(openssh)]), at(0, 51)),
+                (list(&[Kind::Integer(7), string(openssh)]), at(0, 51)),
             ];
             for (keys, span) in cases {
                 assert_eq!(
@@ -2899,8 +2900,8 @@ mod tests {
                         "config.public-key-algorithm",
                         at(0, 11),
                         &format!(
-                            "the public key is `{algorithm}`, and a subject takes only \
-                             `ssh-ed25519`"
+                            "the public key is \"{algorithm}\", and a subject takes \
+                             only `ssh-ed25519`"
                         ),
                         "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the \
                          line of its `.pub` file",
@@ -2919,6 +2920,9 @@ mod tests {
                 (Kind::Integer(7), "a public key is a string, not an integer"),
                 (string(""), NOT_A_LINE),
                 (string("ssh-ed25519"), NOT_A_LINE),
+                (string("ssh-\x1b[2Jok AAAA"), NOT_A_LINE),
+                (string("sk-proj-0123456789abcdef AAAA"), NOT_A_LINE),
+                (string("ssh-rsa2 AAAA"), NOT_A_LINE),
                 (string(&ALICE[12..]), NOT_A_LINE),
                 (
                     string("-----BEGIN PUBLIC KEY----- MCowBQYDK2VwAyEA"),
@@ -2930,6 +2934,10 @@ mod tests {
                 ),
                 (
                     string(&format!("{ALICE}\n{}", ed25519([9; 32]))),
+                    "the public key is more than one line",
+                ),
+                (
+                    string(&format!("{ALICE}\r{}", ed25519([9; 32]))),
                     "the public key is more than one line",
                 ),
                 (string("ssh-ed25519 !!!!"), NOT_ED25519),
