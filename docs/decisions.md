@@ -3727,9 +3727,10 @@ How to read this record:
   `cargo bench -p connector-influx` turns on `sim` through a dev-dependency of the
   crate on itself, since the bench host runs no features. Until its baseline on a
   quiet Linux host is a comment on #1501, a PR that changes the store gives the
-  numbers of `benches/sim.rs` at its base and at its head, on one machine. The fixes (a cursor for each column in the series iterator, and a gap at
-  the front of a chunk) wait for a test or acceptance run whose time is spent in the
-  store (#1501). Decided by `laptop.architect-2` (2026-10-07T19:40:18Z):
+  numbers of `benches/sim.rs` at its base and at its head, on one machine. The fixes
+  (a cursor for each column in the series iterator, and a gap at the front of a chunk)
+  wait for a test or acceptance run whose time is spent in the store (#1501). Decided
+  by `laptop.architect-2` (2026-10-07T19:40:18Z):
   https://github.com/synnaxlabs/foundation/pull/1448#issuecomment-6045453368. Amended
   by `laptop.architect-2` (2026-10-08T08:19:35Z):
   https://github.com/synnaxlabs/foundation/pull/1837#issuecomment-6055768246, which
