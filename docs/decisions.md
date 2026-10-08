@@ -5035,7 +5035,10 @@ How to read this record:
   `Mismatch`, a fallible `definitions`, and the #1975 deferral (2026-10-08T19:11:26Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684); a change
   at a reserved name or of a blockless kind is a `Mismatch` (2026-10-08T19:20:33Z,
-  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179).
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179); so is
+  one at a name that is not the tree key of its kind, with one predicate for `plan` and
+  `definitions` (2026-10-08T19:27:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067449819).
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
