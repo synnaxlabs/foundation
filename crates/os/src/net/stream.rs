@@ -177,7 +177,6 @@ mod tests {
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener};
     use std::os::fd::{AsFd, OwnedFd};
-    use std::task::Waker;
 
     use tcp::Driver as _;
 
@@ -243,7 +242,7 @@ mod tests {
                 let bytes = [IoSlice::new(&block)];
                 // The first poll registers the socket and is pending.
                 let mut filled = poll_fn(|cx| stream.poll_write(cx, &bytes)).await;
-                let mut cx = Context::from_waker(Waker::noop());
+                let mut cx = Context::from_waker(std::task::Waker::noop());
                 while let Poll::Ready(written) = stream.poll_write(&mut cx, &bytes) {
                     filled = written;
                 }

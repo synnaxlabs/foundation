@@ -204,13 +204,18 @@ mod tests {
             assert_eq!(sockopt::socket_nosigpipe(&fd), Ok(true));
         }
 
+        /// The kernel binds a socket only to an address of its own family.
+        fn bound(address: SocketAddr) -> SocketAddr {
+            let fd = super::socket(address).unwrap();
+            rustix::net::bind(&fd, &address).unwrap();
+            SocketAddr::try_from(rustix::net::getsockname(&fd).unwrap()).unwrap()
+        }
+
         #[test]
         fn follows_the_family_of_the_address() {
             let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0);
-            let fd = super::socket(v6).unwrap();
-            assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET6));
-            let fd = super::socket(loopback()).unwrap();
-            assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET));
+            assert!(bound(v6).is_ipv6());
+            assert!(bound(loopback()).is_ipv4());
         }
     }
 }
