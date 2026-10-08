@@ -3764,6 +3764,14 @@ How to read this record:
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **COST TRIALS (2026-10-08)** Until 2026-10-09T04:00Z, `box1.builder-1`,
+  `box1.builder-2`, `box1.builder-4`, and `box2.builder-7` run the `reviewer` of a
+  second round that does not skip `breaker` on Sonnet. The director's audits run on
+  Sonnet in the `audit` agent. After the end time, `laptop.monitor` compares the
+  groups and reports to the person, and a new decision keeps or removes each trial.
+  The person (2026-10-08T01:13Z): "Let's try all 3 of these and see what we get",
+  recorded in https://github.com/synnaxlabs/foundation/issues/1703. Supersedes
+  FACTORY MODELS for these runs.
 - **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
   own PR through the queue when the gate, the review rounds, and CI pass; agents may run
   `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and

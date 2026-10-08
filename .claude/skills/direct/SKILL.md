@@ -21,25 +21,10 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 ## Each merged PR
 
 For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
-number, its merge commit, its issue, and its crates. It checks, with file:line:
-
-- **Tests.** They fail when the change is reverted. They test behavior, not private
-  state. They cover the failure paths, not only the happy path.
-- **Review trail.** Every round finished before the merge. Each finding was fixed, or
-  deferred to a linked issue with the architect's OK in a risk crate. Each ruling and
-  surface in the merged code has the architect's approval of that meaning.
-- **Design.** It fits the crate's section of `docs/decisions.md`. Each public item has a
-  caller on the path. No patch hides a cause.
-- **Performance.** For a change on a hot path, the PR answers the six questions of
-  `docs/claude/performance.md` with numbers for `main` and the PR on a named machine,
-  and the `performance` reviewer ran. It also finds a hot path that the PR did not
-  declare, and each allocation, copy, lock, or wakeup on it that the rules forbid.
-- **Defects** it can show.
-
-It also gives the rating and summary that `/review` "Rating" defines. It judges the
-PR by the rules at its merge commit (`git show <merge>:<path>`), never by a rule in an
-open PR or in your branch. Post the verdict as one comment on the PR that starts with
-them, as given. Then act on each problem:
+number, its merge commit, its issue, and its crates. It checks tests, the review trail,
+design, performance, and defects, by the rules at the merge commit. Check each problem
+that it reports yourself, and drop the ones you cannot confirm. Post its verdict as one
+comment on the PR, under your header line. Then act on each problem:
 
 - A defect: an issue with its `crate:` label.
 - A contract question: send it to the crate's architect.
