@@ -172,7 +172,9 @@ impl Woken {
                 set: Arc::clone(&set),
             })
             .expect("opens");
-        let reader = shard.open_complete(slot, u64::MAX).into();
+        let reader = shard
+            .open_complete(slot, u64::MAX, home::reader::complete::Charge::Whole)
+            .into();
         let entry = |key| {
             set.entries()
                 .iter()

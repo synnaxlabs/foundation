@@ -404,6 +404,8 @@ impl Raft {
     ///
     /// - [`Error::Misrouted`] when the message is for another node.
     /// - [`Error::Loopback`] when the message names this node as its sender.
+    /// - [`Error::SecondLeader`] when a heartbeat or an append of this node's term
+    ///   comes from a node other than the leader of the term that it knows.
     /// - [`Error::Unproven`] when the message claims a higher term, or a leader of
     ///   this node's term that it did not prove, with no proof that a quorum of this
     ///   node's voters granted it, and no chain of configuration entries that leads
@@ -421,24 +423,18 @@ impl Raft {
     /// unless the configuration in force removed the sender and this node still sends
     /// to it. The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
+        if !self.reads(&message)? {
+            self.answer_stale(message.from, &message.body);
+            return Ok(());
+        }
         let Message {
             from,
-            to,
             term,
             body,
             mut proof,
             chain,
+            ..
         } = message;
-        if to != self.key {
-            return Err(Error::Misrouted { to });
-        }
-        if from == self.key {
-            return Err(Error::Loopback);
-        }
-        if !self.reads(from, term, &body) {
-            self.answer_stale(from, &body);
-            return Ok(());
-        }
         let body = self.check(from, term, body, proof.as_ref(), &chain)?;
         if self.meet(from, term, &body, &mut proof) {
             self.handle(from, term, body, proof);
@@ -450,12 +446,15 @@ impl Raft {
     /// [`step`](Self::step) reads, with its signature: the grants of its proof in
     /// rising key order; then the votes and the change of each link of its chain
     /// that `step` reads; then the votes and the change of each configuration an
-    /// append carries; then the sender's grant. A message for a lower term, or a
-    /// reply from a node that is not a peer, gives no claim: `step` reads none. The
-    /// list is the one `step` reads only when `step` gets the same message, with no
-    /// call to this node between the two. The caller checks each signature against
-    /// its signer's key before `step`, and refuses a `None`: `step` keeps each
-    /// signature as it came.
+    /// append carries; then the sender's grant. A message that `step` refuses or
+    /// drops by its header gives no claim: one for another node, from this node, or
+    /// from a second leader of this term ([`Error::Misrouted`],
+    /// [`Error::Loopback`], [`Error::SecondLeader`]), one for a lower term, and a
+    /// reply from a node that is not a peer. A grant or a proof that `step` reads
+    /// past the header and then ignores is still a claim. The list is the one `step`
+    /// reads only when `step` gets the same message, with no call to this node
+    /// between the two. The caller checks each signature against its signer's key
+    /// before `step`, and refuses a `None`: `step` keeps each signature as it came.
     pub fn claims<'a>(
         &'a self,
         message: &'a Message,
@@ -468,17 +467,38 @@ impl Raft {
             chain,
             ..
         } = message;
-        let read = self.reads(*from, *term, body).then(|| {
+        let read = matches!(self.reads(message), Ok(true)).then(|| {
             let links = self.prove(*from, *term, body, proof.as_ref(), chain).read;
             message.claims(links)
         });
         read.into_iter().flatten()
     }
 
-    // Whether `step` reads a message past its header. A message for a lower term is
+    // Whether `step` reads a message past its header: each refusal and drop by the
+    // header. `step` refuses a message for another node, from this node, or from a
+    // second leader of this term with the error. A message for a lower term is
     // stale, and a reply from a node that is not a peer is dropped.
-    fn reads(&self, from: node::Key, term: Term, body: &Body) -> bool {
-        term >= self.term && (!body.answers() || self.peers.contains_key(&from))
+    fn reads(&self, message: &Message) -> Result<bool, Error> {
+        let Message { from, to, term, .. } = *message;
+        if to != self.key {
+            return Err(Error::Misrouted { to });
+        }
+        if from == self.key {
+            return Err(Error::Loopback);
+        }
+        if term < self.term {
+            return Ok(false);
+        }
+        if message.body.answers() {
+            return Ok(self.peers.contains_key(&from));
+        }
+        if message.body.leads()
+            && term == self.term
+            && self.led.is_some_and(|led| led != from)
+        {
+            return Err(Error::SecondLeader { term, from });
+        }
+        Ok(true)
     }
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote
@@ -575,10 +595,6 @@ impl Raft {
         proof: Option<&Proof>,
         chain: &[Link],
     ) -> Result<Checked, Error> {
-        if body.leads() && term == self.term && self.led.is_some_and(|led| led != from)
-        {
-            return Err(Error::SecondLeader { term, from });
-        }
         if !self.prove(from, term, &body, proof, chain).proven {
             return Err(Error::Unproven { term, from });
         }
@@ -842,7 +858,7 @@ impl Raft {
     // pre-vote and its grant claim no term. A leader's message needs its votes; a
     // vote request, its pre-votes; a reply, any proof of the term. In this node's own
     // term, only a leader's message needs a proof, and only while the node knows no
-    // leader: `check` refused every other sender as a second one.
+    // leader: `reads` refused every other sender as a second one.
     fn prove<'a>(
         &self,
         from: node::Key,
@@ -1058,7 +1074,7 @@ impl Raft {
         }
         match self.role {
             Role::Leader => unreachable!(
-                "invariant: `check` refuses a second leader of term {}",
+                "invariant: `reads` refuses a second leader of term {}",
                 self.term
             ),
             Role::Follower => {

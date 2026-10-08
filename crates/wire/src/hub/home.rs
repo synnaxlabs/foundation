@@ -1,4 +1,4 @@
-use super::{CREDIT, Credit, Error, Open, keys, rest_of_run};
+use super::{CREDIT, Credit, Error, Mode, Open, keys, rest_of_run};
 
 /// The decoder at the home: it takes each message from the reader's node, in order,
 /// and checks the order and the run of the session.
@@ -14,8 +14,11 @@ enum Next {
     Open,
     Keys {
         remain: u32,
+        latest: bool,
     },
     Credit,
+    /// After the keys run of a latest session, which takes no credit.
+    Latest,
 }
 
 /// A message from the reader's node, decoded.
@@ -47,40 +50,47 @@ impl Home {
     ///
     /// The [`Error`] of a message that does not decode, or that breaks the order or
     /// the run of the session: [`Error::Unopened`] for a credit before the open,
-    /// [`Error::Reopen`] for a second open, and [`Error::Run`] for a message with more
-    /// keys than remain. A message of a run has no kind, so a message where the run
-    /// continues is read as one. The session is then not valid
-    /// ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
+    /// [`Error::Reopen`] for a second open, [`Error::Latest`] for a credit in a latest
+    /// session, and [`Error::Run`] for a message with more keys than remain. A message
+    /// of a run has no kind, so a message where the run continues is read as one. The
+    /// session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the
+    /// caller stops it.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromReader<'m>, Error> {
         let (event, next) = match self.next {
-            Next::Keys { remain } => {
+            Next::Keys { remain, latest } => {
                 let keys = keys::decode(message)?;
                 let remain = rest_of_run(remain, keys.len())?;
                 let last = remain == 0;
-                let next = if last {
-                    Next::Credit
-                } else {
-                    Next::Keys { remain }
+                let next = match (last, latest) {
+                    (false, _) => Next::Keys { remain, latest },
+                    (true, false) => Next::Credit,
+                    (true, true) => Next::Latest,
                 };
                 (FromReader::Keys { keys, last }, next)
             }
-            Next::Open | Next::Credit => match (Message::decode(message)?, self.next) {
-                (Message::Open(open), Next::Open) => (
-                    FromReader::Open(open),
-                    Next::Keys {
-                        remain: open.channels,
-                    },
-                ),
-                (Message::Credit(_), Next::Open) => {
-                    return Err(Error::Unopened { kind: CREDIT });
+            Next::Open | Next::Credit | Next::Latest => {
+                match (Message::decode(message)?, self.next) {
+                    (Message::Open(open), Next::Open) => (
+                        FromReader::Open(open),
+                        Next::Keys {
+                            remain: open.channels,
+                            latest: open.mode == Mode::Latest,
+                        },
+                    ),
+                    (Message::Credit(_), Next::Open) => {
+                        return Err(Error::Unopened { kind: CREDIT });
+                    }
+                    (Message::Credit(_), Next::Latest) => {
+                        return Err(Error::Latest { kind: CREDIT });
+                    }
+                    (Message::Open(open), _) => {
+                        return Err(Error::Reopen { kind: open.kind() });
+                    }
+                    (Message::Credit(credit), _) => {
+                        (FromReader::Credit(credit), Next::Credit)
+                    }
                 }
-                (Message::Open(open), _) => {
-                    return Err(Error::Reopen { kind: open.kind() });
-                }
-                (Message::Credit(credit), _) => {
-                    (FromReader::Credit(credit), Next::Credit)
-                }
-            },
+            }
         };
         self.next = next;
         Ok(event)
@@ -103,10 +113,7 @@ mod tests {
     use types::channel;
 
     use super::*;
-    use crate::hub::{
-        Mode,
-        tests::{cut, encode_credit, encode_keys, encode_open, key},
-    };
+    use crate::hub::tests::{cut, encode_credit, encode_keys, encode_open, key};
 
     fn open(channels: u32) -> Vec<u8> {
         encode_open(Open {
@@ -119,11 +126,15 @@ mod tests {
         encode_credit(Credit { limit_bytes })
     }
 
-    /// A home whose session opened with `keys`, after the keys run.
+    /// A home whose complete session opened with `keys`, after the keys run.
     fn opened(keys: &[channel::Key]) -> Home {
         let mut home = Home::default();
         let channels = u32::try_from(keys.len()).expect("the keys fit a u32");
-        home.decode(&open(channels)).expect("the open decodes");
+        let open = encode_open(Open {
+            mode: Mode::Complete { limit_bytes: 0 },
+            channels,
+        });
+        home.decode(&open).expect("the open decodes");
         home.decode(&encode_keys(keys)).expect("the keys decode");
         home
     }
@@ -188,6 +199,21 @@ mod tests {
             event(&mut home, &credit(1)),
             Ok(Event::Credit(Credit { limit_bytes: 1 }))
         );
+    }
+
+    #[test]
+    fn refuses_a_credit_in_a_latest_session() {
+        let mut home = Home::default();
+        home.decode(&open(1)).expect("the open decodes");
+        home.decode(&encode_keys(&[key(1)]))
+            .expect("the key decodes");
+        for _ in 0..2 {
+            assert_eq!(
+                home.decode(&credit(1)).err(),
+                Some(Error::Latest { kind: 3 })
+            );
+        }
+        assert_eq!(home.decode(&open(1)).err(), Some(Error::Reopen { kind: 1 }));
     }
 
     #[test]
@@ -293,10 +319,12 @@ mod tests {
                 );
             }
             for limit_bytes in credits {
-                prop_assert_eq!(
-                    event(&mut home, &credit(limit_bytes)),
+                let expected = if mode == Mode::Latest {
+                    Err(Error::Latest { kind: CREDIT })
+                } else {
                     Ok(Event::Credit(Credit { limit_bytes }))
-                );
+                };
+                prop_assert_eq!(event(&mut home, &credit(limit_bytes)), expected);
             }
         }
     }
