@@ -1,6 +1,7 @@
-//! The first poll of each UDP half with no free descriptor. It takes each descriptor
-//! of the process, so it runs in a test binary of its own, with this one test only:
-//! the harness runs the tests of a binary on threads of one process.
+//! The first poll of each UDP half with no free descriptor, which binds the half to
+//! its thread and leaves it usable. It takes each descriptor of the process, so it
+//! runs in a test binary of its own, with this one test only: the harness runs the
+//! tests of a binary on threads of one process.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
@@ -14,6 +15,7 @@ use std::task::{Context, Poll, Waker};
 
 use env::net::Error;
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
+use env::thread::Panicked;
 use rustix::fs::{Mode, OFlags, open};
 use rustix::io::Errno;
 use rustix::process::{self, Resource};
@@ -39,6 +41,12 @@ fn receive(
     receiver.poll_recv(cx, &mut buffers, &mut meta)
 }
 
+fn emfile<T>() -> Poll<Result<T, Error>> {
+    Poll::Ready(Err(Error::Io {
+        code: Errno::MFILE.raw_os_error(),
+    }))
+}
+
 /// Takes each free descriptor of the process until the result drops.
 fn take_each() -> Vec<OwnedFd> {
     let mut held = Vec::new();
@@ -49,7 +57,7 @@ fn take_each() -> Vec<OwnedFd> {
 }
 
 #[test]
-fn a_first_poll_with_no_free_descriptor_leaves_the_half_usable() {
+fn a_first_poll_with_no_free_descriptor_binds_the_half_and_leaves_it_usable() {
     let mut limit = process::getrlimit(Resource::Nofile);
     limit.current = Some(128);
     process::setrlimit(Resource::Nofile, limit).unwrap();
@@ -64,16 +72,39 @@ fn a_first_poll_with_no_free_descriptor_leaves_the_half_usable() {
         recv_buffer_bytes: 1 << 16,
     };
     let (mut sender, mut receiver) = os::net().udp(&config).unwrap();
+    let (mut moved, mut moved_receiver) = os::net().udp(&config).unwrap();
     let destination = receiver.local();
-    let io = Error::Io {
-        code: Errno::MFILE.raw_os_error(),
-    };
-    let held = take_each();
-    assert_eq!(send(&mut sender, destination), Poll::Ready(Err(io.clone())));
     let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(receive(&mut receiver, &mut cx), Poll::Ready(Err(io)));
-    drop(held);
+    let mut held = take_each();
+    assert_eq!(send(&mut sender, destination), emfile());
+    assert_eq!(send(&mut moved, destination), emfile());
+    assert_eq!(receive(&mut receiver, &mut cx), emfile());
+    assert_eq!(receive(&mut moved_receiver, &mut cx), emfile());
+    drop(held.pop());
     assert_eq!(send(&mut sender, destination), Poll::Ready(Ok(())));
+    drop(held.pop());
     let arrived = runtime.block_on(poll_fn(|cx| receive(&mut receiver, cx)));
     assert_eq!(arrived, Ok(1));
+    drop(held);
+    let threads = os::threads().expect("the OS gives the cores of this process");
+    let handle = threads.start("udp-moved", move || async move {
+        drop(send(&mut moved, destination));
+    });
+    let panicked = Err(Panicked {
+        name: "udp-moved".into(),
+    });
+    assert_eq!(
+        handle.expect("the thread starts").join(),
+        panicked,
+        "sender"
+    );
+    let handle = threads.start("udp-moved", move || async move {
+        let mut cx = Context::from_waker(Waker::noop());
+        drop(receive(&mut moved_receiver, &mut cx));
+    });
+    assert_eq!(
+        handle.expect("the thread starts").join(),
+        panicked,
+        "receiver"
+    );
 }

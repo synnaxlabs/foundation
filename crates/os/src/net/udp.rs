@@ -23,15 +23,11 @@ use super::{bind, canonical, errno, from_io, io_error};
 /// A bound UDP socket, and the receive half of it.
 pub(super) struct Udp {
     bound: Arc<Bound>,
-    /// Set by the first poll of the receiver that registers.
-    receive: OnceLock<Registered>,
-}
-
-/// The receiver's `dup` of the socket, registered for readable with the I/O driver
-/// of `thread`.
-struct Registered {
-    socket: AsyncFd<UdpSocket>,
-    thread: ThreadId,
+    /// The thread of the receiver's first poll.
+    thread: OnceLock<ThreadId>,
+    /// The receiver's `dup` of the socket, registered for readable by the first poll
+    /// that succeeds.
+    readable: OnceLock<AsyncFd<UdpSocket>>,
 }
 
 /// What each half of one socket reads.
@@ -68,7 +64,8 @@ impl Udp {
         };
         Ok(Self {
             bound: Arc::new(bound),
-            receive: OnceLock::new(),
+            thread: OnceLock::new(),
+            readable: OnceLock::new(),
         })
     }
 }
@@ -100,6 +97,7 @@ impl udp::Driver for Udp {
     fn sender(&self) -> Box<dyn sender::Driver> {
         Box::new(Sender {
             bound: Arc::clone(&self.bound),
+            thread: None,
             writer: None,
         })
     }
@@ -111,17 +109,16 @@ impl udp::Driver for Udp {
         meta: &mut [Meta],
     ) -> Poll<Result<usize, Error>> {
         let bound = &self.bound;
-        let registered = if let Some(registered) = self.receive.get() {
-            registered
+        let thread = self.thread.get_or_init(|| thread::current().id());
+        socket::on_thread("UDP receiver", *thread);
+        let socket = if let Some(socket) = self.readable.get() {
+            socket
         } else {
             let socket = (bound.socket.try_clone())
                 .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
                 .map_err(|e| from_io(&e))?;
-            let thread = thread::current().id();
-            self.receive.get_or_init(|| Registered { socket, thread })
+            self.readable.get_or_init(|| socket)
         };
-        socket::on_thread("UDP receiver", registered.thread);
-        let socket = &registered.socket;
         loop {
             let mut guard =
                 ready!(socket.poll_read_ready(cx)).map_err(|e| from_io(&e))?;
@@ -166,8 +163,10 @@ impl Bound {
 /// The driver of one `Sender` clone.
 struct Sender {
     bound: Arc<Bound>,
-    /// Set by the first poll that registers, with its thread.
-    writer: Option<(Writer, ThreadId)>,
+    /// The thread of the first poll.
+    thread: Option<ThreadId>,
+    /// Set by the first poll that succeeds.
+    writer: Option<Writer>,
 }
 
 /// The descriptor of one sender. It has a registration for writable only while the
@@ -218,17 +217,18 @@ impl sender::Driver for Sender {
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>> {
         let bound = &*self.bound;
-        let (writer, thread) = match &mut self.writer {
+        let thread = self.thread.get_or_insert_with(|| thread::current().id());
+        socket::on_thread("UDP sender", *thread);
+        let writer = match &mut self.writer {
             Some(writer) => writer,
             none @ None => {
                 // It registers, so it panics on a thread with no I/O driver as a TCP
                 // stream does.
                 let fd = bound.socket.try_clone().map_err(|e| from_io(&e))?;
                 let full = Some(Writer::register(&fd).map_err(|e| from_io(&e))?);
-                none.insert((Writer { full, fd }, thread::current().id()))
+                none.insert(Writer { full, fd })
             }
         };
-        socket::on_thread("UDP sender", *thread);
         writer.poll_send(cx, |fd| {
             send_all(bound, transmit, |datagram| {
                 bound.state.try_send(fd.into(), datagram)
