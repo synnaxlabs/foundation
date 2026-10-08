@@ -477,14 +477,18 @@ mod tests {
     }
 
     /// Asserts that each of two blocks inside a `keyword` block with `attributes` adds
-    /// one `document.unknown-block` diagnostic to what `check` gives without them.
+    /// one `document.unknown-block` diagnostic to what `check` gives without them, and
+    /// that a block inside each adds none.
     fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
         let mut policy = block(0, 0, keyword, &["edge"], attributes);
         let mut expected = check(&[document(vec![policy.clone()])])
             .err()
             .unwrap_or_default();
         for (offset, inner) in [(90, "inner"), (95, "other")] {
-            policy.body.blocks.push(block(0, offset, inner, &[], &[]));
+            let mut inner_block = block(0, offset, inner, &[], &[]);
+            let deeper = block(0, offset + 1, "deeper", &[], &[]);
+            inner_block.body.blocks.push(deeper);
+            policy.body.blocks.push(inner_block);
             expected.push(refused(
                 "document.unknown-block",
                 at(0, offset),
