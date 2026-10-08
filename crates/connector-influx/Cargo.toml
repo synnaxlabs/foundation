@@ -22,6 +22,7 @@ env = { path = "../env", optional = true }
 http = { workspace = true, optional = true }
 influxdb-line-protocol = { workspace = true, optional = true }
 types = { path = "../types" }
+unicode-properties.workspace = true
 
 [dev-dependencies]
 connector = { path = "../connector" }

@@ -108,14 +108,64 @@ fn wide() -> (Frame, Arc<KeySet>) {
 }
 
 /// One live frame of [`CHANNELS`] channels to one recording reader that keeps up and
-/// pays for a remote frame of its `places`: the last channel, or every channel.
+/// pays for a remote frame of its `places`: the last channel, or every channel, in
+/// entry order, which is the home's frame.
 #[divan::bench(args = [1, CHANNELS])]
 fn release_places(bencher: Bencher<'_, '_>, places: usize) {
+    release_through(bencher, |set| {
+        let entries = &set.entries()[CHANNELS - places..];
+        entries.iter().map(|entry| entry.slot).collect()
+    });
+}
+
+/// As [`release_places`] for places of every channel, last first, as a remote node
+/// whose slots are in another order lists them.
+#[divan::bench]
+fn release_places_reversed(bencher: Bencher<'_, '_>) {
+    release_through(bencher, |set| {
+        set.entries().iter().rev().map(|entry| entry.slot).collect()
+    });
+}
+
+/// The first frame of [`wide`] to a new session of places of every channel, last
+/// first, which learns the key set.
+#[divan::bench(sample_count = 100)]
+fn release_places_first(bencher: Bencher<'_, '_>) {
     let (frame, set) = wide();
-    let slots = set.entries()[CHANNELS - places..]
-        .iter()
-        .map(|entry| entry.slot)
-        .collect();
+    let slots: Box<[channel::Slot]> =
+        set.entries().iter().rev().map(|entry| entry.slot).collect();
+    bencher
+        .with_inputs(|| {
+            let mut readers = Readers::new(0);
+            let start = Start::At(Position {
+                live: 0,
+                backfill: Some(0),
+            });
+            let key = readers
+                .open(
+                    Reader::Unnamed,
+                    start,
+                    u64::MAX,
+                    Charge::Places(slots.clone()),
+                )
+                .key;
+            readers.queue(&frame, &set, 0..1);
+            (readers, key)
+        })
+        .bench_local_values(|(mut readers, key)| {
+            divan::black_box(readers.release(1));
+            divan::black_box(readers.take(key.into()));
+            readers
+        });
+}
+
+/// Releases each frame of [`wide`] to one session of the places that `slots` gives.
+fn release_through(
+    bencher: Bencher<'_, '_>,
+    slots: impl FnOnce(&KeySet) -> Box<[channel::Slot]>,
+) {
+    let (frame, set) = wide();
+    let slots = slots(&set);
     let mut readers = Readers::new(0);
     let start = Start::At(Position {
         live: 0,

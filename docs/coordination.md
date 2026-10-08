@@ -100,6 +100,33 @@ coordinator admits them. Any builder takes any crate. One task is in progress pe
   "Merge path").
 - **Merge:** `gh pr merge <n> --auto` puts it in the merge queue (`docs/factory.md`).
 
+## Small changes
+
+Each PR pays a fixed cost: CI, its review rounds, an audit, and a slot in the merge
+queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHANGES in
+`docs/decisions.md`).
+
+- **Small change:** a fix, a test pin, a doc or comment fix, a rename, or a record, of
+  under about 50 lines.
+- **Fold it in:** when the PR that you build changes its crate or its file, put it
+  there as its own commit. Do it before that PR's first review round where you can, so
+  that it shares that round.
+- **Found by review:** a finding whose fix is a small change in a crate or a file that
+  the PR changes is fixed in that PR, not deferred. Another small one follows the
+  bullets below.
+- **Else, an item:** a small change that you cannot fold in (from an audit, a weekly
+  pass, or a crate that you do not build) is an item of an open issue in its crate: a
+  comment that states the change, the test that pins it, and its source. Choose the
+  issue whose PR has had no review round, by preference one in progress, else the next
+  one in that crate. Its builder folds the item into its PR and lists it in the PR body.
+- **Alone:** a small change gets its own issue and PR only when no open issue in its
+  crate fits, when it fixes a broken `main`, or when other work waits on it.
+- **Records:** each architect, red-team, and `laptop.monitor` keeps one PR open for its
+  own small changes (decisions, threat model notes, fuzz inputs, factory docs), and
+  sends it to review at most once a day, or at once when other work waits on it. A
+  ruling that a code PR needs ships in that PR (`docs/factory.md`, "GitHub is the
+  record"). The director's rule PR keeps its own pace (`/direct`, "The bar").
+
 ## Interface changes
 
 Builders never edit another crate's public surface. To change one, or to add a crate
@@ -107,11 +134,13 @@ dependency:
 
 1. Open an issue labeled `interface` with the proposed signature and the reason. Send
    the link to the crate's architect (`docs/factory.md`).
-2. The architect decides. A change inside the locked decisions becomes a small PR from
-   the crate's builder. A change to a locked decision, a contract, or an oracle goes to
-   the person first, with the architect's recommendation.
+2. The architect decides. A change inside the locked decisions becomes a change from
+   the crate's builder (a small one as "Small changes" says). A change to a locked
+   decision, a contract, or an oracle goes to the person first, with the architect's
+   recommendation.
 3. After the merge, the architect files an issue for each crate that must follow the
-   change.
+   change, or an item of an open issue in that crate when its change is small ("Small
+   changes").
 
 A builder may change anything private inside the crates of its issue without asking.
 
