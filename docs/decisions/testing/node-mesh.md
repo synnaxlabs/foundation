@@ -6,9 +6,12 @@
   `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
   member of: its prefix, its members (one card has the node's key), the voters before
   the first entry of the log, and its founding definitions. The caller gives the same
-  region at each start: the node keeps no copy of it. `None` opens no mesh, and the hub
-  of each task then gets no mesh: a node runs with no region before it founds or joins
-  one. Changed by `laptop.architect`, 2026-10-08T18:42:42Z
+  region at each start: the first start with a region keeps it in the data directory,
+  and a later start with another region stops the node with `mesh::Error::Founding`
+  (#1209, `laptop.architect-2`, 2026-10-08T16:32:10Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064460084). `None`
+  opens no mesh, and the hub of each task then gets no mesh: a node runs with no region
+  before it founds or joins one. Changed by `laptop.architect`, 2026-10-08T18:42:42Z
   (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536). The
   long-term path takes it out of `Config`: the node keeps its membership in its data
   directory when it founds or joins, and reads it at each start.
