@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::task::{Context, Poll, ready};
 
-use env::net::udp::{self, Meta, Transmit, sender};
+use env::net::udp::{self, Meta, Transmit, receiver, sender};
 use env::net::{Connect, Error, Resolve, listener, tcp};
 use types::time::Monotonic;
 
@@ -53,7 +53,7 @@ impl env::net::Driver for Node {
         Ok(Box::new(Socket {
             node: self.clone(),
             bound: bound?,
-            owner: Owner::new(HALF, life),
+            life,
         }))
     }
 
@@ -218,14 +218,15 @@ impl Drop for Stream {
     }
 }
 
-/// A socket or sender clone, in a panic.
+/// A socket half, in a panic.
 const HALF: &str = "a socket half";
 
 /// One UDP socket. A drop closes it.
 struct Socket {
     node: Node,
     bound: Bound,
-    owner: Owner,
+    /// The life of the node at the bind.
+    life: u64,
 }
 
 impl udp::Driver for Socket {
@@ -245,26 +246,16 @@ impl udp::Driver for Socket {
         Box::new(Sender {
             node: self.node.clone(),
             key: self.bound.key,
-            owner: Owner::new(HALF, self.owner.life),
+            owner: Owner::new(HALF, self.life),
         })
     }
 
-    fn poll_recv(
-        &self,
-        cx: &mut Context<'_>,
-        buffers: &mut [IoSliceMut<'_>],
-        meta: &mut [Meta],
-    ) -> Poll<Result<usize, Error>> {
-        self.owner.check(&self.node);
-        let waker = cx.waker().clone();
-        let (poll, unused) = lock(&self.node.shared).net().udp().recv(
-            self.bound.key,
-            waker,
-            buffers,
-            meta,
-        );
-        drop(unused);
-        poll
+    fn receiver(&self) -> Box<dyn receiver::Driver> {
+        Box::new(Receiver {
+            node: self.node.clone(),
+            key: self.bound.key,
+            owner: Owner::new(HALF, self.life),
+        })
     }
 }
 
@@ -272,6 +263,31 @@ impl Drop for Socket {
     fn drop(&mut self) {
         let wakers = lock(&self.node.shared).net().udp().close(self.bound.key);
         drop(wakers);
+    }
+}
+
+/// The receive half of a socket.
+struct Receiver {
+    node: Node,
+    key: u64,
+    owner: Owner,
+}
+
+impl receiver::Driver for Receiver {
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffers: &mut [IoSliceMut<'_>],
+        meta: &mut [Meta],
+    ) -> Poll<Result<usize, Error>> {
+        self.owner.check(&self.node);
+        let waker = cx.waker().clone();
+        let (poll, unused) = lock(&self.node.shared)
+            .net()
+            .udp()
+            .recv(self.key, waker, buffers, meta);
+        drop(unused);
+        poll
     }
 }
 

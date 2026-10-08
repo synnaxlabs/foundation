@@ -1,6 +1,7 @@
 //! UDP sockets that move batches of datagrams. A socket has two halves: a
 //! [`Sender`] that each sending thread clones, and a [`Receiver`] with one owner.
 
+pub mod receiver;
 pub mod sender;
 
 use std::fmt;
@@ -179,11 +180,17 @@ impl fmt::Debug for Sender {
 ///     Ok(meta[0])
 /// }
 /// ```
-pub struct Receiver(Arc<dyn Driver>);
+pub struct Receiver {
+    socket: Arc<dyn Driver>,
+    driver: Box<dyn receiver::Driver>,
+}
 
 impl Receiver {
     pub(super) fn new(socket: Arc<dyn Driver>) -> Self {
-        Self(socket)
+        Self {
+            driver: socket.receiver(),
+            socket,
+        }
     }
 
     /// The local address of the socket.
@@ -195,7 +202,7 @@ impl Receiver {
     /// ```
     #[must_use]
     pub fn local(&self) -> SocketAddr {
-        self.0.local()
+        self.socket.local()
     }
 
     /// The most datagrams that one buffer may receive: the GRO segment count, or 1
@@ -208,7 +215,7 @@ impl Receiver {
     /// ```
     #[must_use]
     pub fn batch_max(&self) -> NonZeroUsize {
-        self.0.recv_batch_max()
+        self.socket.recv_batch_max()
     }
 
     /// Receives batches into `buffers` in order, one batch per buffer, and fills the
@@ -255,7 +262,7 @@ impl Receiver {
             meta.len(),
             "poll_recv needs one Meta per buffer"
         );
-        self.0.poll_recv(cx, buffers, meta)
+        self.driver.poll_recv(cx, buffers, meta)
     }
 }
 
@@ -366,15 +373,9 @@ pub trait Driver: Send + Sync {
     /// poll.
     fn sender(&self) -> Box<dyn sender::Driver>;
 
-    /// Receives, with the rules of [`Receiver::poll_recv`]. It absorbs the errors of
-    /// one datagram and gives an error only when the socket is broken. It panics on a
-    /// thread other than the one of the first call.
-    fn poll_recv(
-        &self,
-        cx: &mut Context<'_>,
-        buffers: &mut [IoSliceMut<'_>],
-        meta: &mut [Meta],
-    ) -> Poll<Result<usize, Error>>;
+    /// Gives the driver of the [`Receiver`], not bound to a thread yet. `Net::udp`
+    /// calls it once, and a second call is a defect of `env`.
+    fn receiver(&self) -> Box<dyn receiver::Driver>;
 }
 
 #[cfg(test)]
@@ -411,8 +412,31 @@ mod tests {
         }
     }
 
-    /// Numbers its sender drivers from 0. Each receive gives one datagram of three
+    /// Gives one datagram per receive, one byte longer than the one before, from 3
     /// bytes.
+    struct Receiving {
+        len: usize,
+    }
+
+    impl receiver::Driver for Receiving {
+        fn poll_recv(
+            &mut self,
+            _: &mut Context<'_>,
+            _: &mut [IoSliceMut<'_>],
+            meta: &mut [Meta],
+        ) -> Poll<Result<usize, Error>> {
+            meta[0] = Meta {
+                source: "10.0.0.2:4433".parse().expect("an address"),
+                len: self.len,
+                stride: self.len,
+                ..Meta::default()
+            };
+            self.len += 1;
+            Poll::Ready(Ok(1))
+        }
+    }
+
+    /// Numbers its sender drivers from 0.
     struct Socket {
         senders: AtomicUsize,
         sends: Arc<Mutex<Vec<String>>>,
@@ -438,19 +462,8 @@ mod tests {
             })
         }
 
-        fn poll_recv(
-            &self,
-            _: &mut Context<'_>,
-            _: &mut [IoSliceMut<'_>],
-            meta: &mut [Meta],
-        ) -> Poll<Result<usize, Error>> {
-            meta[0] = Meta {
-                source: "10.0.0.2:4433".parse().expect("an address"),
-                len: 3,
-                stride: 3,
-                ..Meta::default()
-            };
-            Poll::Ready(Ok(1))
+        fn receiver(&self) -> Box<dyn receiver::Driver> {
+            Box::new(Receiving { len: 3 })
         }
     }
 
@@ -636,6 +649,22 @@ mod tests {
             );
             assert_eq!(count, Poll::Ready(Ok(1)));
             assert_eq!((meta[0].len, meta[0].stride), (3, 3));
+        }
+
+        #[test]
+        fn keeps_one_driver_across_polls() {
+            let (_, mut receiver, _) = bind();
+            let mut buffer = [0; 64];
+            let mut meta = [Meta::default()];
+            for len in [3, 4] {
+                let count = receive(
+                    &mut receiver,
+                    &mut [IoSliceMut::new(&mut buffer)],
+                    &mut meta,
+                );
+                assert_eq!(count, Poll::Ready(Ok(1)));
+                assert_eq!(meta[0].len, len);
+            }
         }
 
         #[test]

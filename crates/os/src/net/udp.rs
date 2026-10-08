@@ -5,11 +5,11 @@ use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::thread::{self, ThreadId};
 
-use env::net::udp::{self, Meta, Transmit, sender};
+use env::net::udp::{self, Meta, Transmit, receiver, sender};
 use env::net::{Ecn, Error};
 use noq_udp::{EcnCodepoint, RecvMeta, UdpSocketState};
 use rustix::io::Errno;
@@ -20,14 +20,9 @@ use tokio::io::unix::AsyncFd;
 use super::socket;
 use super::{bind, canonical, errno, from_io, io_error};
 
-/// A bound UDP socket, and the receive half of it.
+/// A bound UDP socket.
 pub(super) struct Udp {
     bound: Arc<Bound>,
-    /// The thread of the receiver's first poll.
-    thread: OnceLock<ThreadId>,
-    /// The receiver's `dup` of the socket, registered for readable by the first poll
-    /// that succeeds.
-    readable: OnceLock<AsyncFd<UdpSocket>>,
 }
 
 /// What each half of one socket reads.
@@ -64,8 +59,6 @@ impl Udp {
         };
         Ok(Self {
             bound: Arc::new(bound),
-            thread: OnceLock::new(),
-            readable: OnceLock::new(),
         })
     }
 }
@@ -102,22 +95,43 @@ impl udp::Driver for Udp {
         })
     }
 
+    fn receiver(&self) -> Box<dyn receiver::Driver> {
+        Box::new(Receiver {
+            bound: Arc::clone(&self.bound),
+            thread: None,
+            readable: None,
+        })
+    }
+}
+
+/// The driver of the `Receiver`.
+struct Receiver {
+    bound: Arc<Bound>,
+    /// The thread of the first poll.
+    thread: Option<ThreadId>,
+    /// A `dup` of the socket, registered for readable by the first poll that
+    /// succeeds.
+    readable: Option<AsyncFd<UdpSocket>>,
+}
+
+impl receiver::Driver for Receiver {
     fn poll_recv(
-        &self,
+        &mut self,
         cx: &mut Context<'_>,
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> Poll<Result<usize, Error>> {
-        let bound = &self.bound;
-        let thread = self.thread.get_or_init(|| thread::current().id());
+        let bound = &*self.bound;
+        let thread = self.thread.get_or_insert_with(|| thread::current().id());
         socket::on_thread("UDP receiver", *thread);
-        let socket = if let Some(socket) = self.readable.get() {
-            socket
-        } else {
-            let socket = (bound.socket.try_clone())
-                .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
-                .map_err(|e| from_io(&e))?;
-            self.readable.get_or_init(|| socket)
+        let socket = match &mut self.readable {
+            Some(socket) => socket,
+            none @ None => {
+                let socket = (bound.socket.try_clone())
+                    .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
+                    .map_err(|e| from_io(&e))?;
+                none.insert(socket)
+            }
         };
         loop {
             let mut guard =
