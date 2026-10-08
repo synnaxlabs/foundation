@@ -3346,8 +3346,11 @@ How to read this record:
   `laptop.architect-2` on #1794
   (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931,
   2026-10-08 05:03 UTC). The code of that refusal is `influx.bad-address`. Proposed by
-  `connector` on #1794
-  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052532087).
+  `connector` as its address code
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052532087,
+  2026-10-08 04:51 UTC), and approved by item 4 of
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931
+  (2026-10-08 05:03 UTC).
 - **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
   names one sample of an index on each path (X31), and InfluxDB keys a point by
   measurement, tag set, and time, so a resend stores each sample once. Each run of
