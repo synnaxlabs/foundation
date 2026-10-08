@@ -239,7 +239,7 @@ impl Store {
     }
 
     /// Ends when no put of `digest` is in flight.
-    async fn wait(&self, digest: Digest) {
+    fn wait(&self, digest: Digest) -> Waiter<'_> {
         let key = self.waiters.get();
         self.waiters.set(key + 1);
         Waiter {
@@ -247,7 +247,6 @@ impl Store {
             digest,
             key,
         }
-        .await;
     }
 
     /// Reads the file of `digest` and gives its bytes when they hash to `digest`.
@@ -337,7 +336,10 @@ impl Future for Waiter<'_> {
         let Some(State::Writing(wakers)) = chunks.get_mut(&self.digest) else {
             return Poll::Ready(());
         };
-        wakers.insert(self.key, cx.waker().clone());
+        let replaced = wakers.insert(self.key, cx.waker().clone());
+        // The last drop of a waker can drop a task that uses the store.
+        drop(chunks);
+        drop(replaced);
         Poll::Pending
     }
 }
@@ -345,9 +347,13 @@ impl Future for Waiter<'_> {
 impl Drop for Waiter<'_> {
     fn drop(&mut self) {
         let mut chunks = self.store.chunks.borrow_mut();
-        if let Some(State::Writing(wakers)) = chunks.get_mut(&self.digest) {
-            wakers.remove(&self.key);
-        }
+        let removed = match chunks.get_mut(&self.digest) {
+            Some(State::Writing(wakers)) => wakers.remove(&self.key),
+            _ => None,
+        };
+        // As in `poll`, the waker drops after the borrow.
+        drop(chunks);
+        drop(removed);
     }
 }
 
@@ -1731,14 +1737,20 @@ mod tests {
             }
         }
 
-        fn wakers(store: &Store, digest: Digest) -> usize {
-            let chunks = store.chunks.borrow();
-            let Some(State::Writing(wakers)) = chunks.get(&digest) else {
-                panic!("no put of the digest is in flight");
-            };
-            wakers.len()
+        /// Polls `future` once with a waker of `count`.
+        fn poll_with<F: Future>(
+            future: Pin<&mut F>,
+            count: &Arc<Count>,
+        ) -> Poll<F::Output> {
+            let waker = Waker::from(Arc::clone(count));
+            future.poll(&mut std::task::Context::from_waker(&waker))
         }
 
+        fn wakes(count: &Count) -> u64 {
+            count.0.load(Ordering::Relaxed)
+        }
+
+        // A waker that the store keeps holds a count of its `Arc`.
         #[test]
         fn waiters_leave_no_waker() {
             let (mut sim, node) = create_default_node(0);
@@ -1747,13 +1759,12 @@ mod tests {
                 let (digest, block) = chunk(7, 3000);
                 let mut put = pin!(store.put(digest, &block));
                 assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                let count = Arc::new(Count::default());
                 for _ in 0..1000 {
-                    let mut get = pin!(store.get(digest));
-                    let waker = Waker::from(Arc::new(Count::default()));
-                    let mut cx = std::task::Context::from_waker(&waker);
-                    assert!(get.as_mut().poll(&mut cx).is_pending());
+                    let get = pin!(store.get(digest));
+                    assert!(poll_with(get, &count).is_pending());
                 }
-                assert_eq!(wakers(&store, digest), 0);
+                assert_eq!(Arc::strong_count(&count), 1);
             })
             .unwrap();
         }
@@ -1770,19 +1781,70 @@ mod tests {
                 let counts: Vec<_> =
                     (0..1000).map(|_| Arc::new(Count::default())).collect();
                 for count in &counts {
-                    let waker = Waker::from(Arc::clone(count));
-                    let mut cx = std::task::Context::from_waker(&waker);
-                    assert!(get.as_mut().poll(&mut cx).is_pending());
+                    assert!(poll_with(get.as_mut(), count).is_pending());
                 }
-                assert_eq!(wakers(&store, digest), 1);
+                let held: Vec<usize> = counts.iter().map(Arc::strong_count).collect();
+                let mut expected = vec![1; 1000];
+                expected[999] = 2;
+                assert_eq!(held, expected);
                 put.await.unwrap();
-                let woken: Vec<u64> = counts
-                    .iter()
-                    .map(|count| count.0.load(Ordering::Relaxed))
-                    .collect();
+                let woken: Vec<u64> = counts.iter().map(|count| wakes(count)).collect();
                 let mut expected = vec![0; 1000];
                 expected[999] = 1;
                 assert_eq!(woken, expected);
+                assert_eq!(&get.await.unwrap().unwrap()[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn a_dropped_waiter_keeps_the_wakers_of_others() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                let mut put = pin!(store.put(digest, &block));
+                assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                let kept = Arc::new(Count::default());
+                let mut get = pin!(store.get(digest));
+                assert!(poll_with(get.as_mut(), &kept).is_pending());
+                {
+                    let dropped = pin!(store.get(digest));
+                    let count = Arc::new(Count::default());
+                    assert!(poll_with(dropped, &count).is_pending());
+                }
+                assert_eq!(Arc::strong_count(&kept), 2);
+                put.await.unwrap();
+                assert_eq!(wakes(&kept), 1);
+                assert_eq!(&get.await.unwrap().unwrap()[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        // The first get keeps its key after its put drops. A key used again by a
+        // waiter of the next put would let the first get's drop take its waker.
+        #[test]
+        fn a_waiter_of_a_dropped_put_keeps_the_wakers_of_the_next_put() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                let mut first = Box::pin(store.get(digest));
+                {
+                    let mut put = pin!(store.put(digest, &block));
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                    let count = Arc::new(Count::default());
+                    assert!(poll_with(first.as_mut(), &count).is_pending());
+                }
+                let mut put = pin!(store.put(digest, &block));
+                assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                let kept = Arc::new(Count::default());
+                let mut get = pin!(store.get(digest));
+                assert!(poll_with(get.as_mut(), &kept).is_pending());
+                drop(first);
+                assert_eq!(Arc::strong_count(&kept), 2);
+                put.await.unwrap();
+                assert_eq!(wakes(&kept), 1);
                 assert_eq!(&get.await.unwrap().unwrap()[..], &block[..]);
             })
             .unwrap();
