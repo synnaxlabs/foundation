@@ -908,6 +908,34 @@ fn a_stream_poll_on_a_second_thread_panics() {
 
 #[test]
 #[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_write_of_no_bytes_on_a_second_thread_panics() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[b"x"]).await, Ok(1));
+        (client, server, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut client, &[b""]).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_first_write_of_no_bytes_binds_the_thread() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[b""]).await, Ok(0));
+        (client, server, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut client, &[b"y"]).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
 fn a_poll_after_the_close_on_a_second_thread_panics() {
     let (mut client, _server, _listener) = on_thread("net-first", || async {
         let net = net();

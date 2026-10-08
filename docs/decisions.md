@@ -5940,13 +5940,16 @@ How to read this record:
   Amended (2026-10-08T19:21:24Z, #1977): a write of no bytes gives `Ok(0)` at once, with
   no wait and no error, also after a reset or `poll_close`. It writes nothing, so it has
   nothing to report; the next write of bytes, read, or close reports a reset or a close.
-  `os` and `sim` each return before any other step, so the two agree with no shared
-  logic. Lost: `Ok(0)` or the error that ended the stream, which needs a read of
-  `SO_ERROR` in `os` and the close and reset states in both drivers, for a call that no
-  caller makes; and a wait as for a write of bytes, which needs the kernel's unsent
-  count on each such call and is not exact on macOS. Decided by `laptop.architect-2`
-  (2026-10-08T19:21:24Z:
-  https://github.com/synnaxlabs/foundation/issues/1977#issuecomment-6067346540).
+  `os` and `sim` each return after the thread check (and, in `sim`, the crash check),
+  before any other step, so the two agree with no shared logic. The thread check binds
+  the stream to its thread, also at a first poll that writes no bytes. Lost: `Ok(0)` or
+  the error that ended the stream, which needs a read of `SO_ERROR` in `os` and the
+  close and reset states in both drivers, for a call that no caller makes; and a wait as
+  for a write of bytes, which needs the kernel's unsent count on each such call and is
+  not exact on macOS. Decided by `laptop.architect-2` (2026-10-08T19:21:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1977#issuecomment-6067346540; the
+  order, 2026-10-08T19:44:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that

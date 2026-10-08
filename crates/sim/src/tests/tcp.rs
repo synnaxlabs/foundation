@@ -487,6 +487,68 @@ async fn write_nothing(tcp: &mut Tcp) -> [Option<Result<usize, Net>>; 2] {
     ]
 }
 
+/// A stream that `b` accepts from `a`, after the run of the connect.
+fn accepted() -> (crate::Sim, node::Node, Tcp) {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(
+        &b,
+        "server",
+        move |_| async move { accept(&mut listener).await },
+    );
+    let remote = at(&b, 4433);
+    start(&a, "client", move |node| async move {
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        pending::<()>().await;
+    });
+    sim.run_for(millis(5)).unwrap();
+    let tcp = take(&server);
+    (sim, b, tcp)
+}
+
+#[test]
+fn a_write_of_no_bytes_after_a_crash_panics() {
+    let (mut sim, b, mut tcp) = accepted();
+    sim.crash(&b, Crash::Process);
+    start(&b, "stream", move |_| async move {
+        drop(write_nothing(&mut tcp).await);
+    });
+    let message = "a TCP stream of node 1 polls after a crash of the node";
+    assert_eq!(sim.run_for(millis(1)), Err(panicked("stream", message)));
+}
+
+#[test]
+fn a_write_of_no_bytes_on_a_second_thread_panics() {
+    let (mut sim, b, mut tcp) = accepted();
+    let slot = start(&b, "first", move |_| async move {
+        drop(poll_once(write_all(&mut tcp, b"x")).await);
+        tcp
+    });
+    sim.run_for(millis(1)).unwrap();
+    let mut tcp = take(&slot);
+    start(&b, "second", move |_| async move {
+        drop(write_nothing(&mut tcp).await);
+    });
+    let message = "a TCP stream polls only on thread \"first\" of its first poll";
+    assert_eq!(sim.run_for(millis(1)), Err(panicked("second", message)));
+}
+
+#[test]
+fn a_first_write_of_no_bytes_binds_the_thread() {
+    let (mut sim, b, mut tcp) = accepted();
+    let slot = start(&b, "first", move |_| async move {
+        drop(write_nothing(&mut tcp).await);
+        tcp
+    });
+    sim.run_for(millis(1)).unwrap();
+    let mut tcp = take(&slot);
+    start(&b, "second", move |_| async move {
+        drop(poll_once(write_all(&mut tcp, b"x")).await);
+    });
+    let message = "a TCP stream polls only on thread \"first\" of its first poll";
+    assert_eq!(sim.run_for(millis(1)), Err(panicked("second", message)));
+}
+
 #[test]
 fn a_write_of_no_bytes_gives_0_at_a_full_send_buffer() {
     let (mut sim, a, b) = pair(0, link::Config::default());

@@ -64,7 +64,7 @@ impl Stream {
             },
         };
         Ok(Self {
-            socket: Socket::Idle(stream),
+            socket: Socket::new(stream),
             local,
             peer,
             #[cfg(target_os = "macos")]
@@ -149,6 +149,7 @@ impl tcp::Driver for Stream {
             .take_while(|buffer| buffer.is_empty())
             .count();
         let buffers = &buffers[skip..];
+        self.socket.bind("stream");
         if buffers.is_empty() {
             return Poll::Ready(Ok(0));
         }

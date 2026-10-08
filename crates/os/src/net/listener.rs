@@ -39,7 +39,7 @@ impl Listener {
         let listener = std::net::TcpListener::from(fd);
         let local = listener.local_addr().map_err(|e| io_error(errno(&e)))?;
         Ok(Self {
-            socket: Socket::Idle(listener),
+            socket: Socket::new(listener),
             local: canonical(local),
             options: config.options,
         })
