@@ -18,7 +18,9 @@ use types::ed25519::PrivateKey;
 use types::time::{Interval, Span, Stamp};
 use wire::header::MALFORMED;
 use wire::hub::BUSY;
-use wire::hub::client::{BODY_BYTES_MAX, Challenge, REFUSED, Refusal, Response};
+use wire::hub::client::{
+    BODY_BYTES_MAX, Challenge, REFUSED, Refusal, Request, Response,
+};
 
 use super::link::{
     AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
@@ -27,14 +29,17 @@ use super::link::{
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
 use super::{NODE, POOL};
 
-/// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`.
+/// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`, with a
+/// client pool that holds a body at the cap while the transport sends it.
 async fn connect(
     node: &sim::node::Node,
     tasks: env::tasks::Tasks,
     at: Address,
     key: PrivateKey,
 ) -> Result<Client, Error> {
-    connect_with(node, tasks, at, key, own_pool()).await
+    let config = block::Config { budget: 2 << 24 };
+    let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
+    connect_with(node, tasks, at, key, Rc::new(pool)).await
 }
 
 /// As [`connect`], where the client sends from `pool`, and the transport from a pool
@@ -199,7 +204,7 @@ fn renews_the_hello_before_it_expires() {
 }
 
 /// Two tasks that call `request` on clones of one client at once each get their own
-/// replies, and the node never stops one as `MALFORMED`.
+/// replies, in turns, and the node never stops one as `MALFORMED`.
 #[test]
 fn takes_requests_from_two_tasks_one_at_a_time() {
     const EACH: usize = 8;
@@ -229,12 +234,48 @@ fn takes_requests_from_two_tasks_one_at_a_time() {
             assert_eq!(replied.get(), 2 * EACH);
         },
     );
-    let requests = home
+    let order: Vec<_> = (0..EACH)
+        .flat_map(|i| [1, 2].map(|tag| [tag, u8::try_from(i).expect("small")]))
+        .map(|body| Ok(Got::Request(name(SUBJECT), body.to_vec())))
+        .collect();
+    let requests: Vec<_> = home
         .served
-        .iter()
+        .into_iter()
         .filter(|got| matches!(got, Ok(Got::Request(..))))
-        .count();
-    assert_eq!(requests, 2 * EACH, "{:?}", home.served);
+        .collect();
+    assert_eq!(requests, order);
+}
+
+/// A body of exactly the cap is sent whole.
+#[test]
+fn sends_a_body_at_the_cap() {
+    by_hand(
+        137,
+        |session, node| async move {
+            let mut incoming = session.accept().await.expect("a stream");
+            header(&mut incoming).await;
+            let mut bytes = 0;
+            while let Some(message) = incoming.receiver.recv().await.expect("a message")
+            {
+                bytes += message.len();
+            }
+            let cap = usize::try_from(BODY_BYTES_MAX).expect("fits");
+            assert_eq!(bytes, Request::LEN + cap);
+            let mut response = [0; Response::LEN];
+            Response { length: 0 }.encode(&mut response);
+            let sender = incoming.sender.as_mut().expect("two-way");
+            let response = own_pool().copy(&response).expect("room");
+            sender.send(response).await.expect("sends");
+            sender.finish().expect("finishes");
+            node.clock().sleep(QUIET).await;
+        },
+        |client, _| {
+            Box::pin(async move {
+                let cap = usize::try_from(BODY_BYTES_MAX).expect("fits");
+                assert_eq!(client.request(&vec![7; cap]).await, Ok(Vec::new()));
+            })
+        },
+    );
 }
 
 #[test]

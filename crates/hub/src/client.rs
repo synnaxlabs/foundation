@@ -2,11 +2,12 @@
 //! admitted, and sends signed requests.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::poll_fn;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 use transport::stream::{Receiver, Sender};
 use transport::{Address, Class, Code};
@@ -139,7 +140,7 @@ impl Client {
     }
 
     /// Sends `body` as a request signed with the subject's key, and gives the body of
-    /// the response. Requests of one client go one at a time, in no set order. A
+    /// the response. Requests of one client go one at a time, in the order they began. A
     /// request dropped before its response began keeps the turn until the response
     /// begins or the stream ends, since the node holds it open until then.
     ///
@@ -278,35 +279,82 @@ async fn renew(
     shared.session.close(Code(code));
 }
 
-/// The turn of one request at a time.
+/// The turn of one request at a time, given in the order that requests ask for it.
 #[derive(Debug, Default)]
 struct Turn {
+    /// Stays true while waiters remain, as `give` hands the turn on directly.
     taken: Cell<bool>,
-    /// The requests that wait for the turn.
-    waiters: RefCell<Vec<Waker>>,
+    waiters: RefCell<VecDeque<Rc<Waiter>>>,
+}
+
+#[derive(Debug, Default)]
+struct Waiter {
+    given: Cell<bool>,
+    waker: RefCell<Option<Waker>>,
 }
 
 impl Turn {
     async fn take(&self) {
-        poll_fn(|cx| {
-            if !self.taken.replace(true) {
-                return Poll::Ready(());
-            }
-            let mut waiters = self.waiters.borrow_mut();
-            if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
-                waiters.push(cx.waker().clone());
-            }
-            Poll::Pending
-        })
+        if !self.taken.replace(true) {
+            return;
+        }
+        let waiter = Rc::new(Waiter::default());
+        self.waiters.borrow_mut().push_back(Rc::clone(&waiter));
+        Wait {
+            turn: self,
+            waiter,
+            done: false,
+        }
         .await;
     }
 
-    /// Wakes each waiter, and the first to poll takes the turn, so a waiter that
-    /// dropped holds nothing.
     fn give(&self) {
-        self.taken.set(false);
-        for waker in self.waiters.take() {
+        let next = self.waiters.borrow_mut().pop_front();
+        let Some(waiter) = next else {
+            self.taken.set(false);
+            return;
+        };
+        waiter.given.set(true);
+        if let Some(waker) = waiter.waker.take() {
             waker.wake();
+        }
+    }
+}
+
+/// A place in the line for the turn. A drop leaves the line, or hands on a turn
+/// given to it.
+struct Wait<'a> {
+    turn: &'a Turn,
+    waiter: Rc<Waiter>,
+    done: bool,
+}
+
+impl Future for Wait<'_> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.waiter.given.get() {
+            self.done = true;
+            return Poll::Ready(());
+        }
+        *self.waiter.waker.borrow_mut() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl Drop for Wait<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        if self.waiter.given.get() {
+            self.turn.give();
+        } else {
+            let waiter = &self.waiter;
+            self.turn
+                .waiters
+                .borrow_mut()
+                .retain(|other| !Rc::ptr_eq(other, waiter));
         }
     }
 }
