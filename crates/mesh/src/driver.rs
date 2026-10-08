@@ -74,10 +74,10 @@ pub struct Config {
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
     pub voters: BTreeSet<node::Key>,
-    /// The node's files. The mesh reads and writes only in `dir`.
+    /// The file seam. `os` or `sim` implements it.
     pub files: Files,
-    /// The mesh's directory in `files`. The mesh makes it when it is not there. Its
-    /// parent must be there.
+    /// The mesh's directory, relative to the data directory. The mesh makes it, and
+    /// the log goes in `log` in it. Its parent must be there and durable.
     pub dir: PathBuf,
     /// Times the ticks of the group.
     pub clock: Clock,
@@ -100,7 +100,9 @@ pub struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory gives [`Error::Log`]. [`Mesh::ended`] tells when.
+/// open of the same directory gives [`Error::Log`]. Each task that sends ends at its
+/// next poll: a dial or a send in progress stops, and does not wait for its timeout.
+/// [`Mesh::ended`] tells when each task has ended.
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
@@ -240,9 +242,11 @@ impl Mesh {
         self.group.borrow().raft.key()
     }
 
-    /// Resolves when each task of the mesh has ended: soon after the group stops or
-    /// the last clone drops. Then the log is closed, and the mesh holds no session, no
-    /// block, and no clone of [`Config::transport`]. It holds no clone of the mesh.
+    /// Gives a future that resolves once each task of the mesh has ended: the group's
+    /// task and each task that sends. The future holds no clone, so it does not keep
+    /// the group running. Once it resolves, the mesh holds no file, and a new open of
+    /// its directory can take the log.
+    #[must_use]
     pub fn ended(&self) -> Ended {
         Ended(Rc::clone(&self.running))
     }
@@ -4853,19 +4857,23 @@ mod tests {
         });
     }
 
+    /// The other members never answer, so each dial waits for [`IDLE`]. The drop of
+    /// the last mesh stops each dial, and `ended` does not wait for it.
     #[test]
-    fn ended_waits_for_each_task_that_sends() {
+    fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
         solo(|node, tasks| async move {
             let config = config(&node, &tasks, 1, &IDS, &IDS);
             let transport = Rc::clone(&config.transport);
             let mesh = Mesh::open(config).await.unwrap();
-            node.clock()
-                .sleep(Span::from_nanos(5 * Span::SECOND.nanos()))
-                .await;
+            let clock = node.clock();
+            clock.sleep(seconds(5)).await;
             assert!(Rc::strong_count(&transport) > 2);
             let ended = mesh.ended();
+            let dropped = clock.now();
             drop(mesh);
             ended.await;
+            let waited = clock.now() - dropped;
+            assert!(waited <= TICK, "it ended after {waited}");
             assert_eq!(Rc::strong_count(&transport), 1);
         });
     }
@@ -4883,29 +4891,29 @@ mod tests {
     }
 
     #[test]
-    fn a_power_cut_keeps_the_directory_of_the_config() {
+    fn a_power_cut_right_after_the_open_keeps_the_directory_and_its_log() {
         let mut sim = Sim::new(sim::Config::default());
         let node = sim.node(sim::node::Config::default());
-        let at = sim
-            .run_on(&node, |node, tasks| async move {
-                let config = Config {
-                    dir: "region".into(),
-                    ..config(&node, &tasks, 1, &[1], &[1])
-                };
-                let mesh = Mesh::start(config).await.unwrap();
-                lead(&mesh, &node.clock(), home(1)).await
-            })
-            .unwrap();
+        sim.run_on(&node, |node, tasks| async move {
+            let config = Config {
+                dir: "region".into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            Mesh::start(config).await.unwrap();
+        })
+        .unwrap();
         sim.crash(&node, Crash::Power);
-        let entries = sim
+        let listed = sim
             .run_on(&node, |node, _| async move {
-                let dir = Path::new("region").join(LOG);
-                let (_, stored) =
-                    Log::open(node.files(), dir, create_pool()).await.unwrap();
-                stored.entries
+                let files = node.files();
+                (
+                    files.list(Path::new("")).await,
+                    files.list(Path::new("region")).await,
+                )
             })
             .unwrap();
-        assert_eq!(entries.last().map(|entry| entry.at), Some(at));
+        let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
+        assert_eq!(listed, (names(&["region"]), names(&[LOG])));
     }
 
     #[test]

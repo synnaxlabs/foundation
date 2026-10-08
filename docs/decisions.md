@@ -2785,6 +2785,11 @@ How to read this record:
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): each task that sends ends
+  at its next poll after the group stops or the last `Mesh` drops. A dial or a send in
+  progress stops, so it never holds `Mesh::ended` for a dial timeout. Decided by
+  `laptop.architect`, 04:00 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -2855,18 +2860,23 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
   three types.
-  Amended (2026-10-08, PR 3b of #585): `Config::dir` is the mesh's directory in
-  `Config::files`, and the log is in its `log` directory. `node` gives `mesh` (decided
-  by `laptop.architect`, 03:37 UTC:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). `open`
-  makes `dir` and syncs its parent when it is not there. `Mesh::ended` gives `Ended`, a
-  future that resolves when each task of the mesh has ended: the group's task and each
-  task that sends. It holds no `Group`, so it waits soon after the last clone drops or
-  the group stops. Then the log is closed, and a new open of `dir` succeeds. Lost: a
-  counting `Tasks` driver in `node`, which counts each task of a shard, not those of the
-  mesh; a `Files` call that gives a subdirectory, which changes `env` for one caller
-  (the field won, by `laptop.architect-2`, 03:54 UTC:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866).
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir` is the
+  mesh's directory, relative to the data directory. The mesh makes it and syncs its
+  parent, and the log goes in `log` in it. Its parent must be there and durable. `node`
+  gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each task of
+  the mesh has ended: the group's task and each task that sends. It holds no clone, so
+  it does not keep the group running. Once it resolves, the mesh holds no file, and a
+  new open of its directory can take the log. Decided by `laptop.architect`, 04:00 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after
+  the ruling on PR 3b, 03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475, and the
+  field over a `Files` call by `laptop.architect-2`, 03:54 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866. Lost: a
+  counting `Tasks` driver in `node`, because `node` then watches the tasks of another
+  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end
+  the group; `env::files::Files::within`, because `env` then gives two ways to scope
+  the files of a crate, beside `buffer::Config::dir`. A change that wants it later
+  moves `buffer` and `mesh` together.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
