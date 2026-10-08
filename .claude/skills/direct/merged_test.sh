@@ -1,5 +1,6 @@
 #!/bin/sh
-# Runs merged.sh against fixed answers. A stub `gh` prints `$STUB/<n>` on its call <n>.
+# Runs merged.sh against fixed answers. A stub `gh` prints `$STUB/<n>` on its call <n>,
+# and writes its arguments, one to a line, to `$STUB/args.<n>`.
 # A stub `sleep` returns at once, and stops the script when no answer is left. It keeps
 # its files in a new folder from `mktemp -d`. Exit 1 on a failure.
 set -u
@@ -10,6 +11,7 @@ cat > "$tmp/bin/gh" <<'STUB'
 #!/bin/sh
 n=$(($(cat "$STUB/calls") + 1))
 echo "$n" > "$STUB/calls"
+printf '%s\n' "$@" > "$STUB/args.$n"
 cat "$STUB/$n"
 STUB
 cat > "$tmp/bin/sleep" <<'STUB'
@@ -24,9 +26,10 @@ check() {
   echo 0 > "$tmp/$1/calls"
   STUB=$tmp/$1 TMPDIR=$tmp/$1 PATH="$tmp/bin:$PATH" sh "$here/merged.sh" \
     > "$tmp/$1/out" 2> /dev/null
-  got=$(cat "$tmp/$1/out")
-  [ "$got" = "$2" ] && return
-  printf 'FAIL %s\nwant:\n%s\ngot:\n%s\n' "$1" "$2" "$got"
+  # `$(...)` drops trailing newlines, so compare the bytes.
+  printf '%s\n' "$2" | cmp -s - "$tmp/$1/out" && return
+  printf 'FAIL %s\nwant:\n%s\ngot:\n' "$1" "$2"
+  cat "$tmp/$1/out"
   failed=1
 }
 
@@ -49,5 +52,22 @@ mkdir "$tmp/first"
 : > "$tmp/first/1"
 echo '#5 +1 -1 First' > "$tmp/first/2"
 check first '#5 +1 -1 First'
+
+# Each call lists the PRs merged into main since the start, most recently updated first.
+t='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+for n in 1 2; do
+  grep -q -x -E "base:main merged:>=$t sort:updated-desc" "$tmp/first/args.$n" &&
+    continue
+  printf 'FAIL search: call %s\n' "$n"
+  cat "$tmp/first/args.$n"
+  failed=1
+done
+
+# A poll with no merge prints nothing.
+mkdir "$tmp/empty"
+: > "$tmp/empty/1"
+: > "$tmp/empty/2"
+echo '#5 +1 -1 First' > "$tmp/empty/3"
+check empty '#5 +1 -1 First'
 
 exit "$failed"
