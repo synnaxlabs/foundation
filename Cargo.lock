@@ -19,6 +19,7 @@ dependencies = [
 name = "access"
 version = "0.0.0"
 dependencies = [
+ "document",
  "proptest",
  "spec",
  "types",
@@ -352,6 +353,7 @@ dependencies = [
  "env",
  "http",
  "http-body",
+ "hub",
  "hyper",
  "proptest",
  "sim",

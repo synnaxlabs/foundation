@@ -1,12 +1,12 @@
 use document::diagnostic::{Code, Diagnostic};
-use document::value::{self, Value};
+use document::value::Value;
 use document::{Block, Span, read};
 use spec::channel::{Data, Edge, Error, Kind};
 use spec::data_type::DataType;
 use spec::unit::Unit;
 use types::name::Name;
 
-use crate::{Definition, Found, Reported};
+use crate::{Definition, Found, Reported, written};
 
 const BAD_CHANNEL_KIND: Code = Code::new("config.bad-channel-kind");
 const BAD_DATA_TYPE: Code = Code::new("config.bad-data-type");
@@ -165,13 +165,4 @@ fn text<'v>(
             format!("Write a string such as {example}"),
         )
     })
-}
-
-/// The text of a string or a reference, as the file wrote it.
-fn written(value: &Value) -> Option<&str> {
-    match &value.kind {
-        value::Kind::String(text) => Some(text),
-        value::Kind::Reference(name) => Some(name.as_str()),
-        _ => None,
-    }
 }

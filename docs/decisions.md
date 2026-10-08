@@ -2180,7 +2180,21 @@ How to read this record:
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
   caller must keep and that shows only at a restart. The person decided on 2026-10-05
-  ("I approve long term fix on 522"), #522.
+  ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
+  configuration removed a node: the configuration before the entries or a committed
+  `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
+  ask it at a refusal and keeps no copy of the configurations (#1105, #1762).
+  `Voters::contains` and `Voters::nodes` are public. Decided by `laptop.architect`,
+  2026-10-08T03:04:33Z:
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777. After
+  compaction, a snapshot also carries the nodes that the configurations it replaces
+  held or removed, so the answer survives a trim (#253; `laptop.architect`,
+  2026-10-08T03:41:50Z:
+  https://github.com/synnaxlabs/foundation/pull/1775#issuecomment-6051704590).
+  Supersedes the place of `held` in `mesh` in part 2 of
+  https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747 and
+  finding 2 of
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -3191,7 +3205,39 @@ How to read this record:
   name comes from a file. A run or a discovery fails with one of three classes:
   `Config` (stop until the spec changes), `Device`, and `Retry` (restart with
   backoff). Decided by the `connector` builder in the plan on #338, after
-  `/eb-review`; approved by the coordinator (#338).
+  `/eb-review`; approved by the coordinator (#338). `Table::check` takes where the file
+  names the kind and puts `connector.unknown-kind` there; `discover` and `run` take
+  their kind from the spec, which has no spans (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC). `Table::check` also puts there each diagnostic of the kind
+  with no span, since a `Document` has none to place a missing attribute
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967,
+  2026-10-08 03:59 UTC).
+- **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
+  an out connector: the `select` attribute and one `reader` block with `name`, `mode`
+  (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
+  reader is ad hoc and complete. A second `reader` block is `config.repeated-block`, and
+  `read` reads only the first, where a label is `config.label-count`. A negative `hold`
+  is `config.negative-span` (READER RULES, #94). A `hold` with no `name` or in `latest`
+  mode is `connector.unnamed-hold` or `connector.latest-hold`, since only a named
+  complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
+  `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
+  `document.unknown-attribute` or `document.unknown-block` for each other key it does
+  not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
+  key. Decided by `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC, and
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
+  2026-10-08 03:05 UTC). A kind that lists `select` in its attributes or `reader` in its
+  blocks is a defect in the kind, and `read` panics (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6052200724, 2026-10-08
+  04:25 UTC). Supersedes the `KEYS` part of
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152 and
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
+  03:59 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
@@ -3625,7 +3671,11 @@ How to read this record:
   2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
   rest at `finish`, which drops the diagnostics when a caller returns early;
   `unknown_attributes` and `unknown_blocks` as two functions; a public
-  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on. `read::one_of` lists words in
+  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list, as
+  `missing` does. It is public for the `config.bad-action` fix, so no copy goes into
+  `config`. Decided by `laptop.architect-2` at 2026-10-08T03:54:12Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -3843,6 +3893,31 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
+- **ACCESS BLOCK (2026-10-08)** `access "<name>" { subjects, select, allow, authority }`
+  (C8) gives a `spec::access::Policy` at `<name>.@access`. `subjects` and `select` are
+  selectors. `allow` is one action or a list of actions, each a string or a bare word,
+  so `["read", "write"]` and `[read, write]` read the same; a repeat is one action, and
+  an empty list is `config.empty-allow`. A word that is not an action is
+  `config.bad-action`. `authority` is optional, an integer from 0 to 255
+  (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
+  the least, as default deny gives the least. Such a writer still takes control when no
+  writer holds it (GATE RULES). Lost: an `authority` that `write` makes required, a
+  rule that C8 does not have. The action words are a table in `config` until a second
+  reader needs them, such as the `plan` output of access; then they move to `spec` as
+  `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
+  An `authority` with no `write` in an `allow` that reads is
+  `config.authority-without-write`, also `authority = 0`: only a write uses an
+  authority, so the value is a mistake. `Policy::new` still sets the authority of a
+  policy with no `write` to zero. Lost: no diagnostic, which hides the mistake. Decided
+  by `laptop.architect-2` at 2026-10-08T04:00:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051909712).
+  It reads two attributes together, so it runs only when each attribute of the block is
+  known and reads, as `config::check` states for a whole definition. Decided by
+  `laptop.architect-2` at 2026-10-08T04:24:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6052187547).
+  Supersedes the silent `authority` of
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
 
 ### 1.12 Access, identity, and secrets
 
@@ -3858,12 +3933,15 @@ How to read this record:
   connector may write channels under its own name by default. The connector default
   caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
   access changes separately. SSO comes later.
-- **REGION PREFIX** `access::Rules::new` takes the region of each policy as a
-  `types::name::Prefix`; `Prefix::ROOT` is the root region. A policy reaches a name when
+- **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
+  with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
+  picks out the policies and connectors itself. A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
-  applied in #1402.
+  applied in #1402. The trees in place of the policies: `laptop.architect`,
+  2026-10-08T03:01:36Z
+  ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -5605,10 +5683,13 @@ Rules:
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
 8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
-   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, and `hub` may take
-   `buffer`, so its tests build a real `home::Shard`. A crate may also take itself, so
-   its tests and benches build with its own `sim` feature (STORED BENCH;
-   `laptop.architect`, 2026-10-08T01:01:28Z:
+   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, `hub` may take
+   `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
+   so its tests build a `spec::connector::Connector` (`laptop.architect`,
+   2026-10-08T03:01:36Z:
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   may also take itself, so its tests and benches build with its own `sim` feature
+   (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
    `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
    code could call the ring), the hub tests in `node`, and a second way to build a shard
@@ -5635,7 +5716,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
-| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
+| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). `os::net` holds one `setsockopt(TCP_NOTSENT_LOWAT)` call, because `rustix` does not give that option (laptop.architect-2, #120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |

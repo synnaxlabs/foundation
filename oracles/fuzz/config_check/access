@@ -1,0 +1,6 @@
+access "a" {
+  subjects = "s.*"
+  select   = "x.**"
+  allow    = [read, "write"]
+  authority = 7
+}
