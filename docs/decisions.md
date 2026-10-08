@@ -6249,8 +6249,8 @@ How to read this record:
   the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
   DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. For a
-  node with a mesh, this replaces the stop order of the sentence that starts "With no
-  mesh, at the stop" in this entry.
+  node with a mesh, this supersedes the stop order of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669.
   Amended (2026-10-08, #1830, by `laptop.architect-2`, 07:26 UTC): with a mesh, each
   session and stream future drops, then the mesh, and the transport drops when the
   last task of the mesh ends, before `lock` drops:
