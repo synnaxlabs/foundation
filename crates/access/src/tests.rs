@@ -9,7 +9,6 @@ use spec::connector::Connector;
 use spec::definition::Kind;
 use spec::placement::{self, Nodes};
 use spec::region::Delegation;
-use spec::subject::Subject;
 use spec::time::{self, Peers};
 use spec::{node_settings, retention};
 use types::byte::Size;

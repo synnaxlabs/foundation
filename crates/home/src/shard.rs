@@ -494,15 +494,17 @@ impl Shard {
 
     /// Opens an unnamed complete reader on the index at `slot`, with a credit of
     /// `limit_bytes`. From the index's live tail on, it gets each live frame with
-    /// samples after the commit that holds it, while the bytes it has spent are
-    /// below its credit: a frame spends what `charge` says. The first such frame
-    /// that finds the credit spent is a miss: the reader gets neither it nor a later
-    /// frame, no grant changes that, and [`take`](Self::take) then gives
-    /// [`Next::Behind`](reader::Next::Behind). [`woken`](Self::woken) names the
-    /// reader once for a miss with no frame waiting, and not for a miss while frames
-    /// wait. The home does not read a missed frame back from disk yet. Close the
-    /// reader and open a new one. The new one starts at the live tail of its open, so
-    /// the frames from the miss to there reach neither reader.
+    /// samples after the commit that holds it, while the bytes it has spent are below
+    /// its credit: a frame spends what `charge` says. A frame that finds the credit
+    /// spent waits for a [`grant`](Self::grant), and so does each later frame. A frame
+    /// that still waits when a later commit releases frames of the index is a miss:
+    /// the reader gets neither it nor a later frame, and [`take`](Self::take) gives
+    /// the frames before it, then [`Next::Behind`](reader::Next::Behind).
+    /// [`woken`](Self::woken) names the reader once for a miss with no frame to take,
+    /// and not for a miss while frames wait to be taken. The home does not read a
+    /// missed frame back from disk yet. Close the reader and open a new one. The new
+    /// one starts at the live tail of its open, so the frames from the miss to there
+    /// reach neither reader.
     ///
     /// # Panics
     ///
@@ -534,8 +536,10 @@ impl Shard {
     }
 
     /// Raises the credit of the complete reader `key` to `limit_bytes` since it
-    /// opened. A limit that is not higher changes nothing, and so does a grant to a
-    /// closed reader: a grant can arrive after its reader closes.
+    /// opened. A frame that waits for a grant can be taken while the bytes the reader
+    /// spent are below its credit, and [`woken`](Self::woken) does not name the reader
+    /// for it: take after the grant. A limit that is not higher changes nothing, and so
+    /// does a grant to a closed reader: a grant can arrive after its reader closes.
     ///
     /// # Panics
     ///
@@ -3061,7 +3065,7 @@ mod tests {
         }
 
         #[test]
-        fn gives_a_complete_reader_out_of_credit_no_later_frame() {
+        fn gives_a_complete_reader_a_frame_that_waits_for_credit_at_a_grant() {
             run(37, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
@@ -3070,15 +3074,62 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
-                assert_eq!(taken(&mut shard, session.into(), 0), []);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert_eq!(missed(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.grant(session, CREDIT);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn misses_a_frame_that_waits_for_credit_at_the_next_commit() {
+            run(37, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1, Charge::Whole);
+                let reader = reader::Key::from(session);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(taken(&mut shard, reader, 0), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 write(&test, &mut shard, a, &[30]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(missed(&mut shard, reader, 0), []);
+                shard.grant(session, CREDIT);
+                write(&test, &mut shard, a, &[40]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
                 assert_eq!(missed(&mut shard, session, 0), []);
+            });
+        }
+
+        #[test]
+        fn gives_a_frame_that_waits_for_credit_on_a_quiet_index_after_a_grant() {
+            run(39, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1, Charge::Whole);
+                let reader = reader::Key::from(session);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                for stamp in [10, 20, 30] {
+                    write(&test, &mut shard, a, &[stamp]);
+                }
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                let other = frame(&test.pool, &set, &[(2, &[40])]);
+                assert_eq!(shard.write(a, LIVE, other), Ok(&[applied(2, 0, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                shard.grant(session, CREDIT);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1), seq(2, 1)]);
             });
         }
 
@@ -3110,12 +3161,18 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe, reader, data.into()]);
-                let (frames, end) = drain(&mut shard, reader);
-                assert_eq!(frames.len(), 2);
-                assert!(matches!(end, reader::Next::Behind));
-                let (frames, end) = drain(&mut shard, data);
-                assert_eq!(frames.len(), 2);
-                assert!(matches!(end, reader::Next::Behind));
+                for key in [reader, data.into()] {
+                    assert_eq!(
+                        taken(&mut shard, key, 0),
+                        [seq(100, 100), seq(200, 100)]
+                    );
+                }
+                write(&test, &mut shard, a, &stamps(4));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader, data.into()]);
+                for key in [reader, data.into()] {
+                    assert_eq!(missed(&mut shard, key, 0), []);
+                }
             });
         }
 
@@ -3132,9 +3189,13 @@ mod tests {
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), []);
+                write(&test, &mut shard, a, &[30]);
+                shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(missed(&mut shard, reader, 0), []);
-                write(&test, &mut shard, a, &[30]);
+                write(&test, &mut shard, a, &[40]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
                 assert_eq!(missed(&mut shard, reader, 0), []);
@@ -3151,9 +3212,11 @@ mod tests {
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                write(&test, &mut shard, a, &[20]);
-                shard.committed().await.expect("the commit ends");
-                assert_eq!(woken(&mut shard), []);
+                for stamp in [20, 30] {
+                    write(&test, &mut shard, a, &[stamp]);
+                    shard.committed().await.expect("the commit ends");
+                    assert_eq!(woken(&mut shard), []);
+                }
                 assert_eq!(missed(&mut shard, reader, 0), [seq(0, 1)]);
                 assert_eq!(woken(&mut shard), []);
             });

@@ -10,6 +10,7 @@ spec = { path = "../spec" }
 types = { path = "../types" }
 
 [dev-dependencies]
+aws-lc-rs.workspace = true
 document = { path = "../document" }
 proptest.workspace = true
 
