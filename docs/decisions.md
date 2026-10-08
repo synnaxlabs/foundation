@@ -2272,12 +2272,15 @@ How to read this record:
   coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
   gives the fuzz target `mesh_change` the decode and encode of a change record; no
   change type is public (decided by the architect, 2026-10-07T11:17:12Z:
-  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855). The
-  module `change` holds the change records and their byte forms (`Change`, `Join`,
-  `Malformed`, `Unknown`). The module `region` holds the state that they move (`State`,
-  `Request`, `Refused`, `Unfit`). One module for both lost: `region::Unknown`, a change
-  of no known kind, was not clear next to `region::Refused::Unknown`, a ticket that is
-  not recorded (decided by the architect, 2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855).
+  `mesh::testing::round_trip_message` and `round_trip_entries` give the fuzz targets
+  `mesh_message` and `mesh_entries` the decode and encode of a message and of entries
+  one after another, in the same way (#1470). The module `change` holds the change
+  records and their byte forms (`Change`, `Join`, `Malformed`, `Unknown`). The module
+  `region` holds the state that they move (`State`, `Request`, `Refused`, `Unfit`). One
+  module for both lost: `region::Unknown`, a change of no known kind, was not clear next
+  to `region::Refused::Unknown`, a ticket that is not recorded (decided by the
+  architect, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383).
 - **MESH DRIVER (#471)** `mesh` runs the `raft` group of one region as one task, on the
   shard that opened it. The task waits for a tick or a `Ready`, and does each `Ready` in
