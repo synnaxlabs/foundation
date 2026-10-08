@@ -475,8 +475,8 @@ fn each(keys: &[&Name]) -> String {
     }
 }
 
-/// The fix of a diagnostic of a connector on the node `node`. [`moves`] gives the first
-/// three, which move the connector or its indexes to another placement.
+/// The fix of a diagnostic of a connector. [`moves`] gives the first three, which move
+/// the connector or its indexes to another placement.
 enum Fix<'a> {
     /// Take the connector and its indexes out of `placements`, the connector's winner
     /// first, into a placement whose `home` is `node`.
@@ -484,8 +484,8 @@ enum Fix<'a> {
         placements: Vec<&'a Name>,
         node: &'a Name,
     },
-    /// Make `node` the home of `placement`, and make `placement` win for the connector
-    /// and its indexes.
+    /// Make `node` the home of `placement`, keep `node` out of its `standby` and
+    /// `copies`, and make `placement` win for the connector and its indexes.
     House { placement: &'a Name, node: &'a Name },
     /// Take the indexes of the connector out of `owners`, the placements that win for
     /// them, into a placement for the connector whose `home` is `node`.
