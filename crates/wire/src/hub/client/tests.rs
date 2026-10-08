@@ -100,12 +100,9 @@ mod pins {
 
     #[test]
     fn the_request() {
-        let mut bytes = vec![5, 8, 7, 6, 5, 4, 3, 2, 1];
+        let mut bytes = vec![5, 0xef, 0xcd, 0xab, 0, 0, 0, 0, 0];
         bytes.extend([0x5e; 64]);
-        let request = request(0x0000_0000_0100_0000);
-        let mut expected = bytes.clone();
-        expected[1..9].copy_from_slice(&0x0100_0000_u64.to_le_bytes());
-        assert_eq!(encode_request(request), expected);
+        assert_eq!(encode_request(request(0x00ab_cdef)), bytes);
     }
 
     #[test]
@@ -441,7 +438,8 @@ proptest! {
     #[test]
     fn round_trips_a_hello(signed in hello()) {
         let bytes = encode_signed(&signed);
-        prop_assert_eq!(Gateway::default().decode(&bytes), Ok(FromProgram::Signed(signed)));
+        let decoded = Gateway::default().decode(&bytes);
+        prop_assert_eq!(decoded, Ok(FromProgram::Signed(signed)));
     }
 
     #[test]
@@ -485,7 +483,8 @@ proptest! {
             let (bytes, after) = rest.split_at(size);
             rest = after;
             let last = rest.is_empty();
-            prop_assert_eq!(gateway.decode(bytes), Ok(FromProgram::Body { bytes, last }));
+            let body = FromProgram::Body { bytes, last };
+            prop_assert_eq!(gateway.decode(bytes), Ok(body));
             prop_assert_eq!(program.decode(bytes), Ok(FromNode::Body { bytes, last }));
         }
         prop_assert_eq!(gateway.decode(&[0]), Err(Error::Trailing));

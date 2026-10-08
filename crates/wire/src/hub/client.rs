@@ -19,10 +19,10 @@
 //! Fields are little-endian.
 //!
 //! - [`Challenge`]: kind 4, the nonce (16), then the earliest and the latest mesh time
-//!   (`u64` nanoseconds each).
+//!   (`i64` nanoseconds each).
 //! - [`Signed`]: kind 4, the hello as [`Hello::encode`] writes it (the subject's
 //!   length (`u8`) and bytes, the key (32), `via` (`u128`), the connection (16), the
-//!   nonce (16), `expires` (`u64` nanoseconds)), and the signature (64). These are the
+//!   nonce (16), `expires` (`i64` nanoseconds)), and the signature (64). These are the
 //!   signed bytes of the hello with no tag.
 //! - [`Request`]: kind 5, the body's length (`u64`), and the signature (64).
 //! - [`Response`]: kind 5 and the body's length (`u64`).
@@ -166,7 +166,7 @@ impl Signed {
     }
 }
 
-/// The fixed part of a request. The body follows.
+/// The fixed part of a request. Its body follows, unless `length` is 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Request {
     /// The bytes of the body, at most [`BODY_BYTES_MAX`].
@@ -203,7 +203,7 @@ impl Request {
     }
 }
 
-/// The fixed part of a response. The body follows.
+/// The fixed part of a response. Its body follows, unless `length` is 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Response {
     /// The bytes of the body, at most [`BODY_BYTES_MAX`].
@@ -247,7 +247,8 @@ pub struct Gateway {
 pub enum FromProgram<'m> {
     /// A hello. The stream is the hello stream.
     Signed(Signed),
-    /// A request. The stream is a request stream, and the body follows.
+    /// A request. The stream is a request stream. Its body follows as `length` bytes
+    /// of `Body` messages; with `length` 0, none follows and the stream is complete.
     Request(Request),
     /// One message of the request's body.
     Body {
@@ -299,7 +300,8 @@ pub struct Program {
 pub enum FromNode<'m> {
     /// A challenge. The stream is the hello stream.
     Challenge(Challenge),
-    /// A response. The stream is a request stream, and the body follows.
+    /// A response. The stream is a request stream. Its body follows as `length` bytes
+    /// of `Body` messages; with `length` 0, none follows and the stream is complete.
     Response(Response),
     /// One message of the response's body.
     Body {

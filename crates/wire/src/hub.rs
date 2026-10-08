@@ -506,7 +506,7 @@ impl fmt::Display for Error {
             Self::Empty => f.write_str("the hub message is empty"),
             Self::Kind { kind } => write!(
                 f,
-                "the hub message has kind {kind}, which this node does not know"
+                "the hub message has kind {kind}, which the hub wire does not have"
             ),
             Self::Length { len } => write!(
                 f,
@@ -1141,7 +1141,7 @@ mod tests {
             (Error::Empty, "the hub message is empty"),
             (
                 Error::Kind { kind: 9 },
-                "the hub message has kind 9, which this node does not know",
+                "the hub message has kind 9, which the hub wire does not have",
             ),
             (
                 Error::Length { len: 4 },

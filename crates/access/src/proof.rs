@@ -252,7 +252,8 @@ impl Error {
             Self::Expired { .. } => "Send a new hello with a later expiry",
             Self::Capped { .. } => "Send a hello that expires within 15 minutes",
             Self::Changed => {
-                "Renew with the subject, key, `via`, and connection of the hello it renews"
+                "Renew with the subject, key, `via`, and connection of the hello it \
+                 renews"
             }
         }
     }
