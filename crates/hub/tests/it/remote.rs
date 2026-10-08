@@ -440,8 +440,9 @@ fn a_reader_past_the_streams_of_its_home_waits_also_after_another_reader_drops()
                 "no stream is free"
             );
             drop(readers.pop());
-            // A transport defect (#2018): a session never opens a stream past
-            // `streams_max` in its life. Once #2018 is fixed, the reader opens here.
+            // A transport defect (#2018): a session gives back stream slots only
+            // in batches, so one drop frees none. Once #2029 merges, the reader
+            // opens here.
             let wait = test.clock.sleep(Span::from_nanos(2_000_000_000));
             assert!(
                 race(opening, wait).await.is_err(),
@@ -1463,6 +1464,96 @@ fn a_reader_whose_home_finishes_the_stream_inside_a_body_stops_it_as_malformed()
                  bytes of its body to come"
             );
             until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() {
+    const BODY: usize = 16_320;
+    const FIRST: usize = 40;
+    const ALL: usize = 64;
+    let half = u32::try_from(BODY / 2).expect("a short body");
+    remote_sized(
+        46,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let session = transport.accept().await.expect("a session");
+            let mut incoming = session.accept().await.expect("a stream");
+            let mut sender = incoming.sender.take().expect("a two-way stream");
+            for _ in 0..3 {
+                incoming
+                    .receiver
+                    .recv()
+                    .await
+                    .expect("a message")
+                    .expect("open");
+            }
+            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let _second = session.accept().await.expect("a second stream");
+            for _ in 0..FIRST {
+                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
+                send(&mut sender, BODY, |out| out.fill(1)).await;
+            }
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            incoming.receiver.stop(Code(0));
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            for _ in FIRST..ALL {
+                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
+                send(&mut sender, BODY, |out| out.fill(1)).await;
+            }
+            send(&mut sender, 1, |out| Reply::Behind.encode(out)).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            test.tasks.spawn(async move {
+                drop(hub.reader(&names, Mode::Complete).await);
+            });
+            for _ in 0..ALL {
+                reader.next().await.expect("a frame");
+            }
+            let next = reader.next();
+            let blocks = fill(&test.pool);
+            let ended = next.await.expect_err("behind");
+            drop(blocks);
+            assert_eq!(ended, Ended::Behind);
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_whose_credit_the_stream_refuses_sends_no_later_credit() {
+    const BODY: usize = 16_320;
+    const ALL: usize = 33;
+    let half = u32::try_from(BODY / 2).expect("a short body");
+    remote(
+        47,
+        sim::link::Config::default(),
+        move |node, _, transport, steps| async move {
+            let (mut sender, receiver) = fake_open(&transport).await;
+            receiver.stop(Code(0));
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            for _ in 0..ALL {
+                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
+                send(&mut sender, BODY, |out| out.fill(1)).await;
+            }
+            send(&mut sender, 1, |out| Reply::Behind.encode(out)).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..ALL {
+                reader.next().await.expect("a frame");
+            }
+            let next = reader.next();
+            let blocks = fill(&test.pool);
+            let ended = next.await.expect_err("behind");
+            drop(blocks);
+            assert_eq!(ended, Ended::Behind);
         },
     );
 }
