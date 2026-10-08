@@ -5358,10 +5358,9 @@ Rules:
    `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
    so its tests build a `spec::connector::Connector` (`laptop.architect`,
    2026-10-08T03:01:36Z:
-   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A
-   crate may also take itself, so its tests and benches build with its own `sim`
-   feature (STORED BENCH;
-   `laptop.architect`, 2026-10-08T01:01:28Z:
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   may also take itself, so its tests and benches build with its own `sim` feature
+   (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
    `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
    code could call the ring), the hub tests in `node`, and a second way to build a shard
