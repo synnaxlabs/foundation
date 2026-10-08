@@ -42,8 +42,8 @@ impl Kind {
     }
 
     /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
-    /// when it does not. A reserved label has that form only at a key of
-    /// [`crate::founding::create`]: Foundation makes those definitions, and
+    /// when it does not. A reserved label has that form only at a founding key: a key
+    /// that [`crate::founding::create`] makes, or that an earlier build made.
     /// [`Kind::key`] refuses a reserved label, so no file holds one.
     #[must_use]
     pub fn label(self, key: &Name) -> Option<Name> {

@@ -3251,11 +3251,15 @@ How to read this record:
   `plan` (#1082) maps a key to its region with the function of `spec::region`, and
   keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
   https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
-  check of the key form accepts a reserved label only at a key of
-  `spec::founding::create` (FIRST ADMIN). Each other definition at a reserved label is
-  `Misplaced`, so a region there makes no child region. This changes "only for a
-  subject and an access policy, the kinds of the founding definitions", as
-  `ops.@x.@subject` then passed (#1877; `laptop.architect`, 2026-10-08T12:36:57Z,
+  check of the key form accepts a reserved label only at a founding key (FIRST ADMIN;
+  `laptop.architect`, 2026-10-08T12:51:04Z,
+  https://github.com/synnaxlabs/foundation/pull/1880#issuecomment-6060256808). Each
+  other definition at a reserved label is `Misplaced`, so a region there makes no
+  child region. Supersedes "only for a subject and an access policy, the kinds of the
+  founding definitions" (`laptop.architect-2`, 2026-10-08T09:51:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316), as
+  `ops.@x.@subject` then passed (#1877;
+  `laptop.architect`, 2026-10-08T12:36:57Z,
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621). A file
   still cannot hold a reserved label (`Kind::key`).
   Lost: a check that skips each reserved key, as a channel at `@admin.@subject` is
@@ -3263,7 +3267,9 @@ How to read this record:
   `laptop.architect-2`, 2026-10-08T09:15:07Z
   (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056664804), and
   the kinds 2026-10-08T09:51:31Z
-  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316).
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316),
+  superseded by
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621.
   Supersedes: the panic for two channels with one key (architect, #756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890), and
   `Problem::Shared` with the fix "Give each channel its own key", which replaced it
@@ -4679,11 +4685,17 @@ How to read this record:
   at `@admin.@access`, which allows the subjects `@admin` every action on `**` with no
   authority, so its writes cap at `Authority(0)` (ACCESS BLOCK). A policy in a file can
   give the admin more. Their labels are reserved, so no file holds them: `Kind::key`
-  refuses a reserved label, and `Kind::label` gives one only at a key of `create`. A
+  refuses a reserved label, and `Kind::label` gives one only at a founding key: a key
+  of `create`, or one that an earlier build made (`laptop.architect`,
+  2026-10-08T12:51:04Z,
+  https://github.com/synnaxlabs/foundation/pull/1880#issuecomment-6060256808). A
   private table in `spec::founding` holds the founding labels by kind. A later build can
   add an entry and never removes one, as a committed spec holds the keys of an earlier
-  build. This changes "only for a subject or an access policy", as a client's plan could
-  then add a signing subject such as `ops.@x` that no plan shows (#1877;
+  build. Supersedes "only a subject or an access policy can have a reserved label"
+  (`laptop.architect-2`, 2026-10-08T10:56:38Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6058336549), as a
+  client's plan could then add a signing subject such as `ops.@x` that no plan shows
+  (#1877;
   `laptop.architect`, 2026-10-08T12:36:57Z,
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621). A
   definition whose label (`definition.kind().label(key)`) is reserved is
