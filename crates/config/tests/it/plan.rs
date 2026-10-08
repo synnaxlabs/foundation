@@ -700,11 +700,11 @@ fn exclude(connector: &str, p: &str, node: &str) -> String {
     )
 }
 
-#[test]
-fn plans_connectors_after_the_connector_home_fix_of_a_placement_of_two_nodes() {
-    let text = |b: &str, select: &str, home: &str, more: &str| {
-        format!(
-            "\
+/// The connectors `p.a` and `p.c` on `n` and `p.b` on `b`, the placement `p` of
+/// `select` and `home`, then `more`.
+fn two_nodes(b: &str, select: &str, home: &str, more: &str) -> String {
+    format!(
+        "\
 channel \"p.a.time\" {{
   kind = \"index\"
 }}
@@ -728,10 +728,11 @@ placement \"p\" {{
   home = \"{home}\"
 }}
 {more}"
-        )
-    };
-    let all = "\"p.**\"";
-    let fixed = "\
+    )
+}
+
+/// The placements that the fix of `two_nodes` adds for `p.a` and `p.c`.
+const TWO_NODES_FIXED: &str = "\
 placement \"a\" {
   select = [\"p.a\", \"p.a.time\"]
   home = \"n\"
@@ -741,21 +742,29 @@ placement \"c\" {
   home = \"n\"
 }
 ";
+
+#[test]
+fn plans_connectors_after_the_connector_home_fix_of_a_placement_of_two_nodes() {
+    let all = "\"p.**\"";
     plans_after_connector_home(
-        &text("m", all, "m", ""),
+        &two_nodes("m", all, "m", ""),
         &[exclude("p.a", "p", "n"), exclude("p.c", "p", "n")],
-        &text(
+        &two_nodes(
             "m",
             "[\"p.**\", \"!p.a\", \"!p.a.time\", \"!p.c\"]",
             "m",
-            fixed,
+            TWO_NODES_FIXED,
         ),
     );
     plans_after_connector_home(
-        &text("n", all, "m", ""),
+        &two_nodes("n", all, "m", ""),
         &[RENAMED.into(), RENAMED.into(), RENAMED.into()],
-        &text("n", all, "n", ""),
+        &two_nodes("n", all, "n", ""),
     );
+}
+
+#[test]
+fn plans_connectors_after_the_connector_home_fix_of_a_placement_at_a_third_home() {
     let b = "\
 placement \"b\" {
   select = \"p.b\"
@@ -763,17 +772,17 @@ placement \"b\" {
 }
 ";
     plans_after_connector_home(
-        &text("m", all, "k", ""),
+        &two_nodes("m", "\"p.**\"", "k", ""),
         &[
             exclude("p.a", "p", "n"),
             exclude("p.b", "p", "m"),
             exclude("p.c", "p", "n"),
         ],
-        &text(
+        &two_nodes(
             "m",
             "[\"p.**\", \"!p.a\", \"!p.a.time\", \"!p.b\", \"!p.c\"]",
             "k",
-            &(fixed.to_owned() + b),
+            &(TWO_NODES_FIXED.to_owned() + b),
         ),
     );
 }
@@ -1254,6 +1263,18 @@ connector \"b\" {
   node = \"n\"
   writes = [\"b.time\"]
 }
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let expected = [
+        tie(text, "a.time", "a_1", "a_2"),
+        tie(text, "b", "b_1", "b_2"),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn gives_no_split_placement_after_a_tie_at_the_nearest_connector() {
+    let text = "\
 channel \"d.e.time\" {
   kind = \"index\"
 }
@@ -1285,24 +1306,7 @@ connector \"d.e\" {
 }
 ";
     let found = problems(Spec::create_empty().plan(&[text], &["n"]));
-    let tie = |at, first, second| {
-        problem(
-            "config.unplaced",
-            (0, label(text, at)),
-            &format!(
-                "the placements `{first}` and `{second}` select the name with the same \
-                 specificity"
-            ),
-            "Change the `select` of one of the two placements, so that one selects the \
-             name more specifically",
-        )
-    };
-    let expected = [
-        tie("a.time", "a_1", "a_2"),
-        tie("b", "b_1", "b_2"),
-        tie("d.e", "e_1", "e_2"),
-    ];
-    assert_eq!(found, expected);
+    assert_eq!(found, [tie(text, "d.e", "e_1", "e_2")]);
 }
 
 #[test]
