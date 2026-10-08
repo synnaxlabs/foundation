@@ -454,10 +454,10 @@ fn named(paragraphs: &[Vec<&str>]) -> bool {
 }
 
 /// `line` with its indent removed, or `None` when the indent is more than three
-/// spaces or holds a tab: GitHub shows such a line as code.
+/// spaces: GitHub shows such a line as code.
 fn unindented(line: &str) -> Option<&str> {
     let text = line.trim_start_matches(' ');
-    (line.len() - text.len() <= 3 && !text.starts_with('\t')).then_some(text)
+    (line.len() - text.len() <= 3).then_some(text)
 }
 
 /// The [`END`] entries at the start of `lines`, each as its name and value, and the
