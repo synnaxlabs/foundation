@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64ct = { workspace = true }
 document = { path = "../document" }
 spec = { path = "../spec" }
 types = { path = "../types" }
