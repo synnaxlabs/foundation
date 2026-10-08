@@ -480,6 +480,28 @@ fn outside_lay(bencher: Bencher<'_, '_>) {
     bencher.bench_local(|| places.lay(black_box(&frame), &set).len());
 }
 
+/// Lays out a frame of `series` channels spread evenly over 100k places in a
+/// scattered order. The sparse cut of `Places::lay` is at 12,500: 12,499 series sort,
+/// and 12,500 walk the places.
+#[divan::bench(args = [12_499, 12_500], sample_count = 100)]
+fn cut_lay(bencher: Bencher<'_, '_>, series: usize) {
+    let mut interner = Interner::new();
+    let data: Vec<_> = (1..100_000).map(|n| (key(n), F64)).collect();
+    let set = interner.intern(&[Group {
+        index: key(0),
+        data: &data,
+    }]);
+    let pool = pool();
+    let lens: Vec<_> = (0..series).map(|n| (n * 100_000 / series, 8)).collect();
+    let frame = Draft::new(&pool, &set, Form::Encoded, &lens)
+        .expect("the pool holds the frame")
+        .freeze(Path::Live);
+    let mut slots: Vec<channel::Slot> = set.entries().iter().map(|e| e.slot).collect();
+    slots.sort_by_key(|slot| u64::from(slot.get()).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut places = Places::new(slots.into());
+    bencher.bench_local(|| places.lay(black_box(&frame), &set).len());
+}
+
 /// Charges a frame for places of each channel, last first.
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn reversed_charge(bencher: Bencher<'_, '_>, case: &Case) {
