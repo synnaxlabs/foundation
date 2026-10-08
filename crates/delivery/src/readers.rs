@@ -113,6 +113,9 @@ struct Flow {
     behind: bool,
     /// The frames released to the session and not taken, oldest first.
     waiting: VecDeque<Frame>,
+    /// The frames released after `waiting` that wait for credit, with their charges,
+    /// oldest first. While one waits, the credit is spent.
+    owed: VecDeque<(Frame, u64)>,
 }
 
 #[derive(Debug)]
@@ -232,6 +235,7 @@ impl Readers {
             cost: complete::Cost::new(charge),
             behind: position.live < self.released,
             waiting: VecDeque::with_capacity(WAITING),
+            owed: VecDeque::new(),
         });
         self.woken_complete.clear();
         self.woken_complete.reserve(self.complete.len());
@@ -273,16 +277,26 @@ impl Readers {
         Ok(())
     }
 
-    /// Raises the session's credit to `limit_bytes` since it opened. A limit that is
-    /// not higher than the current one changes nothing, and so does a grant to a
-    /// closed session: a grant can arrive after its session closes.
+    /// Raises the session's credit to `limit_bytes` since it opened, and gives the
+    /// session the frames that wait for credit while the credit covers them. No
+    /// [`Readers::release`] names the session for them: take after the grant. A limit
+    /// that is not higher than the current one changes nothing, and so does a grant to
+    /// a closed session: a grant can arrive after its session closes.
     ///
     /// # Panics
     ///
     /// If this `Readers` never gave `key`.
     pub fn grant(&mut self, key: complete::Key, limit_bytes: u64) {
-        if let Some(i) = self.find(key) {
-            self.flows[i].credit.grant(limit_bytes);
+        let Some(i) = self.find(key) else {
+            return;
+        };
+        let flow = &mut self.flows[i];
+        flow.credit.grant(limit_bytes);
+        let credit = &mut flow.credit;
+        while let Some((frame, _)) =
+            flow.owed.pop_front_if(|(_, charge)| credit.spend(*charge))
+        {
+            flow.waiting.push_back(frame);
         }
     }
 
@@ -331,14 +345,22 @@ impl Readers {
     }
 
     /// Gives each queued frame that ends at or below `durable`, the first live seq not
-    /// on disk, to each complete session, in seq order. A session gets each frame that
-    /// ends past its position while it has credit for it, and no frame after the first
-    /// it has no credit for. Returns the complete sessions that had no waiting frame and
-    /// now have one, or that missed a frame now and have none waiting, each once: wake
-    /// them.
+    /// on disk, to each complete session whose position it ends past, in seq order. A
+    /// frame that finds the session's credit spent waits for a grant
+    /// ([`Readers::grant`]), and so does each later frame. A frame that still waits
+    /// when a later call gives a frame is a miss: the session gets no later frame.
+    /// Returns the complete sessions that had no frame to take and now have one, or
+    /// that missed a frame now and have none to take, each once: wake them.
     #[must_use]
     pub fn release(&mut self, durable: u64) -> &[complete::Key] {
         self.woken_complete.clear();
+        if self
+            .queue
+            .front()
+            .is_some_and(|(_, seq)| seq.end <= durable)
+        {
+            self.miss_owed();
+        }
         while let Some((frame, seq)) =
             self.queue.pop_front_if(|(_, seq)| seq.end <= durable)
         {
@@ -351,12 +373,9 @@ impl Readers {
                 if flow.behind || seq.end <= session.position.live {
                     continue;
                 }
-                if !flow.credit.spend(flow.cost.charge(&frame, set, whole)) {
-                    flow.behind = true;
-                    // A session with frames waiting sees the miss after it takes them.
-                    if flow.waiting.is_empty() {
-                        self.woken_complete.push(session.key);
-                    }
+                let charge = flow.cost.charge(&frame, set, whole);
+                if !flow.credit.spend(charge) {
+                    flow.owed.push_back((frame.clone(), charge));
                     continue;
                 }
                 if flow.waiting.is_empty() {
@@ -374,6 +393,22 @@ impl Readers {
         &self.woken_complete
     }
 
+    /// Makes each session with a frame that waits for credit miss it, and adds those
+    /// with no frame to take to the sessions to wake.
+    fn miss_owed(&mut self) {
+        for (session, flow) in iter::zip(&self.complete, &mut self.flows) {
+            if flow.owed.is_empty() {
+                continue;
+            }
+            flow.owed.clear();
+            flow.behind = true;
+            // A session with frames to take sees the miss after it takes them.
+            if flow.waiting.is_empty() {
+                self.woken_complete.push(session.key);
+            }
+        }
+    }
+
     /// Whether a queued live frame waits to be on disk. While one does, call
     /// [`Readers::release`] after each commit.
     #[must_use]
@@ -382,9 +417,9 @@ impl Readers {
     }
 
     /// Takes the session's next waiting frame. A latest session has at most one; a
-    /// complete session has the frames that [`Readers::release`] gave it, in seq
-    /// order, then [`Next::Behind`] once it missed a live frame. A session can miss
-    /// one at its open, which no `release` names.
+    /// complete session has the frames that [`Readers::release`] gave it and its credit
+    /// covers, in seq order, then [`Next::Behind`] once it missed a live frame. A
+    /// session can miss one at its open, which no `release` names.
     ///
     /// # Panics
     ///
@@ -1772,7 +1807,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [key]);
-            assert_eq!(missed(&mut readers, key), [1, 2]);
+            assert_eq!(taken(&mut readers, key), [1, 2]);
         }
 
         #[test]
@@ -1791,7 +1826,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [key]);
-            assert_eq!(missed(&mut readers, key), [1, 2]);
+            assert_eq!(taken(&mut readers, key), [1, 2]);
         }
 
         #[test]
@@ -1806,7 +1841,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(missed(&mut readers, key), [1, 2, 3]);
+            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
@@ -1826,12 +1861,42 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(missed(&mut readers, key), [1, 2, 3]);
+            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
-        fn gives_no_frame_after_one_without_credit() {
-            let frames = Frames::new(4);
+        fn misses_a_frame_that_waits_for_credit_at_the_next_release() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), &frames.set, 0..1);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            assert_eq!(released(&mut readers, 2), [key]);
+            readers.queue(&frames.frame(3), &frames.set, 2..3);
+            assert_eq!(released(&mut readers, 3), []);
+            readers.grant(key, 10 * CHARGE);
+            assert_eq!(missed(&mut readers, key), [1]);
+        }
+
+        #[test]
+        fn gives_a_frame_that_waits_for_credit_at_a_grant() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 1);
+            for n in 0..3 {
+                readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
+            }
+            assert_eq!(released(&mut readers, 3), [key]);
+            assert_eq!(taken(&mut readers, key), [1]);
+            readers.grant(key, 2 * CHARGE);
+            assert_eq!(taken(&mut readers, key), [2]);
+            readers.grant(key, 3 * CHARGE);
+            assert_eq!(taken(&mut readers, key), [3]);
+        }
+
+        #[test]
+        fn misses_no_frame_that_a_grant_covers_before_the_next_release() {
+            let frames = Frames::new(3);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 1);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
@@ -1840,7 +1905,53 @@ pub(super) mod tests {
             readers.grant(key, 10 * CHARGE);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(released(&mut readers, 3), []);
-            assert_eq!(missed(&mut readers, key), [1]);
+            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
+        }
+
+        #[test]
+        fn misses_no_frame_at_a_release_that_gives_none() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), &frames.set, 0..1);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            readers.queue(&frames.frame(3), &frames.set, 2..4);
+            assert_eq!(released(&mut readers, 2), [key]);
+            assert_eq!(released(&mut readers, 3), []);
+            readers.grant(key, 10 * CHARGE);
+            assert_eq!(taken(&mut readers, key), [1, 2]);
+            assert_eq!(released(&mut readers, 4), [key]);
+            assert_eq!(taken(&mut readers, key), [3]);
+        }
+
+        #[test]
+        fn gives_a_prompt_session_each_frame_of_a_release_of_many_windows() {
+            const WINDOW: u64 = 8 * CHARGE;
+            let frames = Frames::new(1);
+            let frame = frames.frame(1);
+            for windows in [2, 10, 100] {
+                let mut readers = Readers::new(0);
+                let prompt = opened(&mut readers, 0, WINDOW / CHARGE);
+                let idle = opened(&mut readers, 0, WINDOW / CHARGE);
+                let count = windows * WINDOW / CHARGE;
+                for n in 0..count {
+                    readers.queue(&frame, &frames.set, n..n + 1);
+                }
+                assert_eq!(released(&mut readers, count), [prompt, idle]);
+                // As a local reader grants: past the frames it took, at its next take.
+                let mut taken_bytes = 0;
+                let mut got = 0;
+                while let Next::Frame(frame) = readers.take(prompt.into()) {
+                    got += 1;
+                    taken_bytes += frame.charge();
+                    readers.grant(prompt, taken_bytes + WINDOW);
+                }
+                assert_eq!(got, count, "{windows} windows");
+                readers.queue(&frame, &frames.set, count..count + 1);
+                assert_eq!(released(&mut readers, count + 1), [prompt]);
+                assert_eq!(taken(&mut readers, prompt), [1]);
+                assert_eq!(missed(&mut readers, idle).len(), 8);
+            }
         }
 
         #[test]
@@ -1853,7 +1964,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [short, long]);
-            assert_eq!(missed(&mut readers, short), [1]);
+            assert_eq!(taken(&mut readers, short), [1]);
             assert_eq!(taken(&mut readers, long), [1, 2, 3]);
         }
 
@@ -1871,8 +1982,10 @@ pub(super) mod tests {
                 .open(named("a", 10), resume(live(0)), 0, Charge::Whole)
                 .key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
-            assert_eq!(released(&mut readers, 1), [new]);
-            assert_eq!(missed(&mut readers, new), []);
+            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(taken(&mut readers, new), []);
+            readers.grant(new, CHARGE);
+            assert_eq!(taken(&mut readers, new), [1]);
         }
 
         #[test]
@@ -1911,7 +2024,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [open]);
-            assert_eq!(missed(&mut readers, open), [1]);
+            assert_eq!(taken(&mut readers, open), [1]);
         }
 
         #[test]
@@ -1926,8 +2039,8 @@ pub(super) mod tests {
                 .key;
             readers.grant(old, 10 * CHARGE);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
-            assert_eq!(released(&mut readers, 1), [new]);
-            assert_eq!(missed(&mut readers, new), []);
+            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(taken(&mut readers, new), []);
         }
 
         #[test]
@@ -1960,7 +2073,7 @@ pub(super) mod tests {
 
         #[test]
         fn wakes_a_session_once_when_it_misses_a_frame_with_none_waiting() {
-            let frames = Frames::new(3);
+            let frames = Frames::new(4);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 1);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
@@ -1968,43 +2081,54 @@ pub(super) mod tests {
             assert_eq!(taken(&mut readers, key), [1]);
             assert_eq!(taken(&mut readers, key), []);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
-            assert_eq!(released(&mut readers, 2), [key]);
-            assert_eq!(missed(&mut readers, key), []);
+            assert_eq!(released(&mut readers, 2), []);
+            assert_eq!(taken(&mut readers, key), []);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
-            assert_eq!(released(&mut readers, 3), []);
+            assert_eq!(released(&mut readers, 3), [key]);
+            assert_eq!(missed(&mut readers, key), []);
+            readers.queue(&frames.frame(4), &frames.set, 3..4);
+            assert_eq!(released(&mut readers, 4), []);
             assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
         fn wakes_a_session_once_for_a_frame_and_a_miss_in_one_release() {
-            let frames = Frames::new(2);
+            let frames = Frames::new(4);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 1);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [key]);
-            assert_eq!(missed(&mut readers, key), [1]);
+            assert_eq!(taken(&mut readers, key), [1]);
+            readers.queue(&frames.frame(3), &frames.set, 2..3);
+            readers.queue(&frames.frame(4), &frames.set, 3..4);
+            assert_eq!(released(&mut readers, 4), [key]);
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
         fn wakes_no_session_with_frames_waiting_when_it_misses_one() {
-            let frames = Frames::new(2);
+            let frames = Frames::new(3);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 1);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), []);
+            readers.queue(&frames.frame(3), &frames.set, 2..3);
+            assert_eq!(released(&mut readers, 3), []);
             assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
         fn gives_no_closed_session_as_behind() {
-            let frames = Frames::new(1);
+            let frames = Frames::new(2);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 0);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
-            assert_eq!(released(&mut readers, 1), [key]);
+            assert_eq!(released(&mut readers, 1), []);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            assert_eq!(released(&mut readers, 2), [key]);
             assert_eq!(missed(&mut readers, key), []);
             assert_eq!(missed(&mut readers, key), []);
             readers.close(key.into());
@@ -2038,10 +2162,23 @@ pub(super) mod tests {
         fn drops_a_frame_no_session_got() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
-            let key = opened(&mut readers, 0, 0);
+            opened(&mut readers, 1, 0);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert!(!frames.spare());
-            assert_eq!(released(&mut readers, 1), [key]);
+            assert_eq!(released(&mut readers, 1), []);
+            assert!(frames.spare());
+        }
+
+        #[test]
+        fn drops_a_frame_that_waits_for_credit_at_the_next_release() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = opened(&mut readers, 0, 0);
+            readers.queue(&frames.frame(1), &frames.set, 0..1);
+            assert_eq!(released(&mut readers, 1), []);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            assert!(!frames.spare());
+            assert_eq!(released(&mut readers, 2), [key]);
             assert!(frames.spare());
         }
 
@@ -2282,7 +2419,8 @@ pub(super) mod tests {
         }
 
         /// Asserts that `frames` cost a session that `charge` charges `spent` bytes: a
-        /// frame after them passes a credit of `spent + 1` and not one of `spent`.
+        /// frame after them passes a credit of `spent + 1`, and waits for credit at a
+        /// credit of `spent`.
         fn spends(charge: &Charge, frames: &[(&Frame, &Arc<KeySet>)], spent: u64) {
             for (limit, passes) in [(spent, false), (spent + 1, true)] {
                 let mut readers = Readers::new(0);
@@ -2299,7 +2437,7 @@ pub(super) mod tests {
                 let (taken, end) = drain(&mut readers, key);
                 let count = frames.len() + usize::from(passes);
                 assert_eq!(taken.len(), count, "credit {limit}");
-                assert_eq!(matches!(end, Next::Behind), !passes, "credit {limit}");
+                assert!(matches!(end, Next::Empty), "credit {limit}");
             }
         }
 
@@ -2317,7 +2455,7 @@ pub(super) mod tests {
             assert_eq!(readers.release(11), [key]);
             let (taken, end) = drain(&mut readers, key);
             assert_eq!(taken.len(), 10);
-            assert!(matches!(end, Next::Behind));
+            assert!(matches!(end, Next::Empty), "the last waits for credit");
         }
 
         #[test]
@@ -2792,12 +2930,24 @@ pub(super) mod tests {
         #[derive(Default)]
         struct Got {
             behind: bool,
-            /// The session missed a frame in the last release.
+            /// The session missed a frame that waited for credit, in the last release.
             missed: bool,
             limit: u64,
             spent: u64,
             frames: Vec<u64>,
+            /// The frames that wait for credit, oldest first.
+            owed: Vec<u64>,
             taken: usize,
+        }
+
+        impl Got {
+            /// Gives the session each frame that waits for credit while it has credit.
+            fn pay(&mut self) {
+                while !self.owed.is_empty() && self.spent < self.limit {
+                    self.spent += CHARGE;
+                    self.frames.push(self.owed.remove(0));
+                }
+            }
         }
 
         /// The live path stated a second way: the readers and their positions, what
@@ -2880,8 +3030,15 @@ pub(super) mod tests {
                     .filter(|(_, got)| got.taken == got.frames.len())
                     .map(|(&key, _)| key)
                     .collect();
+                let gives = self.queued.iter().any(|queued| {
+                    queued.held && !queued.seq.is_empty() && queued.seq.end <= durable
+                });
                 for got in self.open.values_mut() {
-                    got.missed = false;
+                    got.missed = gives && !got.owed.is_empty();
+                    if got.missed {
+                        got.owed.clear();
+                        got.behind = true;
+                    }
                 }
                 let held = self.queued.iter_mut().filter(|queued| queued.held);
                 for queued in held.filter(|queued| queued.seq.end <= durable) {
@@ -2891,13 +3048,8 @@ pub(super) mod tests {
                         if got.behind || !holds(&queued.seq, position) {
                             continue;
                         }
-                        if got.spent >= got.limit {
-                            got.behind = true;
-                            got.missed = true;
-                            continue;
-                        }
-                        got.spent += CHARGE;
-                        got.frames.push(queued.n);
+                        got.owed.push(queued.n);
+                        got.pay();
                     }
                 }
                 self.open
@@ -2965,7 +3117,8 @@ pub(super) mod tests {
 
         /// Checks the live path against a model of the rules: a session gets each
         /// released frame with a sample at or past its position, in seq order, while it
-        /// has credit, and none after the first it has no credit for. A session that
+        /// has credit. A frame with no credit, and each after it, waits for a grant, and
+        /// one that still waits when a later release gives a frame is a miss. A session that
         /// starts at or below a sample no longer in memory gets none, and nothing is
         /// kept with no session open. A named reader that resumes starts where its
         /// last session stopped. A release wakes each session that had no frame
@@ -3001,6 +3154,7 @@ pub(super) mod tests {
                         readers.grant(key, limit);
                         let got = model.got(key);
                         got.limit = got.limit.max(limit);
+                        got.pay();
                     }
                     Live::Queue { gap, len } => {
                         made += 1;

@@ -532,7 +532,12 @@ How to read this record:
   grant for a session it closed. The home sends a whole frame while the bytes it has
   spent are below the limit, so it passes the limit by less than one frame and never
   splits a frame. After a refusal, the session gets no later frame until it has the
-  refused one; frames from catch-up spend credit too. A frame costs its charge,
+  refused one; frames from catch-up spend credit too. A live frame that finds the
+  credit spent waits for a grant, and so does each later one: a grant gives them, oldest
+  first, while the credit covers them. A frame that still waits when a later release of
+  its index gives a frame is a miss. So a session that grants after each take gets each
+  frame of a commit of any size, and a session pins at most its window plus the frames
+  of one release (#1170). A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
   costs its length plus the header and at most 64 bytes or a quarter of its length more,
@@ -1195,7 +1200,8 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359 and
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
-  pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
+  pages lazily, and purge after idle. Credits cap the blocks a reader can pin: its
+  window plus the frames of one release (CREDIT RULES). A reader
   that falls behind is served from disk. When the pool is full, a live write records a
   gap and backfill waits. The current value of B4 pins one block per index that had a
   live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The

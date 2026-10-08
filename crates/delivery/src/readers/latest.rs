@@ -150,7 +150,9 @@ mod tests {
 
     use super::*;
     use crate::complete::Charge;
-    use crate::readers::tests::{Frames, dropped, missed, number};
+    use crate::readers::tests::{
+        Frames, dropped, missed, number, taken as complete_taken,
+    };
     use crate::{Next, Position, Reader, Record, Start, complete};
 
     fn at(nanos: i64) -> Stamp {
@@ -347,7 +349,7 @@ mod tests {
             assert_eq!(readers.records().count(), 0);
             assert_eq!(readers.release(2), [new]);
             dropped(&mut readers, old.into());
-            assert_eq!(missed(&mut readers, new), [1]);
+            assert_eq!(complete_taken(&mut readers, new), [1]);
         }
 
         #[test]
@@ -382,7 +384,7 @@ mod tests {
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(readers.release(3), []);
-            assert_eq!(missed(&mut readers, new), [1, 2]);
+            assert_eq!(complete_taken(&mut readers, new), [1, 2]);
             dropped(&mut readers, old.into());
             assert_eq!(readers.open_latest().key, Key(1));
             let next = complete(&mut readers, "c", live(3));

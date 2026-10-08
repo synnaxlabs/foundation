@@ -1,10 +1,10 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
-//! make none once each session got a frame, also for sessions charged by their places,
-//! nor a release in which sessions miss a frame, with frames waiting or not. An ack
-//! makes none, and no call on a closed key of either mode makes one. This binary has no
-//! test harness: the count covers each thread, and a harness allocates on its own
-//! thread at any time.
+//! make none once each session got a frame, also for sessions charged by their places.
+//! Once frames waited for credit, a release in which frames wait for credit makes none,
+//! nor one in which sessions miss them. An ack makes none, and no call on a closed key
+//! of either mode makes one. This binary has no test harness: the count covers each
+//! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -200,18 +200,32 @@ fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     for _ in 0..2 {
         flow(&mut readers, &warm, frame, set, &mut seq);
     }
-    // A session of credit 1 takes the first frame and misses with one frame waiting.
+    // A session of credit 1 gets the first frame, and the second waits for credit.
     let keys: Vec<_> = (0..SESSIONS)
         .map(|i| open(&mut readers, seq, u64::from(i % 2 == 1)))
         .collect();
-    let (woken, allocations) =
-        ALLOCATOR.count(|| flow(&mut readers, &warm, frame, set, &mut seq));
+    flow(&mut readers, &warm, frame, set, &mut seq);
+    // Each session gets both frames and has spent its credit.
+    let limit_bytes = 2 * frame().charge();
+    for &key in &keys {
+        readers.grant(key, limit_bytes);
+    }
+    let all: Vec<_> = warm.iter().chain(&keys).copied().collect();
+    let ((owed, missed), allocations) = ALLOCATOR.count(|| {
+        let owed = flow(&mut readers, &all, frame, set, &mut seq);
+        (owed, flow(&mut readers, &warm, frame, set, &mut seq))
+    });
     assert_eq!(
         allocations, 0,
-        "a release that wakes a missed session allocated"
+        "a release that makes frames wait for credit, or that misses them, allocated"
     );
     assert_eq!(
-        woken,
+        owed,
+        2 * SESSIONS + 3,
+        "each session takes two frames, and the release wakes only the warm session"
+    );
+    assert_eq!(
+        missed,
         SESSIONS + 3,
         "the warm session takes two frames, and the release wakes each session"
     );
