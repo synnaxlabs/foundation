@@ -4845,6 +4845,41 @@ How to read this record:
   `applied` in place of chunks, the key that no stored channel holds, and one sort:
   `laptop.architect` (2026-10-08T13:26:52Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
+- **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
+  it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
+  fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
+  `#[non_exhaustive]`, so `node` builds it with a struct literal. An error from `read`
+  holds at least one problem. The table is a `BTreeMap<&'static str, FrontEnd>`, keyed
+  by the extension with no dot (`"hcl"`). The text after the last `.` of a file name
+  picks the front end. A file with no front end gives `ops.unknown-extension` with no
+  span, as no Document of the file exists (an exception to the span rule of
+  DIAGNOSTICS): the message names the path, and the fix names each extension. A
+  directory gives each file in it that the table reads, in path order. `Source(i)` is
+  the index of the file in the order `ops` reads it, and `ops` keeps the paths to
+  print spans. `node` fills the table (#1756) with `config_hcl::read`, its errors
+  mapped through `From<&config_hcl::Error> for Diagnostic`. `write` and `update` join
+  `FrontEnd` with the first operation that writes a file. Lost: `ops` calls
+  `config_hcl::read` (breaks K1), a `FrontEnd` trait (one implementation, no state),
+  and `Box<dyn Fn>` (no front end needs state). Decided by `laptop.architect-2`
+  (2026-10-08T06:38:41Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444).
+- **OPS OUTPUT (#337, 2026-10-08)** The plan output is a typed `plan::Output { base,
+  changes, homes, added, changed, removed }`, with `Change { action, kind, name, place:
+  Option<Place> }`. It derives `Serialize`, `Deserialize`, and `JsonSchema`, and `ops`
+  resolves each span to a file, line, and column. `text()` gives the terminal text, as
+  `Response` and `Error` do. #1744 makes it a `Response` variant. Each error of `ops`,
+  in the CLI and in MCP, has one JSON shape: `{"errors": [...]}`, each item a typed
+  `Problem { code, message, fix, place: Option<Place>, notes }`. An error that is not a
+  diagnostic, such as `ops.argument`, is a list of one item with no place. A place is
+  `{"file", "line", "column"}`, each count from 1, and the key is absent when there is
+  no place. `notes` is a list, empty when there is no note. The text of an error is each
+  item as `error[<code>]: <message>`, its place, `fix: <fix>`, and each note, with an
+  empty line between two items. Lost: a second shape for diagnostics, with which a
+  client parses two shapes and must know which operation gives which. Decided by
+  `laptop.architect-2` (2026-10-08T16:26:42Z,
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064364728). The
+  place and notes details: `laptop.architect-2` (2026-10-08T16:40:27Z,
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064603605).
 
 ### 1.12 Access, identity, and secrets
 
@@ -7045,7 +7080,10 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927), and
    `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
    with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
-   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152). A crate
+   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152), and
+   `ops` may take `config-hcl`, so its plan tests read a real file
+   (`laptop.architect-2`, 2026-10-08T16:00:18Z:
+   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
