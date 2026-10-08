@@ -3,7 +3,7 @@
 
 use std::future::poll_fn;
 use std::io::IoSlice;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -485,7 +485,7 @@ fn a_listen_binds_a_port_in_time_wait() {
 fn an_ipv4_peer_of_an_any_v6_listener_has_a_plain_ipv4_address() {
     on_thread("net-mapped", || async {
         let net = net();
-        let any = SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0);
+        let any = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
         let mut listener = net.listen(&listen_config(any)).expect("v6 any binds");
         let remote = SocketAddr::new(LOCALHOST.into(), listener.local().port());
         let client = connect(&net, remote).await;
@@ -521,6 +521,21 @@ fn a_connect_to_a_mapped_address_names_plain_ipv4_ends() {
         let server = accept(&mut listener).await;
         assert_eq!(client.peer(), listener.local());
         assert_eq!(client.local(), server.peer());
+    });
+}
+
+#[test]
+fn a_connect_with_a_scope_and_flow_label_the_kernel_ignores_names_the_real_peer() {
+    on_thread("net-scope", || async {
+        let net = net();
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0);
+        let mut listener = net.listen(&listen_config(v6)).expect("::1 binds");
+        let port = listener.local().port();
+        let remote = SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 2, 7);
+        let client = connect(&net, remote.into()).await;
+        let server = accept(&mut listener).await;
+        assert_eq!(server.peer(), client.local());
+        assert_eq!(client.peer(), server.local());
     });
 }
 

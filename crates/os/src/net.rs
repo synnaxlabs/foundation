@@ -52,8 +52,7 @@ impl env::net::Driver for Driver {
 /// take it.
 async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     let remote = config.remote;
-    let peer = canonical(remote);
-    let failed = |code: Errno| stream_error(code, peer);
+    let failed = |code: Errno| stream_error(code, canonical(remote));
     let socket = match remote {
         SocketAddr::V4(_) => TcpSocket::new_v4(),
         SocketAddr::V6(_) => TcpSocket::new_v6(),
@@ -66,8 +65,10 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
         .map_err(|e| failed(errno(&e)))?;
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
+    // The kernel drops a scope or flow label it does not use, so it names the peer.
+    let peer = stream.peer_addr().map_err(|e| failed(errno(&e)))?;
     Ok(Box::new(
-        Stream::new(stream, canonical(local), peer).map_err(failed)?,
+        Stream::new(stream, canonical(local), canonical(peer)).map_err(failed)?,
     ))
 }
 
