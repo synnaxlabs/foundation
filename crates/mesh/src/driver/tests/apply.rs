@@ -870,7 +870,7 @@ fn an_equal_change_gives_ok_when_a_later_home_applies_in_its_batch() {
         assert!(now(set.as_mut()).await.is_pending());
         assert_eq!(mesh.group.borrow().proposals.len(), 2);
         assert_eq!(call.await, Ok(moved));
-        assert!(set.await.is_ok());
+        set.await.unwrap();
         assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
     });
 }

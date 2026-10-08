@@ -2383,12 +2383,12 @@ How to read this record:
   store cannot give. The node counts itself as the one holder. When the holders are
   not a majority of each half of the voters, before the propose or at the apply, the
   call gives `Error::Quorum { held, voters }` for the first half that lacks one, the
-  incoming half first. The count before the propose costs no entry and no put. The
-  node then puts each chunk of the new
-  tree in its store, not only the listed ones, because `diff` never reads a chunk that
-  the two trees share, so a chunk that the store lost is found only by a put. On `Ok`,
-  a put of each chunk of the new tree has returned. BLOB STORE gives what a put holds
-  after a fault. Decided by `laptop.architect`, 2026-10-08T12:13:51Z
+  incoming half first. The count before the propose costs no entry and no put. The node
+  then puts each chunk of the new tree in its store, not only the listed ones, because
+  `diff` never reads a chunk that the two trees share, so a chunk that the store lost is
+  found only by a put. On `Ok`, a put of each chunk of the new tree has returned. BLOB
+  STORE gives what a put holds after a fault. Decided by `laptop.architect`,
+  2026-10-08T12:13:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), which
   supersedes the postcondition of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
@@ -2403,25 +2403,25 @@ How to read this record:
   of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A call
   whose entry finds the pointer that the call makes, after a lost answer or an equal
-  change of another call, returns that pointer; a later pointer gives `Stale`. Decided
-  by `laptop.architect`, 2026-10-08T10:19:54Z
+  change of another call, returns that pointer when each listed index has a home
+  (below); a later pointer gives `Stale`. Decided by `laptop.architect`,
+  2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
   equal change of another call, 2026-10-08T11:46:44Z
-  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A
-  listed home is a proposal: the entry gives it only to an index with none. On `Ok`,
-  the pointer is the call's and each listed index has a home in this node's state when
-  the call settles, the listed one or another. A call whose entry finds
-  `base.next(root)` returns it when each listed index has a home then, and else gives
-  `Stale`. No entry removes a home, so the path on which the call's entry applies
-  needs no check, and both paths give the same result. Trigger: when an entry can
-  remove a home, that path checks too. Decided by
-  `laptop.architect`, 2026-10-08T17:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A listed
+  home is a proposal: the entry gives it only to an index with none. On `Ok`, the
+  pointer is the call's and each listed index has a home in this node's state when the
+  call settles, the listed one or another. A call whose entry finds `base.next(root)`
+  returns it when each listed index has a home then, and else gives `Stale`. No entry
+  removes a home, so the path on which the call's entry applies needs no check, and both
+  paths give the same result. Trigger: when an entry can remove a home, that path checks
+  too. Decided by `laptop.architect`, 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
   changed by `laptop.architect` at 2026-10-08T17:34:20Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915), which
   supersedes item 2 of
-  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958.
-  Supersedes, in
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958. Those two
+  rulings supersede, in
   https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107, the `Ok`
   of an equal change of another call that leaves a listed index with no home. The
   `Stale` item of `Mesh::apply` names that case, approved by `laptop.architect` at
@@ -2430,8 +2430,8 @@ How to read this record:
   reading when the call settles, the invariant, and its trigger, decided by
   `laptop.architect` at 2026-10-08T18:00:15Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065963448), which
-  supersedes the `Stale` text of 17:52:34Z. The build with `spec::region::tree`, and
-  the build of the root of `Config::founding` with it in `Mesh::open`, decided by
+  supersedes the `Stale` text of 17:52:34Z. The build with `spec::region::tree`, and the
+  build of the root of `Config::founding` with it in `Mesh::open`, decided by
   `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
