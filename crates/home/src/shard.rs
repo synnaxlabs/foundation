@@ -570,7 +570,8 @@ impl Shard {
     ///
     /// If the shard never gave `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
-        self.readers.close(self.place(key.slot), key.session);
+        let now = self.now().map(|(_, now)| now);
+        self.readers.close(self.place(key.slot), key.session, now);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot

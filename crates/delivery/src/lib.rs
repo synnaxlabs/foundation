@@ -3,11 +3,11 @@
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub mod named;
 mod readers;
 
 use std::fmt;
 
-use types::name::Name;
 use types::time::{Span, Stamp};
 
 pub use readers::{Key, Next, Readers, complete, latest};
@@ -41,13 +41,10 @@ pub enum Reader {
     Unnamed,
     /// A reader with a name, which belongs to the subject that opens it. It has at most
     /// one session at a time. After the session closes, the reader keeps its position
-    /// and holds its data for `hold`. A hold of zero ends at the close. Readers of the
-    /// same name and different subjects share nothing.
+    /// and holds its data for `hold`. A hold of zero ends at the close.
     Named {
-        /// The subject that opens the reader.
-        subject: Name,
-        /// The reader's name.
-        name: Name,
+        /// The reader's subject and name.
+        reader: named::Key,
         /// How long the reader holds its data after its session closes: zero or more.
         hold: Span,
     },
@@ -71,13 +68,11 @@ pub enum Start {
 }
 
 /// A named reader's state, for the index log. The last record of a reader, by its
-/// subject and name, replaces the ones before it.
+/// key, replaces the ones before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
-    /// The subject whose reader it is.
-    pub subject: Name,
-    /// The reader's name.
-    pub reader: Name,
+    /// The reader's subject and name.
+    pub reader: named::Key,
     /// The reader's position.
     pub position: Position,
     /// How long the reader holds its data after its session closes.
