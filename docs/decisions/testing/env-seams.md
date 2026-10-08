@@ -52,7 +52,10 @@
   `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
-  readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
+  readable at its first poll, in a field of its driver, so no lock is on the receive
+  path. That driver is the receiver's alone, as a sender clone's is: `Net::udp` gets
+  it once from the socket (`laptop.architect-2`, 2026-10-08 19:12 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). A
   sender registers for writable at its first poll and after each `EAGAIN`, and the next
   send that succeeds drops the registration: Linux wakes each `EPOLLOUT` registration of
   a socket for each datagram that the socket sends (1,000 wakes for 1,000 sends on
