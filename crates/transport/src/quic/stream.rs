@@ -7251,8 +7251,8 @@ mod tests {
             }
         }
 
-        // The share cannot show it: the late claims end, and the owed class then
-        // takes the room, so each class sends the same bytes as with the fix.
+        // The share cannot show it: the late `Latest` message ends, and `Complete`
+        // then takes the room, so each class sends the same bytes as with the fix.
         #[test]
         fn room_a_latest_frees_starts_one_late_latest_while_complete_is_owed() {
             testing::run(1, |shard| {
@@ -7319,6 +7319,8 @@ mod tests {
             });
         }
 
+        // The share cannot show it: the late claims end, and the owed class then
+        // takes the room, so each class sends the same bytes as with the fix.
         #[test]
         fn room_an_owed_class_frees_waits_for_it_past_late_claims_of_the_other() {
             type Setup = fn(&Shard) -> (Pair, Sender);
