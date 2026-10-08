@@ -149,8 +149,7 @@ impl<C> Context<C> {
         &self.config
     }
 
-    /// Cancelled when the run must stop, and once it returned, so each task that it
-    /// spawned to wait on this token stops with it.
+    /// Cancelled when the run must stop, and when it has returned.
     #[must_use]
     pub fn cancel(&self) -> &cancel::Token {
         &self.cancel
@@ -174,8 +173,8 @@ impl<C> Context<C> {
         &self.inputs.net
     }
 
-    /// Runs the kind's own tasks on its shard. A task ends only on its own: one that
-    /// must not outlive the run waits on [`cancel`](Self::cancel).
+    /// Runs the kind's own tasks on its shard. Each task must end when
+    /// [`Context::cancel`] is cancelled.
     #[must_use]
     pub fn tasks(&self) -> &Tasks {
         &self.inputs.tasks

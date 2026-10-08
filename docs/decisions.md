@@ -3858,13 +3858,10 @@ How to read this record:
   and cancels it. `ctx` gives hub sessions, status, run commands, secrets, and cancel.
   `hub` and `home` enforce the rules. `connector` is a library of components plus
   ready-made compositions built only from public parts. Supersedes: r8 Q5 actor with
-  device hooks. One `supervisor::Supervisor` runs on each shard, built from
-  `supervisor::Config` (the kinds, clock, entropy, network, and tasks). `kind::Context`
-  gives a run its name, config, cancel, clock, randomness, network (`net`), and tasks.
-  It is not `Send`: a kind's own thread takes clones of the parts it needs
-  (`laptop.architect-2`, 2026-10-08T02:21:15Z and 03:05:58Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677,
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538).
+  device hooks. `kind::Context` gives a run its name, config, cancel, clock,
+  randomness, network (`net`), and tasks. It is not `Send`: a kind's own thread takes
+  clones of the parts it needs (`laptop.architect-2`, 2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677).
 - **C5 + KINDS OWN THEIR CONFIG** Each kind owns parse, check, discover, and run, built
   on shared components. `config` never knows a kind's fields. A kind returns diagnostics
   with positions plus the channels it reads and writes. Calculations are a kind. The
@@ -3946,10 +3943,15 @@ How to read this record:
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token, which the supervisor cancels once the run returns or its future
-  drops, so each task that the run spawned to wait on it ends with the run (round 1 of
-  #1944). After `Device` or `Retry` it restarts with full jitter backoff (1 s first,
-  60 s cap, constants). The waits start again from 1 s after a run that
-  lasted at least 60 s. `Ok` from `run` ends the connector.
+  drops, so each task that the run spawned to wait on it ends with the run
+  (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
+  supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
+  entropy, network, and tasks) (`laptop.architect-2`, 2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). After
+  `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
+  constants). The waits start again from 1 s after a run that lasted at least 60 s.
+  `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
   changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
   `connector` builder in the plan on #338, after `/eb-review`; approved by the
