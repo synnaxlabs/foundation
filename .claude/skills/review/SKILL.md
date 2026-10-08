@@ -34,9 +34,9 @@ the crate's architect (`docs/factory.md`), which reviews it before the person. A
 surface change includes a change to what a public item accepts, returns, or states in
 its doc, and any change from a surface or text that the architect approved. When the PR
 adds or changes a decision or a public doc that states what a crate does, and that
-crate and the crates that the PR changes are not all on one architect's list, also send
-it to `laptop.architect`, which owns each contract between the two lists
-(`docs/factory.md`), and link its approval.
+crate, the crate whose section or doc holds the text, and the crates that the PR changes
+are not all on one architect's list, also send it to `laptop.architect`, which owns each
+contract between the two lists (`docs/factory.md`), and link its approval.
 
 When a new PR replaces one under review, close the old one first (`gh pr close <old>
 --comment "Replaced by #<new>"`), and link its round comments in the new round 1
