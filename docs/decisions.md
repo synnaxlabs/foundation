@@ -2187,13 +2187,18 @@ How to read this record:
   `spec::region::tree`. The change lists each chunk of the new tree that the tree of
   the base lacks, or each chunk of the new tree when `Config::chunks`, the node's
   `blob::Store`, cannot give the tree of the base. A change that lists more than
-  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. The
-  node puts each listed chunk in its store, which gives `Error::Pool` or
-  `Error::Blob` on a failure, and counts itself as the one holder. When the holders
-  are not a majority of each half of the voters, before the propose or at the apply,
-  the call gives `Error::Quorum { held, voters }` for the first half that lacks one,
-  the incoming half first. The count before the propose costs no entry. `Mesh::open`
-  puts each chunk of the founding tree in the store. A change that the state refuses
+  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A
+  base root whose chunk is not a tree node is a base tree that the store cannot give.
+  The node counts itself as the one holder. When the holders are not a majority of
+  each half of the voters, before the propose or at the apply, the call gives
+  `Error::Quorum { held, voters }` for the first half that lacks one, the incoming
+  half first. The count before the propose costs no entry and no put. The node then
+  puts each chunk of the new tree in its store, not only the listed ones, because
+  `diff` never reads a chunk that the two trees share, so a chunk that the store lost
+  is found only by a put. A put gives `Error::Pool` or `Error::Blob` on a failure.
+  `Mesh::open` puts each chunk of the founding tree in the store. The store writes
+  again each chunk that it found at its open, so the first put of a chunk after each
+  open costs one durable write. A change that the state refuses
   as stale gives `Error::Stale { base, pointer }`. A call learns the refusal of its own
   entry from `Applied`, which keeps the refusal of each applied entry above the lowest
   open floor of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
@@ -3071,7 +3076,7 @@ How to read this record:
   Amended (2026-10-08, PR 1 of #1741): with a region, `node` opens the chunk store in
   `blob` in the data directory before the mesh, and gives it as
   `mesh::Config::chunks`. A store that does not open stops the node with
-  `Error::Mesh(mesh::Error::Blob)`.
+  `node::Error::Blob`.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can

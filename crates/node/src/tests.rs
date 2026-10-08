@@ -2911,13 +2911,16 @@ mod port {
             host.fail_file(Path::new("blob"), env::files::Operation::List);
             let node = start_alone(&host);
             assert_eq!(sim.run(), Ok(()));
-            let error =
-                ::mesh::Error::Blob(blob::Error::Files(env::files::Error::Io {
-                    path: PathBuf::from("blob"),
-                    operation: env::files::Operation::List,
-                    code: 5,
-                }));
-            assert_eq!(node.join(), Err(Error::Mesh(error)));
+            let error = blob::Error::Files(env::files::Error::Io {
+                path: PathBuf::from("blob"),
+                operation: env::files::Operation::List,
+                code: 5,
+            });
+            assert_eq!(node.join(), Err(Error::Blob(error.clone())));
+            assert_eq!(
+                Error::Blob(error.clone()).to_string(),
+                format!("the node's chunk store did not open: {error}")
+            );
         }
 
         /// Takes the lock of `host` as soon as it is free, then opens the mesh's log

@@ -157,6 +157,8 @@ impl Mesh {
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
+    /// - [`Error::Pool`] when the pool has no block for a chunk of the founding tree,
+    ///   and [`Error::Blob`] when its put in `config.chunks` fails.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     ///
