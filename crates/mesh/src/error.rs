@@ -3,6 +3,7 @@ use std::fmt;
 use raft::Position;
 use spec::Pointer;
 use types::ed25519::PublicKey;
+use types::name::Name;
 use types::node;
 
 use crate::change::Unknown;
@@ -96,6 +97,20 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
+    /// A home of a spec change names an index that the spec of the change does not
+    /// hold as an index channel.
+    NotIndex(Name),
+    /// A home of a spec change names a node that no member of the region has as its
+    /// name.
+    UnknownNode(Name),
+    /// A spec change gives more homes than one change can hold. Apply the change in
+    /// smaller steps.
+    Homes {
+        /// The count of homes that the change gives.
+        homes: usize,
+        /// The most homes that one change gives.
+        most: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -146,26 +161,44 @@ impl fmt::Display for Error {
                 "the change lists {chunks} chunks, more than the {most} that one \
                  change can list"
             ),
-            Self::Problems(problems) => {
-                f.write_str("the spec has problems")?;
-                let mut separator = ": ";
-                for problem in problems {
-                    write!(f, "{separator}{problem}")?;
-                    separator = "; ";
-                }
-                Ok(())
-            }
+            Self::Problems(problems) => write_problems(f, problems),
             Self::Quorum { held, voters } => write!(
                 f,
                 "{held} of {voters} voters hold the chunks of the spec change, not a \
                  majority"
             ),
             Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
+            Self::NotIndex(index) => write!(
+                f,
+                "a home names {index}, which the spec does not hold as an index channel"
+            ),
+            Self::UnknownNode(node) => write!(
+                f,
+                "a home names the node {node}, which is not a member of the region"
+            ),
+            Self::Homes { homes, most } => write!(
+                f,
+                "the change gives {homes} homes, more than the {most} that one change \
+                 can give"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+fn write_problems(
+    f: &mut fmt::Formatter<'_>,
+    problems: &[spec::region::Problem],
+) -> fmt::Result {
+    f.write_str("the spec has problems")?;
+    let mut separator = ": ";
+    for problem in problems {
+        write!(f, "{separator}{problem}")?;
+        separator = "; ";
+    }
+    Ok(())
+}
 
 impl From<log::Error> for Error {
     fn from(error: log::Error) -> Self {
