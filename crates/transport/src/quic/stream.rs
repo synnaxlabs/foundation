@@ -607,7 +607,10 @@ impl<'a> Left<'a> {
             return (Piece::Chunk(block.slice(range)), after);
         }
         if buffer.len() > COPIED_MAX {
-            return (Piece::Chunk(Bytes::copy_from_slice(buffer)), after);
+            // Not `Bytes::copy_from_slice`: with a second caller, it stays out of line
+            // in noq-proto's `SendStream::write`, and each long run costs about 12 ns
+            // more on the release profile.
+            return (Piece::Chunk(Bytes::from(buffer.to_vec())), after);
         }
         (Piece::Copied(buffer), after)
     }
