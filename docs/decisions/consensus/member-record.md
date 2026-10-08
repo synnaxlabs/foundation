@@ -110,7 +110,9 @@
   and the status keys, which the voter assigns (UUIDv7). Apply refuses, in this order,
   a forged card, a reserved name (A3), a name outside the region, a status channel
   `<name>.<status>` that is longer than a name can be or reserved, a key that is
-  already a member, a public key that the card of a member holds (`Unfit::Held`), a
+  already a member, a public key that the card of a member holds (`Unfit::Held`;
+  `laptop.architect`, 2026-10-08T22:29:26Z,
+  https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077), a
   name that a member holds, a status key that a member holds or
   that the join repeats (A4), an unknown ticket, and each refusal of `Record::admit`.
   So no refusal counts a use. A member's names are its card name and each
