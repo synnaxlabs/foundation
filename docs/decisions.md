@@ -1019,10 +1019,11 @@ How to read this record:
 - **HOME EVERY TYPE (#1145)** `Shard::open_writer` takes a key set of every
   `sample::Type`, and the home writes and reads a series of each: `codec` checks and
   encodes it as S3 says, and STORED BODY stores its type. Neither `home` nor `hub` has
-  a `writer::Error::Type`. Supersedes HOME TYPE REFUSAL (#963), the patch that refused
-  a series of a type other than a scalar until this change. Decided by
-  `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861).
+  a `writer::Error::Type`. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785 (HOME TYPE
+  REFUSAL), the patch that refused a series of a type other than a scalar until this
+  change. The scope is from `laptop.architect` (2026-10-08T06:36:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861).
 - **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
@@ -1068,9 +1069,7 @@ How to read this record:
   releases the frame at the next call, not at its first poll, and grants credit for it
   there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
   keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
-  A writer opens on a channel of every type (HOME EVERY TYPE). Decided by
-  `laptop.architect`
-  (2026-10-07T05:53:24Z:
+  Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
