@@ -343,9 +343,9 @@ How to read this record:
   pressure, but at `0s` a reader a few milliseconds behind loses each sample it reads
   from disk, and each read needs `keep` and a clock. Stale commands are the job of
   `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
-  `keep` reads with `document::read::span` (`document.bad-span`), where a negative span
-  reads, and `config` refuses it with `config.negative-span` at the `keep` value. The
-  code names the defect, so a later span bound (a reader `hold`, S10) uses it too.
+  `keep` reads with `document::read::duration`, which refuses a negative span with
+  `document.negative-span` at the `keep` value, as it does a reader `hold` (S10,
+  DOCUMENT KEYS).
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
@@ -3385,10 +3385,11 @@ How to read this record:
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
   reader is complete, has the connector's name, and holds nothing. A second `reader`
-  block is `config.repeated-block`, and `read` reads only the first, where a label is
-  `config.label-count`. A negative `hold` is `config.negative-span` (READER RULES, #94).
+  block is `document.repeated-block`, and `read` reads only the first, where a label is
+  `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
+  #94).
   A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
-  holds. #1785 moves the three `config.*` checks into `document::read`.
+  holds.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3852,6 +3853,9 @@ How to read this record:
   through `document::read::name` (#474). `read::names` reads one name or a list, in
   order with repeats, and `read::label` reads a block label (architect, #1150,
   [ruling](https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151)).
+  `value::Kind::text` gives the text of a string or of a reference, so each place that
+  reads the two as the same text matches them once (`laptop.architect-2`, #1702,
+  [ruling](https://github.com/synnaxlabs/foundation/issues/1702#issuecomment-6053513102)).
   `export` and `discover` write every name as a string (`"site_a.pt_1"`): they need no
   HCL rule, and a generated file reads back as exactly the Document it came from. This
   replaces the #363 ruling that a file writes a reserved name only as a string. The
@@ -3866,30 +3870,36 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
-- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
-  a body that its reader does not take, with the attribute keys and the block keywords
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of a
+  body that its reader does not take, with the attribute keys and the block keywords
   apart, so a key that names an attribute never passes as a block. One function holds
   both checks, so a kind cannot forget one half. When a body takes blocks and no
   attribute, as a file does, the fix of an attribute is to move it into one of those
-  blocks. `read::missing` reports a body with none of some keys, and panics on an
-  empty list, which is a defect of the caller. `read::required` reads one key or gives
-  that diagnostic. `config` uses them, also at the top level of a file, and so does each
-  kind, so one mistake has one code: `document.unknown-attribute`,
+  blocks. `read::missing` reports a body with none of some keys, and panics through
+  `one_of` on an empty list, which is a defect of the caller. `read::required` reads one
+  key or gives that diagnostic. `config` uses them, also at the top level of a file, and
+  so does each kind, so one mistake has one code: `document.unknown-attribute`,
   `document.unknown-block`, and `document.missing-attribute`. Decided by
   `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
   2026-10-08 03:05 UTC) and on #1772
   (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
   2026-10-08 03:27 UTC, and
-  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
-  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
-  rest at `finish`, which drops the diagnostics when a caller returns early;
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111, 2026-10-08
+  03:29 UTC). Lost: a `Body` value that records each key read and reports the rest at
+  `finish`, which drops the diagnostics when a caller returns early;
   `unknown_attributes` and `unknown_blocks` as two functions; a public
   `UNKNOWN_ATTRIBUTE` code for a caller to match on. `read::one_of` lists words in
-  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list, as
-  `missing` does. It is public for the `config.bad-action` fix, so no copy goes into
-  `config`. Decided by `laptop.architect-2` at 2026-10-08T03:54:12Z
+  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list. It is
+  public for the `config.bad-action` fix, so no copy goes into `config`. Decided by
+  `laptop.architect-2` at 2026-10-08T03:54:12Z
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
+  `read::labels::<N>` checks that a block has `N` labels (`document.label-count`),
+  `read::repeated` reports each second block of a keyword that takes one
+  (`document.repeated-block`), and `read::duration` reads a span of zero or more
+  (`document.negative-span`). `config` and `connector::reader` use them, and the
+  `config.*` codes for these went. Decided by `laptop.architect-2` on #1785
+  (RULING_LINK).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
