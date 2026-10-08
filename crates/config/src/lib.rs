@@ -1915,6 +1915,10 @@ mod tests {
                 "access",
                 &self::attributes(string("read"), None),
             );
+            assert_inner_blocks_refused(
+                "access",
+                &self::attributes(string("read"), Some(5)),
+            );
         }
 
         #[test]
@@ -2517,6 +2521,14 @@ mod tests {
             assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
             assert_inner_blocks_refused("channel", &[("kind", string("stream"))]);
             assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
+            assert_inner_blocks_refused(
+                "channel",
+                &[
+                    ("data_type", string("bool")),
+                    ("index", string("edge")),
+                    ("unit", string("V")),
+                ],
+            );
         }
 
         #[test]
