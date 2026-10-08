@@ -21,7 +21,8 @@ pub struct Spec {
     /// The definitions of the spec in use, by tree key.
     pub definitions: Rc<BTreeMap<Name, Definition>>,
     /// Why the node does not use the newest committed pointer whose read ended, or
-    /// `None` when it uses that pointer. A newer pointer can wait for its read.
+    /// `None` when it uses that pointer. A newer pointer can wait for its read, and a
+    /// retry keeps the cause of the read before it.
     pub behind: Option<Behind>,
 }
 

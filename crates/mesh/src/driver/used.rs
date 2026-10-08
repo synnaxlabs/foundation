@@ -458,9 +458,10 @@ fn file(pointer: Pointer) -> PathBuf {
 }
 
 impl Mesh {
-    /// The spec that this node uses, once it has read the spec of the pointer that
-    /// was committed at the call. It waits only for the first read of that pointer,
-    /// never for a retry or a later pointer.
+    /// The spec that this node uses, once the first read of the pointer that was
+    /// committed at the call ended, or of a later pointer that replaced it before its
+    /// read began. `pointer` or `behind` of the result then names that pointer or a
+    /// later one. It never waits for a retry.
     ///
     /// # Errors
     ///
