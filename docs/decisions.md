@@ -4503,6 +4503,24 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526),
   which extends the refusal ruling of #1744
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053329389).
+- **HUB LINK (2026-10-08)** `Hub::link(session)` gives a `hub::Link` for one transport
+  session, and `node` calls `Link::serve` for each hub stream in accept order. `serve`
+  takes the role of the stream at the call: the first stream of a client session is
+  its hello stream, and each later one a request stream. `hub::Config` gets `node`
+  (the `via` that `admit` checks), `time` (`clock::Reader`), and `entropy` (the
+  nonces). The link waits for a hello's expiry through `clock`, which knows how mesh
+  time moves against the monotonic clock; `hub` gets no second clock unless the owner
+  of `clock` refuses that wait. A link has one open request: it frees the request when
+  `Reply::send` is called or the `Reply` drops, before the first byte of the response,
+  so a client that sends its next request when a reply ends never gets `MALFORMED`.
+  `Reply::send` panics on a body over `BODY_BYTES_MAX`, a precondition that the maker of
+  the body checks. Each order error names its cause, though all three stop with
+  `MALFORMED`: `serve::Error::Unadmitted` (a request before an admitted hello),
+  `Hello` (a hello on a later stream), and `Pending` (a request while one waits for its
+  reply). `Link` is not `Clone`. Lost: a `Config::clock` beside `time`, with a loop in
+  `hub` that knows the slew; more than one open request, which no wire needs now. Decided
+  by `laptop.architect` at 2026-10-08T11:24:07Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies, connectors, and subjects itself. A policy reaches a name when

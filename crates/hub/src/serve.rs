@@ -52,9 +52,13 @@ pub enum Error {
     Access(access::proof::Error),
     /// The hello does not echo the nonce of the last challenge. Code `STALE`.
     Stale,
-    /// A request stream before the link admitted a hello, a hello on a request
-    /// stream, or a request while another is open. Code `MALFORMED`.
-    Order,
+    /// A request stream before the link admitted a hello. Code `MALFORMED`.
+    Unadmitted,
+    /// A hello on a stream after the first of the session. Code `MALFORMED`.
+    Hello,
+    /// A request stream while another request of the link waits for its reply. Code
+    /// `MALFORMED`.
+    Pending,
     /// The program finished a request stream with `remain` bytes of its body unsent.
     /// Code `MALFORMED`.
     Unfinished {
@@ -72,7 +76,9 @@ impl Error {
             | Self::Class(_)
             | Self::ManyIndexes
             | Self::NoIndex
-            | Self::Order
+            | Self::Unadmitted
+            | Self::Hello
+            | Self::Pending
             | Self::Unfinished { .. } => Some(Code(MALFORMED)),
             Self::Access(error) => Some(Code(client::code(error))),
             Self::Stale => Some(Code(STALE)),
@@ -117,9 +123,14 @@ impl fmt::Display for Error {
             Self::Stale => f.write_str(
                 "the hello does not echo the nonce of the node's last challenge",
             ),
-            Self::Order => f.write_str(
-                "the program opened a stream out of order: a request before its \
-                 hello was admitted, a second hello stream, or a second open request",
+            Self::Unadmitted => f.write_str(
+                "the program sent a request before the node admitted a hello",
+            ),
+            Self::Hello => {
+                f.write_str("the program sent a hello on a stream after the first")
+            }
+            Self::Pending => f.write_str(
+                "the program sent a request while another request waits for its reply",
             ),
             Self::Unfinished { remain } => write!(
                 f,

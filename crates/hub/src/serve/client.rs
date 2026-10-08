@@ -34,7 +34,7 @@ pub struct Request {
 }
 
 /// The response half of a request stream. A drop with no send resets the stream. The
-/// link takes its next request once this sends or drops.
+/// link takes its next request from the start of the send, or from the drop.
 #[derive(Debug)]
 pub struct Reply {
     state: Rc<RefCell<State>>,
@@ -61,8 +61,8 @@ impl Reply {
             receiver,
             open,
         } = self;
-        let sent = respond(&state, &mut sender, body).await;
         drop(open);
+        let sent = respond(&state, &mut sender, body).await;
         if let Err(error) = &sent {
             stop(receiver, sender, error);
         }
@@ -152,7 +152,7 @@ async fn take(
     };
     let FromProgram::Signed(Signed { hello, signature }) = gateway.decode(&message)?
     else {
-        return Err(Error::Order);
+        return Err(Error::Unadmitted);
     };
     if hello.nonce != nonce {
         return Err(Error::Stale);
@@ -259,17 +259,18 @@ async fn read(
     receiver: &mut Receiver,
 ) -> Result<Option<(Signed, Vec<u8>, [u8; 64], Open)>, Error> {
     if shared.admitted.borrow().is_none() {
-        return Err(Error::Order);
+        return Err(Error::Unadmitted);
     }
     let mut gateway = Gateway::default();
     let Some(message) = receiver.recv().await? else {
         return Ok(None);
     };
+    // A first message is a hello or a request.
     let FromProgram::Request(request) = gateway.decode(&message)? else {
-        return Err(Error::Order);
+        return Err(Error::Hello);
     };
     if shared.open.replace(true) {
-        return Err(Error::Order);
+        return Err(Error::Pending);
     }
     let open = Open(Rc::clone(shared));
     let mut remain = usize::try_from(request.length)

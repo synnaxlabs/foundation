@@ -12,8 +12,8 @@ use crate::serve::{self, Request, client};
 
 /// The hub's part of one transport session. For a client session, it holds the
 /// admitted hello, so the hello is checked once for the connection, and it closes the
-/// session when the hello expires. Clones share it.
-#[derive(Clone, Debug)]
+/// session when the hello expires.
+#[derive(Debug)]
 pub struct Link(Rc<Shared>);
 
 /// What [`Link::serve`] ended with.

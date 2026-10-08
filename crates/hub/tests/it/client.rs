@@ -70,9 +70,9 @@ struct Home {
 }
 
 /// Runs one client session: the home's node makes a [`Test`] hub, with mesh time when
-/// `synced`, and serves each hub stream of the session on one `hub::Link`. It replies to
-/// each request with its body reversed, after [`HOLD`]. The program's node gives its
-/// end to `program`.
+/// `synced`, and serves each hub stream of the session on one `hub::Link`. It replies
+/// to each request with its body reversed, after [`HOLD`]. The program's node gives
+/// its end to `program`.
 fn session<P>(
     seed: u64,
     synced: bool,
@@ -254,11 +254,7 @@ impl Agent {
 
     /// Signs `hello` with `key` and sends it on the hello stream.
     async fn send_hello(&mut self, hello: Hello, key: &PrivateKey) {
-        let signature = Pair::new(key).sign(&access::proof::hello(&hello));
-        let signed = Signed { hello, signature };
-        let mut out = vec![0; signed.encoded_len()];
-        signed.encode(&mut out);
-        self.hello.send(&out).await;
+        self.hello.send(&signed(hello, key)).await;
     }
 
     /// Takes the challenge and answers it with a valid hello.
@@ -308,6 +304,15 @@ impl Agent {
     async fn sleep(&self, span: Span) {
         self.node.clock().sleep(span).await;
     }
+}
+
+/// `hello`, signed with `key` and encoded.
+fn signed(hello: Hello, key: &PrivateKey) -> Vec<u8> {
+    let signature = Pair::new(key).sign(&access::proof::hello(&hello));
+    let signed = Signed { hello, signature };
+    let mut out = vec![0; signed.encoded_len()];
+    signed.encode(&mut out);
+    out
 }
 
 fn closed_with(code: u32) -> transport::Error {
@@ -510,15 +515,14 @@ fn stops_a_request_before_the_hello_is_admitted() {
         let mut stream = agent.request(2, b"cd").await;
         assert_eq!(stream.response().await, b"dc");
     });
-    assert_eq!(home.served[0], Err(serve::Error::Order));
+    assert_eq!(home.served[0], Err(serve::Error::Unadmitted));
     assert_eq!(
         home.served[1],
         Ok(Got::Request(name(SUBJECT), b"cd".to_vec()))
     );
     assert_eq!(
-        serve::Error::Order.to_string(),
-        "the program opened a stream out of order: a request before its hello was \
-         admitted, a second hello stream, or a second open request"
+        serve::Error::Unadmitted.to_string(),
+        "the program sent a request before the node admitted a hello"
     );
 }
 
@@ -539,10 +543,59 @@ fn stops_a_second_request_while_one_is_open() {
     assert_eq!(
         home.served,
         [
-            Err(serve::Error::Order),
+            Err(serve::Error::Pending),
             Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
             Ok(Got::Request(name(SUBJECT), b"ef".to_vec())),
         ]
+    );
+    assert_eq!(
+        serve::Error::Pending.to_string(),
+        "the program sent a request while another request waits for its reply"
+    );
+}
+
+/// The link frees a request before the first byte of its reply, so a request sent once
+/// the last reply ends is never refused as pending.
+#[test]
+fn takes_each_request_sent_once_the_last_reply_ends() {
+    const COUNT: u8 = 20;
+    let home = session(98, true, |mut agent| async move {
+        agent.admit().await;
+        for i in 0..COUNT {
+            let mut stream = agent.request(2, &[i, 0]).await;
+            assert_eq!(stream.response().await, [0, i]);
+        }
+    });
+    let expected: Vec<_> = (0..COUNT)
+        .map(|i| Ok(Got::Request(name(SUBJECT), vec![i, 0])))
+        .collect();
+    assert_eq!(home.served, expected);
+}
+
+/// A hello on a stream after the first stops as `MALFORMED`, and the session stays
+/// open.
+#[test]
+fn stops_a_hello_on_a_request_stream() {
+    let home = session(99, true, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        let challenge = agent.hello.challenge().await;
+        let mut other = agent.open().await;
+        other.send(&signed(Agent::hello(challenge), &AGENT)).await;
+        assert_eq!(other.recv().await, reset_with(MALFORMED));
+        let mut stream = agent.request(2, b"ab").await;
+        assert_eq!(stream.response().await, b"ba");
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Hello),
+            Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
+        ]
+    );
+    assert_eq!(
+        serve::Error::Hello.to_string(),
+        "the program sent a hello on a stream after the first"
     );
 }
 
@@ -606,19 +659,14 @@ fn ends_a_request_stream_that_finished_before_its_request() {
     assert_eq!(home.served[0], Ok(Got::Ended));
 }
 
-/// A request on the hello stream breaks the order of the stream, so the session
-/// closes.
+/// A request on the hello stream after a hello breaks the order of the stream, so the
+/// session closes.
 #[test]
 fn closes_the_session_on_a_request_on_the_hello_stream() {
     let home = session(95, true, |mut agent| async move {
+        agent.admit().await;
         agent.hello.challenge().await;
-        let request = Request {
-            length: 0,
-            signature: [0; 64],
-        };
-        let mut out = [0; Request::LEN];
-        request.encode(&mut out);
-        agent.hello.send(&out).await;
+        agent.hello.send(&empty_request()).await;
         assert_eq!(agent.closed().await, closed_with(MALFORMED));
     });
     assert_eq!(
@@ -627,6 +675,29 @@ fn closes_the_session_on_a_request_on_the_hello_stream() {
             kind: 5
         }))]
     );
+}
+
+/// A request as the first message of the session asks before a hello, so the session
+/// closes.
+#[test]
+fn closes_the_session_on_a_request_before_the_first_hello() {
+    let home = session(100, true, |mut agent| async move {
+        agent.hello.challenge().await;
+        agent.hello.send(&empty_request()).await;
+        assert_eq!(agent.closed().await, closed_with(MALFORMED));
+    });
+    assert_eq!(home.served, [Err(serve::Error::Unadmitted)]);
+}
+
+/// A request with no body and a signature that does not verify.
+fn empty_request() -> [u8; Request::LEN] {
+    let request = Request {
+        length: 0,
+        signature: [0; 64],
+    };
+    let mut out = [0; Request::LEN];
+    request.encode(&mut out);
+    out
 }
 
 /// A hello whose expiry is past the cap is refused, so a renewal cannot hold a
