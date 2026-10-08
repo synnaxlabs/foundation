@@ -516,13 +516,13 @@ mod tests {
 
     const FOUNDING: Digest = Digest([1; 32]);
 
-    // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
     // The state of `members` in the region `prefix`, with voter 1, the spec
     // `FOUNDING`, and no home.
     fn create_state(prefix: Prefix, members: Vec<Member>) -> Result<State, Unfit> {
         State::new(prefix, members, FOUNDING, [node(1)].into(), BTreeMap::new())
     }
 
+    // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
     fn state() -> State {
         let mut state =
             create_state(name("plant").into(), create_members(&[1, 2])).unwrap();
