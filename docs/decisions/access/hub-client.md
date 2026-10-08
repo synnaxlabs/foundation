@@ -9,8 +9,8 @@
   ends the renewal and closes the session with `MALFORMED`. Each later request gives the
   error that ended the renewal. `request(body)` signs the body, sends it on its own
   stream, and gives the body of the response. Requests of one client go one at a time,
-  in the order they ask, by a turn in the client, as a link holds one open request (HUB
-  LINK). A request dropped before its response began keeps the turn until the next
+  in the order they began, by a turn in the client, as a link holds one open request
+  (HUB LINK). A request dropped before its response began keeps the turn until the next
   message or the end of its stream, because the node holds it open until its response
   begins. `Config` holds its own `pool`, which a program may share with the transport.
   `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
@@ -22,8 +22,11 @@
   a code outside the set stays `Error::Transport`. Lost: one dial for each request (a
   handshake for each request, and `foundation status` needs a session that lives); `&mut
   self` with the renewal inside `request` (an idle program loses its session at the
-  expiry); a queue in a task that owns the session; `Error::Stopped` with a `u32` code,
-  which gives `hub` a meaning for each code. The plan
+  expiry); a queue in a task that owns the session; a lock of a library (`tokio::sync`
+  is FIFO, but `hub` does not depend on Tokio (HUB SESSIONS), and `futures::lock::Mutex`
+  wakes the first waiter of its slab, not the oldest, and lets a new `lock` take the
+  lock ahead of it, which starves a waiter); `Error::Stopped` with a `u32` code, which
+  gives `hub` a meaning for each code. The plan
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069186434) was
   approved with the `Refusal` change by `laptop.architect` at 2026-10-08T21:25:05Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069345374).
