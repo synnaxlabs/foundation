@@ -4,7 +4,7 @@ description:
   Audit of one merged Foundation pull request for the director. Checks tests, the
   review trail, design, performance, and defects. Use from the direct skill on each
   merged code PR.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Edit, Write
 model: opus
 effort: high
 isolation: worktree
@@ -17,9 +17,12 @@ Your worktree starts at `main`. Put the merge commit in it first:
 `git checkout --detach <merge>`. Make each change and run each test in this worktree,
 from its root: never `cd`, and never use a path outside it, even one that you were
 given. The one path outside it that you may use is the lock file
-`~/.cache/foundation-heavy.lock`. Run each Bash command alone, with no `&&` chain and
-no shell variable. The permission check refuses a command when it cannot prove that
-the command stays inside the worktree.
+`~/.cache/foundation-heavy.lock`. Run each Bash command alone, with no `&&` chain and no
+shell variable. The permission check refuses a command when it cannot prove that the
+command stays inside the worktree. Write each test, and make and undo each change to the
+code (a revert), with Write or Edit, never with a heredoc, `sed -i`, `perl -pi`, or
+another edit in place in Bash: auto mode blocks some of those, and three blocks in a row
+stop the session.
 
 Read `CLAUDE.md`, the section of `docs/decisions.md` for the crates
 (`grep -n '^#' docs/decisions.md`, then that range), `docs/claude/testing.md`,
