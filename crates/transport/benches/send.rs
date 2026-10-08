@@ -23,12 +23,12 @@
 //! Over the timed rounds, the `Complete` bytes timed must be from 2.5 to 3.5 times the
 //! `Latest` bytes: the share gives `Complete` 3 bytes for each byte of `Latest`. The
 //! `budget` line sends messages of two sizes, so a share in sends or in writes fails
-//! it. In each of its rounds, the messages of the sends that wait at once must hold
-//! more than the peer's window, which is the send budget, so a claim waits for room in
-//! it. After the rounds, the server must have accepted one stream for each stream
-//! opened, of the same class. If not, the bench panics. The control is `complete 1 KiB
-//! waiting`, whose send must wait in each round. Each poll has a timing cost, so
-//! compare the lines with their polls per send.
+//! it. In each of its rounds, a send must wait for room in the send budget, which the
+//! peer's window bounds. It does not check that room an owed class frees waits for
+//! that class: the unit tests of `transport` do. After the rounds, the server must
+//! have accepted one stream for each stream opened, of the same class. If not, the
+//! bench panics. The control is `complete 1 KiB waiting`, whose send must wait in each
+//! round. Each poll has a timing cost, so compare the lines with their polls per send.
 //!
 //! The `parts` lines time, in rounds that take turns, each on its own stream, a `send`
 //! of one block, a `send_parts` of the same bytes as ranges of a larger block, and a
@@ -81,13 +81,15 @@ const WIDE: Room = Room {
     window_bytes: 1 << 22,
     message_bytes_max: 1 << 16,
 };
-/// The room of the server for the `WAITING` scenarios: a quarter of a round.
+/// The room of the server for the `WAITING` scenarios: a quarter of a round of 64
+/// messages of 1 KiB.
 const TIGHT: Room = Room {
     window_bytes: 16 << 10,
     message_bytes_max: 4 << 10,
 };
 
-/// Sends per round. A round fits the `WIDE` window, so no send waits there.
+/// Sends per round of a [`Scenario`]. A round fits the `WIDE` window, so no send waits
+/// there.
 const SENDS: usize = 64;
 /// Sends per round of a [`Shape`], whose message is up to 64 KiB.
 const PARTS_SENDS: usize = 16;
@@ -241,7 +243,7 @@ const WAITING: [Waiting; 3] = [
             Stream::new(Class::Latest, 2 << 10, 8),
             Stream::new(Class::Latest, 2 << 10, 8),
         ],
-        premise: Premise::OverBudget,
+        premise: Premise::WaitsForBudget,
     },
 ];
 
@@ -281,9 +283,9 @@ enum Premise {
     /// class waits. Over the timed rounds, the bytes of the timed `Complete` sends
     /// must also be from 2.5 to 3.5 times those of the timed `Latest` sends.
     Competes,
-    /// As `Competes`, and a claim waits for room in the send budget: the messages of
-    /// the sends that wait at once hold more bytes than the peer's window.
-    OverBudget,
+    /// As `Competes`, and a send waits for room in the send budget, as the
+    /// transport's `Status::budget_waits` counts.
+    WaitsForBudget,
 }
 
 /// The class of each stream a server accepted, in the order it accepted them.
@@ -345,7 +347,8 @@ fn main() {
             for scenario in WAITING {
                 let classes = scenario.streams.iter().map(|stream| stream.class);
                 let mut senders = open(&session, classes).await;
-                let line = compete(&pool, &mut senders, scenario, &accepted);
+                let line =
+                    compete(&transport, &pool, &mut senders, scenario, &accepted);
                 lines.push(line.await);
                 for sender in &mut senders {
                     sender.finish().expect("the stream finishes");
@@ -652,10 +655,11 @@ async fn open(
 /// # Panics
 ///
 /// When a send fails, when the rounds do not show the scenario's premise (for
-/// `Competes` and `OverBudget`, also when the bytes of the timed `Complete` sends
+/// `Competes` and `WaitsForBudget`, also when the bytes of the timed `Complete` sends
 /// are not 2.5 to 3.5 times those of the timed `Latest` sends), or when the classes
 /// the server got in `accepted` are not those of `senders`.
 async fn compete(
+    transport: &Transport,
     pool: &Pool,
     senders: &mut [Sender],
     scenario: Waiting,
@@ -668,6 +672,7 @@ async fn compete(
     let (mut allocations, mut polls, mut timed) = (0, 0, 0);
     let (mut complete, mut latest) = (0, 0);
     for round in 0..WARMUP + ROUNDS {
+        let waits = transport.status().budget_waits;
         let tally = RefCell::new(Tally::new(scenario));
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
         let streams = senders.iter_mut().zip(scenario.streams);
@@ -680,8 +685,13 @@ async fn compete(
         join(futures).await;
         let tally = tally.into_inner();
         let sends: u64 = tally.sent.iter().sum();
+        let waited = transport.status().budget_waits > waits;
+        let shown = match premise {
+            Premise::WaitsForBudget => tally.shown && waited,
+            Premise::Waits | Premise::Competes => tally.shown,
+        };
         assert!(
-            tally.shown,
+            shown,
             "{} is not {premise:?} in round {round}",
             scenario.name
         );
@@ -699,7 +709,7 @@ async fn compete(
             latest += tally.bytes(Class::Latest);
         }
     }
-    if let Premise::Competes | Premise::OverBudget = premise {
+    if let Premise::Competes | Premise::WaitsForBudget = premise {
         assert!(
             5 * latest <= 2 * complete && 2 * complete <= 7 * latest,
             "{} times {complete} Complete and {latest} Latest bytes, \
@@ -741,7 +751,7 @@ async fn send_each(
 }
 
 /// The polls of the sends of one `WAITING` round. Under `Premise::Competes` and
-/// `Premise::OverBudget`, a send is timed only when its last poll runs while a send
+/// `Premise::WaitsForBudget`, a send is timed only when its last poll runs while a send
 /// of the other class waits.
 struct Tally {
     /// The cost of the timed sends.
@@ -756,11 +766,8 @@ struct Tally {
     waiting: Vec<bool>,
     /// Whether each sender finished a send while a send of the other class waited.
     turned: Vec<bool>,
-    /// Whether the messages of the sends that waited at once held more bytes than
-    /// the peer's window, which is the send budget.
-    over: bool,
     premise: Premise,
-    /// Whether the polls so far show `premise`.
+    /// Whether the polls so far show `premise`, apart from a wait for budget room.
     shown: bool,
 }
 
@@ -782,7 +789,6 @@ impl Tally {
             waiting: vec![false; streams.len()],
             turned: vec![false; streams.len()],
             streams,
-            over: false,
             premise: scenario.premise,
             shown: false,
         }
@@ -819,17 +825,11 @@ impl Tally {
                 self.sent[at] += 1;
             }
         }
-        let streams = self.streams.iter().zip(&self.waiting);
-        let held: usize = streams
-            .filter(|&(_, &waits)| waits)
-            .map(|(stream, _)| stream.bytes)
-            .sum();
-        self.over |= held > TIGHT.window_bytes;
-        let turned = self.turned(Class::Latest) && self.turned(Class::Complete);
         self.shown |= match self.premise {
             Premise::Waits => self.waiting.iter().any(|&waits| waits),
-            Premise::Competes => turned,
-            Premise::OverBudget => turned && self.over,
+            Premise::Competes | Premise::WaitsForBudget => {
+                self.turned(Class::Latest) && self.turned(Class::Complete)
+            }
         };
         polled
     }
@@ -950,7 +950,7 @@ fn part(node: &Node, port: u16) -> transport::port::Part {
 
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
 fn print(lines: &[Measured]) {
-    println!("ns per timed send over {ROUNDS} rounds of {SENDS} sends");
+    println!("ns per timed send over {ROUNDS} rounds");
     println!("pN: the round at percentile N, over its timed sends");
     println!(
         "{:<40} {:>9} {:>9} {:>9} {:>12} {:>11} {:>6}",
