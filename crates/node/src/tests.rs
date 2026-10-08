@@ -2078,9 +2078,10 @@ mod hub {
         let host = host(&mut sim, 1);
         let opened = sim.run_on(&host, move |host, tasks| async move {
             let stop = Stop::default();
-            let (open, pool, next, _) =
+            let (open, pool, next, time) =
                 super::home::create_open(&host, &tasks, 0, stop.clone());
             let monotonic = host.clock();
+            let entropy = host.entropy();
             let spawn = tasks.clone();
             let hold = async move |home, guard| {
                 let interner = next.await.expect("the open gives the interner");
@@ -2088,6 +2089,10 @@ mod hub {
                     home,
                     interner,
                     tasks: spawn,
+                    node: types::node::Key::from_u128(1),
+                    time,
+                    clock: monotonic.clone(),
+                    entropy,
                 });
                 define(&hub, 1, "time", STAMP, 1);
                 define(&hub, 2, "value", I64, 1);

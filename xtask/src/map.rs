@@ -175,6 +175,7 @@ pub(crate) const CRATES: &[Crate] = &[
         name: "hub",
         layer: 2,
         deps: Deps::Only(&[
+            "access",
             "env",
             "types",
             "block",

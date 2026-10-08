@@ -454,8 +454,9 @@ impl Open {
                 let (shard, pool) = (tasks.clone(), Rc::new(pool));
                 let own = Rc::clone(&pool);
                 let failed = Arc::clone(&self.failed);
+                let time = self.clock.clone();
                 let hold = async move |home, guard| {
-                    serve.run(home, own, shard, guard, &failed).await;
+                    serve.run(home, time, own, shard, guard, &failed).await;
                 };
                 self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
@@ -614,8 +615,8 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Runs each task given with a hub over `home`, and serves the node's port with
-    /// a transport on `pool`, until `guard` completes or the transport stops. A
+    /// Runs each task given with a hub over `home` and the mesh time `time`, and serves
+    /// the node's port with a transport on `pool`, until `guard` completes or the transport stops. A
     /// transport that stops goes into `failed` before any task drops. Then drops the
     /// tasks, the hub, `home`, and `guard`. Each session and the transport drop after
     /// `guard` when `guard` completes, and before the tasks when the transport stops.
@@ -623,6 +624,7 @@ impl Serve {
     async fn run(
         self,
         home: home::Shard,
+        time: clock::Reader,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
@@ -635,6 +637,12 @@ impl Serve {
             home,
             interner,
             tasks: tasks.clone(),
+            // The node has no node key until #1660. Its port refuses each hub
+            // stream, so no hello names this one.
+            node: types::node::Key::from_u128(0),
+            time,
+            clock: self.endpoint.clock.clone(),
+            entropy: self.endpoint.entropy.clone(),
         });
         let transport = self.endpoint.open(pool, tasks.clone());
         let mut port = pin!(route::accept(transport, tasks.clone()));

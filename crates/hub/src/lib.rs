@@ -3,6 +3,7 @@
 
 mod channel;
 mod commit;
+mod link;
 pub mod reader;
 pub mod serve;
 pub mod writer;
@@ -13,9 +14,10 @@ use std::task::Waker;
 
 use types::frame::key_set::Interner;
 use types::hash;
-use types::name::Name;
+use types::name::{Name, Prefix};
 
 pub use channel::Channel;
+pub use link::{Link, Served};
 use reader::Reader;
 use writer::Writer;
 
@@ -50,6 +52,15 @@ pub struct Config {
     pub interner: Interner,
     /// Where the hub spawns its commit task.
     pub tasks: env::tasks::Tasks,
+    /// This node's key. A client's hello must name it as `via`.
+    pub node: types::node::Key,
+    /// Mesh time, which the hub checks each hello and request against.
+    pub time: clock::Reader,
+    /// The monotonic clock that `time` reads, on which the hub waits for a hello's
+    /// expiry.
+    pub clock: env::clock::Clock,
+    /// The source of each challenge's nonce.
+    pub entropy: env::entropy::Entropy,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -68,6 +79,12 @@ struct State {
     commit: commit::Signal,
     /// The error that ended the home's buffer.
     failed: Option<env::files::Error>,
+    node: types::node::Key,
+    time: clock::Reader,
+    clock: env::clock::Clock,
+    entropy: env::entropy::Entropy,
+    /// Empty, so refusing each hello, until [`Hub::rules`] first runs.
+    rules: access::Rules,
 }
 
 impl Hub {
@@ -83,6 +100,10 @@ impl Hub {
             home,
             interner,
             tasks,
+            node,
+            time,
+            clock,
+            entropy,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -93,6 +114,14 @@ impl Hub {
             woken: Vec::new(),
             commit: commit::Signal::default(),
             failed: None,
+            node,
+            time,
+            clock,
+            entropy,
+            rules: access::Rules::new(std::iter::empty::<(
+                Prefix,
+                [(&Name, &spec::definition::Definition); 0],
+            )>()),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -173,28 +202,18 @@ impl Hub {
         Reader::open(&self.0, channels, mode)
     }
 
-    /// Serves one remote reader session on `incoming`, a hub stream whose header the
-    /// caller read. It reads the `Open` and its keys, opens the session at this
-    /// node's home, sends `Opened`, then sends each frame that the session takes
-    /// through the reader's places, and applies each `Credit`. It returns when the
-    /// session ends: after `Behind` and a finish when the session missed a frame, or
-    /// when the peer finishes or the stream breaks. A drop of the future closes the
-    /// session at the home and drops the stream.
-    ///
-    /// # Errors
-    ///
-    /// The [`serve::Error`] that ended the session. The stream stops with the code
-    /// that HUB WIRE gives for it, except after [`serve::Error::Stream`].
-    ///
-    /// # Panics
-    ///
-    /// When the session sends a frame: `transport` cannot yet send a message in parts
-    /// (#68).
-    pub async fn serve(
-        &self,
-        incoming: transport::stream::Incoming,
-    ) -> Result<(), serve::Error> {
-        serve::run(&self.0, incoming).await
+    /// Sets the access rules that each later hello and request is checked against.
+    /// Until the first call, no subject is known: each hello gets
+    /// `access::proof::Error::Unknown`.
+    pub fn rules(&self, rules: access::Rules) {
+        self.0.borrow_mut().rules = rules;
+    }
+
+    /// The hub's part of `session`. Give each hub stream of the session to
+    /// [`Link::serve`].
+    #[must_use]
+    pub fn link(&self, session: transport::Session) -> Link {
+        Link::new(Rc::clone(&self.0), session)
     }
 }
 

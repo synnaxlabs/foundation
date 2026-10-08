@@ -17,11 +17,15 @@ pub(crate) const SETTLE: Span = Span::from_nanos(20_000_000);
 
 /// A hub on a new shard, with `time` and `value` defined, and the node's mesh time now.
 pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (home, interner, now) = shard(node, tasks.clone()).await;
+    let (home, interner, now, time) = shard(node, tasks.clone()).await;
     let hub = Hub::new(hub::Config {
         home,
         interner,
         tasks,
+        node: types::node::Key::from_u128(1),
+        time,
+        clock: node.clock(),
+        entropy: node.entropy(),
     });
     for (key, channel, scalar) in
         [(1, "time", Scalar::Stamp), (2, "value", Scalar::I64)]

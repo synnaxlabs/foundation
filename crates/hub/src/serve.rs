@@ -1,4 +1,7 @@
-//! Remote reader sessions that a hub serves, and why one ends.
+//! The streams that a [`Link`](crate::Link) serves: remote reader sessions, and the
+//! hello and request streams of a client, and why one ends.
+
+pub(crate) mod client;
 
 use std::cell::RefCell;
 use std::fmt;
@@ -14,12 +17,15 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
-use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, Reply, UNKNOWN, ends};
+use wire::hub::client::STALE;
+use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, UNKNOWN, ends};
 
 use crate::State;
 use crate::reader::{Credit, Ended, Session};
 
-/// Why [`Hub::serve`](crate::Hub::serve) ended a session.
+pub use client::{Reply, Request};
+
+/// Why [`Link::serve`](crate::Link::serve) ended a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A message that `wire::hub::Home` refuses. Code `MALFORMED`.
@@ -41,17 +47,35 @@ pub enum Error {
     Pool(block::Error),
     /// The stream or its session failed. No code.
     Stream(transport::Error),
+    /// `access` refused a hello or a request. Code: the one that CLIENT HELLO gives for
+    /// the error, `REFUSED` for each that tells about the spec.
+    Access(access::proof::Error),
+    /// The hello does not echo the nonce of the last challenge. Code `STALE`.
+    Stale,
+    /// A request stream before the link admitted a hello, a hello on a request
+    /// stream, or a request while another is open. Code `MALFORMED`.
+    Order,
+    /// The program finished a request stream with `remain` bytes of its body unsent.
+    /// Code `MALFORMED`.
+    Unfinished {
+        /// The bytes of the body that did not come.
+        remain: usize,
+    },
 }
 
 impl Error {
     /// The code that the stream stops with, or `None` when it is broken.
-    fn code(&self) -> Option<Code> {
+    pub(crate) fn code(&self) -> Option<Code> {
         match self {
             Self::Message(_)
             | Self::OneWay
             | Self::Class(_)
             | Self::ManyIndexes
-            | Self::NoIndex => Some(Code(MALFORMED)),
+            | Self::NoIndex
+            | Self::Order
+            | Self::Unfinished { .. } => Some(Code(MALFORMED)),
+            Self::Access(error) => Some(Code(client::code(error))),
+            Self::Stale => Some(Code(STALE)),
             Self::Unknown(_) => Some(Code(UNKNOWN)),
             Self::Buffer(_) => Some(Code(FAILED)),
             Self::Pool(_) => Some(Code(BUSY)),
@@ -89,6 +113,18 @@ impl fmt::Display for Error {
             Self::Stream(error) => {
                 write!(f, "the stream of the hub session failed: {error}")
             }
+            Self::Access(error) => write!(f, "access refused the program: {error}"),
+            Self::Stale => f.write_str(
+                "the hello does not echo the nonce of the node's last challenge",
+            ),
+            Self::Order => f.write_str(
+                "the program opened a stream out of order: a request before its \
+                 hello was admitted, a second hello stream, or a second open request",
+            ),
+            Self::Unfinished { remain } => write!(
+                f,
+                "the program finished a request with {remain} bytes of its body unsent"
+            ),
         }
     }
 }
@@ -113,23 +149,33 @@ pub(crate) async fn run(
     state: &Rc<RefCell<State>>,
     incoming: Incoming,
 ) -> Result<(), Error> {
+    let class = incoming.class;
+    let (mut receiver, mut sender) = halves(incoming)?;
+    let served = serve(state, class, &mut receiver, &mut sender).await;
+    if let Err(error) = &served {
+        stop(receiver, sender, error);
+    }
+    served
+}
+
+/// The two halves of `incoming`. Stops a one-way stream.
+fn halves(incoming: Incoming) -> Result<(Receiver, Sender), Error> {
     let Incoming {
-        class,
-        mut receiver,
-        sender,
+        receiver, sender, ..
     } = incoming;
-    let Some(mut sender) = sender else {
+    let Some(sender) = sender else {
         receiver.stop(Code(MALFORMED));
         return Err(Error::OneWay);
     };
-    let served = serve(state, class, &mut receiver, &mut sender).await;
-    if let Err(error) = &served
-        && let Some(code) = error.code()
-    {
+    Ok((receiver, sender))
+}
+
+/// Stops both halves of a stream with the code of `error`, if it has one.
+fn stop(receiver: Receiver, sender: Sender, error: &Error) {
+    if let Some(code) = error.code() {
         receiver.stop(code);
         sender.reset(code);
     }
-    served
 }
 
 async fn serve(
@@ -148,7 +194,7 @@ async fn serve(
         sender.finish()?;
         return Ok(());
     };
-    sender.send(reply(state, Reply::Opened)?).await?;
+    sender.send(reply(state, wire::hub::Reply::Opened)?).await?;
     // `peer` lives across turns, so a frame never drops a read of the peer. `take`
     // gives up a frame only in the poll that returns it.
     let mut peer = pin!(peer(receiver, home, credit.as_ref()));
@@ -171,7 +217,7 @@ async fn serve(
                 layout.send(state, sender, &frame, set).await?;
             }
             Event::Frame(Err(Ended::Behind)) => {
-                sender.send(reply(state, Reply::Behind)?).await?;
+                sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
@@ -280,14 +326,15 @@ async fn open(
 }
 
 /// A block of the home's pool that holds `reply`.
-fn reply(state: &RefCell<State>, reply: Reply) -> Result<Block, Error> {
+fn reply(state: &RefCell<State>, reply: wire::hub::Reply) -> Result<Block, Error> {
     let mut block = alloc(state, reply.encoded_len())?;
     reply.encode(&mut block);
     Ok(block.freeze())
 }
 
-/// A block of `len` bytes from the home's pool: a reply, or an ends run, which is
-/// smaller than the frame's descriptors.
+/// A block of `len` bytes from the home's pool. Each caller asks for at most its
+/// largest block: a reply, an ends run, which is smaller than the frame's
+/// descriptors, or a message of a client stream.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
     state
         .borrow()
@@ -297,7 +344,7 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
         .map_err(|error| match error {
             block::Error::TooLarge { .. } => {
                 unreachable!(
-                    "invariant: an ends run is smaller than the frame's descriptors"
+                    "invariant: no caller asks for more than the largest block"
                 )
             }
             block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
@@ -334,7 +381,9 @@ impl Layout {
     ) -> Result<(), Error> {
         let placed = self.places.lay(frame, set);
         let head = head(frame, set, self.index, placed.len());
-        sender.send(reply(state, Reply::Head(head))?).await?;
+        sender
+            .send(reply(state, wire::hub::Reply::Head(head))?)
+            .await?;
         for run in runs(placed, sender.bytes_max()) {
             let mut block = alloc(state, run.len() * ends::LEN)?;
             ends::encode(

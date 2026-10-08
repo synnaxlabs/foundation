@@ -30,6 +30,8 @@ use types::time::{Span, Stamp};
 
 mod serve;
 
+/// The node key of the hub under test.
+const NODE: types::node::Key = types::node::Key::from_u128(1);
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
@@ -123,6 +125,10 @@ impl Test {
                 polls: Rc::clone(&polls),
                 paused: Rc::clone(&paused),
             }),
+            node: NODE,
+            time: mesh.clone(),
+            clock: node.clock(),
+            entropy: node.entropy(),
         });
         for (key, channel, data_type, index) in CHANNELS {
             hub.define(Channel {
