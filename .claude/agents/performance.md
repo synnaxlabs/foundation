@@ -36,9 +36,10 @@ Each changed function on a per-sample, per-frame, or per-message path has a benc
 or the report names the one that covers it. In the same run, report one benchmark whose
 code did not change. If it moves over 2%, or a changed result is within 2 points of 5%,
 the run cannot show the 5% check: it is a finding until the PR links the result of the
-coordinator's rerun on a quiet Linux host (BENCH BASELINES): the comment with its
-numbers, never a queued run. Run the same bench source on both commits. When one commit
-cannot run a bench case, remove that case on both, and say so in the report.
+rerun on a quiet Linux host of BENCH BASELINES
+(`docs/decisions/testing/bench-baselines.md`): the comment with its numbers, never a
+queued run. Run the same bench source on both commits. When one commit cannot run a
+bench case, remove that case on both, and say so in the report.
 
 A regression over 5% is a finding, not a verdict. Report it as the P1 judgment:
 
