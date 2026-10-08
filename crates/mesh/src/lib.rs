@@ -18,7 +18,6 @@ pub mod claim;
 #[cfg(test)]
 mod common;
 mod driver;
-mod ed25519;
 mod entry;
 mod error;
 pub mod log;

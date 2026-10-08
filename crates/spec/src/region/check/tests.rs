@@ -5,7 +5,7 @@ use super::*;
 use crate::channel::Edge;
 use crate::definition::tests::kinded;
 use crate::region::common::{
-    access, create_definitions, data, index, name, prefix, record, subject,
+    access, create_definitions, data, index, name, prefix, qualified, record, subject,
 };
 
 fn ungoverned(key: &str, region: &str) -> Problem {
@@ -145,6 +145,37 @@ fn gives_misplaced_before_a_channel_problem_at_one_key() {
     );
 }
 
+// More problems than a sort of short slices handles, so only a stable sort keeps
+// the order at each key, also of the two channel problems.
+#[test]
+fn keeps_the_order_at_each_of_many_keys() {
+    let keys: Vec<String> = (0..40).map(|at| format!("plant.@x.c{at:02}")).collect();
+    let pairs: Vec<(&str, Definition)> = (100..)
+        .zip(&keys)
+        .map(|(at, key)| (key.as_str(), qualified(at, 9, Some(8))))
+        .collect();
+    let problems = check(&prefix("plant"), &create_definitions(&pairs));
+    assert_eq!(problems.len(), 120);
+    for (key, group) in keys.iter().zip(problems.chunks(3)) {
+        let dangling = |edge, to| {
+            Problem::Channel(channel::Problem::Dangling {
+                from: name(key),
+                edge,
+                to: Key::from_u128(to),
+            })
+        };
+        let expected = [
+            Problem::Misplaced {
+                name: name(key),
+                kind: Kind::Channel,
+            },
+            dangling(Edge::Index, 9),
+            dangling(Edge::Quality, 8),
+        ];
+        assert_eq!(group, expected, "{key}");
+    }
+}
+
 #[test]
 fn makes_no_child_of_a_record_above_the_prefix() {
     let definitions = create_definitions(&[
@@ -255,6 +286,21 @@ fn finds_a_channel_at_a_reserved_key_misplaced() {
 }
 
 #[test]
+fn makes_no_child_of_a_region_at_a_reserved_label() {
+    let definitions = create_definitions(&[
+        ("@admin.@region", record()),
+        ("@admin.@subject", subject()),
+    ]);
+    assert_eq!(
+        check(&Prefix::ROOT, &definitions),
+        [Problem::Misplaced {
+            name: name("@admin.@region"),
+            kind: Kind::Region,
+        }]
+    );
+}
+
+#[test]
 fn gives_each_problem_a_message_and_a_fix() {
     let dangling = channel::Problem::Dangling {
         from: name("plant.pressure"),
@@ -302,6 +348,21 @@ proptest! {
         let definitions = BTreeMap::from([(key.clone(), definition)]);
         let problems = check(&prefix("plant"), &definitions);
         prop_assert_eq!(&problems[0], &Problem::Misplaced { name: key, kind });
+    }
+
+    #[test]
+    fn finds_a_definition_at_a_reserved_label_misplaced_unless_it_is_founding(
+        (kind, definition) in kinded(),
+    ) {
+        let key = kind.key("admin").unwrap().as_str().replacen("admin", "@admin", 1);
+        let key = name(&key);
+        let definitions = BTreeMap::from([(key.clone(), definition)]);
+        let problems = check(&Prefix::ROOT, &definitions);
+        let misplaced = match kind {
+            Kind::Subject | Kind::Access => None,
+            _ => Some(&Problem::Misplaced { name: key, kind }),
+        };
+        prop_assert_eq!(problems.first(), misplaced);
     }
 
     #[test]

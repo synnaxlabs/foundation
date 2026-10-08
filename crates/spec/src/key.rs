@@ -45,18 +45,20 @@ impl Kind {
     }
 
     /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
-    /// when it does not. The label of a kind with a segment can be reserved, which
-    /// [`Kind::key`] refuses.
+    /// when it does not. Only the label of a subject or an access policy, the kinds
+    /// of the founding definitions, can be reserved, which [`Kind::key`] refuses.
     pub(crate) fn label(self, key: &Name) -> Option<Name> {
-        match self {
-            Self::Connector | Self::Channel => (!key.reserved()).then(|| key.clone()),
+        let label: Name = match self {
+            Self::Connector | Self::Channel => key.clone(),
             _ => key
                 .as_str()
                 .strip_suffix(self.as_str())?
                 .strip_suffix(".@")?
                 .parse()
-                .ok(),
-        }
+                .ok()?,
+        };
+        let founding = matches!(self, Self::Subject | Self::Access);
+        (founding || !label.reserved()).then_some(label)
     }
 
     /// The name of the kind, such as `node_settings`: the keyword a file format names
@@ -304,14 +306,19 @@ mod tests {
     }
 
     #[test]
-    fn gives_a_reserved_label_for_a_kind_with_a_segment() {
-        assert_eq!(
-            Kind::Access.label(&name("plant.@x.@access")),
-            Some(name("plant.@x"))
-        );
+    fn gives_a_reserved_label_only_for_a_kind_of_the_founding_definitions() {
+        for (kind, segment) in KINDS {
+            let label =
+                matches!(kind, Kind::Subject | Kind::Access).then(|| name("plant.@x"));
+            let key = name(&format!("plant.@x.{segment}"));
+            assert_eq!(kind.label(&key), label, "{segment}");
+        }
         assert_eq!(
             Kind::Subject.label(&name("@admin.@subject")),
             Some(name("@admin"))
         );
+        for kind in [Kind::Connector, Kind::Channel] {
+            assert_eq!(kind.label(&name("plant.@x")), None);
+        }
     }
 }

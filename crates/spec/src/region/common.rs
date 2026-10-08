@@ -52,9 +52,14 @@ pub(super) fn index(key: u128) -> Definition {
 }
 
 pub(super) fn data(key: u128, index: u128) -> Definition {
+    qualified(key, index, None)
+}
+
+/// A data channel whose quality channel is `quality`.
+pub(super) fn qualified(key: u128, index: u128, quality: Option<u128>) -> Definition {
     let data = Data::new(
         Key::from_u128(index),
-        None,
+        quality.map(Key::from_u128),
         DataType::Sample(sample::Type::Scalar(Scalar::F64)),
         None,
     )

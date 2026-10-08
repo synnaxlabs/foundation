@@ -2059,18 +2059,23 @@ How to read this record:
   `hub::client` the private key of a subject. Ordered by `laptop.director` at
   2026-10-08T05:41:28Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
-  `types::ed25519::PrivateKey::public` is the one place that derives the public key
-  from the private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
+  `types::ed25519::Pair::new` is the one place that derives the public key from the
+  private key (`Pair` ruling below). `PrivateKey::public` derives through it, for a
+  caller that needs only the key, or needs it once at an open or a join: `transport`
+  and `mesh` at open, `mesh::Ticket`, and tests. A holder that signs for each message
+  or request keeps one `Pair`. No crate keeps a copy. So
   `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
   crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
   Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
   and the copies, which grow with each crate that needs the key. Decided by
   `laptop.architect` (2026-10-07T14:16:15Z):
-  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
+  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050. The
+  first sentence was changed by `laptop.architect` at 2026-10-08T09:12:15Z
+  (https://github.com/synnaxlabs/foundation/pull/1843#issuecomment-6056619178).
   `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
   `BadSignature` for a signature that is not of the message by the key. A verify on
-  `PublicKey` uses a key that is not of small order by construction. `mesh` calls it,
-  and `access::admit` will (#1747). Lost: a `bool`, which a caller can invert or drop
+  `PublicKey` uses a key that is not of small order by construction. `mesh` and
+  `access` call it. Lost: a `bool`, which a caller can invert or drop
   with no word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the
   length; and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858). The
@@ -2083,6 +2088,16 @@ How to read this record:
   them, and adds no check that the handshake does not make. Decided by
   `laptop.architect` at 2026-10-08T08:04:32Z
   (https://github.com/synnaxlabs/foundation/pull/1812#issuecomment-6055539099).
+  `types::ed25519::Pair` is the one Ed25519 sign. Each signer (`mesh::claim::Signer`,
+  `mesh::card::Signed::sign`, `mesh::Ticket::admission`, `transport::Tls::new`, and
+  `hub::client` in #1748) builds one `Pair` and keeps no other signing key. The TLS
+  CertificateVerify is the exception: rustls signs it with the key of the PKCS#8
+  document that `transport` builds, as a step of the TLS 1.3 handshake. Lost: a
+  `PrivateKey` that owns the pair, which re-derives on each clone and changes each
+  constructor; and a `PrivateKey::sign`, which costs a scalar multiplication for each
+  claim and each request of `hub::client`. Decided by `laptop.architect` at
+  2026-10-08T08:12:49Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6055665349).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -3165,12 +3180,16 @@ How to read this record:
   `plan` (#1082) maps a key to its region with the function of `spec::region`, and
   keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
   https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
-  check of the key form accepts a reserved label for a kind with a segment, so the
-  founding definitions (FIRST ADMIN) have no problem. A file still cannot hold one
-  (`Kind::key`). Lost: a check that skips each reserved key, as a channel at
-  `@admin.@subject` is then no problem and the check needs `spec::key::reserved`.
-  Decided by `laptop.architect-2`, 2026-10-08T09:15:07Z
-  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056664804).
+  check of the key form accepts a reserved label only for a subject and an access
+  policy, the kinds of the founding definitions (FIRST ADMIN). Each other kind at a
+  reserved label is `Misplaced`, so a region there makes no child region. A file
+  still cannot hold a reserved label (`Kind::key`).
+  Lost: a check that skips each reserved key, as a channel at `@admin.@subject` is
+  then no problem and the check needs `spec::key::reserved`. Decided by
+  `laptop.architect-2`, 2026-10-08T09:15:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056664804), and
+  the kinds 2026-10-08T09:51:31Z
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316).
   Supersedes: the panic for two channels with one key (architect, #756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890).
   Decided by `laptop.architect-2`: the check, 2026-10-08T08:41:52Z
@@ -6274,7 +6293,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public and private keys, with the derive and the verify, subject hellos, connection keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public and private keys, with the derive, the sign, and the verify, subject hellos, connection keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |

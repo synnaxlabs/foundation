@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use proptest::prelude::*;
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
+use types::ed25519::{Pair, PrivateKey};
 use types::time::Interval;
 
 use super::*;
@@ -26,16 +26,16 @@ fn hex<const N: usize>(hex: &str) -> [u8; N] {
     bytes
 }
 
-fn pair(private: &str) -> Ed25519KeyPair {
-    Ed25519KeyPair::from_seed_unchecked(&hex::<32>(private)).unwrap()
+fn pair(private: &str) -> Pair {
+    Pair::new(&PrivateKey(hex::<32>(private)))
 }
 
-fn public(pair: &Ed25519KeyPair) -> PublicKey {
-    PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
+fn public(pair: &Pair) -> PublicKey {
+    pair.public()
 }
 
-fn sign(pair: &Ed25519KeyPair, message: &[u8]) -> [u8; 64] {
-    pair.sign(message).as_ref().try_into().unwrap()
+fn sign(pair: &Pair, message: &[u8]) -> [u8; 64] {
+    pair.sign(message)
 }
 
 fn name(s: &str) -> Name {
