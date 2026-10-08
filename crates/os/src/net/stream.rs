@@ -345,7 +345,7 @@ mod tests {
         sockopt::set_tcp_user_timeout(&client, 1).unwrap();
         let mut stream = stream(client);
         let timed_out = Error::TimedOut {
-            remote: stream.peer,
+            remote: stream.peer(),
         };
         let bound = Duration::from_secs(10);
         on_runtime(|| {
@@ -416,6 +416,7 @@ mod tests {
     fn new_sets_linger_zero() {
         let (client, _server) = create_pair();
         let stream = stream(client);
+        // No call of the stream reads an option, so the test reads the descriptor.
         let fd = stream.socket.fd().unwrap();
         assert_eq!(sockopt::socket_linger(fd), Ok(Some(Duration::ZERO)));
     }

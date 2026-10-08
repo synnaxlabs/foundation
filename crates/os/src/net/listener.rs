@@ -177,7 +177,10 @@ mod tests {
             options: options(),
         };
         let listener = Listener::listen(&config).unwrap();
-        let _client = std::net::TcpStream::connect(listener.local).unwrap();
+        let _client =
+            std::net::TcpStream::connect(listener::Driver::local(&listener)).unwrap();
+        // The test accepts on the descriptor, to read the options of the socket
+        // before `accepted` sets them.
         let fd = listener.socket.fd().unwrap();
         // macOS can queue the connection after `connect` returns.
         rustix::fs::fcntl_setfl(fd, OFlags::empty()).unwrap();
