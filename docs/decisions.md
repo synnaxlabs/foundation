@@ -2512,6 +2512,15 @@ How to read this record:
   file. A search past the end for a record lost: a body can hold the bytes of a record,
   so a power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+  `mesh::testing::round_trip_log_record` and `seal_log_record`, behind the `sim`
+  feature, give the fuzz target `mesh_log` the decode and encode of one record; the
+  seal writes the length and both checks, with the log's own check (approved by the
+  architect, 2026-10-08T01:49:20Z:
+  https://github.com/synnaxlabs/foundation/issues/1711#issuecomment-6050509924; the
+  doc of the seal that writes the length, 2026-10-08T03:38:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1740#issuecomment-6051674927. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1711#issuecomment-6050509924 for the
+  doc of the seal).
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
   `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
   that a follower forwards to the leader, and its two answers (the position of the

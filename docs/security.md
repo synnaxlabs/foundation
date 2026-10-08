@@ -362,6 +362,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
 | `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
+| `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -390,9 +391,9 @@ No target yet, because the decoder is private, not built, not reached from a fil
 not reached from the corpus:
 `transport::message` and `tls` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
-#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the header and
-hard state of a mesh log record (#1711), the names of a mesh log directory
-(`mesh::log::sequence`, #1746), each connector's protocol parser, and
+#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
+mesh log files and the names of their directory (`mesh::log::scan` and
+`mesh::log::sequence`, #1746), each connector's protocol parser, and
 `connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
 which `config_check` reaches only from an input with a `connector` block of kind
 `influx`, and no input holds one yet (#1817).
