@@ -15,22 +15,21 @@ pub(crate) fn running() -> bool {
     mark.is_some()
 }
 
-/// Runs the test `name` in a child process, and asserts that it passes. `cflags` is
-/// the only C flags that `cc` reads there for `target` built on itself, and `cc` adds
-/// its defaults.
-pub(crate) fn run(name: &str, target: &str, cflags: Option<&str>) {
+/// Runs the test `name` in a child process, and asserts that it passes. The child
+/// gets only `PATH` from this process, so `cc` reads no compiler or flags from the
+/// environment there, and `cflags` is its `CFLAGS`.
+pub(crate) fn run(name: &str, cflags: Option<&str>) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "`cc` finds the compiler on the PATH of the child process"
+    )]
+    let path = std::env::var_os("PATH").expect("PATH is set");
     let mut child = Command::new(std::env::current_exe().unwrap());
-    child.args(["--exact", name]).env(MARK, "1");
-    let underscored = target.replace(['-', '.'], "_");
-    for var in [
-        "CRATE_CC_NO_DEFAULTS",
-        "CFLAGS",
-        "HOST_CFLAGS",
-        &format!("CFLAGS_{target}"),
-        &format!("CFLAGS_{underscored}"),
-    ] {
-        child.env_remove(var);
-    }
+    child
+        .args(["--exact", name])
+        .env_clear()
+        .env("PATH", path)
+        .env(MARK, "1");
     if let Some(cflags) = cflags {
         child.env("CFLAGS", cflags);
     }

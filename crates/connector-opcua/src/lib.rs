@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn the_shim_fails_on_a_warning_with_or_without_cflags() {
         for cflags in [None, Some("-O1")] {
-            child::run("tests::builds_in_this_environment", TARGET, cflags);
+            child::run("tests::builds_in_this_environment", cflags);
         }
     }
 }
