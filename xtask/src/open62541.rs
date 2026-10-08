@@ -56,6 +56,29 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
+/// The system headers that a file of the copy may include: the C standard library and
+/// the POSIX headers of the plugins. A header that one of them includes is not checked.
+const SYSTEM_HEADERS: [&str; 18] = [
+    "ctype.h",
+    "errno.h",
+    "float.h",
+    "inttypes.h",
+    "limits.h",
+    "pthread.h",
+    "signal.h",
+    "stdarg.h",
+    "stdatomic.h",
+    "stdbool.h",
+    "stddef.h",
+    "stdint.h",
+    "stdio.h",
+    "stdlib.h",
+    "string.h",
+    "sys/socket.h",
+    "syslog.h",
+    "unistd.h",
+];
+
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
 /// replaces `patches/open62541/` with its compiled sources, the headers in the clone
 /// that they include, `LICENSE`, `sources.txt` (each `.c` file), `flags.txt` (the
@@ -81,21 +104,25 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
     let dest = root.join(DEST);
     remove(&dest)
         .and_then(|()| {
-            std::fs::rename(&stage, &dest).map_err(|e| format!("{DEST}: {e}"))
+            let parent = dest.parent().ok_or("a copy with no directory")?;
+            std::fs::create_dir_all(parent)
+                .and_then(|()| std::fs::rename(&stage, &dest))
+                .map_err(|e| format!("{DEST}: {e}"))
         })
         .map_err(|e| vec![e])
 }
 
 /// Builds each file of `sources.txt` in `patches/open62541/` from the copy alone,
-/// with its `flags.txt`, no optimization, and no inlining, so each call stays in the
-/// function that holds it in the source.
+/// with its `flags.txt` and then `-O0`, so each call stays in the function that holds
+/// it in the source.
 ///
 /// # Errors
 ///
-/// A build that fails, a header outside the copy, a call of a clock function from a
-/// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, and a data
-/// section that holds the address of a clock function, through which any code can
-/// call it.
+/// A build that fails, a header outside the copy other than one of
+/// [`SYSTEM_HEADERS`] in a system directory, a call of a clock function from a
+/// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, and any
+/// other reference to a clock function, such as its address in code or data,
+/// through which any code can call it.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     inspect(&root.join(DEST), &root.join("target/open62541/check"))
 }
@@ -278,30 +305,27 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
     remove(out)
         .and_then(|()| std::fs::create_dir_all(out).map_err(|e| format!("{e}")))
         .map_err(|e| vec![e])?;
+    let mut cc = Command::new("cc");
+    let verbose = spawn(cc.args(["-xc", "-E", "-v", "/dev/null"])).and_then(wait);
+    let dirs = system_dirs(&verbose.map_err(|e| vec![e])?.1);
     let objects = build(copy, &sources, &flags, out).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
     let mut problems = Vec::new();
-    for (source, object) in objects {
-        let disassembly = exec(Command::new("objdump").arg("-dr").arg(&object));
-        for function in clock_calls(&disassembly.map_err(|e| vec![e])?) {
+    for (source, object, tree) in objects {
+        let disassembly = exec(Command::new("objdump").arg("-dr").arg(&object))
+            .map_err(|e| vec![e])?;
+        for function in clock_calls(&disassembly) {
             calls.insert((source.to_owned(), function));
         }
         let relocations = exec(Command::new("objdump").arg("-r").arg(&object));
-        for (section, symbol) in data_clocks(&relocations.map_err(|e| vec![e])?) {
+        for (section, symbol) in clock_addresses(&relocations.map_err(|e| vec![e])?) {
             problems.push(format!(
-                "{source}: the section `{section}` holds the address of `{symbol}`, \
+                "{source}: the section `{section}` takes the address of `{symbol}`, \
                  so a call through it escapes CLOCK_CALLS"
             ));
         }
-        let depfile = std::fs::read_to_string(object.with_extension("d"))
-            .map_err(|e| vec![format!("{}.d: {e}", object.display())])?;
-        for header in headers(&depfile) {
-            if !inside(&header) {
-                problems.push(format!(
-                    "{source}: includes {}, which is outside the copy",
-                    header.display()
-                ));
-            }
+        for problem in includes(&tree, &dirs) {
+            problems.push(format!("{source}: {problem}"));
         }
     }
     problems.extend(mismatches(&calls));
@@ -326,40 +350,96 @@ fn inside(path: &Path) -> bool {
     })
 }
 
+/// An error for each header in `tree`, the `-H` output of `cc`, that a file of the
+/// copy includes from outside the copy, other than one of [`SYSTEM_HEADERS`] in one
+/// of the system directories `dirs`.
+fn includes(tree: &str, dirs: &[PathBuf]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut outside: Vec<bool> = Vec::new();
+    for line in tree.lines() {
+        let Some((dots, header)) = line.split_once(' ') else {
+            continue;
+        };
+        if dots.is_empty() || dots.bytes().any(|b| b != b'.') {
+            continue;
+        }
+        outside.truncate(dots.len() - 1);
+        let from_copy = outside.last().is_none_or(|&outside| !outside);
+        let path = Path::new(header);
+        outside.push(!inside(path));
+        if !from_copy || inside(path) {
+            continue;
+        }
+        let path = files::normalize(path);
+        let name = dirs
+            .iter()
+            .filter_map(|dir| path.strip_prefix(dir).ok())
+            .min_by_key(|name| name.components().count());
+        let problem = match name {
+            Some(name) if SYSTEM_HEADERS.iter().any(|&h| name == Path::new(h)) => {
+                continue;
+            }
+            Some(name) => format!(
+                "includes the system header `{}`, which SYSTEM_HEADERS does not list",
+                name.display()
+            ),
+            None => format!("includes {header}, which is outside the copy"),
+        };
+        problems.push(problem);
+    }
+    problems
+}
+
+/// The directories of `#include <...>` in `verbose`, the standard error of
+/// `cc -E -v`.
+fn system_dirs(verbose: &str) -> Vec<PathBuf> {
+    verbose
+        .lines()
+        .skip_while(|line| *line != "#include <...> search starts here:")
+        .skip(1)
+        .take_while(|line| *line != "End of search list.")
+        .map(|line| files::normalize(Path::new(line.trim())))
+        .collect()
+}
+
 /// Compiles each source of `sources` in `copy` into `out` at once, and gives each
-/// (source, object). Each object has a depfile of the headers outside the system
-/// directories beside it.
+/// (source, object, the `-H` output of its compile).
 fn build<'a>(
     copy: &Path,
     sources: &'a str,
     flags: &str,
     out: &Path,
-) -> Result<Vec<(&'a str, PathBuf)>, String> {
+) -> Result<Vec<(&'a str, PathBuf, String)>, String> {
     let mut children = Vec::new();
     for (index, source) in sources.lines().enumerate() {
         let object = out.join(format!("{index}.o"));
         let mut cc = Command::new("cc");
-        cc.current_dir(copy)
-            .args(["-c", "-MMD", "-O0", "-fno-inline"]);
-        cc.args(flags.lines()).arg("-o").arg(&object).arg(source);
+        cc.current_dir(copy).args(flags.lines());
+        cc.args(["-c", "-H", "-O0", "-o"]).arg(&object).arg(source);
         children.push((source, object, spawn(&mut cc)?));
     }
     children
         .into_iter()
-        .map(|(source, object, child)| wait(child).map(|_| (source, object)))
+        .map(|(source, object, child)| {
+            wait(child).map(|(_, tree)| (source, object, tree))
+        })
         .collect()
 }
 
-/// The functions in the output of `objdump -dr` that refer to a function of
-/// [`CLOCKS`]. A name loses the suffix of a compiler clone, such as `.isra.0`.
+/// The relocation types of a call or a tail call. Any other relocation takes an
+/// address.
+const CALLS: [&str; 3] = ["R_X86_64_PLT32", "R_AARCH64_CALL26", "R_AARCH64_JUMP26"];
+
+/// The functions in the output of `objdump -dr` that call a function of [`CLOCKS`].
+/// A name loses the suffix of a compiler clone, such as `.isra.0`.
 fn clock_calls(text: &str) -> BTreeSet<String> {
     let mut calls = BTreeSet::new();
     let mut function = "";
     for line in text.lines() {
         if let Some(name) = line.strip_suffix(">:").and_then(|l| l.split_once(" <")) {
             function = name.1.split('.').next().unwrap_or(name.1);
-        } else if let Some((_, relocation)) = line.split_once(": R_")
-            && clock(relocation).is_some()
+        } else if let Some((kind, _)) = clock(line)
+            && CALLS.contains(&kind)
         {
             calls.insert(function.to_owned());
         }
@@ -367,28 +447,32 @@ fn clock_calls(text: &str) -> BTreeSet<String> {
     calls
 }
 
-/// Each (section, clock function) in the output of `objdump -r` where a section that
-/// is not code refers to a function of [`CLOCKS`].
-fn data_clocks(text: &str) -> Vec<(String, String)> {
+/// Each (section, clock function) in the output of `objdump -r` where the section
+/// takes the address of a function of [`CLOCKS`], in code or in data.
+fn clock_addresses(text: &str) -> Vec<(String, &'static str)> {
     let mut found = Vec::new();
     let mut section = "";
     for line in text.lines() {
         if let Some(name) = line.strip_prefix("RELOCATION RECORDS FOR [") {
             section = name.trim_end_matches("]:");
-        } else if !section.starts_with(".text")
-            && let Some(symbol) = clock(line)
+        } else if let Some((kind, symbol)) = clock(line)
+            && !CALLS.contains(&kind)
         {
-            found.push((section.to_owned(), symbol.to_owned()));
+            found.push((section.to_owned(), symbol));
         }
     }
     found
 }
 
-/// The clock function that a relocation line refers to.
-fn clock(relocation: &str) -> Option<&'static str> {
-    let symbol = relocation.split_whitespace().last()?;
-    let symbol = symbol.split(['+', '-']).next()?;
-    CLOCKS.into_iter().find(|&clock| clock == symbol)
+/// The type and the clock function of a relocation line that refers to one.
+fn clock(line: &str) -> Option<(&str, &'static str)> {
+    let mut words = line.split_whitespace();
+    let kind = words.find(|word| word.starts_with("R_"))?;
+    let symbol = words.next_back()?.split(['+', '-']).next()?;
+    CLOCKS
+        .into_iter()
+        .find(|&clock| clock == symbol)
+        .map(|clock| (kind, clock))
 }
 
 /// Each header that a Make depfile names, with its escapes read: `\ ` for a space,
@@ -439,7 +523,6 @@ fn mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
 
 /// Writes the copy of `found` to `stage`, with `LICENSE` from `src`.
 fn write(stage: &Path, src: &Path, found: &Found, version: &str) -> Result<(), String> {
-    remove(stage)?;
     let mut sources = String::new();
     let license = (src.join("LICENSE"), PathBuf::from("LICENSE"));
     for (from, to) in found.files.iter().chain([&license]) {
@@ -471,7 +554,8 @@ fn remove(dir: &Path) -> Result<(), String> {
 
 /// Runs `command` and gives its trimmed standard output.
 fn exec(command: &mut Command) -> Result<String, String> {
-    wait(spawn(command)?)
+    let (out, _) = wait(spawn(command)?)?;
+    Ok(out.trim().to_owned())
 }
 
 /// Starts `command` with no input, and with its output captured.
@@ -485,8 +569,8 @@ fn spawn(command: &mut Command) -> Result<(String, Child), String> {
     Ok((name, child))
 }
 
-/// Waits for a command from [`spawn`], and gives its trimmed standard output.
-fn wait((name, child): (String, Child)) -> Result<String, String> {
+/// Waits for a command from [`spawn`], and gives its standard output and error.
+fn wait((name, child): (String, Child)) -> Result<(String, String), String> {
     let output = child
         .wait_with_output()
         .map_err(|e| format!("{name}: {e}"))?;
@@ -496,7 +580,8 @@ fn wait((name, child): (String, Child)) -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    Ok((text(&output.stdout), text(&output.stderr)))
 }
 
 #[cfg(test)]
@@ -512,6 +597,7 @@ Disassembly of section .text.setDefaultConfig:
    0:\tpush   %rbx
 \t\t\t1: R_X86_64_PLT32\tUA_DateTime_now-0x4
 0000000000000040 <other>:
+\t\t\t40: R_X86_64_REX_GOTPCRELX\tUA_DateTime_now-0x4
 \t\t\t41: R_X86_64_PLT32\tUA_DateTime_nowMore-0x4
 \t\t\t42: R_X86_64_PC32\tUA_DateTime_now_x+0x4
 0000000000000080 <seed.isra.0>:
@@ -524,14 +610,16 @@ Disassembly of section .text.setDefaultConfig:
     }
 
     #[test]
-    fn data_clocks_names_each_section_other_than_code_that_refers_to_a_clock() {
+    fn clock_addresses_names_each_reference_other_than_a_call() {
         let text = "\
 RELOCATION RECORDS FOR [.text]:
 OFFSET           TYPE              VALUE
 0000000000000005 R_X86_64_PLT32    UA_DateTime_now-0x0000000000000004
+0000000000000009 R_X86_64_REX_GOTPCRELX  UA_DateTime_now-0x0000000000000004
 
 RELOCATION RECORDS FOR [.text.log]:
-0000000000000005 R_X86_64_PLT32    UA_DateTime_nowMonotonic-0x0000000000000004
+0000000000000005 R_AARCH64_CALL26  UA_DateTime_nowMonotonic
+0000000000000009 R_AARCH64_JUMP26  UA_DateTime_nowMonotonic
 
 RELOCATION RECORDS FOR [.data.rel]:
 OFFSET           TYPE              VALUE
@@ -542,13 +630,67 @@ RELOCATION RECORDS FOR [.rodata]:
 0000000000000000 R_AARCH64_ABS64   UA_DateTime_localTimeUtcOffset+0x8
 ";
         assert_eq!(
-            data_clocks(text),
+            clock_addresses(text),
             [
-                (".data.rel".to_owned(), "UA_DateTime_now".to_owned()),
-                (
-                    ".rodata".to_owned(),
-                    "UA_DateTime_localTimeUtcOffset".to_owned()
-                ),
+                (".text".to_owned(), "UA_DateTime_now"),
+                (".data.rel".to_owned(), "UA_DateTime_now"),
+                (".rodata".to_owned(), "UA_DateTime_localTimeUtcOffset"),
+            ]
+        );
+    }
+
+    #[test]
+    fn includes_names_each_header_from_outside_the_copy() {
+        let dirs = [
+            PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/13/include"),
+            PathBuf::from("/usr/include/x86_64-linux-gnu"),
+            PathBuf::from("/usr/include"),
+        ];
+        let tree = "\
+. include/a.h
+.. /usr/include/stdio.h
+... /usr/include/x86_64-linux-gnu/bits/types.h
+.. /usr/include/x86_64-linux-gnu/sys/socket.h
+.. /usr/lib/gcc/x86_64-linux-gnu/13/include/../../../../../include/stdint.h
+. src/../../out.h
+.. /usr/include/locale.h
+. /usr/include/openssl/ssl.h
+.. /usr/include/openssl/x.h
+. /opt/a b.h
+Multiple include guards may be useful for:
+/usr/include/x.h
+src/a.c:1: warning: x
+    1 | . /usr/include/z.h
+. include/b.h
+.. ./include/../deps/c.h
+";
+        assert_eq!(
+            includes(tree, &dirs),
+            [
+                "includes src/../../out.h, which is outside the copy",
+                "includes the system header `openssl/ssl.h`, which SYSTEM_HEADERS \
+                 does not list",
+                "includes /opt/a b.h, which is outside the copy",
+            ]
+        );
+    }
+
+    #[test]
+    fn system_dirs_reads_the_search_list_of_angle_includes() {
+        let verbose = "\
+#include \"...\" search starts here:
+ /q
+#include <...> search starts here:
+ /usr/lib/gcc/x86_64-linux-gnu/13/include
+ /usr/lib/gcc/x86_64-linux-gnu/13/../../../../include
+End of search list.
+ /after
+";
+        assert_eq!(
+            system_dirs(verbose),
+            [
+                PathBuf::from("/usr/lib/gcc/x86_64-linux-gnu/13/include"),
+                PathBuf::from("/usr/include"),
             ]
         );
     }
@@ -803,12 +945,21 @@ RELOCATION RECORDS FOR [.rodata]:
         name: &str,
         change: impl FnOnce(&Path),
     ) -> (PathBuf, PathBuf, Result<(), Vec<String>>) {
+        run_after(name, change, &[("patches/open62541/kept.c", "")])
+    }
+
+    /// [`run_on`] with the files `before` under the root, in place of `kept.c`.
+    fn run_after(
+        name: &str,
+        change: impl FnOnce(&Path),
+        before: &[(&str, &str)],
+    ) -> (PathBuf, PathBuf, Result<(), Vec<String>>) {
         let (root, repo) =
             (temp(&format!("{name}-root")), temp(&format!("{name}-repo")));
         create_project(&repo);
         change(&repo);
         tag(&repo, "v1");
-        create_files(&root, &[("patches/open62541/kept.c", "")]);
+        create_files(&root, before);
         let url = format!("file://{}", repo.display());
         let result = run(&root, &url, "v1");
         (root, repo, result)
@@ -869,8 +1020,18 @@ RELOCATION RECORDS FOR [.rodata]:
                 repo,
                 &[
                     (
+                        "plugins/ua_config_default.c",
+                        "#include \"clock.h\"\nlong long (*UA_clockFn)(void);\n\
+                         long long setDefaultConfig(void) {\n\
+                         UA_clockFn = UA_DateTime_now;\n\
+                         return UA_DateTime_now();\n}\n\
+                         long long interruptServer(void) { return UA_DateTime_now(); }\n",
+                    ),
+                    (
                         "src/more/ua_types.c",
-                        &("#include \"../../../build/other.h\"\n".to_owned()
+                        &("#include \"../../../build/other.h\"\n\
+                           #include <sys/stat.h>\n"
+                            .to_owned()
                             + &calls(&["UA_new"])),
                     ),
                     (
@@ -878,17 +1039,32 @@ RELOCATION RECORDS FOR [.rodata]:
                         "#include \"clock.h\"\n\
                          long long (*UA_clock)(void) = UA_DateTime_now;\n",
                     ),
+                    (
+                        "src/more/ua_text.c",
+                        "#include \"clock.h\"\n\
+                         long long (*UA_text)(void) \
+                         __attribute__((section(\".text_ptr\"))) = UA_DateTime_now;\n",
+                    ),
                 ],
             );
         });
         assert_eq!(
             result,
             Err(vec![
-                "src/more/ua_clock.c: the section `.data.rel` holds the address of \
+                "plugins/ua_config_default.c: the section `.text` takes the address of \
+                 `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
+                    .to_owned(),
+                "src/more/ua_clock.c: the section `.data.rel` takes the address of \
+                 `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
+                    .to_owned(),
+                "src/more/ua_text.c: the section `.text_ptr` takes the address of \
                  `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
                     .to_owned(),
                 "src/more/ua_types.c: includes src/more/../../../build/other.h, which \
                  is outside the copy"
+                    .to_owned(),
+                "src/more/ua_types.c: includes the system header `sys/stat.h`, which \
+                 SYSTEM_HEADERS does not list"
                     .to_owned(),
                 "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
                  whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
@@ -963,15 +1139,23 @@ RELOCATION RECORDS FOR [.rodata]:
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
     fn check_finds_a_clock_call_added_to_the_copy() {
-        let (root, repo, result) = run_on("check", |_| {});
+        let (root, repo, result) = run_after("check", |_| {}, &[]);
         assert_eq!(result, Ok(()));
-        let util = root.join("patches/open62541/src/util/ua_util.c");
-        let text = std::fs::read_to_string(&util).unwrap() + &calls(&["later"]);
-        std::fs::write(&util, text).unwrap();
+        let copy = root.join("patches/open62541");
+        let append = |path: &str, text: &str| {
+            let old = std::fs::read_to_string(copy.join(path)).unwrap();
+            std::fs::write(copy.join(path), old + text).unwrap();
+        };
+        append("flags.txt", "-O2\n");
+        append(
+            "src/util/ua_util.c",
+            "static long long hidden(void) { return UA_DateTime_now(); }\n\
+             long long later(void) { return hidden(); }\n",
+        );
         assert_eq!(
             check(&root),
             Err(vec![
-                "src/util/ua_util.c: `later` calls a global clock function. Find \
+                "src/util/ua_util.c: `hidden` calls a global clock function. Find \
                  whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
                     .to_owned(),
             ])
