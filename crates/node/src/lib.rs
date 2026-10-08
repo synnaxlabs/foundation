@@ -621,6 +621,28 @@ struct Endpoint {
 }
 
 impl Endpoint {
+    /// The hub of shard 0 over `home`, which knows each channel of the node's region.
+    fn hub(
+        &self,
+        home: home::Shard,
+        interner: Interner,
+        time: clock::Reader,
+        tasks: &env::tasks::Tasks,
+    ) -> hub::Hub {
+        let hub = hub::Hub::new(hub::Config {
+            home,
+            interner,
+            tasks: tasks.clone(),
+            node: self.key,
+            time,
+            entropy: self.entropy.clone(),
+        });
+        if let Some(region) = &self.region {
+            hub.define(&region.definitions);
+        }
+        hub
+    }
+
     /// Opens the node's transport on `pool` and `tasks`, then, when the node has a
     /// region, the chunk store in directory [`directory::blob`] of `files`, and the
     /// mesh of that region over both, in directory [`directory::mesh`]. Gives the
@@ -699,17 +721,7 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let hub = hub::Hub::new(hub::Config {
-            home,
-            interner,
-            tasks: tasks.clone(),
-            node: self.endpoint.key,
-            time: self.time,
-            entropy: self.endpoint.entropy.clone(),
-        });
-        if let Some(region) = &self.endpoint.region {
-            hub.define(&region.definitions);
-        }
+        let hub = self.endpoint.hub(home, interner, self.time, &tasks);
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
                 Ok(opened) => opened,

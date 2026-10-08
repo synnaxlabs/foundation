@@ -2897,23 +2897,19 @@ mod port {
                 let pool = block::Config { budget: 1 << 20 };
                 let memory = block::Heap::new(pool.reservation());
                 let pool = Rc::new(block::Pool::new(pool, memory));
+                let stop = crate::stop::Stop::default();
+                let (open, buffer, next, time) =
+                    super::super::home::create_open(&own, &tasks, 0, stop);
+                let opened =
+                    open.run(own.files(), Rc::new(buffer), tasks.clone()).await;
+                let home = opened.expect("the buffer opens");
+                let interner = next.await.expect("the open gives the interner");
+                let hub = endpoint.hub(home, interner, time, &tasks);
                 let (transport, mesh) = endpoint
                     .open(own.files(), pool, tasks.clone())
                     .await
                     .expect("the mesh opens");
                 let mesh = mesh.expect("the peer has a region");
-                let stop = crate::stop::Stop::default();
-                let (open, pool, next, time) =
-                    super::super::home::create_open(&own, &tasks, 0, stop);
-                let opened = open.run(own.files(), Rc::new(pool), tasks.clone()).await;
-                let hub = ::hub::Hub::new(::hub::Config {
-                    home: opened.expect("the buffer opens"),
-                    interner: next.await.expect("the open gives the interner"),
-                    tasks: tasks.clone(),
-                    node: OTHER.0,
-                    time,
-                    entropy: own.entropy(),
-                });
                 let port = route::accept(transport, Some(mesh.clone()), hub, tasks);
                 let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
                 poll_fn(|cx| {
