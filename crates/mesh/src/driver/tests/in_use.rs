@@ -538,7 +538,7 @@ async fn create_rootless(
 }
 
 // The read of v2 waits on a get of its root while v3 commits, then fails. The read of
-// v3 waits on a get of its root, which never ends.
+// v3 waits on a get of its root, which never ends, so `behind` names v2.
 #[test]
 fn a_call_ends_when_the_read_of_its_pointer_ends_after_a_later_pointer_commits() {
     solo(|node, tasks| async move {
@@ -573,6 +573,13 @@ fn a_call_ends_when_the_read_of_its_pointer_ends_after_a_later_pointer_commits()
         assert_eq!(third.version, 3);
         admin_put.await.unwrap();
         clock.sleep(seconds(3)).await;
-        assert_eq!(now(call.as_mut()).await, Poll::Ready(Ok(in_use(first, &a))));
+        let behind = Spec {
+            behind: Some(Behind {
+                pointer: second,
+                cause: admin(),
+            }),
+            ..in_use(first, &a)
+        };
+        assert_eq!(now(call.as_mut()).await, Poll::Ready(Ok(behind)));
     });
 }
