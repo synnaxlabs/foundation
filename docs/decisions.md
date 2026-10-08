@@ -3595,12 +3595,12 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,
   2026-10-08 11:03 UTC). Supersedes the clock address rule of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. The
-  check stands against a clock reference that the compiler
-  makes from C in the copy, from a new tag or from our patch. It does not stand against
-  an edit made to hide from it, such as assembly that stores a function's address:
-  review of each copy PR covers that. A `#line` directive or a line marker in a copy
-  file fails the check, because it moves the file that the include check reads.
-  Decided by `laptop.architect-2`
+  check stands against a clock reference that the compiler makes from C in the copy,
+  from a new tag or from our patch. It does not stand against an edit made to hide
+  from it, such as assembly that stores a function's address: review of each copy PR
+  covers that. A `#line` directive or a line marker in a copy file fails the check,
+  because it moves the file that the include check reads. Decided by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058103514,
   2026-10-08 10:42 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
