@@ -52,9 +52,13 @@
   https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6067470813). A
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
-  stays its one check, of the members and voters. It checks no definition or home. The
-  node that founds the region checks the definitions (SPEC CHANGE). Nothing checks the
-  homes (`laptop.architect`, 2026-10-08T18:35:16Z:
+  stays its one check, of the members and voters. It refuses no definition. A founding
+  spec with problems is not an error of the open: when no file names a pointer, the node
+  uses no spec until a valid change takes effect (SPEC IN USE; `laptop.architect`,
+  2026-10-08T15:42:09Z:
+  https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498). The node
+  that founds the region checks the definitions (SPEC CHANGE).
+  Nothing checks the homes (`laptop.architect`, 2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). `Start`
   lost, because `driver.rs` holds `raft::Start`, which changes at each open
   (`laptop.architect`, 2026-10-08T10:34:37Z:

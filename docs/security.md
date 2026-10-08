@@ -409,8 +409,9 @@ not reached from the corpus:
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), each connector's protocol parser, the OPC UA binary
-decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
+`mesh::log::sequence`, #1746), the names in the directory of the spec in use
+(`mesh::driver::used::pointer`, #1746), each connector's protocol parser, the OPC UA
+binary decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
 `connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
 reaches only from an input with a `connector` block of kind `influx`, and no input holds
 one yet (#1817).

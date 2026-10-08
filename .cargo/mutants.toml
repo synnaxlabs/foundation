@@ -73,7 +73,4 @@ exclude_re = [
   # Only a pool whose largest block is 1472 bytes tells `<` from `<=`. Block sizes are
   # 64 times 2^k times 5 to 8, so none is 1472: 1280, then 1536.
   'crates/transport/src/client\.rs:.*replace < with <= in Config::setup',
-  # A pair or a refusal at or below the lowest floor only takes memory: no outcome
-  # reads it.
-  'crates/mesh/src/applied\.rs:.*replace Applied::trim with \(\)',
 ]

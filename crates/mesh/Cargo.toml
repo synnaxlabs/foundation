@@ -21,8 +21,13 @@ wire = { path = "../wire" }
 
 [dev-dependencies]
 block = { path = "../block", features = ["sim"] }
+counting = { path = "../counting" }
 proptest.workspace = true
 sim = { path = "../sim" }
+
+[[test]]
+name = "memory"
+harness = false
 
 [lints]
 workspace = true
