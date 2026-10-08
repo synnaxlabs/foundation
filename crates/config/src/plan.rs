@@ -6,7 +6,6 @@ use document::diagnostic::{Code, Diagnostic};
 use spec::channel::{Channel, Problem};
 use spec::definition;
 use spec::placement::{Policy, place};
-use spec::tree::{self, Chunks};
 use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
@@ -19,8 +18,10 @@ const WRITER_NODES: Code = Code::new("config.writer-nodes");
 const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 
 /// The change from the applied spec of the root region to the definitions in
-/// `documents`. `members` names each node in the mesh. `kinds` checks each connector
-/// block and gives the channels it writes.
+/// `documents`. `applied` is the definitions of the spec at `base`, by tree key, with
+/// no problem from [`spec::region::check`]: the spec that a node uses. `members` names
+/// each node in the mesh. `kinds` checks each connector block and gives the channels
+/// it writes.
 ///
 /// A channel keeps the key of the stored channel at its name, so a renamed channel is
 /// removed and added, and each channel with an edge to it changes. A definition of the
@@ -41,31 +42,25 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   is not in `members`. The fix names a member that is equal to it without case.
 ///
 /// These come in the order of their [`document::Source`], then in source order.
-///
-/// # Panics
-///
-/// When `chunks` lacks a chunk of the tree at `applied.root`, or holds one that does
-/// not decode. The caller gives the whole applied tree.
 pub fn plan(
     documents: &[Document],
-    applied: spec::Pointer,
-    chunks: &Chunks,
+    base: spec::Pointer,
+    applied: &BTreeMap<Name, definition::Definition>,
     members: &BTreeSet<Name>,
     kinds: &Table,
 ) -> Result<Plan, Vec<Diagnostic>> {
     let found = checked(documents, kinds)?;
-    let stored = stored(chunks, applied.root);
-    let channels = channels(&found.entries, &stored);
+    let channels = channels(&found.entries, applied);
     let mut diagnostics = wrong(&found, &channels);
-    let homes = homes(&found, &stored, &mut diagnostics);
+    let homes = homes(&found, applied, &mut diagnostics);
     unknown(&found, members, &mut diagnostics);
     if !diagnostics.is_empty() {
         sort(&mut diagnostics);
         return Err(diagnostics);
     }
     Ok(Plan {
-        base: applied,
-        changes: changes(found.entries, channels, stored),
+        base,
+        changes: changes(found.entries, channels, applied),
         homes,
     })
 }
@@ -97,50 +92,30 @@ pub struct Change {
     pub new: Option<Entry>,
 }
 
-/// The definitions of an applied tree, with their bytes, by tree key.
-type Stored<'c> = BTreeMap<Name, (&'c [u8], definition::Definition)>;
-
-/// Each definition of the tree at `root` whose label is not reserved.
-fn stored(chunks: &Chunks, root: Digest) -> Stored<'_> {
-    let diff = tree::diff(chunks, tree::empty(), root).unwrap_or_else(|error| {
-        panic!("cannot read the applied tree at {root}: {error}")
-    });
-    let mut stored = Stored::new();
-    for changed in diff.changes {
-        let bytes = changed.new.expect("invariant: the empty tree has no entry");
-        let definition =
-            definition::Definition::decode(bytes).unwrap_or_else(|error| {
-                panic!(
-                    "the applied definition `{}` does not decode: {error}",
-                    changed.name
-                )
-            });
-        let label = definition.kind().label(&changed.name);
-        if !label.is_some_and(|label| label.reserved()) {
-            stored.insert(changed.name, (bytes, definition));
-        }
-    }
-    stored
-}
-
 /// The channel of each `channel` entry. It keeps the key of the stored channel at its
-/// name. Else it gets a key that no stored key can be, since each stored key is v7.
+/// name. Else it gets `Key::from_u128(n)` for the least `n` that no stored channel or
+/// earlier entry holds.
 fn channels(
     entries: &BTreeMap<Name, Entry>,
-    stored: &Stored<'_>,
+    applied: &BTreeMap<Name, definition::Definition>,
 ) -> BTreeMap<Name, Channel> {
-    let mut made = 0;
+    let held: BTreeSet<Key> = applied
+        .values()
+        .filter_map(|definition| match definition {
+            definition::Definition::Channel(channel) => Some(channel.key),
+            _ => None,
+        })
+        .collect();
+    let mut made = (1..).map(Key::from_u128).filter(|key| !held.contains(key));
     let keys: BTreeMap<&Name, Key> = entries
         .iter()
         .filter(|(_, entry)| matches!(entry.definition, Definition::Channel(_)))
-        .map(|(name, _)| {
-            if let Some((_, definition::Definition::Channel(channel))) =
-                stored.get(name)
-            {
-                return (name, channel.key);
-            }
-            made += 1;
-            (name, Key::from_u128(made))
+        .map(|(name, _)| match applied.get(name) {
+            Some(definition::Definition::Channel(channel)) => (name, channel.key),
+            _ => (
+                name,
+                made.next().expect("invariant: fewer than 2^128 channels"),
+            ),
         })
         .collect();
     let mut channels = BTreeMap::new();
@@ -194,7 +169,7 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
 /// that two writer nodes or [`place`] leave with no home.
 fn homes(
     found: &Found<'_>,
-    stored: &Stored<'_>,
+    applied: &BTreeMap<Name, definition::Definition>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BTreeMap<Name, Name> {
     let placements: Vec<(&Name, &Policy)> = found
@@ -216,9 +191,8 @@ fn homes(
         let writer = writer(found, index, diagnostics);
         match place(index, placements.iter().copied(), writer) {
             Ok(placed) => {
-                let stored = stored.get(index).map(|(_, definition)| definition);
                 let indexed = matches!(
-                    stored,
+                    applied.get(index),
                     Some(definition::Definition::Channel(Channel {
                         kind: spec::channel::Kind::Index { .. },
                         ..
@@ -302,12 +276,21 @@ fn unknown(
 }
 
 /// The change of each definition whose bytes differ from the stored bytes, in tree key
-/// order.
+/// order. A stored definition whose label is reserved is never removed.
 fn changes(
     entries: BTreeMap<Name, Entry>,
     mut channels: BTreeMap<Name, Channel>,
-    mut stored: Stored<'_>,
+    applied: &BTreeMap<Name, definition::Definition>,
 ) -> Vec<Change> {
+    let mut stored: BTreeMap<&Name, &definition::Definition> = applied
+        .iter()
+        .filter(|(name, definition)| {
+            !definition
+                .kind()
+                .label(name)
+                .is_some_and(|label| label.reserved())
+        })
+        .collect();
     let mut changes = Vec::new();
     for (name, entry) in entries {
         let bytes = match &entry.definition {
@@ -319,18 +302,18 @@ fn changes(
                 definition::Definition::Channel(channel).encode()
             }
         };
-        let old = stored.remove(&name).map(|(old, _)| old);
-        if old != Some(bytes.as_slice()) {
+        let old = stored.remove(&name).map(definition::Definition::encode);
+        if old.as_ref() != Some(&bytes) {
             changes.push(Change {
                 name,
-                old: old.map(Digest::of),
+                old: old.as_deref().map(Digest::of),
                 new: Some(entry),
             });
         }
     }
-    changes.extend(stored.into_iter().map(|(name, (old, _))| Change {
-        name,
-        old: Some(Digest::of(old)),
+    changes.extend(stored.into_iter().map(|(name, old)| Change {
+        name: name.clone(),
+        old: Some(Digest::of(&old.encode())),
         new: None,
     }));
     changes.sort_by(|a, b| a.name.cmp(&b.name));

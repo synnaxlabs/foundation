@@ -92,13 +92,25 @@ impl Spec {
 
     fn plan(&self, texts: &[&str], members: &[&str]) -> Result<Plan, Vec<Diagnostic>> {
         let members = members.iter().map(|member| name(member)).collect();
+        let applied = self.definitions();
         config::plan(
             &documents(texts),
             self.pointer,
-            &self.chunks,
+            &applied,
             &members,
             &kinds(),
         )
+    }
+
+    /// Each stored definition, by tree key.
+    fn definitions(&self) -> BTreeMap<Name, Stored> {
+        let all = tree::diff(&self.chunks, tree::empty(), self.pointer.root);
+        let all = all.expect("a whole tree").changes.into_iter();
+        all.map(|changed| {
+            let bytes = changed.new.expect("an entry");
+            (changed.name, Stored::decode(bytes).expect("decodes"))
+        })
+        .collect()
     }
 
     /// Changes the tree as one apply.
@@ -119,13 +131,10 @@ impl Spec {
     /// Applies `plan`: a channel keeps the stored key at its name, and each other
     /// channel gets a new v7 key.
     fn apply(&mut self, plan: &Plan) {
-        let all = tree::diff(&self.chunks, tree::empty(), self.pointer.root);
         let mut keys: BTreeMap<Name, Key> = BTreeMap::new();
-        for changed in all.expect("a whole tree").changes {
-            let stored =
-                Stored::decode(changed.new.expect("an entry")).expect("decodes");
+        for (name, stored) in self.definitions() {
             if let Stored::Channel(channel) = stored {
-                keys.insert(changed.name, channel.key);
+                keys.insert(name, channel.key);
             }
         }
         for change in &plan.changes {
@@ -328,6 +337,36 @@ fn changes_each_channel_on_a_renamed_index() {
         plan.homes,
         BTreeMap::from([(name("edge.clock"), name("edge"))])
     );
+}
+
+#[test]
+fn gives_a_new_channel_a_key_that_no_stored_channel_holds() {
+    let mut spec = Spec::create_empty();
+    let index = spec::channel::Kind::Index {
+        error: None,
+        control: None,
+    };
+    let key = Key::from_u128(1);
+    let stored = Stored::Channel(Channel { key, kind: index });
+    spec.set([tree::Change::Set(name("b.time"), stored.encode())]);
+    let b = "\
+channel \"b.time\" {
+  kind = \"index\"
+}
+placement \"b\" {
+  select = \"b.*\"
+  home = \"n\"
+}
+";
+    let plan = spec.plan(&[PLANT, b], &["n"]).expect("no problems");
+    let found: Vec<_> = plan
+        .changes
+        .iter()
+        .map(|change| (change.name.as_str(), change.old))
+        .collect();
+    let added = ["a.@placement", "a.time", "a.value", "b.@placement"];
+    assert_eq!(found, added.map(|name| (name, None)));
+    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
 }
 
 #[test]
@@ -563,8 +602,16 @@ connector \"w2\" {{
 
 #[test]
 fn gives_the_problems_in_source_then_source_order() {
-    let placement = "placement \"a\" {\n  select = \"a.*\"\n  home = \"x_1\"\n  \
-                     copies = [\"x_2\"]\n}\nchannel \"b.time\" {\n  kind = \"index\"\n}\n";
+    let placement = "\
+placement \"a\" {
+  select = \"a.*\"
+  home = \"x_1\"
+  copies = [\"x_2\"]
+}
+channel \"b.time\" {
+  kind = \"index\"
+}
+";
     let channels = "\
 channel \"a.time\" {
   kind = \"index\"
@@ -581,8 +628,13 @@ channel \"a.other\" {
     let documents = [read(1, channels), read(0, placement)];
     let members = BTreeSet::from([name("n")]);
     let spec = Spec::create_empty();
-    let result =
-        config::plan(&documents, spec.pointer, &spec.chunks, &members, &kinds());
+    let result = config::plan(
+        &documents,
+        spec.pointer,
+        &spec.definitions(),
+        &members,
+        &kinds(),
+    );
     let codes: Vec<_> = problems(result)
         .into_iter()
         .map(|(code, at, ..)| (code, at))
@@ -606,13 +658,4 @@ channel \"a.other\" {
         ),
     ];
     assert_eq!(codes, expected);
-}
-
-#[test]
-#[should_panic(expected = "cannot read the applied tree at")]
-fn panics_without_a_chunk_of_the_applied_tree() {
-    let mut spec = Spec::create_empty();
-    spec.apply(&spec.plan(&[PLANT], &["n"]).expect("no problems"));
-    spec.chunks = Chunks::default();
-    drop(spec.plan(&[PLANT], &["n"]));
 }
