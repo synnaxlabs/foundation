@@ -6,7 +6,9 @@
 //! the decoded entries exactly when `spec::region::tree` of them has the same root.
 //!
 //! Input: a count of chunks, each a count of pieces, each a length, bytes, and a
-//! link; then changes to the end, each a length, a name, and a length and value, where
+//! link. A length of `KEY` or more adds an entry key instead of bytes, and one of
+//! `VALUE` or more adds an entry value that is a definition, so that a short input
+//! builds a tree that `definitions` reads. Then changes to the end, each a length, a name, and a length and value, where
 //! a value length of 255 deletes. A link `k` above zero adds the digest of chunk
 //! `k - 1`, modulo the chunks built so far, where chunk 0 is the empty tree. A count
 //! past the end reads as zero; bytes past the end stop at the end.
@@ -16,13 +18,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use libfuzzer_sys::fuzz_target;
+use spec::channel::{Channel, Kind};
 use spec::definition::Definition;
 use spec::region;
 use spec::tree::{self, Change, Chunks, Diff, Error};
+use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
 const DELETE: u8 = 255;
+const KEY: u8 = 250;
+const VALUE: u8 = 253;
 
 fuzz_target!(|input: &[u8]| {
     let mut input = input;
@@ -31,8 +37,23 @@ fuzz_target!(|input: &[u8]| {
     for _ in 0..byte(&mut input) {
         let mut chunk = Vec::new();
         for _ in 0..byte(&mut input) {
-            let len = byte(&mut input);
-            chunk.extend_from_slice(bytes(&mut input, len));
+            match byte(&mut input) {
+                len @ VALUE.. => {
+                    let at = u128::from(len - VALUE);
+                    let definition = Definition::Channel(Channel {
+                        key: Key::from_u128(at + 1),
+                        kind: Kind::Index {
+                            error: None,
+                            control: None,
+                        },
+                    });
+                    let value = definition.encode();
+                    chunk.push(u8::try_from(value.len()).expect("a short value"));
+                    chunk.extend(value);
+                }
+                len @ KEY.. => chunk.extend([3, b'p', b'.', b'a' + (len - KEY)]),
+                len => chunk.extend_from_slice(bytes(&mut input, len)),
+            }
             if let Some(link) = byte(&mut input).checked_sub(1) {
                 chunk.extend(roots[usize::from(link) % roots.len()].0);
             }
