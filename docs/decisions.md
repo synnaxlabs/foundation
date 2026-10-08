@@ -1207,6 +1207,10 @@ How to read this record:
   `tasks.spawn`, which gives no way to drop it. Decided by the architect
   (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641).
+  Amended by HUB LINK (#1946): `Hub::serve` is gone. A `Link`, the future of
+  `Link::serve`, and a `Reply` each hold the hub's state, so each is a session of the
+  hub here, and `node` drops each where `keep` drops the future, before it awaits the
+  commit.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -5058,9 +5062,20 @@ How to read this record:
   `MALFORMED`: `serve::Error::Unadmitted` (a request stream before an admitted hello)
   and `Pending` (a request while one waits for its reply). A message of the wrong kind
   for its stream, such as a hello on a request stream, is `serve::Error::Message` with
-  `wire::hub::Error::Kind`, and a body that ends early is `Message` with `Unfinished`
-  (`laptop.architect`,
-  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704).
+  `wire::hub::Error::Kind` (`laptop.architect`, 2026-10-08T15:38:46Z,
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704), and a
+  body that ends early is `Message` with `Unfinished` (`laptop.architect`,
+  2026-10-08T16:52:55Z,
+  https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697).
+  Supersedes item 5 (`serve::Error::Hello`) of
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738.
+  `Hub::rules` sets the `access::Rules` that each later hello and request is checked
+  against, and `node` calls it with the rules of each spec (#1951). Until then, a hub
+  has `access::Rules::default()`, which knows no subject, so each hello gets
+  `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, since the
+  rules change at run time through `Mesh::apply`. Decided by `laptop.architect`
+  (2026-10-08T18:05:25Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140).
   A program sends its first request once the challenge after its hello comes, since
   the node sends it only after it admits the hello. `Session::accept` gives streams
   by class, not in open order, so this rule also makes the hello stream the first
