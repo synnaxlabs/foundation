@@ -215,8 +215,8 @@ pub enum Outcome {
     /// A live group with samples found no room in the ring or the pool. Its seq is a
     /// gap in the log. The gap is durable only when a later live entry of the index,
     /// with samples or a handoff, is on disk: a restart before that gives the next
-    /// frame the same seq. A [`Shard::shed`] of the index gives it again only when no
-    /// later live entry was appended.
+    /// frame the same seq. After a [`Shard::shed`] and a [`Shard::carry`] of the index,
+    /// the next frame gets the same seq only when no later live entry was appended.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -3952,6 +3952,8 @@ mod tests {
                     }
                 };
                 shard.close_writer(a);
+                // No public outcome shows a waiting handoff before the shed drops it.
+                assert!(shard.indexes[0].handoff().is_some(), "the handoff waits");
                 shard.shed(Slot::new(0));
                 shard.carry(Slot::new(0));
                 let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
