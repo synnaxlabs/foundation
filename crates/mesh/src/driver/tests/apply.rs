@@ -864,15 +864,11 @@ fn an_equal_change_gives_ok_when_a_later_home_applies_in_its_batch() {
                 node.clock().sleep(Span::MILLISECOND).await;
             }
         }
-        let later = Change::Home {
-            index: SECOND,
-            home: key(2),
-        };
-        let mut set = pin!(mesh.propose(later));
+        let mut set = pin!(mesh.set_home(SECOND, key(2)));
         assert!(now(set.as_mut()).await.is_pending());
         assert_eq!(mesh.group.borrow().proposals.len(), 2);
         assert_eq!(call.await, Ok(moved));
-        set.await.unwrap();
+        assert_eq!(set.await, Ok(()));
         assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
     });
 }
