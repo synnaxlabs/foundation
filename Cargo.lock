@@ -370,6 +370,7 @@ dependencies = [
  "bytes",
  "connector",
  "counting",
+ "divan",
  "document",
  "env",
  "http",
