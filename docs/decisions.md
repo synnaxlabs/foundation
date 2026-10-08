@@ -4393,9 +4393,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
   tree key, which `admit` built with `Kind::key`, was decided by `laptop.architect` at
   2026-10-08T08:10:33Z
-  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). The
-  ruling of 11:00:08Z supersedes it and its lost option, a public `Kind::label` that
-  only `access` calls.
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), with
+  the lost option of a public `Kind::label` that only `access` calls. The ruling of
+  11:00:08Z supersedes
+  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911.
 - **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
   `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
   builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
@@ -4495,8 +4496,8 @@ How to read this record:
   give the admin more. Their labels are reserved, so no file holds them: `Kind::key`
   refuses a reserved label, and `Kind::label` gives one only for a subject or an access
   policy. A definition whose label (`definition.kind().label(key)`) is reserved is
-  Foundation's: `plan` leaves it out, and `access::Rules` finds a subject by its label,
-  so it admits `@admin`. Lost: `Kind::key` takes a reserved label behind a flag, so
+  Foundation's, and `plan` leaves it out. `access::Rules` finds a subject by its label,
+  so it admits `@admin` (SUBJECT KEYS). Lost: `Kind::key` takes a reserved label behind a flag, so
   `node` writes the definitions and `config` can make a reserved key by mistake;
   `spec::key::reserved(key)`, which needs a list of every kind that a new kind can miss,
   and gives `plan` no label or kind to print. Decided by `laptop.architect-2`
