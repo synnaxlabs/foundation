@@ -70,11 +70,13 @@
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743).
   Supersedes "or the errno" of item 2 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541: a
-  failure is not stored. One exception: on an IPv4 socket, `os` gives
-  `Io { code: 22 }` for each IPv6 source, mapped too, because Linux skips the
-  `IPV6_PKTINFO` of such a send and sends from an address of its choice. Decided by
-  `laptop.architect-2` (2026-10-08 20:06 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235). On
+  failure is not stored. One exception: `os` gives `Io { code: 22 }` for each IPv6
+  source on an IPv4 socket, mapped too, or `0.0.0.0` in either form. Linux skips the
+  `IPV6_PKTINFO` of the first and reads the second as no source, and sends each from
+  an address of its choice. Decided by `laptop.architect-2` (2026-10-08 20:06 and
+  20:32 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601). On
   `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
   stream reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of
   the connect, an IPv4-mapped address as plain IPv4, and any other address as given,

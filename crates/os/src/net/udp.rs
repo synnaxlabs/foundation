@@ -2,7 +2,7 @@
 //! through Tokio.
 
 use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::{Arc, OnceLock};
@@ -296,8 +296,9 @@ fn sent(outcome: io::Result<()>, remote: SocketAddr) -> Poll<Result<(), Error>> 
 ///
 /// - [`Error::Unreachable`] with the destination as given when the socket's family
 ///   cannot reach it.
-/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket. Linux skips
-///   the `IPV6_PKTINFO` of such a send and sends from an address of its choice.
+/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket, or for
+///   `0.0.0.0` in either form. Linux skips the `IPV6_PKTINFO` of the first and reads
+///   the second as no source, and sends each from an address of its choice.
 fn route(
     local: SocketAddr,
     transmit: &Transmit<'_>,
@@ -312,10 +313,13 @@ fn route(
     if local.ip() != any && local.is_ipv4() != destination.is_ipv4() {
         return Err(Error::Unreachable { remote });
     }
+    let unspecified = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    if transmit.source.is_some_and(|source| {
+        source.to_canonical() == unspecified || local.is_ipv4() && source.is_ipv6()
+    }) {
+        return Err(io_error(Errno::INVAL));
+    }
     if local.is_ipv4() {
-        if transmit.source.is_some_and(|source| source.is_ipv6()) {
-            return Err(io_error(Errno::INVAL));
-        }
         return Ok((remote, transmit.source));
     }
     let mapped = |ip: IpAddr| match ip {
@@ -347,8 +351,6 @@ fn from_codepoint(ecn: EcnCodepoint) -> Ecn {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
     use super::*;
 
     const V4: Ipv4Addr = Ipv4Addr::LOCALHOST;
