@@ -21,10 +21,6 @@ const CHUNK: usize = 4096;
 /// and 2 of index, with room for the chunks.
 const BUDGET: usize = 22;
 
-/// The most for one float field in time order or newest first, as each chunk then
-/// fills and only the last growth of each column is spare.
-const APPEND: usize = 19;
-
 /// The most that SIM INFLUX allows, which also holds with 255 sparse fields, as each
 /// chunk keeps a column for each field it holds, and with 1000 short series, as each
 /// series has a fixed cost.
@@ -34,7 +30,7 @@ const SPARSE: usize = 32;
 const FLOOR: usize = 16;
 
 fn main() {
-    check("the lab's data lines", LAB, APPEND, |k, line| {
+    check("the lab's data lines", LAB, BUDGET, |k, line| {
         let time = 1_000_000 + k * 1_000;
         writeln!(line, "m,node=edge,unit=V value={k} {time}")
     });
@@ -44,10 +40,10 @@ fn main() {
             writeln!(line, "m c{}={k} {}", k % fields, 1_000_000 + k)
         });
     }
-    check("newest first", POINTS, APPEND, |k, line| {
+    check("newest first", POINTS, BUDGET, |k, line| {
         writeln!(line, "m value={k} {}", POINTS - k)
     });
-    check("each pair of times swapped", POINTS, APPEND, |k, line| {
+    check("each pair of times swapped", POINTS, BUDGET, |k, line| {
         writeln!(line, "m value={k} {}", 1_000_000 + (k ^ 1))
     });
     check("1000 series of 200 points", POINTS, SPARSE, |k, line| {
@@ -58,7 +54,7 @@ fn main() {
     check(
         "a full chunk, then the rest newest first",
         POINTS,
-        APPEND,
+        BUDGET,
         |k, line| {
             let time = if k < CHUNK { k } else { 1_000_000 + POINTS - k };
             writeln!(line, "m value={k} {time}")
@@ -67,7 +63,7 @@ fn main() {
     check(
         "live, then an outage newest first",
         POINTS,
-        APPEND,
+        BUDGET,
         |k, line| {
             let live = POINTS / 2;
             let time = match k {

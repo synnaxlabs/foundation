@@ -58,15 +58,6 @@ exclude_re = [
   # A `Tcp` has no write buffer, so a flush is ready at once. `Poll::Ready(Ok(()))` is
   # what the body returns.
   'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
-  # A full chunk takes one more point between its times, so it holds 4097 points and
-  # splits on the next. The points read the same, and the heap stays inside each bound
-  # of `tests/memory.rs`.
-  'crates/connector-influx/src/sim\.rs:.*replace < with <= in Series::write',
-  # A point before a full chunk goes into it and splits it, not into a new chunk. The
-  # points read the same, and the heap falls: 18.1 bytes a point newest first, not
-  # 18.9. The line number keeps this entry off the `<` on line 268, which `APPEND` in
-  # `tests/memory.rs` kills.
-  'crates/connector-influx/src/sim\.rs:274:.*replace < with <= in Series::take',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
 ]
