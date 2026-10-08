@@ -167,7 +167,6 @@ mod tests {
     mod socket {
         use rustix::fs::OFlags;
         use rustix::io::FdFlags;
-        use rustix::net::AddressFamily;
 
         use super::*;
 
@@ -188,13 +187,16 @@ mod tests {
             assert_eq!(sockopt::socket_nosigpipe(&fd), Ok(true));
         }
 
+        /// Reads the family from the bound address, since macOS has no `SO_DOMAIN`.
         #[test]
         fn follows_the_family_of_the_address() {
             let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0);
-            let fd = super::socket(v6).unwrap();
-            assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET6));
-            let fd = super::socket(loopback()).unwrap();
-            assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET));
+            for address in [v6, loopback()] {
+                let fd = super::socket(address).unwrap();
+                rustix::net::bind(&fd, &address).unwrap();
+                let local = rustix::net::getsockname(&fd).unwrap();
+                assert_eq!(SocketAddr::try_from(local).unwrap().ip(), address.ip());
+            }
         }
     }
 }
