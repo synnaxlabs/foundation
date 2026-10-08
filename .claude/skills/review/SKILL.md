@@ -198,7 +198,8 @@ nothing checked again. So when round 1 led to fix commits:
    one finds nothing. So does a fix that only edits the PR body: its range is
    `<head>..<head>`, so its round runs `reviewer` alone, on the edit, and its comment
    has the `Breaker:` skip line (Round comment). When each finding of a round is low and
-   in the PR title or body, its comment gives `Findings: none` and lists them under a
+   in the PR title or body, or in the `Deferred:`, `Later steps:`, or `Public surface:`
+   line of a round comment, its comment gives `Findings: none` and lists them under a
    line `Text fixes:`. Each item gives the exact new text: an item that asks the author
    to write text is a finding. The author applies each with the `reviewer`'s words as
    given, and needs no further round.
