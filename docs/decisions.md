@@ -4635,8 +4635,8 @@ How to read this record:
   `documents` changes no problem (#1886 round 2, 2026-10-08T14:14:16Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). A tie,
   with no span or with one `Source` in two Documents, has no defined choice (#1886 round
-  3, 2026-10-08T14:26:34Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062050321). The
+  4, 2026-10-08T14:35:32Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090). The
   problems come in `Source` order, then in source order, as the problems of `check` do.
   `config.connector-home` (X22) and `config.split-placement` (BQ10) follow in a second
   PR of #1082. The region check and the region of each key (REGION CHECK) come with
