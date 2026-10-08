@@ -8,10 +8,11 @@ use types::time::Span;
 
 use crate::{Address, Error, MESSAGE_BYTES_MIN, POOL_RULE, Session, dial, port, quic};
 
-/// The smallest window of a program: the window of a node.
+/// The smallest window of a program: 1 Gbit/s over a round trip of 8 ms.
 const WINDOW_BYTES_MIN: usize = 1 << 20;
 
-/// The idle timeout of a program: the idle timeout of a node.
+/// The idle timeout of a program. Keep-alives go out well inside it, so only a
+/// session whose node is gone ends.
 const IDLE: Span = Span::from_nanos(30 * Span::SECOND.nanos());
 
 /// A program's sessions to nodes. It dials a node with no node key, so the node sees
