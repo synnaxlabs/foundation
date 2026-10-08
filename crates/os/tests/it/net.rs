@@ -302,6 +302,24 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
     });
 }
 
+/// On macOS, one write takes at most the unsent bound, since the kernel applies it
+/// only to the write event. An accepted stream keeps the bound of its listener.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_write_takes_at_most_the_unsent_bound() {
+    on_thread("net-cap", || async {
+        let net = net();
+        let mut config = listen_config(SocketAddr::new(LOCALHOST.into(), 0));
+        config.options.unsent_bytes_max = 1 << 13;
+        let mut listener = net.listen(&config).expect("the loopback has a free port");
+        let mut client = connect(&net, listener.local()).await;
+        let mut server = accept(&mut listener).await;
+        let bytes = vec![7; 1 << 20];
+        assert_eq!(write(&mut client, &[&bytes]).await, Ok(1 << 14));
+        assert_eq!(write(&mut server, &[&bytes]).await, Ok(1 << 13));
+    });
+}
+
 /// Writes of 64 bytes that total less than the unsent bound each go at once, with no
 /// read on the peer: macOS waits for the write event only once the bound is reached.
 #[test]
