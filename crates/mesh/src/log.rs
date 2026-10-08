@@ -2710,8 +2710,14 @@ mod tests {
     // Bytes too few for a header that are not zeros are not the end of the log.
     #[test]
     fn refuses_a_short_file_that_is_not_zeros() {
+        let mut last = [0_u8; 10];
+        last[9] = 1;
         // `log-0` with no record, then with record 0.
-        for (records, blamed) in [(0, "log-0"), (1, "log-1")] {
+        let cases = [(0, "log-0"), (1, "log-1")];
+        for ((records, blamed), short) in cases
+            .into_iter()
+            .flat_map(|case| [[0xAB; 10], last].map(|short| (case, short)))
+        {
             let (mut sim, node) = create_node(0);
             let names = sim
                 .run_on(&node, move |node, _| async move {
@@ -2724,19 +2730,20 @@ mod tests {
                         let mode = Mode::Create { len: 0 };
                         drop(node.files().open(&file("log-0"), mode).await.unwrap());
                     }
-                    let short = Mode::Create { len: 10 };
-                    drop(node.files().open(&file("log-1"), short).await.unwrap());
+                    let mode = Mode::Create { len: 10 };
+                    drop(node.files().open(&file("log-1"), mode).await.unwrap());
                     node.files().sync_dir(Path::new(DIR)).await.unwrap();
-                    put(&node, "log-1", 0, &[0xAB; 10]).await;
+                    put(&node, "log-1", 0, &short).await;
                     lens(&node).await
                 })
                 .unwrap();
-            assert_eq!(names[2], named(("log-1", 10)), "records {records}");
+            let case = format!("records {records}, {short:?}");
+            assert_eq!(names[2], named(("log-1", 10)), "{case}");
             let expected = Error::Corrupt {
                 path: file(blamed),
                 offset: 0,
             };
-            assert_eq!(stored(&mut sim, &node), Err(expected), "records {records}");
+            assert_eq!(stored(&mut sim, &node), Err(expected), "{case}");
         }
     }
 
