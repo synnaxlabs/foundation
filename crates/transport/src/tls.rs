@@ -482,7 +482,7 @@ mod tests {
             VALIDITY,
             &subject,
             SPKI,
-            pair.public_key().as_ref(),
+            &private_key.public().to_bytes(),
         ]
         .concat());
         let signature = pair.sign(&tbs);
