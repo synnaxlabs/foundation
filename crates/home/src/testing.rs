@@ -70,3 +70,37 @@ pub async fn shard(env: Env) -> (Shard, Interner, Stamp) {
         env.clock.sleep(Span::from_nanos(1)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use env::files::Mode;
+
+    use super::*;
+
+    #[test]
+    fn opens_a_ring_of_4_mib_in_shard_0_once_the_clock_has_mesh_time() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let (len, now) = sim
+            .run_on(&node, |node, tasks| async move {
+                let env = Env {
+                    files: node.files(),
+                    clock: node.clock(),
+                    wall: node.wall(),
+                    entropy: node.entropy(),
+                    tasks,
+                };
+                let (_shard, _interner, now) = shard(env).await;
+                let files = node.files();
+                let ring = files.open(Path::new("shard-0/ring"), Mode::Read).await;
+                (ring.expect("the ring exists").len(), now)
+            })
+            .expect("the run ends");
+
+        // The ring follows two 4 KiB header blocks.
+        assert_eq!(len, (1 << 22) + 2 * 4096);
+        assert!(now > Stamp::from_nanos(0), "{now:?}");
+    }
+}
