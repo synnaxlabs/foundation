@@ -77,7 +77,7 @@ impl fmt::Display for Error {
         match self {
             Self::Tree(error) => write!(f, "{error}"),
             Self::Definition { key, error } => {
-                write!(f, "the value at {key} is not a definition: {error}")
+                write!(f, "the value at `{key}` is not a definition: {error}")
             }
         }
     }

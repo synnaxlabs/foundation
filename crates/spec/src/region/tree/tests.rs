@@ -116,7 +116,28 @@ fn definitions_with_a_value_that_does_not_decode_give_its_key() {
     assert_eq!(read, Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the value at plant.x is not a definition: the definition has format version \
+        "the value at `plant.x` is not a definition: the definition has format version \
          255, newer than 1"
     );
+}
+
+#[test]
+fn definitions_of_a_chunk_that_is_not_a_tree_give_the_chunk() {
+    let mut chunks = Chunks::default();
+    let root = chunks.insert(vec![1]);
+    assert_eq!(
+        definitions(&chunks, root),
+        Err(Error::Tree(tree::Error::Corrupt(root)))
+    );
+}
+
+#[test]
+fn definitions_give_definitions_with_a_problem() {
+    let defined = create_definitions(&[
+        ("plant.pressure", data(2, 9)),
+        ("plant.time", subject()),
+    ]);
+    let mut chunks = Chunks::default();
+    let update = tree(&mut chunks, &defined);
+    assert_eq!(definitions(&chunks, update.root), Ok(defined));
 }
