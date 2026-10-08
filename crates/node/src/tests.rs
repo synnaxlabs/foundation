@@ -2279,18 +2279,18 @@ mod port {
     }
 
     /// Starts a peer on a new host of `sim` that dials the node at `listen` of
-    /// `host`, opens a two-way stream, sends `header` as its first message, then
-    /// sends until a send fails, and reads the reply half. Gives what the peer saw
+    /// `host`, opens a two-way stream, sends each of `first`, then sends until a send
+    /// fails, and reads the reply half. Gives what the peer saw
     /// once the run reaches it, or the error of the dial. The peer holds its session
     /// until the session closes.
     fn dial(
         sim: &mut sim::Sim,
         host: &sim::node::Node,
-        header: &[u8],
+        first: &[&[u8]],
     ) -> Arc<Mutex<Option<Result<Seen, transport::Error>>>> {
         let peer = sim.node(sim::node::Config::default());
         let listen = listen(host);
-        let header = header.to_vec();
+        let first: Vec<Vec<u8>> = first.iter().map(|bytes| bytes.to_vec()).collect();
         let out = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&out);
         let shard = env::shards::Config {
@@ -2316,7 +2316,12 @@ mod port {
                 block.freeze()
             };
             let bytes_max = sender.bytes_max();
-            let mut sent = sender.send(message(&header)).await;
+            let mut sent = Ok(());
+            for bytes in &first {
+                if sent.is_ok() {
+                    sent = sender.send(message(bytes)).await;
+                }
+            }
             while sent.is_ok() {
                 own.clock().sleep(Span::MILLISECOND).await;
                 sent = sender.send(message(b"after")).await;
@@ -2336,13 +2341,13 @@ mod port {
         out
     }
 
-    /// What a peer sees when it sends `header` to a running node with `memory`, which
+    /// What a peer sees when it sends `first` to a running node with `memory`, which
     /// then stops cleanly.
-    fn rejected(header: &[u8], memory: Size) -> Seen {
+    fn sees(first: &[&[u8]], memory: Size) -> Seen {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = host(&mut sim, 2);
         let node = Node::start(config(&host, memory, Box::new(heap)));
-        let seen = dial(&mut sim, &host, header);
+        let seen = dial(&mut sim, &host, first);
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
         node.stop();
         assert_eq!(sim.run(), Ok(()));
@@ -2364,9 +2369,29 @@ mod port {
             bytes_max,
             sent,
             read,
-        } = rejected(&header, Size::MEBIBYTE);
+        } = sees(&[&header], Size::MEBIBYTE);
         assert_eq!(peer, Peer::Node(key));
         assert_eq!(bytes_max, 65_536);
+        assert_eq!(sent, transport::Error::Stopped { code });
+        assert_eq!(read, Err(transport::Error::Reset { code }));
+    }
+
+    /// The node gives a hub stream of a node to its hub, which stops an open of a
+    /// channel that the node does not know, and resets its reply half, with
+    /// `UNKNOWN`.
+    #[test]
+    fn a_hub_stream_of_a_node_goes_to_the_hub() {
+        let header = wire::header::encode(wire::Protocol::Hub);
+        let open = wire::hub::Open {
+            mode: wire::hub::Mode::Complete { limit_bytes: 0 },
+            channels: 1,
+        };
+        let mut opened = vec![0; open.encoded_len()];
+        open.encode(&mut opened);
+        let mut keys = [0; wire::hub::keys::LEN];
+        wire::hub::keys::encode(&[types::channel::Key::from_u128(9)], &mut keys);
+        let Seen { sent, read, .. } = sees(&[&header, &opened, &keys], Size::MEBIBYTE);
+        let code = Code(wire::hub::UNKNOWN);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -2381,7 +2406,7 @@ mod port {
             Err(wire::header::Error::Protocol { number: 9 })
         );
         let code = Code(wire::header::REJECTED);
-        let Seen { sent, read, .. } = rejected(&header, Size::MEBIBYTE);
+        let Seen { sent, read, .. } = sees(&[&header], Size::MEBIBYTE);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -2390,7 +2415,7 @@ mod port {
     #[test]
     fn a_node_whose_largest_block_is_below_64_kib_serves_its_port() {
         let header = wire::header::encode(wire::Protocol::Mesh);
-        let seen = rejected(&header, Size::from_bytes(128 << 10));
+        let seen = sees(&[&header], Size::from_bytes(128 << 10));
         assert_eq!(seen.bytes_max, 57_344);
         let code = Code(wire::header::REJECTED);
         assert_eq!(seen.sent, transport::Error::Stopped { code });
@@ -2403,9 +2428,9 @@ mod port {
         let host = host(&mut sim, 2);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
         let header = wire::header::encode(wire::Protocol::Mesh);
-        let first = dial(&mut sim, &host, &header);
+        let first = dial(&mut sim, &host, &[&header]);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
-        let second = dial(&mut sim, &host, &header);
+        let second = dial(&mut sim, &host, &[&header]);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
         let sent = |seen: &Arc<Mutex<Option<Result<Seen, _>>>>| {
             let seen = seen.lock().unwrap().take();
@@ -2485,7 +2510,11 @@ mod port {
         let host = host(&mut sim, 2);
         host.fail_file(Path::new("shard-1/ring"), env::files::Operation::Open);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-        let seen = dial(&mut sim, &host, &wire::header::encode(wire::Protocol::Mesh));
+        let seen = dial(
+            &mut sim,
+            &host,
+            &[&wire::header::encode(wire::Protocol::Mesh)],
+        );
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
@@ -2841,8 +2870,8 @@ mod port {
             start(host, (OWN, KEY), region(&[member(OWN, &KEY, host)]))
         }
 
-        /// Starts the member [`OTHER`] of `members` on `host`: an endpoint with no
-        /// node, which opens and serves the mesh as a node's does. Runs `act` with the
+        /// Starts the member [`OTHER`] of `members` on `host`: an endpoint and a hub
+        /// with no node, which serve the mesh as a node's do. Runs `act` with the
         /// mesh, then drops the mesh and its port.
         fn peer<F: Future<Output = ()> + 'static>(
             host: &sim::node::Node,
@@ -2873,7 +2902,19 @@ mod port {
                     .await
                     .expect("the mesh opens");
                 let mesh = mesh.expect("the peer has a region");
-                let port = route::accept(transport, Some(mesh.clone()), tasks);
+                let stop = crate::stop::Stop::default();
+                let (open, pool, next, time) =
+                    super::super::home::create_open(&own, &tasks, 0, stop);
+                let opened = open.run(own.files(), Rc::new(pool), tasks.clone()).await;
+                let hub = ::hub::Hub::new(::hub::Config {
+                    home: opened.expect("the buffer opens"),
+                    interner: next.await.expect("the open gives the interner"),
+                    tasks: tasks.clone(),
+                    node: OTHER.0,
+                    time,
+                    entropy: own.entropy(),
+                });
+                let port = route::accept(transport, Some(mesh.clone()), hub, tasks);
                 let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
                 poll_fn(|cx| {
                     let stopped = port.as_mut().poll(cx);
@@ -2922,7 +2963,7 @@ mod port {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
             let node = start_alone(&host);
-            let seen = dial(&mut sim, &host, header);
+            let seen = dial(&mut sim, &host, &[header]);
             assert_eq!(sim.run_for(Span::HOUR), Ok(()));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
