@@ -1007,6 +1007,7 @@ mod tests {
     use sim::{Crash, Sim, link};
     use transport::{Address, Peer, Port};
     use types::node::SealKey;
+    use types::time::Monotonic;
     use wire::Protocol;
 
     use super::*;
@@ -1690,10 +1691,21 @@ mod tests {
 
     /// Proposes `change` once per tick until this node leads.
     async fn lead(mesh: &Mesh, clock: &Clock, change: Change) -> Position {
+        lead_at(mesh, clock, change).await.1
+    }
+
+    /// As [`lead`], and also gives the time at which it asked the proposal that
+    /// succeeded.
+    async fn lead_at(
+        mesh: &Mesh,
+        clock: &Clock,
+        change: Change,
+    ) -> (Monotonic, Position) {
         let follower = Error::Raft(raft::Error::NotLeader { leader: None });
         loop {
+            let asked = clock.now();
             match mesh.propose(change.clone()).await {
-                Ok(at) => return at,
+                Ok(at) => return (asked, at),
                 Err(error) => assert_eq!(error, follower),
             }
             clock.sleep(TICK).await;
@@ -3536,16 +3548,9 @@ mod tests {
                 let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
                 let clock = node.clock();
                 let opened = clock.now();
-                let follower = Error::Raft(raft::Error::NotLeader { leader: None });
-                let asked = loop {
-                    let asked = clock.now() - opened;
-                    match mesh.propose(home(1)).await {
-                        Ok(_) => break asked,
-                        Err(error) => assert_eq!(error, follower),
-                    }
-                    clock.sleep(TICK).await;
-                };
-                // The timeout is 10 to 19 ticks, and the loop asks once per tick.
+                let (asked, _) = lead_at(&mesh, &clock, home(1)).await;
+                let asked = asked - opened;
+                // The timeout is 10 to 19 ticks, and `lead_at` asks once per tick.
                 let timeout = seconds(1)..=seconds(2);
                 assert!(timeout.contains(&asked), "it led at {asked}");
             });
