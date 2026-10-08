@@ -22,8 +22,6 @@ use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-pub use plan::{Change, Plan, plan};
-
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");

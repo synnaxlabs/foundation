@@ -21,7 +21,7 @@ mod tests;
 /// # Errors
 ///
 /// [`Error::Config`] with each problem of [`front_end::read`], else with each problem
-/// of [`config::plan`].
+/// of [`config::plan::plan`].
 ///
 /// # Panics
 ///
@@ -43,8 +43,8 @@ pub(crate) fn plan(
         Error::Config(problems)
     };
     let documents = front_end::read(files, front_ends).map_err(failed)?;
-    let plan =
-        config::plan(&documents, base, applied, members, kinds).map_err(failed)?;
+    let plan = config::plan::plan(&documents, base, applied, members, kinds)
+        .map_err(failed)?;
     let mut changes: Vec<(Order, Change)> = plan
         .changes
         .iter()
@@ -141,7 +141,7 @@ type Order = (bool, Option<(Source, u32)>, Name);
 
 impl Change {
     fn of(
-        change: &config::Change,
+        change: &config::plan::Change,
         applied: &BTreeMap<Name, Definition>,
         paths: &[PathBuf],
     ) -> (Order, Self) {

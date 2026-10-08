@@ -4821,23 +4821,24 @@ How to read this record:
   not have is `connector.unknown-kind` there. Decided by `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC).
-- **PLAN SURFACE (#1082, 2026-10-08)** `config::plan(documents, base, applied,
-  members, kinds)` gives a `config::Plan { base, changes, homes }`, or diagnostics.
-  `base` is the `spec::Pointer { version, root }` of the applied spec. `version` is 0
-  before the first apply, and one more at each apply. `applied` is the definitions of
-  the spec at `base`, by tree key, with no problem from `spec::region::check`: the
-  spec that a node uses (#1741). Each `config::Change { name, old, new }` holds the
-  tree key, the digest of the stored bytes, and the `Entry` of the files. The stored
-  bytes are the `encode` of each applied definition: `decode` takes only canonical
-  bytes, so they are the bytes of the tree. The plan holds no channel key (A4). `homes`
-  gives the home of each index that the stored spec has no index at. A channel keeps the
-  stored key at its name, and a new name gets `Key::from_u128(n)`, a key that no stored
-  channel holds. A definition changes when its encoded bytes differ from the stored
-  bytes. A stored definition that no file holds is removed (A2), except one whose label
-  is reserved (FIRST ADMIN), or whose kind no block of a file defines, such as `Time`
-  and `Compression` until their blocks come: the files cannot state such a kind, so
-  they ask for no removal. Lost: remove it, and refuse the plan, which stops each apply
-  with no fix in the files (`laptop.architect`, #1886, 2026-10-08T15:22:47Z,
+- **PLAN SURFACE (#1082, 2026-10-08)** `config::plan::plan(documents, base, applied,
+  members, kinds)` gives a `config::plan::Plan { base, changes, homes }`, or
+  diagnostics. `base` is the `spec::Pointer { version, root }` of the applied spec.
+  `version` is 0 before the first apply, and one more at each apply. `applied` is the
+  definitions of the spec at `base`, by tree key, with no problem from
+  `spec::region::check`: the spec that a node uses (#1741). Each `config::plan::Change {
+  name, old, new }` holds the tree key, the digest of the stored bytes, and the `Entry`
+  of the files. The stored bytes are the `encode` of each applied definition: `decode`
+  takes only canonical bytes, so they are the bytes of the tree. The plan holds no
+  channel key (A4). `homes` gives the home of each index that the stored spec has no
+  index at. A channel keeps the stored key at its name, and a new name gets
+  `Key::from_u128(n)`, a key that no stored channel holds. A definition changes when its
+  encoded bytes differ from the stored bytes. A stored definition that no file holds is
+  removed (A2), except one whose label is reserved (FIRST ADMIN), or whose kind no block
+  of a file defines, such as `Time` and `Compression` until their blocks come: the files
+  cannot state such a kind, so they ask for no removal. Lost: remove it, and refuse the
+  plan, which stops each apply with no fix in the files (`laptop.architect`, #1886,
+  2026-10-08T15:22:47Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An
   edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
   edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
@@ -5003,18 +5004,21 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087),
   approved by `laptop.architect` (2026-10-08T14:50:25Z,
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561).
-- **PLAN FILE (#337, 2026-10-08)** `config::Plan::encode` gives the canonical bytes of
-  a plan, and `config::Plan::decode` reads only those bytes and never panics. The
-  first byte is the format version, 1. Then the base pointer, the changes in name
-  order, and the homes in name order. A `Spec` definition is its `spec` encoding; a
+- **PLAN FILE (#337, 2026-10-08)** `config::plan::Plan::encode` gives the canonical
+  bytes of a plan, and `config::plan::Plan::decode` reads only those bytes and never
+  panics. The first byte is the format version, 1. Then the base pointer, the changes in
+  name order, and the homes in name order. A `Spec` definition is its `spec` encoding; a
   channel kind holds its edges as names, so the plan still holds no channel key (A4).
   The bytes hold no span. Another version is `plan::Error::Version`, which says to
   plan again; other bytes are `plan::Error::Malformed` at the first wrong byte.
   `decode` checks only the form: `spec::region::check` of the definitions after the
-  plan refuses the rest. `config::Plan::definitions(applied, key)` gives those
+  plan refuses the rest. `config::plan::Plan::definitions(applied, key)` gives those
   definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
-  from `key`, which the check refuses as dangling. Plan:
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221.
+  from `key`, which the check refuses as dangling. Each item of a plan has one path,
+  under `config::plan`. Plan:
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221,
+  approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066727322).
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no

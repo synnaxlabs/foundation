@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::slice;
 
-use config::{Definition, Entry, Plan};
+use config::plan::Plan;
+use config::{Definition, Entry};
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Kind, Table};
 use document::diagnostic::Diagnostic;
@@ -98,7 +99,7 @@ impl Spec {
     fn plan(&self, texts: &[&str], members: &[&str]) -> Result<Plan, Vec<Diagnostic>> {
         let members = members.iter().map(|member| name(member)).collect();
         let applied = self.definitions();
-        config::plan(
+        config::plan::plan(
             &documents(texts),
             self.pointer,
             &applied,
@@ -2070,7 +2071,7 @@ connector \"w2\" {
     )];
     let mut documents = [read(0, &first), read(1, second)];
     for _ in 0..2 {
-        let result = config::plan(
+        let result = config::plan::plan(
             &documents,
             spec.pointer,
             &spec.definitions(),
@@ -2110,7 +2111,7 @@ channel \"a.other\" {
     let documents = [read(1, channels), read(0, placement)];
     let members = BTreeSet::from([name("n")]);
     let spec = Spec::create_empty();
-    let result = config::plan(
+    let result = config::plan::plan(
         &documents,
         spec.pointer,
         &spec.definitions(),

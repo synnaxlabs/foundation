@@ -1,5 +1,4 @@
-use config::Plan;
-use config::plan::Error;
+use config::plan::{Error, Plan};
 use proptest::prelude::*;
 use spec::channel::{Edge, Problem};
 use spec::region;
