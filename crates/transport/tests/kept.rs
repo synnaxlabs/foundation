@@ -16,7 +16,8 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
-use transport::{Address, Class, Config, Port, Transport};
+use transport::stream::Receiver;
+use transport::{Address, Class, Config, Error, Port, Transport};
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
@@ -26,22 +27,24 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 const CLIENT: PrivateKey = PrivateKey([1; 32]);
 const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
-/// The most net heap that the drop of the receiver gives back after the read: a list
-/// of 64 chunks, since each slot is 32 bytes. The drop also allocates a few bytes.
+/// The most heap that the drop of the receiver gives back after the stream ends: a list
+/// of 64 chunks, since each slot is 32 bytes.
 const KEPT_MAX: usize = 2 << 10;
 /// When the server reads after it accepts the stream, once the message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its send: past the server's read.
 const LIVE: Span = Span::from_nanos(2_000_000_000);
 
-/// The length of the message that the server's one poll gives, and the net heap
-/// bytes that the drop of the receiver then gives back.
-type Out = (Option<usize>, usize);
+/// The length of the message that the server's one poll gives, whether the next poll
+/// gives the end of the stream, and the net heap bytes that the drop of the receiver
+/// then gives back.
+type Out = (Option<usize>, bool, usize);
 
 fn main() {
     for len in [100_000, 240_000, 1 << 18] {
-        let (read, kept) = run(len);
+        let (read, ended, kept) = run(len);
         assert_eq!(read, Some(len), "{len} bytes: the read");
+        assert!(ended, "{len} bytes: the stream ends after the message");
         assert!(
             kept <= KEPT_MAX,
             "{len} bytes: the receiver keeps {kept} bytes after a whole message"
@@ -55,7 +58,7 @@ fn run(len: usize) -> Out {
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
-    let out = Arc::new(Mutex::new((None, 0)));
+    let out = Arc::new(Mutex::new((None, false, 0)));
     serve(&server, Arc::clone(&out));
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
@@ -70,14 +73,15 @@ fn run(len: usize) -> Out {
             .await
             .expect("a stream");
         sender.send(filled(&pool, len)).await.expect("sent");
+        sender.finish().expect("finished");
         node.clock().sleep(LIVE).await;
     })
     .expect("the run ends");
     *out.lock().expect("not poisoned")
 }
 
-/// Starts the server on `node`. Once the message is in, it reads it in one poll,
-/// drops the receiver, and puts the [`Out`] in `out`.
+/// Starts the server on `node`. Once the message is in, it reads it in one poll, then
+/// the end, drops the receiver, and puts the [`Out`] in `out`.
 fn serve(node: &Node, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
@@ -90,21 +94,23 @@ fn serve(node: &Node, out: Arc<Mutex<Out>>) {
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         own.clock().sleep(READ).await;
-        let poll = {
-            let mut recv = pin!(receiver.recv());
-            let mut cx = Context::from_waker(Waker::noop());
-            recv.as_mut().poll(&mut cx)
-        };
-        let len = match poll {
+        let len = match poll(&mut receiver) {
             Poll::Ready(Ok(Some(block))) => Some(block.len()),
             _ => None,
         };
+        let ended = matches!(poll(&mut receiver), Poll::Ready(Ok(None)));
         let before = ALLOCATOR.held();
         drop(receiver);
         let kept = before.saturating_sub(ALLOCATOR.held());
-        *out.lock().expect("not poisoned") = (len, kept);
+        *out.lock().expect("not poisoned") = (len, ended, kept);
     });
     drop(started.expect("a shard"));
+}
+
+/// Polls `receiver.recv()` once.
+fn poll(receiver: &mut Receiver) -> Poll<Result<Option<Block>, Error>> {
+    let mut recv = pin!(receiver.recv());
+    recv.as_mut().poll(&mut Context::from_waker(Waker::noop()))
 }
 
 /// A block of `len` bytes from `pool`.

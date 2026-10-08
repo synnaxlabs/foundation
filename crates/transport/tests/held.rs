@@ -38,10 +38,11 @@ const LONG: usize = 100_000;
 /// list twice before it holds the rest.
 const LONGER: usize = 250_000;
 const MESSAGE_BYTES_MAX: usize = 1 << 18;
-/// The most net heap that the drop of the receiver gives back after the error. A list
-/// of 64 chunks is 2 KiB, since each slot is 32 bytes, and a closed session adds some
-/// state; one of 128 is 4 KiB.
-const KEPT_MAX: usize = 3 << 10;
+/// The heap of a list of 64 chunks, since each slot is 32 bytes.
+const LIST: usize = 2 << 10;
+/// The heap of the cell that holds a closed session's error, which the drop of its
+/// receiver frees.
+const CLOSED: usize = 72;
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);
 /// When the client ends the stream or the session, after its send.
@@ -86,8 +87,12 @@ fn main() {
             "{end:?}, {len} bytes: the read that gives the error frees the buffer of \
              the message, made at its length"
         );
+        let kept_max = match end {
+            End::Reset => LIST,
+            End::Close => LIST + CLOSED,
+        };
         assert!(
-            kept <= KEPT_MAX,
+            kept <= kept_max,
             "{end:?}, {len} bytes: the receiver keeps {kept} bytes after the error"
         );
     }
