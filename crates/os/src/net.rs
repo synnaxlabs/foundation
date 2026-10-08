@@ -65,11 +65,26 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
         .map_err(|e| failed(errno(&e)))?;
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    // The kernel drops a scope or flow label it does not use, so it names the peer.
-    let peer = stream.peer_addr().map_err(|e| failed(errno(&e)))?;
+    let peer = peer(&stream, remote)?;
     Ok(Box::new(
-        Stream::new(stream, canonical(local), canonical(peer)).map_err(failed)?,
+        Stream::new(stream, canonical(local), peer).map_err(failed)?,
     ))
+}
+
+/// The peer of `stream`, connected to `remote`, as the kernel names it: without a
+/// scope or flow label the kernel does not use. A reset since the connect gives
+/// [`Error::Reset`], since the kernel then holds no peer.
+fn peer(stream: &std::net::TcpStream, remote: SocketAddr) -> Result<SocketAddr, Error> {
+    match stream.peer_addr() {
+        Ok(peer) => Ok(canonical(peer)),
+        Err(e) => {
+            let code = match errno(&e) {
+                Errno::NOTCONN => Errno::CONNRESET,
+                code => code,
+            };
+            Err(stream_error(code, canonical(remote)))
+        }
+    }
 }
 
 /// `address` as `sim` names it: an IPv4 address on an IPv6 socket is an IPv4 address.
@@ -198,6 +213,30 @@ mod tests {
             let link_local = SocketAddrV6::new("fe80::1".parse().unwrap(), 8080, 7, 2);
             let address = SocketAddr::V6(link_local);
             assert_eq!(canonical(address), address);
+        }
+    }
+
+    mod peer {
+        use std::time::Duration;
+
+        use super::*;
+
+        #[test]
+        #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+        fn a_peer_that_reset_after_the_connect_is_reset() {
+            let listener = std::net::TcpListener::bind(loopback()).unwrap();
+            let remote = listener.local_addr().unwrap();
+            let client = std::net::TcpStream::connect(remote).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            assert_eq!(peer(&client, remote), Ok(remote));
+            sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
+            drop(server);
+            client
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let read = client.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
+            assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
+            assert_eq!(peer(&client, remote), Err(Error::Reset { remote }));
         }
     }
 
