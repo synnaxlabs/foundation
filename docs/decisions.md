@@ -4122,7 +4122,11 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142),
   which also decided that `config.subject-is-connector` and its test go in the PR that
   merges second: #1823, or the #1153 PR that adds `connector` blocks to
-  `config::check`.
+  `config::check`. Lost: `ssh-key`, for one key type with one fixed layout. The first
+  PR that prints a key's `SHA256:` fingerprint or writes a `.pub` line weighs `ssh-key`
+  again, and moves this read to it if it takes `ssh-key` (`laptop.architect-2`,
+  2026-10-08T06:40:01Z,
+  https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054059191).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies and connectors itself. A policy reaches a name when
@@ -5296,6 +5300,7 @@ Storage classes used in the table:
 | Reduction policy | Spec; selects data channels; deadband checked against the channel's unit | Files | Connector library component through `hub.spec()` | `spec`, `connector` |
 | Time policy | Spec; selects node names; lists candidate peer nodes (default: the region's voters) | Files | `clock` | `spec`, `clock` |
 | Access policy | Spec; `{ subjects, select, allow, authority }` | Files | `access`, called by the owners (`home`, `mesh`) | `spec`, `access` |
+| Subject | Files as `subject "<name>" { keys }`, then Spec as `spec::subject::Subject` at `<name>.@subject` | People, agents | `access::admit` (#1747), `plan` (#1082) | `spec` (definition), `config` (OpenSSH read) |
 | Secret store policy | Spec; selects secret names | Files | The secret resolver | `spec` |
 | Connector | Files, then Spec as `spec::connector::Connector { kind, node, config }`, keyed by its name | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
 | Kind config | Kind-owned: an opaque Document in the spec (canonical form, no source positions, so hashes stay stable) | Files | The kind's check at plan, `ctx.config()` at run | `connector-<kind>` |
