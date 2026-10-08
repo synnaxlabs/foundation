@@ -61,9 +61,9 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Under
   `sim`, the port is free once `lock` is, which a test pins. Under `os`, the carrier's
   task can hold the socket after `lock` drops, until the runtime of shard 0 drops,
-  before `Node::join` returns: the task ends only once each connection drained and the
-  runtime polls it. #2017 makes shard 0 wait for the task before it drops `lock`, by
-  `laptop.architect-2` (21:58 UTC, words of 22:23 UTC):
+  before `Node::join` returns: with a socket that works, the task ends only once each
+  connection drained and the runtime polls it. #2017 makes shard 0 wait for the task
+  before it drops `lock`, by `laptop.architect-2` (21:58 UTC, words of 22:23 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529.
   Supersedes the port clause of
