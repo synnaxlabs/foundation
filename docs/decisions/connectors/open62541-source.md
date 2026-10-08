@@ -154,7 +154,9 @@
   (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
   2026-10-08 20:04 UTC, and at 1a593331:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069664332,
-  2026-10-08 21:46 UTC).
+  2026-10-08 21:46 UTC, and the list for 64-bit Arm at 586e8089:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069858320,
+  2026-10-08 22:00 UTC).
   The event loop of `connector-opcua` is a `UA_EventLoop` that `shim.c` fills and
   `event::Loop` owns, on one thread. Its monotonic time is the clock of `env`.
   `dateTime_now` gives that time counted from the Unix epoch, and the UTC offset is 0,
