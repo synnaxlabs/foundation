@@ -488,7 +488,12 @@ How to read this record:
   the bench host gives A/A. It lands before the next PR after #1698 that changes
   `Writer::append`, `synced`, `release`, or `trimmed`. Decided by `laptop.architect`
   (2026-10-08T01:37:51Z):
-  https://github.com/synnaxlabs/foundation/issues/324#issuecomment-6050388456.
+  https://github.com/synnaxlabs/foundation/issues/324#issuecomment-6050388456. Its
+  baseline is a quiet-host run of this bench at the head of #1729, not the #1698 rerun,
+  whose scratch bench had no warm-up. The run makes two passes of one binary, and each
+  median agrees within 3%. If one does not, a `crate:buffer` issue follows, and there is
+  no baseline until it is fixed. Decided by `laptop.architect` (2026-10-08T03:12:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1729#issuecomment-6051403457.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
