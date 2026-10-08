@@ -567,7 +567,7 @@ connector \"w2\" {{
 #[test]
 fn gives_the_problems_in_source_then_source_order() {
     let placement = "placement \"a\" {\n  select = \"a.*\"\n  home = \"x_1\"\n  \
-                     copies = [\"x_2\"]\n}\n";
+                     copies = [\"x_2\"]\n}\nchannel \"b.time\" {\n  kind = \"index\"\n}\n";
     let channels = "\
 channel \"a.time\" {
   kind = \"index\"
@@ -581,7 +581,7 @@ channel \"a.other\" {
   index = \"a.value\"
 }
 ";
-    let documents = [read(1, placement), read(0, channels)];
+    let documents = [read(0, placement), read(1, channels)];
     let members = BTreeSet::from([name("n")]);
     let spec = Spec::create_empty();
     let result =
@@ -592,16 +592,20 @@ channel \"a.other\" {
         .collect();
     let expected = [
         (
+            "config.unknown-node",
+            Some((Source(0), value(placement, "home", "\"x_1\""))),
+        ),
+        (
+            "config.unknown-node",
+            Some((Source(0), offset(placement, "\"x_2\""))),
+        ),
+        (
+            "config.unplaced",
+            Some((Source(0), label(placement, "b.time"))),
+        ),
+        (
             "config.wrong-channel",
-            Some((Source(0), value(channels, "index", "\"a.value\""))),
-        ),
-        (
-            "config.unknown-node",
-            Some((Source(1), value(placement, "home", "\"x_1\""))),
-        ),
-        (
-            "config.unknown-node",
-            Some((Source(1), offset(placement, "\"x_2\""))),
+            Some((Source(1), value(channels, "index", "\"a.value\""))),
         ),
     ];
     assert_eq!(codes, expected);
