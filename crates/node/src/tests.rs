@@ -2235,16 +2235,6 @@ mod port {
         tasks: env::tasks::Tasks,
         key: PrivateKey,
     ) -> (Transport, Rc<block::Pool>) {
-        transport_at(host, tasks, key, 0)
-    }
-
-    /// A transport on `host` with `key`, at port `number`, with its pool.
-    fn transport_at(
-        host: &sim::node::Node,
-        tasks: env::tasks::Tasks,
-        key: PrivateKey,
-        number: u16,
-    ) -> (Transport, Rc<block::Pool>) {
         let pool = block::Config { budget: 1 << 20 };
         let memory = block::Heap::new(pool.reservation());
         let pool = Rc::new(block::Pool::new(pool, memory));
@@ -2259,7 +2249,7 @@ mod port {
             tasks,
             pool: Rc::clone(&pool),
         };
-        let at = SocketAddr::new(host.addresses()[0], number);
+        let at = SocketAddr::new(host.addresses()[0], 0);
         let bound = transport::Port::bind(&host.net(), at).expect("a port");
         let part = bound.split(NonZeroUsize::MIN).pop().expect("one part");
         (Transport::new(config, part).expect("a transport"), pool)
@@ -2636,7 +2626,7 @@ mod port {
         use types::node::SealKey;
 
         use super::*;
-        use crate::{Region, route};
+        use crate::{Endpoint, Region, route};
 
         /// The key and private key of a second node.
         const OTHER: (types::node::Key, PrivateKey) =
@@ -2702,8 +2692,8 @@ mod port {
             start(host, (OWN, KEY), region(&[member(OWN, &KEY, host)]))
         }
 
-        /// Starts the member [`OTHER`] of `members` on `host`: a mesh with no node,
-        /// whose port serves each mesh stream as a node's does. Runs `act` with the
+        /// Starts the member [`OTHER`] of `members` on `host`: an endpoint with no
+        /// node, which opens and serves the mesh as a node's does. Runs `act` with the
         /// mesh, then drops the mesh and its port.
         fn peer<F: Future<Output = ()> + 'static>(
             host: &sim::node::Node,
@@ -2716,25 +2706,24 @@ mod port {
             };
             let own = host.clone();
             let started = host.shards().start(shard, move |tasks| async move {
-                let (transport, pool) =
-                    transport_at(&own, tasks.clone(), OTHER.1, listen(&own).port());
-                let transport = Rc::new(transport);
-                let config = ::mesh::Config {
-                    key: OTHER.0,
+                let bound =
+                    transport::Port::bind(&own.net(), listen(&own)).expect("a port");
+                let endpoint = Endpoint {
+                    part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
                     private_key: OTHER.1,
-                    region: "plant".parse().unwrap(),
-                    voters: members.iter().map(|member| member.card.key()).collect(),
-                    members,
-                    founding: BTreeMap::new(),
-                    files: own.files(),
-                    dir: "mesh".into(),
+                    key: OTHER.0,
+                    region: Some(region(&members)),
                     clock: own.clock(),
                     entropy: own.entropy(),
-                    tasks: tasks.clone(),
-                    pool,
-                    transport: Rc::clone(&transport),
                 };
-                let mesh = ::mesh::Mesh::open(config).await.expect("the mesh opens");
+                let pool = block::Config { budget: 1 << 20 };
+                let memory = block::Heap::new(pool.reservation());
+                let pool = Rc::new(block::Pool::new(pool, memory));
+                let (transport, mesh) = endpoint
+                    .open(own.files(), pool, tasks.clone())
+                    .await
+                    .expect("the mesh opens");
+                let mesh = mesh.expect("the peer has a region");
                 let port = route::accept(transport, Some(mesh.clone()), tasks);
                 let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
                 poll_fn(|cx| {
