@@ -139,10 +139,10 @@ again once to prove that the failure replays (r16 59).
   `mod write { mod when_pool_full { #[test] fn records_a_gap() } }`.
 - **Production-path tests across crates** that use only public APIs go in one
   integration binary per crate: `tests/it/main.rs` with modules, never many
-  `tests/*.rs` files (r16 49).
-  A counting allocator is global, so each type of it gets one more binary with no
-  harness, for example `tests/alloc` (`counting::Allocator`) or `tests/memory`
-  (`counting::Bytes`). Helpers that binaries share go in `tests/common/mod.rs`.
+  `tests/*.rs` files (r16 49). A counting allocator is global, so each type of it gets
+  one more binary with no harness, for example `tests/alloc` (`counting::Allocator`)
+  or `tests/memory` (`counting::Bytes`). Helpers that binaries share go in
+  `tests/common/mod.rs`.
 
 ## Oracles
 
