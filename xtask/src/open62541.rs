@@ -118,11 +118,12 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 ///
 /// # Errors
 ///
-/// A build that fails, an `#include` of a header outside the copy other than one of
+/// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag, a build that fails,
+/// an `#include` or `#import` of a header outside the copy other than one of
 /// [`SYSTEM_HEADERS`] in a system directory, a call of a clock function from a
 /// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any other
 /// reference to a clock function, such as its address in code or data, through
-/// which any code can call it, and each inlined function.
+/// which any code can call it, each inlined function, and an `#include_next`.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     inspect(&root.join(DEST), &root.join("target/open62541/check"))
 }
@@ -302,6 +303,14 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
             .map_err(|e| vec![format!("{}: {e}", copy.join(name).display())])
     };
     let (sources, flags) = (read("sources.txt")?, read("flags.txt")?);
+    let other: Vec<String> = flags
+        .lines()
+        .filter(|flag| !["-D", "-I", "-std="].iter().any(|p| flag.starts_with(p)))
+        .map(|flag| format!("flags.txt: `{flag}` is not a -D, -I, or -std flag"))
+        .collect();
+    if !other.is_empty() {
+        return Err(other);
+    }
     remove(out)
         .and_then(|()| std::fs::create_dir_all(out).map_err(|e| format!("{e}")))
         .map_err(|e| vec![e])?;
@@ -358,7 +367,8 @@ fn inside(path: &Path) -> bool {
     })
 }
 
-/// An error for each `#include` in a file of the copy, as `preprocessed` (the output
+/// An error for each `#include_next`, and each `#include` or `#import` in a file of
+/// the copy, as `preprocessed` (the output
 /// of `cc -E -dI` in `copy`) shows it, that finds a header outside the copy, other
 /// than one of [`SYSTEM_HEADERS`] in one of the system directories `dirs`. It finds
 /// the header as `cc` does, through the `-I` directories `flags` gives. Unlike
@@ -383,10 +393,15 @@ fn includes(
             file = Path::new(name.rsplit_once('"').map_or(name, |(name, _)| name));
             continue;
         }
-        let Some(directive) = line.strip_prefix("#include") else {
+        let Some((keyword, directive)) = line.split_once(' ') else {
             continue;
         };
-        if !inside(file) {
+        if !matches!(keyword, "#include" | "#import" | "#include_next") || !inside(file)
+        {
+            continue;
+        }
+        if keyword == "#include_next" {
+            problems.push(format!("uses {line}, which the check cannot follow"));
             continue;
         }
         let directive = directive.trim();
@@ -758,6 +773,9 @@ Disassembly of section .text.log:
 #include <time.h>
 #include <openssl/ssl.h>
 #include UA_X
+#import <time.h>
+#include_next <stdio.h>
+#includes <time.h>
 # 1 \"{sys}/stdio.h\" 1 3 4
 #include <sys/stat.h>
 # 9 \"src/a.c\" 2
@@ -782,6 +800,11 @@ Disassembly of section .text.log:
                  does not list"
                     .to_owned(),
                 "includes UA_X, which is not a file name".to_owned(),
+                "includes the system header `time.h`, which SYSTEM_HEADERS does not \
+                 list"
+                    .to_owned(),
+                "uses #include_next <stdio.h>, which the check cannot follow"
+                    .to_owned(),
                 format!("includes {}, which is outside the copy", out.display()),
             ]
         );
@@ -1279,7 +1302,17 @@ End of search list.
             let old = std::fs::read_to_string(copy.join(path)).unwrap();
             std::fs::write(copy.join(path), old + text).unwrap();
         };
-        append("flags.txt", "-O2\n");
+        let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
+        append("flags.txt", "-O2\n-include\nsys/stat.h\n");
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                "flags.txt: `-O2` is not a -D, -I, or -std flag".to_owned(),
+                "flags.txt: `-include` is not a -D, -I, or -std flag".to_owned(),
+                "flags.txt: `sys/stat.h` is not a -D, -I, or -std flag".to_owned(),
+            ])
+        );
+        std::fs::write(copy.join("flags.txt"), flags).unwrap();
         append(
             "src/util/ua_util.c",
             "static long long hidden(void) { return UA_DateTime_now(); }\n\
