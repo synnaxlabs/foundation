@@ -29,9 +29,10 @@ pub struct Env {
 /// it.
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
-/// otherwise. A commit starts 10 ms after the write it holds. A commit takes whole
-/// 4 KiB blocks (one for a frame, three for 64), and nothing frees the ring until #160,
-/// so a run fills it at 1023 one-frame commits.
+/// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
+/// earlier commit runs. A commit takes whole 4 KiB blocks (one for a frame, three for
+/// 64), and nothing frees the ring until #160, so a run fills it at 1023 one-frame
+/// commits.
 ///
 /// # Panics
 ///
@@ -199,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_the_commit_of_a_frame_10_ms_after_its_write() {
+    fn starts_the_commit_of_a_lone_frame_10_ms_after_its_write() {
         let elapsed = run(
             sim::node::Config::default(),
             |node, mut shard, mut interner, now| async move {
