@@ -1,12 +1,12 @@
-//! The subject: a person, an agent, or a program that authenticates with its keys.
+//! The public keys of a subject that signs its own hello.
 
 use std::fmt;
 
 use types::ed25519::PublicKey;
-use types::hash::Set;
+use types::hash::Map;
 
-/// A person, an agent, or a program that authenticates with one of its keys. A
-/// connector is not one: its node vouches for it.
+/// The public keys of a subject that signs its own hello: a person, an agent, or a
+/// program. A connector is a subject with no such definition: its node vouches for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subject {
     keys: Vec<PublicKey>,
@@ -19,16 +19,16 @@ impl Subject {
     /// # Errors
     ///
     /// [`Error::Empty`] when `keys` is empty, and [`Error::Duplicate`] at the first
-    /// key, in the order given, that is a copy of a key before it.
+    /// key, in the order given, that repeats an earlier one.
     pub fn new(mut keys: Vec<PublicKey>) -> Result<Self, Error> {
         if keys.is_empty() {
             return Err(Error::Empty);
         }
-        let mut seen = Set::default();
-        if let Some((index, &key)) =
-            keys.iter().enumerate().find(|&(_, &key)| !seen.insert(key))
-        {
-            return Err(Error::Duplicate { index, key });
+        let mut seen = Map::default();
+        for (second, &key) in keys.iter().enumerate() {
+            if let Some(first) = seen.insert(key, second) {
+                return Err(Error::Duplicate { first, second });
+            }
         }
         keys.sort_unstable_by_key(|key| key.to_bytes());
         Ok(Self { keys })
@@ -47,12 +47,12 @@ impl Subject {
 pub enum Error {
     /// The list has no key.
     Empty,
-    /// A key appears twice in the list.
+    /// A key repeats an earlier one in the list.
     Duplicate {
-        /// Where the second copy is in the list.
-        index: usize,
-        /// The key.
-        key: PublicKey,
+        /// Where the earlier key is in the list.
+        first: usize,
+        /// Where the repeat is in the list.
+        second: usize,
     },
 }
 
@@ -71,7 +71,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("the subject has no public key"),
-            Self::Duplicate { .. } => f.write_str("a public key appears twice"),
+            Self::Duplicate { .. } => {
+                f.write_str("a public key repeats an earlier one")
+            }
         }
     }
 }
@@ -102,20 +104,20 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_second_copy_that_comes_first() {
+    fn refuses_the_first_key_that_repeats_an_earlier_one() {
         let keys = vec![key(3), key(9), key(7), key(9), key(3)];
         assert_eq!(
             Subject::new(keys),
             Err(Error::Duplicate {
-                index: 3,
-                key: key(9)
+                first: 1,
+                second: 3
             })
         );
         let error = Error::Duplicate {
-            index: 1,
-            key: key(0xab),
+            first: 0,
+            second: 1,
         };
-        assert_eq!(error.to_string(), "a public key appears twice");
+        assert_eq!(error.to_string(), "a public key repeats an earlier one");
         assert_eq!(error.fix(), "Remove the second copy of the key");
     }
 

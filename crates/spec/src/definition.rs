@@ -130,7 +130,7 @@ pub enum Definition {
     Channel(Channel),
     /// A retention policy.
     Retention(retention::Policy),
-    /// A subject and its keys.
+    /// A subject's public keys.
     Subject(Subject),
 }
 
