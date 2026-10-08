@@ -78,7 +78,7 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
         },
     };
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
-    let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
+    let local = stream.local_addr().map_err(|e| from_io(&e))?;
     let peer = peer(&stream, remote)?;
     let mut stream = Stream::new(stream, canonical(local), peer).map_err(failed)?;
     if let Some(reset) = reset {
@@ -162,6 +162,11 @@ fn io_error(code: Errno) -> Error {
     Error::Io {
         code: code.raw_os_error(),
     }
+}
+
+/// The error of a socket call that failed with `error`, with no remote to name.
+fn from_io(error: &io::Error) -> Error {
+    io_error(errno(error))
 }
 
 /// The error of a stream to `remote` that failed with `code`.

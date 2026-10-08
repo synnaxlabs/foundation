@@ -18,7 +18,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
 use super::socket::{self, Socket};
-use super::{bind, canonical, errno, io_error};
+use super::{bind, canonical, errno, from_io, io_error};
 
 /// A bound UDP socket, and the receive half of it.
 pub(super) struct Udp {
@@ -59,9 +59,8 @@ impl Udp {
         }
         bind(fd.as_fd(), local)?;
         let socket = UdpSocket::from(fd);
-        let failed = |e: io::Error| io_error(errno(&e));
-        let state = UdpSocketState::new((&socket).into()).map_err(failed)?;
-        let local = socket.local_addr().map_err(failed)?;
+        let state = UdpSocketState::new((&socket).into()).map_err(|e| from_io(&e))?;
+        let local = socket.local_addr().map_err(|e| from_io(&e))?;
         let bound = Bound {
             send_batch_max: state.max_gso_segments(),
             socket,
@@ -115,11 +114,11 @@ impl udp::Driver for Udp {
         let socket = registered.socket.as_ref().map_err(|&code| io_error(code))?;
         loop {
             let mut guard =
-                ready!(socket.poll_read_ready(cx)).map_err(|e| io_error(errno(&e)))?;
+                ready!(socket.poll_read_ready(cx)).map_err(|e| from_io(&e))?;
             if let Ok(received) =
                 guard.try_io(|fd| bound.receive(fd.get_ref(), buffers, meta))
             {
-                return Poll::Ready(received.map_err(|e| io_error(errno(&e))));
+                return Poll::Ready(received.map_err(|e| from_io(&e)));
             }
         }
     }
@@ -189,13 +188,12 @@ impl Writer {
             let full = match &mut self.full {
                 Some(full) => full,
                 none @ None => {
-                    let full =
-                        Self::register(&self.fd).map_err(|e| io_error(errno(&e)))?;
+                    let full = Self::register(&self.fd).map_err(|e| from_io(&e))?;
                     none.insert(full)
                 }
             };
             let mut guard =
-                ready!(full.poll_write_ready(cx)).map_err(|e| io_error(errno(&e)))?;
+                ready!(full.poll_write_ready(cx)).map_err(|e| from_io(&e))?;
             guard.clear_ready();
         }
     }

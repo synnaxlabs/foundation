@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::socket::Socket;
 use super::stream::Stream;
-use super::{apply, bind, canonical, errno, in_use, io_error};
+use super::{apply, bind, canonical, from_io, in_use, io_error};
 
 /// A listening socket.
 pub(super) struct Listener {
@@ -33,7 +33,7 @@ impl Listener {
         bind(fd.as_fd(), local)?;
         listen(fd.as_fd(), local, config.backlog)?;
         let listener = std::net::TcpListener::from(fd);
-        let local = listener.local_addr().map_err(|e| io_error(errno(&e)))?;
+        let local = listener.local_addr().map_err(|e| from_io(&e))?;
         Ok(Self {
             socket: Socket::Idle(listener),
             local: canonical(local),
@@ -61,8 +61,8 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
 
 /// A stream the kernel accepted, with the options of the listener inherited.
 fn accepted(stream: TcpStream, peer: SocketAddr) -> Result<Stream, Error> {
-    let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
-    let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
+    let stream = stream.into_std().map_err(|e| from_io(&e))?;
+    let local = stream.local_addr().map_err(|e| from_io(&e))?;
     Stream::new(stream, canonical(local), canonical(peer)).map_err(io_error)
 }
 
@@ -80,7 +80,7 @@ impl listener::Driver for Listener {
             .live("TCP listener", TcpListener::from_std)
             .map_err(io_error)?;
         let (stream, peer) =
-            ready!(listener.poll_accept(cx)).map_err(|e| io_error(errno(&e)))?;
+            ready!(listener.poll_accept(cx)).map_err(|e| from_io(&e))?;
         let stream = accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
