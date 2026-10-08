@@ -171,7 +171,7 @@ fn a_sleep_does_not_wake_its_task_before_the_deadline() {
 }
 
 #[test]
-fn a_sleep_past_a_second_completes_at_the_deadline_or_later() {
+fn a_sleep_that_re_arms_completes_at_the_deadline_or_later() {
     let clock = os::clock();
     on_a_thread(move || async move {
         let start = clock.now();
