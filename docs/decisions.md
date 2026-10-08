@@ -3799,9 +3799,7 @@ How to read this record:
   could then take the node), and an admin public key given before the first start (a
   step before the first use). The #1744 plan names the subject, its access policy,
   and the key file. Decided by the person ("Yes, I approve."), 2026-10-08T02:43:43Z:
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
-  question:
-  https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051078801.
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981.
 
 ### 1.13 Operations, agents, and the factory
 
