@@ -1563,6 +1563,7 @@ mod tests {
                     Error::Trailing { extra: 1 },
                     "bytes after the last vector: 1",
                 ),
+                (Error::Utf8 { sample: 1 }, "sample 1 is not UTF-8"),
                 (
                     Error::Length {
                         expected: 4,
