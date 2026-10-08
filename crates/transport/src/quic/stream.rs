@@ -4660,6 +4660,46 @@ mod tests {
     }
 
     #[test]
+    fn a_late_streams_blocked_for_an_old_limit_keeps_the_wait_of_the_peer() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let open = |pair: &mut Pair| {
+                let (now, key) = (pair.now(), key(&pair.client));
+                pair.client.endpoint.open_sender(now, key, Class::Complete)
+            };
+            let now = pair.now();
+            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
+                .map(|_| {
+                    let mut sender = open_sender(&mut pair, Class::Complete);
+                    write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+                    sender
+                })
+                .collect();
+            pair.run(RUN);
+            let server = key(&pair.server);
+            let mut incoming: Vec<Incoming> =
+                iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+            assert!(open(&mut pair).is_none());
+            let held = pair.client.sent.len();
+            pair.client.drops = 1;
+            pair.run(RUN);
+            let late = pair.client.sent[held].2.clone();
+            let before = announced(&mut pair);
+            end(&mut pair, &mut senders[0], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 1, "a free, and a resent wait");
+            assert!(open(&mut pair).is_some());
+            assert!(open(&mut pair).is_none());
+            pair.run(RUN);
+            let now = pair.now();
+            let meta = pair::meta(pair::CLIENT, &late);
+            pair.server.endpoint.receive(now, &meta, &late);
+            pair.run(RUN);
+            end(&mut pair, &mut senders[1], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 2, "a late wait for an old limit");
+        });
+    }
+
+    #[test]
     fn stopped_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
