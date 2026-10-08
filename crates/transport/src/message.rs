@@ -500,6 +500,26 @@ mod tests {
         }
 
         #[test]
+        fn when_stream_ends_inside_a_prefix_after_a_long_message_it_fails() {
+            let pool = pool(1 << 16);
+            // At 1 to 3 bytes per chunk the message fills the list of chunks.
+            for split in 1..=8 {
+                for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
+                    let bytes = [encode(&[vec![1; 200]]).as_slice(), cut].concat();
+                    let mut source = Source::new(bytes, split);
+                    let mut reader = Reader::new(200);
+                    assert_eq!(
+                        read_all(&mut reader, &pool, &mut source),
+                        Err(Error::Broken {
+                            reason: "the stream ended inside a message".to_owned()
+                        }),
+                        "{cut:x?}, {split} per chunk"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn gives_messages_at_each_prefix_size() {
             let messages: Vec<_> = [0, 63, 64, 16_383, 16_384, 70_000]
                 .into_iter()
