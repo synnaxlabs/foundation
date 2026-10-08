@@ -329,6 +329,15 @@ fn sized(len: u64, bytes_max: usize) -> State {
 /// Copies `chunks` into `buffer`, the buffer of a message of `len` bytes, and drops
 /// them. The first chunk makes the buffer, so a message with no chunks holds no
 /// heap.
+fn spill(buffer: &mut Vec<u8>, chunks: &mut Vec<Bytes>, len: usize) {
+    for chunk in chunks.drain(..) {
+        if buffer.capacity() == 0 {
+            *buffer = Vec::with_capacity(len);
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+}
+
 /// The length of the whole message in `state`, and the buffer that holds its first
 /// bytes.
 ///
@@ -341,15 +350,6 @@ fn body(state: &mut State) -> (usize, &mut Vec<u8>) {
     };
     assert!(have == len, "a reader fills only a whole message");
     (*len, buffer)
-}
-
-fn spill(buffer: &mut Vec<u8>, chunks: &mut Vec<Bytes>, len: usize) {
-    for chunk in chunks.drain(..) {
-        if buffer.capacity() == 0 {
-            *buffer = Vec::with_capacity(len);
-        }
-        buffer.extend_from_slice(&chunk);
-    }
 }
 
 fn ended() -> Error {
