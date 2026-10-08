@@ -227,6 +227,22 @@ impl Stream {
         self.sender.send(block.freeze()).await.expect("sends");
     }
 
+    /// Sends a request of `length` bytes, signed over `body`, and `body` in messages
+    /// of at most 64 KiB.
+    async fn request(&mut self, length: u64, body: &[u8]) {
+        let signed = access::proof::request(CONNECTION, body);
+        let request = Request {
+            length,
+            signature: Pair::new(&AGENT).sign(&signed),
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        self.send(&out).await;
+        for chunk in body.chunks(1 << 16) {
+            self.send(chunk).await;
+        }
+    }
+
     /// The next message from the node, `None` once it finished.
     async fn recv(&mut self) -> Result<Option<Vec<u8>>, transport::Error> {
         Ok(self.receiver.recv().await?.map(|block| block.to_vec()))
@@ -325,15 +341,20 @@ impl Agent {
 
     /// Opens a request stream and sends its header.
     async fn open(&self) -> Stream {
+        let mut stream = self.silent().await;
+        stream.send(&wire::header::encode(Protocol::Hub)).await;
+        stream
+    }
+
+    /// Opens a stream and sends nothing, so the node does not see it yet.
+    async fn silent(&self) -> Stream {
         let (sender, receiver) =
             self.session.open(Class::Complete).await.expect("opens");
-        let mut stream = Stream {
+        Stream {
             pool: std::rc::Rc::clone(&self.pool),
             sender,
             receiver,
-        };
-        stream.send(&wire::header::encode(Protocol::Hub)).await;
-        stream
+        }
     }
 
     /// Sends a request of `length` bytes, signed over `body`, and `body` in messages
@@ -347,17 +368,7 @@ impl Agent {
     /// As [`Agent::request`], but leaves the stream open.
     async fn unfinished(&self, length: u64, body: &[u8]) -> Stream {
         let mut stream = self.open().await;
-        let signed = access::proof::request(CONNECTION, body);
-        let request = Request {
-            length,
-            signature: Pair::new(&AGENT).sign(&signed),
-        };
-        let mut out = [0; Request::LEN];
-        request.encode(&mut out);
-        stream.send(&out).await;
-        for chunk in body.chunks(1 << 16) {
-            stream.send(chunk).await;
-        }
+        stream.request(length, body).await;
         stream
     }
 
@@ -993,4 +1004,29 @@ fn takes_the_role_of_a_stream_at_the_call() {
     });
     let got = got.lock().expect("not poisoned").take();
     assert_eq!(got, Some(Err(serve::Error::Unadmitted)));
+}
+
+/// The node sees a stream at its header, so a request stream that the program opens
+/// before its hello, and whose header it sends after the challenge that follows the
+/// hello, is a request stream.
+#[test]
+fn answers_a_request_on_a_stream_opened_before_the_hello() {
+    let home = session(108, true, |mut agent| async move {
+        let mut stream = agent.silent().await;
+        agent.sleep(QUIET).await;
+        agent.admit().await;
+        stream.send(&wire::header::encode(Protocol::Hub)).await;
+        stream.request(4, b"ping").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.response().await, b"gnip");
+        agent.hello.sender.finish().expect("finishes");
+        agent.sleep(QUIET).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Ok(Got::Request(name(SUBJECT), b"ping".to_vec())),
+            Ok(Got::Ended)
+        ]
+    );
 }
