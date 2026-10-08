@@ -2200,7 +2200,11 @@ How to read this record:
   held, voters }` for the first half that lacks one, the incoming half first. The count
   before the propose costs no entry and no put. The node then puts each chunk of the new
   tree in its store, not only the listed ones, because `diff` never reads a chunk that
-  the two trees share, so a chunk that the store lost is found only by a put. A put
+  the two trees share, so a chunk that the store lost is found only by a put. On `Ok`,
+  a put of each chunk of the new tree has returned. A file that a fault removes after
+  its put reads as absent (BLOB STORE), and the next put of that chunk writes it again.
+  Decided by `laptop.architect`, 2026-10-08T12:13:51Z
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551). A put
   gives `Error::Pool` or `Error::Blob` on a failure. `Mesh::open` puts each chunk of the
   founding tree in the store. The store writes again each chunk that it found at its
   open, so the first put of a chunk after each open costs one durable write. A change

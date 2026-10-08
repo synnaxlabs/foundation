@@ -16,10 +16,10 @@ use crate::region::{self, Refused};
 
 impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
-    /// `base`. It puts each chunk of the new tree in
-    /// [`Config::store`](super::Config::store). The change lists each chunk of the
-    /// new tree that the tree of `base` lacks, or each chunk of the new tree when the
-    /// store cannot give the tree of `base`. A follower forwards the change to the
+    /// `base`. On `Ok`, a put of each chunk of the new tree in
+    /// [`Config::store`](super::Config::store) has returned. The change lists each
+    /// chunk of the new tree that the tree of `base` lacks, or each chunk of the new
+    /// tree when the store cannot give the tree of `base`. A follower forwards the change to the
     /// leader. Returns the new pointer once its entry has committed and this node
     /// applied it. It tries again when a new leader replaces the entry, and after
     /// each tick while no leader takes it, as [`Mesh::set_home`] does. A call whose
