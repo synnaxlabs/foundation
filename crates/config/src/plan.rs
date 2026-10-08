@@ -245,36 +245,39 @@ fn connectors<'f>(
     indexes: &BTreeMap<&Name, Result<Placed<'f>, Unplaced>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (name, entry) in &found.entries {
-        let Definition::Spec(definition::Definition::Connector(connector)) =
-            &entry.definition
-        else {
-            continue;
-        };
-        let node = connector.node();
-        let placed = place(name, placements.iter().copied(), Some(node));
-        match &placed {
+    let connectors: Vec<_> = found
+        .entries
+        .iter()
+        .filter_map(|(name, entry)| match &entry.definition {
+            Definition::Spec(definition::Definition::Connector(connector)) => {
+                let node = connector.node();
+                let placed = place(name, placements.iter().copied(), Some(node));
+                Some((name, entry, node, placed))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
+    for (_, _, node, placed) in &connectors {
+        if let Ok(Some(placement)) = winner(placed) {
+            nodes.entry(placement).or_default().insert(*node);
+        }
+    }
+    for (name, entry, node, placed) in &connectors {
+        match placed {
             Ok(Placed {
                 placement: Some(placement),
                 home,
                 ..
-            }) if *home != node => diagnostics.push(Diagnostic::new(
-                CONNECTOR_HOME,
-                span(found.blocks[*placement], "home"),
-                format!(
-                    "the placement `{}` names the home `{home}`, but the connector \
-                     `{name}` runs on the node `{node}`",
-                    label(placement)
-                ),
-                format!(
-                    "Name `{node}` as the `home`, and keep `{node}` out of `standby` \
-                     and `copies`"
-                ),
-            )),
+            }) if home != node => {
+                let shared = nodes[placement].iter().any(|other| other != node);
+                diagnostics
+                    .push(connector_home(found, placement, home, name, node, shared));
+            }
             Ok(_) => {}
             Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
         }
-        let Ok(theirs) = winner(&placed) else {
+        let Ok(theirs) = winner(placed) else {
             continue;
         };
         let under = indexes.iter().filter(|(index, _)| index.starts_with(name));
@@ -284,6 +287,40 @@ fn connectors<'f>(
             }
         }
     }
+}
+
+/// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
+/// `placement` names `home`. `shared` is true when `placement` also wins for a
+/// connector on another node, which a new `home` would move the problem to.
+fn connector_home(
+    found: &Found<'_>,
+    placement: &Name,
+    home: &Name,
+    connector: &Name,
+    node: &Name,
+    shared: bool,
+) -> Diagnostic {
+    let fix = if shared {
+        format!(
+            "Select the connector `{connector}` and each index under its name with a \
+             more specific placement whose `home` is `{node}`"
+        )
+    } else {
+        format!(
+            "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
+             `copies`"
+        )
+    };
+    Diagnostic::new(
+        CONNECTOR_HOME,
+        span(found.blocks[placement], "home"),
+        format!(
+            "the placement `{}` names the home `{home}`, but the connector \
+             `{connector}` runs on the node `{node}`",
+            label(placement)
+        ),
+        fix,
+    )
 }
 
 /// A `config.split-placement` diagnostic when `own`, the placement that wins for

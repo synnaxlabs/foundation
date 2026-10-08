@@ -628,6 +628,24 @@ connector \"a\" {
     assert_eq!(found, [expected]);
 }
 
+/// Asserts that `refused` gives `config.connector-home` with each of `texts` as its
+/// fix, and that `fixed`, the text after the fixes, plans.
+fn plans_after_connector_home(refused: &str, texts: &[String], fixed: &str) {
+    let nodes = ["k", "m", "n"];
+    let found = problems(Spec::create_empty().plan(&[refused], &nodes));
+    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+    let expected: Vec<_> = texts
+        .iter()
+        .map(|fix| ("config.connector-home", fix.clone()))
+        .collect();
+    assert_eq!(found, expected, "{refused}");
+    let plan = Spec::create_empty().plan(&[fixed], &nodes);
+    assert!(plan.is_ok(), "{fixed}: {plan:?}");
+}
+
+const RENAMED: &str =
+    "Name `n` as the `home`, and keep `n` out of `standby` and `copies`";
+
 #[test]
 fn plans_a_connector_after_the_connector_home_fix() {
     let text = |placement: &str| {
@@ -653,13 +671,66 @@ placement \"a\" {{
         ),
     ];
     for (refused, fixed) in cases {
-        let found =
-            problems(Spec::create_empty().plan(&[&text(refused)], &["k", "m", "n"]));
-        let codes = found.iter().map(|p| p.0).collect::<Vec<_>>();
-        assert_eq!(codes, ["config.connector-home"], "{refused}");
-        let plan = Spec::create_empty().plan(&[&text(fixed)], &["k", "m", "n"]);
-        assert!(plan.is_ok(), "{fixed}: {plan:?}");
+        plans_after_connector_home(&text(refused), &[RENAMED.into()], &text(fixed));
     }
+}
+
+#[test]
+fn plans_connectors_after_the_connector_home_fix_of_a_placement_of_two_nodes() {
+    let text = |b: &str, home: &str, more: &str| {
+        format!(
+            "\
+channel \"p.a.time\" {{
+  kind = \"index\"
+}}
+connector \"p.a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"p.a.time\"]
+}}
+connector \"p.b\" {{
+  kind = \"writer\"
+  node = \"{b}\"
+  writes = []
+}}
+connector \"p.c\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+placement \"p\" {{
+  select = \"p.**\"
+  home = \"{home}\"
+}}
+{more}"
+        )
+    };
+    let more = |connector: &str| {
+        format!(
+            "Select the connector `{connector}` and each index under its name with a \
+             more specific placement whose `home` is `n`"
+        )
+    };
+    let fixed = "\
+placement \"a\" {
+  select = \"p.a.**\"
+  home = \"n\"
+}
+placement \"c\" {
+  select = \"p.c\"
+  home = \"n\"
+}
+";
+    plans_after_connector_home(
+        &text("m", "m", ""),
+        &[more("p.a"), more("p.c")],
+        &text("m", "m", fixed),
+    );
+    plans_after_connector_home(
+        &text("n", "m", ""),
+        &[RENAMED.into(), RENAMED.into(), RENAMED.into()],
+        &text("n", "n", ""),
+    );
 }
 
 #[test]

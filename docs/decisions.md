@@ -4641,7 +4641,13 @@ How to read this record:
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
   `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
   (X22) is at the `home` of a placement that wins for a connector and names a node other
-  than the connector's `node`. `config.split-placement` (BQ10) is at each index under
+  than the connector's `node`. Its fix is "Name `n` as the `home`, and keep `n` out of
+  `standby` and `copies`" when the placement wins for no connector on another node, and
+  else "Select the connector `a` and each index under its name with a more specific
+  placement whose `home` is `n`", which changes no other connector of the placement
+  (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556).
+  `config.split-placement` (BQ10) is at each index under
   the name of a connector (`Name::starts_with`) when the placement that wins for the
   index is not the one that wins for the connector: at the label of the index's
   placement, or of the connector's when no placement selects the index. A tie for the
@@ -4656,9 +4662,11 @@ How to read this record:
   and the chunks of the applied tree as an input, with which `ops` reads the tree a
   second time and a missing chunk panics in `config`, though #1741 names that case
   (`Cause::Tree`), and, for checks 2 and 3, a `spec::placement::check` over the whole
-  spec, a second text in `config`, no report for the `Unplaced` of a connector, and a
+  spec, a second text in `config`, no report for the `Unplaced` of a connector, a
   check against only the nearest connector, which lets the indexes of a connector under
-  the name of another have their own placement. Supersedes the `chunks` input and its
+  the name of another have their own placement, and one `config.connector-home` fix:
+  "leave out `home`" leaves an empty placement, and "Name `n` as the `home`" moves the
+  problem between two connectors of one placement. Supersedes the `chunks` input and its
   panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
