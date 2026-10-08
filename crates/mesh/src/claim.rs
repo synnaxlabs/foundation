@@ -93,9 +93,9 @@ fn verify(
     Ok(())
 }
 
-/// Why [`check`] refused a message.
+/// Why a claim in a message does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The signer is not a member of the region.
     NotMember {
         /// The node whose signature the claim needs.

@@ -16,11 +16,13 @@ clock = { path = "../clock" }
 env = { path = "../env" }
 estimate = { path = "../estimate" }
 home = { path = "../home" }
+hub = { path = "../hub" }
 ops = { path = "../ops" }
 os = { path = "../os" }
 types = { path = "../types" }
 
 [dev-dependencies]
+codec = { path = "../codec" }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
