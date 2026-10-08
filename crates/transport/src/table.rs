@@ -961,6 +961,28 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // The client closes its session while the server holds it, so the server's failed
+    // dial has no session to give.
+    #[test]
+    fn a_failed_dial_of_the_lower_key_gives_its_error_when_the_held_session_ended() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let dead = dead(&client);
+        let failed = unreachable(CLIENT.public(), &client);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let (transport, sessions) = accepting(config, &node);
+            let dialed = transport.dial(CLIENT.public(), &dead).await;
+            assert_eq!(dialed.err(), Some(failed));
+            assert!(sessions.borrow().is_empty());
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let dialed = transport.dial(SERVER.public(), &at).await;
+            dialed.expect("a session").close(Code(1));
+            linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
     /// Two transports for [`CLIENT`] on the client node, at [`testing::PORT`] and the
     /// port after it, so that each makes its own session to one peer.
     fn twins(shard: &testing::Shard, node: &Node) -> [Transport; 2] {
@@ -1048,6 +1070,7 @@ mod tests {
                 .await
                 .expect("the restarted node's session");
             assert_eq!(first.closed().await, old);
+            assert!(!first.downgrade().is(&new));
             let open = transport.dial(peer, &[]).await.expect("the new session");
             assert!(open.downgrade().is(&new));
             new.close(Code(3));
