@@ -4521,6 +4521,21 @@ How to read this record:
   Supersedes the deferral of
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048464411
   (2026-10-07 22:50 UTC), under which the node ran on with no port until #1647.
+- **NODE MESH (#585, 2026-10-08)** `Config::region: Option<Region>` gives the region
+  that the node is a member of: its key, its prefix, its members, and the voters before
+  the first entry of the log. It is a patch until the node reads its region from its
+  data directory (#1660, #1732); `None` opens no mesh. With a region, shard 0 opens
+  `mesh::Mesh` on the node's transport after the last shard has opened its buffer and
+  before it takes the first session. The mesh's log is the directory `log` of the data
+  directory. A mesh that does not open stops the node, and `Node::join` gives
+  `Error::Mesh`. Each `wire::Protocol::Mesh` stream of a peer that proved a node key
+  goes to `Mesh::serve`, which checks each message against the region, so the node
+  admits every such peer. A mesh stream of a client, or of a node with no region, is
+  rejected as NODE PORT says. Shard 0 sets no home yet (PR 4 of #585). A mesh that
+  stops does not stop the node until #1780, before PR 4 gives the mesh to the hub.
+  Lost: `Node::found(region)` at run time, which needs a second open path and a node
+  that runs with no region before it. Plan:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

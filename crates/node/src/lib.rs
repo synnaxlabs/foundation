@@ -486,10 +486,10 @@ impl Open {
                 tasks.spawn(async { mesh.run(wall).await });
                 let lock = self.claim(&files, closed.len() + 1, give).await;
                 let (shard, pool) = (tasks.clone(), Rc::new(pool));
-                let (own, mesh) = (Rc::clone(&pool), files.clone());
+                let (own, directory) = (Rc::clone(&pool), files.clone());
                 let failed = Arc::clone(&self.failed);
                 let hold = async move |home, guard| {
-                    serve.run(home, mesh, own, shard, guard, &failed).await;
+                    serve.run(home, directory, own, shard, guard, &failed).await;
                 };
                 self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
