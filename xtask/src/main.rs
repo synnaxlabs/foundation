@@ -9,6 +9,7 @@ mod files;
 mod globals;
 mod map;
 mod miri;
+mod open62541;
 mod oracles;
 mod review;
 mod select;
@@ -32,10 +33,12 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
+        ["open62541", tag] => open62541::run(root, tag),
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
                 "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
+                 cargo xtask open62541 <tag>\n       \
                  cargo xtask review <pr> <head sha>"
             );
             return ExitCode::FAILURE;

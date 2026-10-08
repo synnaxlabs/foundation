@@ -1,0 +1,385 @@
+//! Copies a release of open62541 into `patches/open62541/`: each C file that our
+//! options compile and each header that it includes, unchanged.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::Value;
+
+use crate::files;
+
+const URL: &str = "https://github.com/open62541/open62541.git";
+
+/// The `cmake` options of our build: no architecture, so the event loop and the clock
+/// are ours, and no feature the connector does not use.
+const OPTIONS: [&str; 11] = [
+    "-DUA_ARCHITECTURE=none",
+    "-DUA_MULTITHREADING=100",
+    "-DUA_ENABLE_ENCRYPTION=OFF",
+    "-DUA_ENABLE_PUBSUB=OFF",
+    "-DUA_ENABLE_XML_ENCODING=OFF",
+    "-DUA_ENABLE_JSON_ENCODING=OFF",
+    "-DUA_ENABLE_SUBSCRIPTIONS_EVENTS=OFF",
+    "-DUA_ENABLE_HISTORIZING=OFF",
+    "-DUA_ENABLE_DA=OFF",
+    "-DUA_NAMESPACE_ZERO=MINIMAL",
+    "-DUA_ENABLE_DETERMINISTIC_RNG=ON",
+];
+
+/// Options that change only the objects that [`clock_calls`] reads: no inlining and no
+/// LTO, so each call keeps the function that holds it in the source.
+const ANALYSIS: [&str; 4] = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
+    "-DCMAKE_C_FLAGS=-fno-inline",
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+];
+
+/// The global clock functions. Our shim gives each a fixed time, so a call reads no
+/// clock, and one on a path that runs gives a wrong time with no error.
+const CLOCKS: [&str; 3] = [
+    "UA_DateTime_now",
+    "UA_DateTime_nowMonotonic",
+    "UA_DateTime_localTimeUtcOffset",
+];
+
+/// The only (file, function) pairs that may call a function of [`CLOCKS`].
+const CLOCK_CALLS: [(&str, &str); 5] = [
+    // The build date of a server config, for the test server only.
+    ("plugins/ua_config_default.c", "setDefaultConfig"),
+    // `UA_Server_runUntilInterrupt`, which we never call.
+    ("plugins/ua_config_default.c", "interruptServer"),
+    // The stdout logger, which we replace with our own.
+    ("plugins/ua_log_stdout.c", "UA_Log_Stdout_log"),
+    // ECC user tokens, which need encryption, which is off.
+    (
+        "src/util/ua_encryptedsecret.c",
+        "encryptUserIdentityTokenEcc",
+    ),
+    // The seed, which `UA_ENABLE_DETERMINISTIC_RNG` keeps from the clock.
+    ("src/util/ua_util.c", "UA_random_seed"),
+];
+
+/// Clones `tag` into `target/open62541/<tag>/`, builds it with [`OPTIONS`], and
+/// replaces `patches/open62541/` with its compiled sources, their headers,
+/// `LICENSE`, `sources.txt` (each `.c` file), and `VERSION` (tag and commit). Needs
+/// `git`, `cmake`, Python 3, a C compiler, and GNU `objdump`.
+///
+/// # Errors
+///
+/// A step that fails, a header outside the source and build trees, or a call of a
+/// clock function that [`CLOCK_CALLS`] does not list, or an entry it lists that no
+/// call matches.
+pub(crate) fn run(root: &Path, tag: &str) -> Result<(), Vec<String>> {
+    let work = root.join("target/open62541").join(tag);
+    let (src, build) = (work.join("src"), work.join("build"));
+    remove(&work).map_err(|e| vec![e])?;
+    let clone = ["clone", "-q", "--depth", "1", "--branch", tag, URL];
+    let mut git = Command::new("git");
+    git.args(clone).arg(&src);
+    exec(&mut git).map_err(|e| vec![e])?;
+    let mut cmake = Command::new("cmake");
+    cmake.arg("-S").arg(&src).arg("-B").arg(&build);
+    exec(cmake.args(OPTIONS).args(ANALYSIS)).map_err(|e| vec![e])?;
+    let mut make = Command::new("cmake");
+    make.arg("--build").arg(&build);
+    exec(make.args(["--target", "open62541", "--parallel"])).map_err(|e| vec![e])?;
+    let commands = std::fs::read_to_string(build.join("compile_commands.json"))
+        .map_err(|e| vec![format!("compile_commands.json: {e}")])?;
+    let objects = objects(&commands, &build).map_err(|e| vec![e])?;
+    let trees = Trees {
+        src: &src,
+        build: &build,
+    };
+    let mut found = BTreeSet::new();
+    let mut copy = BTreeSet::new();
+    let mut problems = Vec::new();
+    for (source, object) in &objects {
+        let file = trees.relative(source).map_err(|e| vec![e])?;
+        let mut objdump = Command::new("objdump");
+        let text = exec(objdump.arg("-dr").arg(object)).map_err(|e| vec![e])?;
+        for function in clock_calls(&text) {
+            found.insert((file.display().to_string(), function));
+        }
+        let depfile = std::fs::read_to_string(object.with_extension("o.d"))
+            .map_err(|e| vec![format!("{}.d: {e}", object.display())])?;
+        for header in headers(&depfile) {
+            match trees.relative(&header) {
+                Ok(path) => {
+                    copy.insert((header, path));
+                }
+                Err(e) if header.starts_with("/usr") => drop(e),
+                Err(e) => problems.push(e),
+            }
+        }
+        copy.insert((source.clone(), file));
+    }
+    problems.extend(unlisted(&found));
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    let commit = exec(
+        Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["rev-parse", "HEAD"]),
+    )
+    .map_err(|e| vec![e])?;
+    write(root, &src, &copy, &format!("{tag}\n{commit}")).map_err(|e| vec![e])
+}
+
+/// The source and build trees of one clone.
+struct Trees<'a> {
+    src: &'a Path,
+    build: &'a Path,
+}
+
+impl Trees<'_> {
+    /// `path` relative to the copy: a path in the source tree keeps its place, and a
+    /// generated file goes under `src_generated/`.
+    fn relative(&self, path: &Path) -> Result<PathBuf, String> {
+        let path = files::normalize(path);
+        if let Ok(generated) = path.strip_prefix(self.build.join("src_generated")) {
+            return Ok(Path::new("src_generated").join(generated));
+        }
+        path.strip_prefix(self.src)
+            .map(Path::to_path_buf)
+            .map_err(|_outside| format!("{} is outside the clone", path.display()))
+    }
+}
+
+/// Each (source, object) of the `open62541` library in `compile_commands.json`.
+fn objects(commands: &str, build: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let commands: Value =
+        serde_json::from_str(commands).map_err(|e| format!("compile_commands: {e}"))?;
+    let entries = commands
+        .as_array()
+        .ok_or("compile_commands is not a list")?;
+    let mut objects = Vec::new();
+    for entry in entries {
+        let (Some(file), Some(output)) =
+            (entry["file"].as_str(), entry["output"].as_str())
+        else {
+            return Err(format!(
+                "compile_commands entry with no file or output: {entry}"
+            ));
+        };
+        if output.contains("/open62541-object.dir/")
+            || output.contains("/open62541-plugins.dir/")
+        {
+            objects.push((PathBuf::from(file), build.join(output)));
+        }
+    }
+    Ok(objects)
+}
+
+/// The functions in the output of `objdump -dr` that refer to a function of
+/// [`CLOCKS`]. A name loses the suffix of a compiler clone, such as `.isra.0`.
+fn clock_calls(text: &str) -> BTreeSet<String> {
+    let mut calls = BTreeSet::new();
+    let mut function = "";
+    for line in text.lines() {
+        if let Some(name) = line.strip_suffix(">:").and_then(|l| l.split_once(" <")) {
+            function = name.1.split('.').next().unwrap_or(name.1);
+        } else if let Some((_, relocation)) = line.split_once(": R_") {
+            let symbol = relocation.split_whitespace().last().unwrap_or_default();
+            let symbol = symbol.split(['+', '-']).next().unwrap_or_default();
+            if CLOCKS.contains(&symbol) {
+                calls.insert(function.to_owned());
+            }
+        }
+    }
+    calls
+}
+
+/// Each header that a Make depfile names.
+fn headers(depfile: &str) -> Vec<PathBuf> {
+    depfile
+        .split_whitespace()
+        .map(PathBuf::from)
+        .filter(|path| path.extension().is_some_and(|e| e == "h"))
+        .collect()
+}
+
+/// Each call in `found` that [`CLOCK_CALLS`] does not list, and each listed call that
+/// `found` does not hold.
+fn unlisted(found: &BTreeSet<(String, String)>) -> Vec<String> {
+    let listed: BTreeSet<(String, String)> = CLOCK_CALLS
+        .iter()
+        .map(|&(file, function)| (file.to_owned(), function.to_owned()))
+        .collect();
+    let new = found.difference(&listed).map(|(file, function)| {
+        format!(
+            "{file}: `{function}` calls a global clock function. Find whether a node \
+             runs it; if not, add it to CLOCK_CALLS with the reason"
+        )
+    });
+    let gone = listed.difference(found).map(|(file, function)| {
+        format!(
+            "{file}: `{function}` no longer calls a clock. Remove it from CLOCK_CALLS"
+        )
+    });
+    new.chain(gone).collect()
+}
+
+/// Replaces `patches/open62541/` with each (from, to) of `copy`.
+fn write(
+    root: &Path,
+    src: &Path,
+    copy: &BTreeSet<(PathBuf, PathBuf)>,
+    version: &str,
+) -> Result<(), String> {
+    let dest = root.join("patches/open62541");
+    remove(&dest)?;
+    let mut sources = String::new();
+    let license = (src.join("LICENSE"), PathBuf::from("LICENSE"));
+    for (from, to) in copy.iter().chain([&license]) {
+        if to.extension().is_some_and(|e| e == "c") {
+            sources.push_str(&to.display().to_string());
+            sources.push('\n');
+        }
+        let to = dest.join(to);
+        let dir = to.parent().ok_or("a file with no directory")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::copy(from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
+    }
+    std::fs::write(dest.join("sources.txt"), sources)
+        .and_then(|()| std::fs::write(dest.join("VERSION"), format!("{version}\n")))
+        .map_err(|e| format!("{}: {e}", dest.display()))
+}
+
+/// Removes `dir` when it exists.
+fn remove(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("{}: {e}", dir.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Runs `command` and gives its trimmed standard output.
+fn exec(command: &mut Command) -> Result<String, String> {
+    let name = command.get_program().to_string_lossy().into_owned();
+    let output = command.output().map_err(|e| format!("{name}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_calls_names_each_function_that_refers_to_a_clock() {
+        let text = "\
+Disassembly of section .text.setDefaultConfig:
+
+0000000000000000 <setDefaultConfig>:
+   0:\tpush   %rbx
+\t\t\t1: R_X86_64_PLT32\tUA_DateTime_now-0x4
+0000000000000040 <other>:
+\t\t\t41: R_X86_64_PLT32\tUA_DateTime_nowMore-0x4
+\t\t\t42: R_X86_64_PC32\tUA_DateTime_now_x+0x4
+0000000000000080 <seed.isra.0>:
+\t\t\t81: R_AARCH64_CALL26\tUA_DateTime_nowMonotonic
+00000000000000c0 <log>:
+\t\t\tc1: R_X86_64_PLT32\tUA_DateTime_localTimeUtcOffset-0x4
+";
+        let calls: Vec<_> = clock_calls(text).into_iter().collect();
+        assert_eq!(calls, ["log", "seed", "setDefaultConfig"]);
+    }
+
+    #[test]
+    fn headers_reads_each_header_of_a_depfile() {
+        let depfile = "a.c.o: /s/src/a.c /s/src/a.h \\\n /s/src/../deps/b.h /usr/x.h\n";
+        assert_eq!(
+            headers(depfile),
+            [
+                PathBuf::from("/s/src/a.h"),
+                PathBuf::from("/s/src/../deps/b.h"),
+                PathBuf::from("/usr/x.h"),
+            ]
+        );
+    }
+
+    #[test]
+    fn relative_keeps_a_source_path_and_moves_a_generated_one() {
+        let trees = Trees {
+            src: Path::new("/w/src"),
+            build: Path::new("/w/build"),
+        };
+        assert_eq!(
+            trees.relative(Path::new("/w/src/src/server/../ua_types.c")),
+            Ok(PathBuf::from("src/ua_types.c"))
+        );
+        assert_eq!(
+            trees.relative(Path::new("/w/build/src_generated/open62541/config.h")),
+            Ok(PathBuf::from("src_generated/open62541/config.h"))
+        );
+        assert_eq!(
+            trees.relative(Path::new("/w/build/other.h")),
+            Err("/w/build/other.h is outside the clone".to_owned())
+        );
+    }
+
+    #[test]
+    fn objects_keeps_the_library_objects_only() {
+        let commands = r#"[
+            {"file": "/w/src/src/ua_types.c",
+             "output": "CMakeFiles/open62541-object.dir/src/ua_types.c.o"},
+            {"file": "/w/src/plugins/ua_log_stdout.c",
+             "output": "CMakeFiles/open62541-plugins.dir/plugins/ua_log_stdout.c.o"},
+            {"file": "/w/src/tools/x.c", "output": "CMakeFiles/x.dir/tools/x.c.o"}
+        ]"#;
+        let build = Path::new("/w/build");
+        assert_eq!(
+            objects(commands, build),
+            Ok(vec![
+                (
+                    PathBuf::from("/w/src/src/ua_types.c"),
+                    build.join("CMakeFiles/open62541-object.dir/src/ua_types.c.o"),
+                ),
+                (
+                    PathBuf::from("/w/src/plugins/ua_log_stdout.c"),
+                    build.join(
+                        "CMakeFiles/open62541-plugins.dir/plugins/ua_log_stdout.c.o"
+                    ),
+                ),
+            ])
+        );
+        assert_eq!(
+            objects(r#"[{"file": "a.c"}]"#, build),
+            Err(
+                r#"compile_commands entry with no file or output: {"file":"a.c"}"#
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn unlisted_names_a_new_call_and_a_listed_call_that_is_gone() {
+        let mut found: BTreeSet<(String, String)> = CLOCK_CALLS
+            .iter()
+            .map(|&(file, function)| (file.to_owned(), function.to_owned()))
+            .collect();
+        assert_eq!(unlisted(&found), Vec::<String>::new());
+        found.remove(&("src/util/ua_util.c".to_owned(), "UA_random_seed".to_owned()));
+        found.insert(("src/ua_types.c".to_owned(), "UA_new".to_owned()));
+        assert_eq!(
+            unlisted(&found),
+            [
+                "src/ua_types.c: `UA_new` calls a global clock function. Find whether a \
+                 node runs it; if not, add it to CLOCK_CALLS with the reason",
+                "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove it \
+                 from CLOCK_CALLS",
+            ]
+        );
+    }
+}
