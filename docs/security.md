@@ -375,6 +375,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
+| `spec_tree` | `spec::tree::get`, `apply`, `diff`, and `spec::region::definitions` on chunks from a peer | `get` agrees with a whole `diff`; `apply` gives the entries with the changes; `definitions` gives the decode of the entries only when `spec::region::tree` of them has the same root |
 | `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |

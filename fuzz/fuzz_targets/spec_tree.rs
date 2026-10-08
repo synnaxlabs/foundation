@@ -1,24 +1,36 @@
 //! `get`, `apply`, and `diff` of `spec::tree` never panic on chunks from a peer. On a
 //! tree that a `diff` from the empty tree reads whole, that `diff` lists the entries
 //! in name order, `get` agrees with it on each name, and `apply` gives a tree whose
-//! entries are those entries with the changes.
+//! entries are those entries with the changes. `spec::region::definitions` gives the
+//! error of that `diff`, the first entry in name order that is not a definition, or
+//! the decoded entries exactly when `spec::region::tree` of them has the same root.
 //!
 //! Input: a count of chunks, each a count of pieces, each a length, bytes, and a
-//! link; then changes to the end, each a length, a name, and a length and value, where
-//! a value length of 255 deletes. A link `k` above zero adds the digest of chunk
-//! `k - 1`, modulo the chunks built so far, where chunk 0 is the empty tree. A count
-//! past the end reads as zero; bytes past the end stop at the end.
+//! link. A length from `KEY` to `VALUE - 1` adds the entry key `p.a`, `p.b`, or
+//! `p.c` instead of bytes. A length of `VALUE` or more adds an index channel
+//! definition with its value length, so that a short input builds a tree that
+//! `definitions` reads. Then changes to the end, each a length, a name, and a length
+//! and value, where a value length of 255 deletes. A link `k` above zero adds the
+//! digest of chunk `k - 1`, modulo the chunks built so far, where chunk 0 is the
+//! empty tree. A count past the end reads as zero; bytes past the end stop at the
+//! end.
 
 #![no_main]
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use libfuzzer_sys::fuzz_target;
+use spec::channel::{Channel, Kind};
+use spec::definition::Definition;
+use spec::region;
 use spec::tree::{self, Change, Chunks, Diff, Error};
+use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
 const DELETE: u8 = 255;
+const KEY: u8 = 250;
+const VALUE: u8 = 253;
 
 fuzz_target!(|input: &[u8]| {
     let mut input = input;
@@ -27,8 +39,23 @@ fuzz_target!(|input: &[u8]| {
     for _ in 0..byte(&mut input) {
         let mut chunk = Vec::new();
         for _ in 0..byte(&mut input) {
-            let len = byte(&mut input);
-            chunk.extend_from_slice(bytes(&mut input, len));
+            match byte(&mut input) {
+                len @ VALUE.. => {
+                    let at = u128::from(len - VALUE);
+                    let definition = Definition::Channel(Channel {
+                        key: Key::from_u128(at + 1),
+                        kind: Kind::Index {
+                            error: None,
+                            control: None,
+                        },
+                    });
+                    let value = definition.encode();
+                    chunk.push(u8::try_from(value.len()).expect("a short value"));
+                    chunk.extend(value);
+                }
+                len @ KEY.. => chunk.extend([3, b'p', b'.', b'a' + (len - KEY)]),
+                len => chunk.extend_from_slice(bytes(&mut input, len)),
+            }
             if let Some(link) = byte(&mut input).checked_sub(1) {
                 chunk.extend(roots[usize::from(link) % roots.len()].0);
             }
@@ -84,6 +111,7 @@ fn check(
     {
         named(chunks, error);
     }
+    read(chunks, root, &whole);
     let applied = tree::apply(chunks, root, changes.iter().cloned());
     if let Err(error) = &applied {
         named(chunks, error);
@@ -119,6 +147,34 @@ fn check(
         made,
         Ok(update.chunks),
         "the update does not list the chunks it made"
+    );
+}
+
+/// `region::definitions` of the tree at `root`, where `whole` is its `diff` from the
+/// empty tree.
+fn read(chunks: &Chunks, root: Digest, whole: &Result<Vec<(Name, Vec<u8>)>, Error>) {
+    let expected = whole
+        .clone()
+        .map_err(region::Error::Tree)
+        .and_then(|entries| {
+            let definitions = entries
+                .into_iter()
+                .map(|(key, bytes)| match Definition::decode(&bytes) {
+                    Ok(definition) => Ok((key, definition)),
+                    Err(error) => Err(region::Error::Definition { key, error }),
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            let rebuilt = region::tree(&mut Chunks::default(), &definitions).root;
+            if rebuilt == root {
+                Ok(definitions)
+            } else {
+                Err(region::Error::Tree(Error::Corrupt(root)))
+            }
+        });
+    assert_eq!(
+        region::definitions(chunks, root),
+        expected,
+        "definitions is not the decode of the tree"
     );
 }
 
