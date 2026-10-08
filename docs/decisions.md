@@ -3559,18 +3559,27 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931,
   2026-10-08 05:03 UTC). Supersedes the `Host` and `Port` fields and messages of
   https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253.
-- **OPEN62541 SOURCE (#435)** We copy the upstream source files of open62541 unchanged,
-  not the amalgamation: the amalgamation adds the POSIX clock and event loop even with
+- **OPEN62541 SOURCE (#435)** We copy the upstream source files of open62541, not the
+  amalgamation: the amalgamation adds the POSIX clock and event loop even with
   `UA_ARCHITECTURE=none`. The 3 global clock functions give a fixed time. That is
   acceptable only with a closed list of the (file, enclosing function) pairs that may
   call one; a list per file would pass a new call in a listed file. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
   2026-10-08 02:27 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
-  `connector-opcua` reads its `sources.txt`. The check finds call sites by relocation.
-  Decided by `laptop.architect-2`
+  `connector-opcua` reads its `sources.txt`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057244538,
-  2026-10-08 09:50 UTC).
+  2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy: each release
+  file that our build compiles or includes, byte for byte the tag's, and the files that
+  its build generates, which are only that command's output, never edited by hand.
+  `cargo xtask open62541` is the clock check: it builds the copy from its own files with
+  `-g -O0` and finds each call site by its call relocation. It fails on any other
+  reference to a clock function, on each `DW_TAG_inlined_subroutine`, and on an
+  `#include` of a header outside the copy. A test in `cargo test -p xtask` runs it on
+  the committed copy, so it runs on each PR that changes the copy. PR 2 of #435 adds
+  that test with the copy. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
+  2026-10-08 10:08 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
@@ -5353,7 +5362,12 @@ How to read this record:
   and the change is reviewed outside this one); for the first patch, a workaround in
   `transport` that never stops a stream (the peer sends the rest of the stream, and a
   cancel no longer reaches the sender, against STREAM WIRE). The person decided on
-  2026-10-05 ("Ok I guess we need to do #2"), #620.
+  2026-10-05 ("Ok I guess we need to do #2"), #620. A C library that we patch
+  (open62541) is copied by one command: each release file that our build compiles or
+  includes, unchanged, plus the files that its build generates. Its `build.rs` reads
+  the copy, with no `[patch.crates-io]`. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
+  2026-10-08 10:08 UTC).
 
 ### 1.16 Retired entries
 
