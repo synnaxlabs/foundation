@@ -19,9 +19,7 @@ use types::hello::Hello;
 use types::node;
 use types::time::{Interval, Stamp};
 use wire::hub::Error;
-use wire::hub::client::{
-    BODY_BYTES_MAX, Body, Challenge, Request, Response, Signed,
-};
+use wire::hub::client::{BODY_BYTES_MAX, Body, Challenge, Request, Response, Signed};
 
 /// Checks one decoder of kind `kind` on `message`: a decoded message encodes to it,
 /// and a refusal is the one that its first byte gives.
@@ -36,7 +34,9 @@ fn decode<T>(
             assert_eq!(encode(&decoded), message, "the message changed");
             Some(decoded)
         }
-        (None, Err(error)) => panic!("{error:?} is not the refusal of an empty message"),
+        (None, Err(error)) => {
+            panic!("{error:?} is not the refusal of an empty message")
+        }
         (Some(&first), Err(error)) if first != kind => {
             assert_eq!(error, Error::Kind { kind: first }, "{message:?}");
             None
@@ -171,7 +171,11 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     };
     let mut out = [0; Challenge::LEN];
     challenge.encode(&mut out);
-    assert_eq!(Challenge::decode(&out), Ok(challenge), "the challenge changed");
+    assert_eq!(
+        Challenge::decode(&out),
+        Ok(challenge),
+        "the challenge changed"
+    );
 
     let response = Response {
         length: input.int_in_range(0..=BODY_BYTES_MAX)?,

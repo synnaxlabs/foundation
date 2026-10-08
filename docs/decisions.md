@@ -4971,6 +4971,13 @@ How to read this record:
   21, `STALE` 22, `VIA` 23, `EXPIRED` 24, `CAPPED` 25, `CHANGED` 26. `hub` maps each
   `access::proof::Error` to its code in one exhaustive `match`, and `serve` returns the
   exact error for the node's log. `connection::Key` writes as UUID text in byte order.
+  Lost: one `REFUSED` for each refusal, which hides an unsynced node from a program;
+  and a verify before the spec lookup, so that each refusal costs the same, which costs
+  a verify for each hello from an unknown client. Decided by `laptop.architect` at
+  2026-10-08T09:53:58Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526),
+  which extends the refusal ruling of #1744
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053329389).
   Each side knows the kind of each stream, so it calls the `decode` of the message that
   it expects (`Challenge`, `Signed`, `Request`, `Response`), each of which refuses
   another kind with `Error::Kind`; a request or response gives its `Body`, which counts
@@ -4981,13 +4988,6 @@ How to read this record:
   `Gateway::request()`, the kind at construction, because each caller still matches
   variants that its stream cannot carry; and `Gateway` and `Program` for request
   streams only, a header-or-body enum where the caller knows which comes.
-  Lost: one `REFUSED` for each refusal, which hides an unsynced node from a program;
-  and a verify before the spec lookup, so that each refusal costs the same, which costs
-  a verify for each hello from an unknown client. Decided by `laptop.architect` at
-  2026-10-08T09:53:58Z
-  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526),
-  which extends the refusal ruling of #1744
-  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053329389).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies, connectors, and subjects itself. A policy reaches a name when
