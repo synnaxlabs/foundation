@@ -246,8 +246,13 @@ pub fn unknown(
 }
 
 /// A `document.missing-attribute` diagnostic at `at`: `of` has none of `keys`.
+///
+/// # Panics
+///
+/// When `keys` is empty: the caller's list is internal.
 #[must_use]
 pub fn missing(of: &str, at: Option<Span>, keys: &[&str], fix: String) -> Diagnostic {
+    assert!(!keys.is_empty(), "`missing` needs at least one key");
     Diagnostic::new(
         MISSING_ATTRIBUTE,
         at,
@@ -1179,6 +1184,17 @@ mod tests {
                     diagnostic("document.missing-attribute", 7, message, "Add it"),
                 );
             }
+        }
+
+        #[test]
+        #[should_panic(expected = "`missing` needs at least one key")]
+        fn refuses_to_name_no_missing_key() {
+            drop(missing(
+                "the `retention` block",
+                at(7),
+                &[],
+                "Add it".into(),
+            ));
         }
 
         #[test]

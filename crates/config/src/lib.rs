@@ -70,9 +70,9 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
         channels: channels(documents),
         ..Found::default()
     };
+    let kinds = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
-        let kinds = KINDS.map(|(kind, _)| kind.as_str());
         found
             .diagnostics
             .extend(read::unknown(document, "a file", &[], &kinds));
@@ -81,6 +81,7 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
                 .iter()
                 .find(|(kind, _)| kind.as_str() == &*block.keyword)
             else {
+                // `read::unknown` reported it.
                 continue;
             };
             let key = found.key(block, *kind);
