@@ -4061,9 +4061,11 @@ How to read this record:
   the 12 open PRs that had one (#1245, #1487, #1554, #1561, #1600, #1626, #1636, #1643,
   #1650, #1691, #1739, #1752) hit none of these cases. Decided by the director at
   2026-10-08T05:13:45Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147) and
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147),
   2026-10-08T05:31:31Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328).
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328), and
+  2026-10-08T05:43:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053208426).
   https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
   does. A round comment posted before the cutoff `CUTOFF` in
   `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
