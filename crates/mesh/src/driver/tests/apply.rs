@@ -712,6 +712,27 @@ fn a_failed_read_of_the_base_tree_gives_the_error_of_the_store() {
     assert_eq!(specs(&entries).len(), 1);
 }
 
+#[test]
+fn the_base_tree_comes_from_the_store_when_it_is_the_tree_in_use() {
+    let first = create_subjects(&["plant.a"], 1);
+    let moved = pointer(1, &first);
+    solo(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert_eq!(mesh.apply(base(), first).await, Ok(moved));
+        assert_eq!(mesh.spec().await.unwrap().pointer, Some(moved));
+        let path = Path::new(BLOB).join(moved.root.to_string());
+        node.fail_file(&path, Operation::Open);
+        let second = create_subjects(&["plant.b"], 1);
+        let cause = files::Error::Io {
+            path,
+            operation: Operation::Open,
+            code: 5,
+        };
+        let failed = Error::Blob(blob::Error::Files(cause));
+        assert_eq!(mesh.apply(moved, second).await, Err(failed));
+    });
+}
+
 /// The spec changes of `entries`, in order.
 fn specs(entries: &[Entry]) -> Vec<Change> {
     let change = |entry: &Entry| match &entry.data {
