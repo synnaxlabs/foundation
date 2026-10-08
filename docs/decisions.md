@@ -4059,7 +4059,22 @@ How to read this record:
   adapter hides the gap between frames, so a seam that split frames would act
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
-  thread panics. Amended (2026-10-07, #995): `env::net` also gives name lookups.
+  thread panics. Amended (2026-10-08, #120): on `os`, a TCP stream or listener is a
+  non-blocking socket that no reactor holds until its first poll, which registers it
+  with the I/O driver of the Tokio runtime of that thread. `os::shards()` and
+  `os::threads()` build their runtimes with `enable_io`. A connect uses the driver of
+  the thread that polls it, and an accept that of its listener; each gives the stream
+  back unregistered, so a shard can take a stream that another thread accepted (ONE
+  PORT PER NODE). A first poll on a thread with no runtime or no I/O driver panics.
+  Rejected: one I/O thread for every socket, as `os::files` uses; each message would
+  cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
+  behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
+  it lacks, from one `libc::setsockopt`. Until #119 and #1095 land, `os::net()` is
+  behind the cargo feature `net`, and its `udp` and `resolve` of a host name panic
+  ("os::net has no UDP driver yet", "os::net has no resolver yet"); the last of the
+  two removes the feature and the panic. Decided by the architect, #120
+  (https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843).
+  Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
   lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a
   retry may fix, and a caller matches the variant, not the code. On `os`,
@@ -5440,7 +5455,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). `os::net::lowat` holds one `setsockopt(TCP_NOTSENT_LOWAT)` call, which `rustix` lacks (architect, #120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |

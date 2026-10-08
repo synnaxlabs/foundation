@@ -22,10 +22,6 @@ mod files;
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
-#[expect(
-    unsafe_code,
-    reason = "`TCP_NOTSENT_LOWAT` is a `setsockopt` rustix lacks"
-)]
 mod net;
 mod shards;
 mod thread;

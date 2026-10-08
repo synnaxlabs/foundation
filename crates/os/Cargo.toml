@@ -26,6 +26,8 @@ rustix = { workspace = true, features = ["thread"] }
 [dev-dependencies]
 counting = { path = "../counting" }
 divan = { workspace = true }
+# Turns `net` on for the tests and benches of this crate.
+os = { path = ".", features = ["net"] }
 proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["net", "rt", "time"] }
@@ -33,13 +35,16 @@ tokio = { workspace = true, features = ["net", "rt", "time"] }
 [[test]]
 name = "alloc"
 harness = false
-required-features = ["net"]
 
 # Needs `sudo`: only one CI step on a GitHub-hosted runner runs it.
 [[test]]
 name = "root"
 path = "tests/root/main.rs"
 test = false
+
+[[bench]]
+name = "net"
+harness = false
 
 [[bench]]
 name = "now"

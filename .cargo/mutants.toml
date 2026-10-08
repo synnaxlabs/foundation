@@ -60,7 +60,4 @@ exclude_re = [
   'crates/connector/src/http/stream\.rs:.*<impl Write for Stream>::poll_flush',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
-  # Linux drops an aborted connection from the backlog itself, so `accept` never gives
-  # `ECONNABORTED` there. BSD gives it, and the retry has no test that runs on CI.
-  'crates/os/src/net/listener\.rs:.*(CONNABORTED|replace == with != in .*poll_accept)',
 ]

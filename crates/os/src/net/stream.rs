@@ -15,8 +15,8 @@ use tokio::net::TcpStream;
 use super::socket::Socket;
 use super::{errno, io_error, stream_error};
 
-/// A connected stream. `SO_LINGER` 0 is set until `poll_close`, so a drop before it
-/// resets the peer.
+/// A connected stream. `SO_LINGER` 0 is set from `new` until `poll_close`, so a drop
+/// before it resets the peer.
 pub(super) struct Stream {
     socket: Socket<std::net::TcpStream, TcpStream>,
     local: SocketAddr,
@@ -30,18 +30,20 @@ pub(super) struct Stream {
 
 impl Stream {
     /// A stream over `stream`, connected from `local` to `peer`, before its first poll.
+    /// Gives the code of a failed `SO_LINGER`.
     pub(super) fn new(
         stream: std::net::TcpStream,
         local: SocketAddr,
         peer: SocketAddr,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Errno> {
+        sockopt::set_socket_linger(&stream, Some(Duration::ZERO))?;
+        Ok(Self {
             socket: Socket::Idle(stream),
             local,
             peer,
             closed: false,
             failed: None,
-        }
+        })
     }
 
     /// Records `error` as the end of the stream, and gives it.
@@ -56,6 +58,14 @@ impl Stream {
             .live("stream", TcpStream::from_std)
             .map_err(io_error)?;
         Ok(Pin::new(stream))
+    }
+
+    /// The error the kernel holds for the stream, after an event no poll reported.
+    fn pending(stream: &TcpStream) -> Option<Errno> {
+        match sockopt::socket_error(stream) {
+            Ok(Ok(())) => None,
+            Ok(Err(code)) | Err(code) => Some(code),
+        }
     }
 }
 
@@ -92,11 +102,17 @@ impl tcp::Driver for Stream {
         if let Some(failed) = &self.failed {
             return Poll::Ready(Err(failed.clone()));
         }
-        if self.closed {
-            return Poll::Ready(Err(io_error(Errno::PIPE)));
-        }
         let peer = self.peer;
-        match ready!(self.live()?.poll_write_vectored(cx, buffers)) {
+        let (closed, stream) = (self.closed, self.live()?);
+        if closed {
+            // A reset after the close is the stream's end. Without one, the write
+            // is a misuse, as `sim` reports it.
+            return Poll::Ready(Err(match Self::pending(&stream) {
+                Some(code) => self.fail(stream_error(code, peer)),
+                None => io_error(Errno::PIPE),
+            }));
+        }
+        match ready!(stream.poll_write_vectored(cx, buffers)) {
             Ok(written) => Poll::Ready(Ok(written)),
             Err(e) => Poll::Ready(Err(self.fail(stream_error(errno(&e), peer)))),
         }
@@ -106,29 +122,30 @@ impl tcp::Driver for Stream {
         if let Some(failed) = &self.failed {
             return Poll::Ready(Err(failed.clone()));
         }
-        if self.closed {
+        let peer = self.peer;
+        let (closed, stream) = (self.closed, self.live()?);
+        if closed {
             return Poll::Ready(Ok(()));
         }
-        let peer = self.peer;
-        let stream = self.live()?;
-        let code = match rustix::net::shutdown(&*stream, Shutdown::Write) {
-            Ok(()) => match sockopt::set_socket_linger(&*stream, None) {
-                Ok(()) => {
-                    self.closed = true;
-                    return Poll::Ready(Ok(()));
+        // The linger goes first: macOS refuses an option on a socket shut both ways.
+        let shut = match sockopt::set_socket_linger(&*stream, None) {
+            Ok(()) => match rustix::net::shutdown(&*stream, Shutdown::Write) {
+                // The connection ended with no poll that reported why: a reset,
+                // unless the kernel holds another code.
+                Err(Errno::NOTCONN) => {
+                    Err(Self::pending(&stream).unwrap_or(Errno::CONNRESET))
                 }
-                Err(e) => e,
+                outcome => outcome,
             },
-            // The connection ended with no read that reported why. The pending
-            // error says why, or the peer reset it.
-            Err(Errno::NOTCONN) => match sockopt::socket_error(&*stream) {
-                Ok(Err(pending)) => pending,
-                Ok(Ok(())) => Errno::CONNRESET,
-                Err(e) => e,
-            },
-            Err(e) => e,
+            Err(e) => Err(e),
         };
-        Poll::Ready(Err(self.fail(stream_error(code, peer))))
+        match shut {
+            Ok(()) => {
+                self.closed = true;
+                Poll::Ready(Ok(()))
+            }
+            Err(code) => Poll::Ready(Err(self.fail(stream_error(code, peer)))),
+        }
     }
 }
 
@@ -149,9 +166,12 @@ impl Drop for Stream {
 
 #[cfg(test)]
 mod tests {
+    use std::future::poll_fn;
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener};
     use std::os::fd::{AsFd, OwnedFd};
+
+    use tcp::Driver as _;
 
     use super::*;
 
@@ -165,16 +185,35 @@ mod tests {
         (client, server)
     }
 
-    /// Drops a closed stream over `client` and gives a descriptor that still sees the
-    /// socket's options.
+    fn stream(socket: std::net::TcpStream) -> Stream {
+        socket.set_nonblocking(true).unwrap();
+        let local = socket.local_addr().unwrap();
+        let peer = socket.peer_addr().unwrap();
+        Stream::new(socket, local, peer).unwrap()
+    }
+
+    /// Closes a stream over `client` and drops it, and gives a descriptor that still
+    /// sees the socket's options.
     fn drop_closed(client: std::net::TcpStream) -> OwnedFd {
-        let local = client.local_addr().unwrap();
-        let peer = client.peer_addr().unwrap();
         let kept = rustix::io::dup(client.as_fd()).unwrap();
-        let mut stream = Stream::new(client, local, peer);
-        stream.closed = true;
-        drop(stream);
+        let mut stream = stream(client);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert_eq!(poll_fn(|cx| stream.poll_close(cx)).await, Ok(()));
+            drop(stream);
+        });
         kept
+    }
+
+    #[test]
+    fn new_sets_linger_zero() {
+        let (client, _server) = create_pair();
+        let stream = stream(client);
+        let fd = stream.socket.fd().unwrap();
+        assert_eq!(sockopt::socket_linger(fd), Ok(Some(Duration::ZERO)));
     }
 
     #[test]

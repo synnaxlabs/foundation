@@ -2,22 +2,24 @@
 //! that registers with the I/O driver of the Tokio runtime of the thread of its first
 //! poll.
 
-use std::ffi::c_int;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::time::Duration;
+use std::os::fd::{AsFd, BorrowedFd};
 
 use env::net::{Connect, Error, Resolve, tcp, udp};
-use rustix::fs::OFlags;
-use rustix::io::{Errno, FdFlags};
-use rustix::net::{AddressFamily, SocketType, ipproto, sockopt};
-use tokio::net::TcpStream;
+use rustix::io::Errno;
+use rustix::net::sockopt;
+use tokio::net::TcpSocket;
 
 use self::listener::Listener;
 use self::stream::Stream;
 
 mod listener;
+#[expect(
+    unsafe_code,
+    reason = "`TCP_NOTSENT_LOWAT` is a `setsockopt` rustix lacks"
+)]
+mod lowat;
 mod socket;
 mod stream;
 
@@ -46,98 +48,34 @@ impl env::net::Driver for Driver {
 }
 
 /// Connects to `config.remote` through the I/O driver of the runtime that polls the
-/// future, and gives the stream back on no I/O driver.
+/// future. The stream it gives is registered with no driver yet, so any thread may
+/// take it.
 async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     let remote = config.remote;
-    let stream =
-        connecting(remote, &config.options).map_err(|e| stream_error(e, remote))?;
-    let stream =
-        TcpStream::from_std(stream).map_err(|e| stream_error(errno(&e), remote))?;
-    stream
-        .writable()
+    let failed = |code: Errno| stream_error(code, remote);
+    let socket = match remote {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }
+    .map_err(|e| failed(errno(&e)))?;
+    apply(socket.as_fd(), &config.options).map_err(failed)?;
+    let stream = socket
+        .connect(remote)
         .await
-        .map_err(|e| stream_error(errno(&e), remote))?;
-    match sockopt::socket_error(&stream) {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) | Err(e) => return Err(stream_error(e, remote)),
-    }
-    let stream = stream
-        .into_std()
-        .map_err(|e| stream_error(errno(&e), remote))?;
+        .map_err(|e| failed(errno(&e)))?;
+    let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    Ok(Box::new(Stream::new(stream, local, remote)))
+    Ok(Box::new(
+        Stream::new(stream, local, remote).map_err(failed)?,
+    ))
 }
 
-/// A socket with `options` whose connect to `remote` has started.
-fn connecting(
-    remote: SocketAddr,
-    options: &tcp::Options,
-) -> Result<std::net::TcpStream, Errno> {
-    let fd = socket(remote)?;
-    apply(fd.as_fd(), options)?;
-    match rustix::net::connect(&fd, &remote) {
-        Ok(()) | Err(Errno::INPROGRESS) => Ok(std::net::TcpStream::from(fd)),
-        Err(e) => Err(e),
-    }
-}
-
-/// A non-blocking TCP socket of the family of `address`, closed on exec. On macOS, a
-/// write to a reset socket gives `EPIPE` with no `SIGPIPE`, as `send` with
-/// `MSG_NOSIGNAL` does on Linux.
-fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
-    let family = match address {
-        SocketAddr::V4(_) => AddressFamily::INET,
-        SocketAddr::V6(_) => AddressFamily::INET6,
-    };
-    let fd = rustix::net::socket(family, SocketType::STREAM, Some(ipproto::TCP))?;
-    rustix::io::fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
-    rustix::fs::fcntl_setfl(&fd, OFlags::NONBLOCK)?;
-    #[cfg(target_os = "macos")]
-    sockopt::set_socket_nosigpipe(&fd, true)?;
-    Ok(fd)
-}
-
-/// Sets `options` on a stream socket. `SO_LINGER` 0 makes a close before `poll_close`
-/// reset the peer.
+/// Sets `options` on a TCP socket.
 fn apply(fd: BorrowedFd<'_>, options: &tcp::Options) -> Result<(), Errno> {
     sockopt::set_socket_send_buffer_size(fd, options.send_buffer_bytes)?;
     sockopt::set_socket_recv_buffer_size(fd, options.recv_buffer_bytes)?;
     sockopt::set_tcp_nodelay(fd, !options.delayed)?;
-    sockopt::set_socket_linger(fd, Some(Duration::ZERO))?;
-    set_unsent_max(fd, options.unsent_bytes_max)
-}
-
-/// libc has no `TCP_NOTSENT_LOWAT` for macOS. The value is from `netinet/tcp.h`.
-#[cfg(target_os = "macos")]
-const TCP_NOTSENT_LOWAT: c_int = 0x201;
-#[cfg(target_os = "linux")]
-const TCP_NOTSENT_LOWAT: c_int = libc::TCP_NOTSENT_LOWAT;
-
-/// The size of a `c_int`, as `setsockopt` and `getsockopt` take it.
-const C_INT_LEN: libc::socklen_t = 4;
-const _: () = assert!(
-    size_of::<c_int>() == 4,
-    "a c_int is four bytes on each target"
-);
-
-/// Sets `TCP_NOTSENT_LOWAT`, which `rustix` has no call for.
-fn set_unsent_max(fd: BorrowedFd<'_>, bytes: usize) -> Result<(), Errno> {
-    let value = c_int::try_from(bytes).map_err(|_overflow| Errno::INVAL)?;
-    // SAFETY: `fd` is open, and the pointer and `len` are those of `value`.
-    let rc = unsafe {
-        libc::setsockopt(
-            fd.as_raw_fd(),
-            libc::IPPROTO_TCP,
-            TCP_NOTSENT_LOWAT,
-            (&raw const value).cast(),
-            C_INT_LEN,
-        )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(errno(&io::Error::last_os_error()))
-    }
+    lowat::set(fd, options.unsent_bytes_max)
 }
 
 /// The OS code of `error`, or `EIO` when it has none.
@@ -184,24 +122,6 @@ mod tests {
         }
     }
 
-    /// Reads `TCP_NOTSENT_LOWAT` back.
-    fn unsent_max(fd: BorrowedFd<'_>) -> c_int {
-        let mut value: c_int = 0;
-        let mut len = C_INT_LEN;
-        // SAFETY: `fd` is open, and the pointers are those of `value` and `len`.
-        let rc = unsafe {
-            libc::getsockopt(
-                fd.as_raw_fd(),
-                libc::IPPROTO_TCP,
-                TCP_NOTSENT_LOWAT,
-                (&raw mut value).cast(),
-                &raw mut len,
-            )
-        };
-        assert_eq!(rc, 0, "getsockopt: {}", io::Error::last_os_error());
-        value
-    }
-
     /// Linux keeps twice the buffer size it is given, for its own bookkeeping.
     fn kept(bytes: usize) -> usize {
         if cfg!(target_os = "linux") {
@@ -215,13 +135,13 @@ mod tests {
         use super::*;
 
         fn check(delayed: bool) {
-            let fd = socket(loopback()).unwrap();
+            let fd = listener::socket(loopback()).unwrap();
             apply(fd.as_fd(), &options(delayed)).unwrap();
             assert_eq!(sockopt::socket_send_buffer_size(&fd), Ok(kept(1 << 16)));
             assert_eq!(sockopt::socket_recv_buffer_size(&fd), Ok(kept(1 << 15)));
             assert_eq!(sockopt::tcp_nodelay(&fd), Ok(!delayed));
-            assert_eq!(sockopt::socket_linger(&fd), Ok(Some(Duration::ZERO)));
-            assert_eq!(unsent_max(fd.as_fd()), 1 << 14);
+            assert_eq!(lowat::get(fd.as_fd()), Ok(1 << 14));
+            assert_eq!(sockopt::socket_linger(&fd), Ok(None), "the stream sets it");
         }
 
         #[test]
@@ -236,47 +156,11 @@ mod tests {
 
         #[test]
         #[cfg(target_pointer_width = "64")]
-        fn refuses_an_unsent_bound_past_a_c_int() {
-            let fd = socket(loopback()).unwrap();
-            let bound = usize::try_from(c_int::MAX).unwrap() + 1;
-            assert_eq!(set_unsent_max(fd.as_fd(), bound), Err(Errno::INVAL));
-            assert_eq!(set_unsent_max(fd.as_fd(), bound - 1), Ok(()));
-        }
-    }
-
-    mod socket {
-        use super::*;
-
-        #[test]
-        fn is_non_blocking_and_closed_on_exec() {
-            let fd = super::socket(loopback()).unwrap();
-            assert!(
-                rustix::fs::fcntl_getfl(&fd)
-                    .unwrap()
-                    .contains(OFlags::NONBLOCK)
-            );
-            assert!(
-                rustix::io::fcntl_getfd(&fd)
-                    .unwrap()
-                    .contains(FdFlags::CLOEXEC)
-            );
-            #[cfg(target_os = "macos")]
-            assert_eq!(sockopt::socket_nosigpipe(&fd), Ok(true));
-        }
-
-        #[test]
-        fn follows_the_family_of_the_address() {
-            let v6 = SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), 0);
-            let fd = super::socket(v6).unwrap();
-            assert_eq!(
-                rustix::net::sockopt::socket_domain(&fd),
-                Ok(AddressFamily::INET6)
-            );
-            let fd = super::socket(loopback()).unwrap();
-            assert_eq!(
-                rustix::net::sockopt::socket_domain(&fd),
-                Ok(AddressFamily::INET)
-            );
+        fn gives_the_code_of_a_refused_option() {
+            let fd = listener::socket(loopback()).unwrap();
+            let mut options = options(false);
+            options.unsent_bytes_max = usize::MAX;
+            assert_eq!(apply(fd.as_fd(), &options), Err(Errno::INVAL));
         }
     }
 

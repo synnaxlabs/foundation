@@ -206,6 +206,77 @@ fn a_drop_before_close_resets_the_peer() {
     });
 }
 
+#[test]
+fn an_accepted_stream_dropped_before_close_resets_its_peer() {
+    on_thread("net-drop-accepted", || async {
+        let net = net();
+        let (_listener, mut client, server) = create_pair(&net).await;
+        let remote = server.local();
+        drop(server);
+        read_reset(&mut client, remote).await;
+    });
+}
+
+/// Writes `bytes` to `tcp` with one poll, with no waker, and gives the count taken.
+/// The stream has polled before, so the kernel's readiness is known.
+fn write_once(tcp: &mut Tcp, bytes: &[u8]) -> Poll<usize> {
+    let mut cx = Context::from_waker(Waker::noop());
+    tcp.poll_write(&mut cx, &[IoSlice::new(bytes)])
+        .map(|outcome| outcome.expect("the write takes bytes or waits"))
+}
+
+#[test]
+fn a_drop_after_close_delivers_the_bytes_the_kernel_still_holds() {
+    on_thread("net-close-drop", || async {
+        let net = net();
+        let (_listener, mut client, mut server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[&[7]]).await, Ok(1));
+        let bytes = vec![7; 1 << 20];
+        let Poll::Ready(queued) = write_once(&mut client, &bytes) else {
+            panic!("an empty send buffer takes bytes")
+        };
+        let queued = queued + 1;
+        assert!(queued < 1 << 20, "the kernel holds the rest: {queued}");
+        assert_eq!(close(&mut client).await, Ok(()));
+        drop(client);
+        let mut received = 0;
+        let mut buffer = vec![0; 1 << 16];
+        loop {
+            match read(&mut server, &mut buffer).await {
+                Ok(0) => break,
+                Ok(n) => received += n,
+                Err(e) => panic!("the close delivers each byte: {e}"),
+            }
+        }
+        assert_eq!(received, queued);
+    });
+}
+
+/// With a peer that reads nothing, the kernel sends until the peer's receive buffer
+/// is full. The write then waits at the unsent bound, with most of the send buffer
+/// still free. Measured on Linux.
+#[test]
+fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
+    on_thread("net-unsent", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.send_buffer_bytes = 1 << 20;
+        let mut client = net.connect(&config).await.expect("the listener accepts");
+        let _server = accept(&mut listener).await;
+        let mut written = write(&mut client, &[&[7]]).await.expect("one byte");
+        let bytes = vec![7; 1 << 22];
+        while let Poll::Ready(n) = write_once(&mut client, &bytes) {
+            written += n;
+            assert!(written < 1 << 20, "the send buffer never fills: {written}");
+        }
+        assert!(
+            written > 1 << 16,
+            "the peer's buffer fills first: {written}"
+        );
+    });
+}
+
 /// Linux takes the FIN before the RST: the read gives 0, and a write gives the reset.
 /// macOS gives the reset on the read.
 #[test]
@@ -272,18 +343,18 @@ fn each_poll_after_a_read_found_the_reset_is_reset() {
     });
 }
 
-/// Drops `client`, and waits until its reset reached `server`, with no poll that
+/// Drops `dropped`, and waits until its reset reached `kept`, with no poll that
 /// reports it. Gives the address of the dropped end.
-async fn reset_unseen(client: Tcp, server: &mut Tcp) -> SocketAddr {
+async fn reset_unseen(dropped: Tcp, kept: &mut Tcp) -> SocketAddr {
     let counted = Arc::new(Counted {
         wakes: AtomicUsize::new(0),
         woken: Notify::new(),
     });
     let waker = Waker::from(Arc::clone(&counted));
     let mut cx = Context::from_waker(&waker);
-    assert_eq!(server.poll_read(&mut cx, &mut [0; 8]), Poll::Pending);
-    let remote = client.local();
-    drop(client);
+    assert_eq!(kept.poll_read(&mut cx, &mut [0; 8]), Poll::Pending);
+    let remote = dropped.local();
+    drop(dropped);
     timeout(BOUND, counted.woken.notified())
         .await
         .expect("the reset wakes the reader");
@@ -313,6 +384,84 @@ fn each_poll_after_a_write_found_the_reset_is_reset() {
         let reset = Err(Error::Reset { remote });
         assert_eq!(write(&mut server, &[b"x"]).await, reset);
         assert_eq!(read(&mut server, &mut [0; 8]).await, reset);
+    });
+}
+
+#[test]
+fn a_write_after_the_close_is_a_broken_pipe() {
+    on_thread("net-write-closed", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(close(&mut client).await, Ok(()));
+        let pipe = Err(Error::Io { code: 32 });
+        assert_eq!(write(&mut client, &[b"late"]).await, pipe);
+        assert_eq!(
+            write(&mut client, &[b"late"]).await,
+            pipe,
+            "no end of stream"
+        );
+        assert_eq!(close(&mut client).await, Ok(()));
+    });
+}
+
+#[test]
+fn a_write_after_the_close_and_an_unseen_reset_is_reset() {
+    on_thread("net-write-closed-reset", || async {
+        let net = net();
+        let (_listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(close(&mut client).await, Ok(()));
+        let remote = reset_unseen(server, &mut client).await;
+        let reset = Err(Error::Reset { remote });
+        assert_eq!(write(&mut client, &[b"late"]).await, reset);
+        assert_eq!(read(&mut client, &mut [0; 8]).await, reset);
+        assert_eq!(close(&mut client).await, reset.map(|_: usize| ()));
+    });
+}
+
+#[test]
+fn a_listen_binds_a_port_in_time_wait() {
+    on_thread("net-time-wait", || async {
+        let net = net();
+        let (listener, mut client, mut server) = create_pair(&net).await;
+        let local = listener.local();
+        assert_eq!(close(&mut server).await, Ok(()));
+        assert_eq!(read(&mut client, &mut [0; 8]).await, Ok(0));
+        assert_eq!(close(&mut client).await, Ok(()));
+        assert_eq!(read(&mut server, &mut [0; 8]).await, Ok(0));
+        drop((listener, client, server));
+        let again = net.listen(&listen_config(local)).map(|l| l.local());
+        assert_eq!(again, Ok(local));
+    });
+}
+
+#[test]
+fn an_ipv4_peer_of_an_any_v6_listener_has_a_plain_ipv4_address() {
+    on_thread("net-mapped", || async {
+        let net = net();
+        let any = SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0);
+        let mut listener = net.listen(&listen_config(any)).expect("v6 any binds");
+        let remote = SocketAddr::new(LOCALHOST.into(), listener.local().port());
+        let client = connect(&net, remote).await;
+        let server = accept(&mut listener).await;
+        assert_eq!(server.peer(), client.local());
+        assert_eq!(server.local(), client.peer());
+    });
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn an_unsent_bound_past_a_c_int_fails_the_listen_and_the_connect() {
+    on_thread("net-bad-option", || async {
+        let net = net();
+        let listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.unsent_bytes_max = usize::MAX;
+        let invalid = Err(Error::Io { code: 22 });
+        let outcome = net.connect(&config).await.map(|_| ());
+        assert_eq!(outcome, invalid);
+        let mut config = listen_config(SocketAddr::new(LOCALHOST.into(), 0));
+        config.options.unsent_bytes_max = usize::MAX;
+        assert_eq!(net.listen(&config).map(|_| ()), invalid);
     });
 }
 
@@ -395,6 +544,20 @@ fn a_stream_poll_on_a_second_thread_panics() {
         let net = net();
         let (listener, mut client, server) = create_pair(&net).await;
         assert_eq!(write(&mut client, &[b"x"]).await, Ok(1));
+        (client, server, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut client, &[b"y"]).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_poll_after_the_close_on_a_second_thread_panics() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(close(&mut client).await, Ok(()));
         (client, server, listener)
     });
     runtime().block_on(async {

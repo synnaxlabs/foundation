@@ -116,8 +116,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, `counting`, the `memory`, `clock`, `wall`, and `net` modules of
-  `os`, the `allocate` module of `os` on macOS (architect, #931,
+  `block`, `ring`, `counting`, the `memory`, `clock`, and `wall` modules of `os`, the
+  `net::lowat` module of `os` (architect, #120,
+  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843), the
+  `allocate` module of `os` on macOS (architect, #931,
   https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099), and
   later FFI connectors. Such a module uses `#[expect(unsafe_code, reason = "...")]`
   and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
