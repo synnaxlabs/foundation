@@ -1323,3 +1323,50 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }
+
+/// Polls `reader.next()` once with `waker`, and says whether it gave a frame.
+fn poll_next(reader: &mut Reader, waker: &Waker) -> bool {
+    let mut next = pin!(reader.next());
+    match next.as_mut().poll(&mut Context::from_waker(waker)) {
+        Poll::Ready(received) => {
+            received.expect("a frame");
+            true
+        }
+        Poll::Pending => false,
+    }
+}
+
+#[test]
+fn starts_a_new_streak_after_a_wait() {
+    run(31, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[0]);
+        test.clock.sleep(SETTLE).await;
+        let waker = Waker::noop();
+        assert!(poll_next(&mut reader, waker), "the first frame waits");
+        assert!(!poll_next(&mut reader, waker), "no frame waits");
+        for n in 1..=128 {
+            write(&mut writer, &[now + n], &[n]);
+        }
+        test.clock.sleep(SETTLE).await;
+        let given = (0..129)
+            .take_while(|_| poll_next(&mut reader, waker))
+            .count();
+        assert_eq!(given, 128, "a wait ends the streak");
+    });
+}
+
+#[test]
+fn keeps_no_waker_of_a_dropped_reader() {
+    run(32, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(Arc::clone(&flag));
+        assert!(!poll_next(&mut reader, &waker), "no frame waits");
+        drop(waker);
+        drop(reader);
+        assert_eq!(Arc::strong_count(&flag), 1, "the hub keeps the waker");
+    });
+}
