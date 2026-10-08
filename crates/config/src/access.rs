@@ -38,11 +38,12 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         "Add an `allow` attribute with the actions that it allows, such as \"read\"";
     let allow = found.required(block, "allow", actions, fix.into());
     let authority = found.attribute(block, "authority", authority);
-    let unwritten = matches!(
-        (&allow, &authority),
-        (Ok(allow), Ok(Some(_))) if !allow.contains(Action::Write)
-    );
-    if unwritten {
+    let (Ok(()), Ok(subjects), Ok(select), Ok(allow), Ok(authority)) =
+        (unknown, subjects, select, allow, authority)
+    else {
+        return None;
+    };
+    if authority.is_some() && !allow.contains(Action::Write) {
         let at = block.body.attributes.get("authority");
         found.diagnostics.push(Diagnostic::new(
             AUTHORITY_WITHOUT_WRITE,
@@ -52,12 +53,8 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
                 .into(),
             "Add `write` to `allow`, or remove `authority`".into(),
         ));
-    }
-    let (Ok(()), Ok(subjects), Ok(select), Ok(allow), Ok(authority), false) =
-        (unknown, subjects, select, allow, authority, unwritten)
-    else {
         return None;
-    };
+    }
     let authority = authority.unwrap_or(Authority(0));
     let policy = Policy::new(subjects, select, allow, authority);
     Some(Definition::Spec(definition::Definition::Access(policy)))

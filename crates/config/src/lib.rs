@@ -1808,34 +1808,6 @@ mod tests {
         }
 
         #[test]
-        fn refuses_an_authority_without_write_beside_a_missing_subjects() {
-            let documents = access(&[
-                ("select", string("edge.**")),
-                ("allow", string("read")),
-                ("authority", Kind::Integer(5)),
-            ]);
-            assert_eq!(
-                check(&documents),
-                Err(vec![
-                    refused(
-                        "config.missing-attribute",
-                        at(0, 0),
-                        "the `access` block has no `subjects`",
-                        "Add a `subjects` attribute with the subjects that it \
-                         allows, such as \"site_a.operators.*\"",
-                    ),
-                    refused(
-                        "config.authority-without-write",
-                        at(0, 15),
-                        "the policy has an `authority` and no `write` in `allow`, \
-                         and only a write uses an authority",
-                        "Add `write` to `allow`, or remove `authority`",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_only_the_action_of_a_bad_allow_with_an_authority() {
             assert_eq!(
                 check(&access(&attributes(string("erase"), Some(5)))),

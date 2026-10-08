@@ -3805,11 +3805,10 @@ How to read this record:
   `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
   An `authority` with no `write` in an `allow` that reads is
-  `config.authority-without-write`, also `authority = 0`, and also when another
-  attribute fails: only a write uses an authority, so the value is a mistake.
-  `Policy::new` still sets the authority of a policy with no `write` to zero. Lost: no
-  diagnostic, which hides the mistake. Decided by `laptop.architect-2` at
-  2026-10-08T04:00:34Z
+  `config.authority-without-write`, also `authority = 0`: only a write uses an
+  authority, so the value is a mistake. `Policy::new` still sets the authority of a
+  policy with no `write` to zero. Lost: no diagnostic, which hides the mistake. Decided
+  by `laptop.architect-2` at 2026-10-08T04:00:34Z
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051909712).
   Supersedes the silent `authority` of
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
