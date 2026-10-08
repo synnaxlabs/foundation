@@ -27,6 +27,10 @@ impl Rules {
     /// prefix of a region, with [`Prefix::ROOT`] for the root region, and the
     /// definitions of its tree by name. Access keeps the access policies, the
     /// connectors, and the subjects, and ignores each other kind.
+    ///
+    /// Each tree must have no problem from [`spec::region::check`] at its prefix, as
+    /// the tree of the spec that a region uses has. Given another tree, a subject can
+    /// take the label of a subject of another region.
     pub fn new<'a, T>(trees: impl IntoIterator<Item = (Prefix, T)>) -> Self
     where
         T: IntoIterator<Item = (&'a Name, &'a Definition)>,

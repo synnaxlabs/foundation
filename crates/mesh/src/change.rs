@@ -46,6 +46,9 @@ pub(crate) enum Change {
         /// The digests of the new tree's chunks that a voter must hold, at most
         /// [`CHUNKS_MAX`].
         chunks: BTreeSet<Digest>,
+        /// The voters whose durable put of the chunks the proposer counted, at most
+        /// [`HOLDERS_MAX`].
+        holders: BTreeSet<node::Key>,
     },
 }
 
@@ -74,6 +77,10 @@ const SPEC: u8 = 4;
 /// 32 KiB) fits in an append of 64 KiB.
 pub(crate) const CHUNKS_MAX: usize = 1024;
 
+/// The most holders of one `Spec` change, so that a change with [`CHUNKS_MAX`]
+/// chunks stays at about 33 KiB.
+pub(crate) const HOLDERS_MAX: usize = 64;
+
 impl Change {
     /// Adds the one byte form of the change to `out`: a kind byte, then the body of
     /// that kind. Every number is little endian.
@@ -86,12 +93,13 @@ impl Change {
     ///   or 1), the expiry in nanoseconds (8 bytes), and the ephemeral span behind a
     ///   presence byte.
     /// - Spec: the base version (8 bytes), the base root, the new root, the count of
-    ///   chunks (2 bytes), and each chunk digest in rising order. A digest is its 32
-    ///   bytes.
+    ///   chunks (2 bytes), each chunk digest in rising order, the count of holders (2
+    ///   bytes), and each holder's key in rising order. A digest is its 32 bytes.
     ///
     /// # Panics
     ///
-    /// When a `Spec` change lists more than [`CHUNKS_MAX`] chunks.
+    /// When a `Spec` change lists more than [`CHUNKS_MAX`] chunks, or more than
+    /// [`HOLDERS_MAX`] holders.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Home { index, home } => {
@@ -115,7 +123,12 @@ impl Change {
                 put_public_key(*public_key, out);
                 options.encode(out);
             }
-            Self::Spec { base, root, chunks } => {
+            Self::Spec {
+                base,
+                root,
+                chunks,
+                holders,
+            } => {
                 out.push(SPEC);
                 out.extend(base.version.to_le_bytes());
                 out.extend(base.root.0);
@@ -127,6 +140,14 @@ impl Change {
                 out.extend(count.to_le_bytes());
                 for chunk in chunks {
                     out.extend(chunk.0);
+                }
+                let count = u16::try_from(holders.len())
+                    .ok()
+                    .filter(|_| holders.len() <= HOLDERS_MAX)
+                    .expect("invariant: a spec change has at most HOLDERS_MAX holders");
+                out.extend(count.to_le_bytes());
+                for &holder in holders {
+                    put_key(holder, out);
                 }
             }
         }
@@ -197,7 +218,24 @@ fn take_spec(bytes: &mut &[u8]) -> Option<Change> {
         }
         chunks.insert(chunk);
     }
-    Some(Change::Spec { base, root, chunks })
+    let count = usize::from(u16::from_le_bytes(take(bytes)?));
+    if count > HOLDERS_MAX {
+        return None;
+    }
+    let mut holders = BTreeSet::new();
+    for _ in 0..count {
+        let holder = take_key(bytes)?;
+        if holders.last().is_some_and(|&last| last >= holder) {
+            return None;
+        }
+        holders.insert(holder);
+    }
+    Some(Change::Spec {
+        base,
+        root,
+        chunks,
+        holders,
+    })
 }
 
 /// Bytes that are not a change record.
@@ -327,8 +365,25 @@ mod tests {
         expected.extend([2, 0]);
         expected.extend([3; 32]);
         expected.extend([9; 32]);
+        expected.extend([1, 0]);
+        expected.extend(1_u128.to_le_bytes());
         assert_eq!(encoded(&spec(7, 1, 2, &[3, 9])), expected);
-        assert_eq!(encoded(&spec(0, 1, 2, &[]))[73..], [0, 0]);
+        assert_eq!(encoded(&spec(0, 1, 2, &[]))[73..77], [0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn a_spec_change_whose_holders_do_not_strictly_rise_does_not_decode() {
+        for holders in [[3_u128, 3], [9, 3]] {
+            let mut bytes = encoded(&spec(7, 1, 2, &[3]));
+            bytes.truncate(107);
+            bytes.extend(2_u16.to_le_bytes());
+            for holder in holders {
+                bytes.extend(holder.to_le_bytes());
+            }
+            let length = bytes.len();
+            let error = Change::decode(&bytes).unwrap_err();
+            assert_eq!(error, Malformed::Body { kind: 4, length });
+        }
     }
 
     #[test]
@@ -339,6 +394,7 @@ mod tests {
             for chunk in chunks {
                 bytes.extend([chunk; 32]);
             }
+            bytes.extend([0, 0]);
             let length = bytes.len();
             let error = Change::decode(&bytes).unwrap_err();
             assert_eq!(error, Malformed::Body { kind: 4, length });
@@ -367,6 +423,53 @@ mod tests {
         encoded(&many(CHUNKS_MAX.checked_add(1).unwrap()));
     }
 
+    #[test]
+    fn a_spec_change_with_more_than_64_holders_does_not_decode() {
+        let change = held(HOLDERS_MAX);
+        let mut bytes = encoded(&change);
+        assert_eq!(Change::decode(&bytes), Ok(change));
+        let at = bytes.len() - HOLDERS_MAX * 16 - 2;
+        bytes[at..at + 2].copy_from_slice(&65_u16.to_le_bytes());
+        bytes.extend(u128::MAX.to_le_bytes());
+        let length = bytes.len();
+        assert_eq!(
+            Change::decode(&bytes),
+            Err(Malformed::Body { kind: 4, length })
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a spec change has at most HOLDERS_MAX holders"
+    )]
+    fn encode_of_a_spec_change_with_more_than_64_holders_panics() {
+        encoded(&held(HOLDERS_MAX.checked_add(1).unwrap()));
+    }
+
+    #[test]
+    fn a_spec_change_at_both_bounds_fits_in_34_kib() {
+        let mut change = many(CHUNKS_MAX);
+        let Change::Spec { holders, .. } = &mut change else {
+            unreachable!()
+        };
+        *holders = (0..u128::try_from(HOLDERS_MAX).unwrap())
+            .map(node::Key::from_u128)
+            .collect();
+        assert_eq!(encoded(&change).len(), 33_869);
+    }
+
+    /// A spec change with no chunk and `count` holders.
+    fn held(count: usize) -> Change {
+        let mut change = many(0);
+        let Change::Spec { holders, .. } = &mut change else {
+            unreachable!()
+        };
+        *holders = (0..u128::try_from(count).unwrap())
+            .map(node::Key::from_u128)
+            .collect();
+        change
+    }
+
     /// A spec change that lists `count` distinct chunks.
     fn many(count: usize) -> Change {
         let chunks = (0..count)
@@ -383,6 +486,7 @@ mod tests {
             },
             root: digest(2),
             chunks,
+            holders: BTreeSet::new(),
         }
     }
 
@@ -504,14 +608,16 @@ mod tests {
             any::<[u8; 32]>(),
             any::<[u8; 32]>(),
             prop::collection::btree_set(any::<[u8; 32]>(), 0..4),
+            prop::collection::btree_set(any::<u128>(), 0..4),
         )
-            .prop_map(|(version, base, root, chunks)| Change::Spec {
+            .prop_map(|(version, base, root, chunks, holders)| Change::Spec {
                 base: Pointer {
                     version,
                     root: Digest(base),
                 },
                 root: Digest(root),
                 chunks: chunks.into_iter().map(Digest).collect(),
+                holders: holders.into_iter().map(node::Key::from_u128).collect(),
             });
         prop_oneof![homes, joins, tickets, specs]
     }
