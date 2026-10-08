@@ -100,7 +100,7 @@ impl Mesh {
         // A try opens only after the puts, since its floor keeps `Applied` from a trim.
         self.check_proposer()?;
         let homes = self.keyed(indexes)?;
-        let holders = BTreeSet::from([self.key()]);
+        let holders = BTreeSet::from([self.group.borrow().raft.key()]);
         region::quorum(self.group.borrow().raft.voters(), &holders).map_err(refused)?;
         // Each chunk, not only the listed ones: the store can lack a chunk that the
         // base shares with the new tree, and `diff` never reads a shared chunk.
