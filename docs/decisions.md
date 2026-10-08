@@ -1034,8 +1034,9 @@ How to read this record:
   `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
-  Supersedes the clause "apart from two" of
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051. `Config`
+  Supersedes the clause "apart from `Config`" of
+  https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116, which
+  the `Shard::pool` ruling above made two. `Config`
   takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
   for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
   the caller gives it with no entry that waits for a commit. The condition is stated,
@@ -5017,7 +5018,7 @@ How to read this record:
   each through `home::reader`, not at its home (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
-  Supersedes the clause "Only `hub` re-exports" of
+  Supersedes the clause "Only `hub` does this" of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6030532788 for
   those values.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
