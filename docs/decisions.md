@@ -5911,13 +5911,16 @@ How to read this record:
   `Config::private_key`; both are patches until #1660 moves them to node-local disk.
   `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
   member of: its prefix, its members (one card has `Config::key`), the voters before the
-  first entry of the log, and its founding definitions. The caller gives the same
-  region at each start: the node keeps no copy of it. `None` opens no mesh. The `Option`
-  is a dark patch: the `None` stays in `node`, and no lower crate gets an `Option` of
-  the mesh. PR 4 of #585, which gives the mesh to the hub, makes the region required,
-  unless #1660 and #1744 have already taken it out of `Config`. The long-term path takes
-  it out of `Config`: the node keeps its membership in its data directory when it founds
-  or joins, and reads it at each start.
+  first entry of the log, and its founding definitions. The caller gives the same region
+  at each start: the first start with a region keeps it in the data directory, and a
+  later start with another region stops the node with `mesh::Error::Founding` (#1209,
+  `laptop.architect-2`, 2026-10-08T16:32:10Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064460084). `None`
+  opens no mesh. The `Option` is a dark patch: the `None` stays in `node`, and no lower
+  crate gets an `Option` of the mesh. PR 4 of #585, which gives the mesh to the hub,
+  makes the region required, unless #1660 and #1744 have already taken it out of
+  `Config`. The long-term path takes it out of `Config`: the node keeps its membership
+  in its data directory when it founds or joins, and reads it at each start.
   With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last shard
   has opened its buffer and before it takes the first session. Its directory is `mesh`
   in the data directory (`mesh::Config::dir`; the directory by `laptop.architect`,
