@@ -1,10 +1,11 @@
-//! The cost of a `stream::Receiver::recv` on a session between two sim nodes. Run
-//! with `cargo bench -p transport --bench recv`. A figure is the time of the polls of
-//! `recv` per message over a round, and some messages in a round cost more than
-//! others.
+//! The cost of a `stream::Receiver::recv` and a `recv_into` on a session between two
+//! sim nodes. Run with `cargo bench -p transport --bench recv`. A figure is the time
+//! of the polls of a read per message over a round, and some messages in a round cost
+//! more than others.
 //!
 //! Each round, the client sends 16 messages of one size on one `Complete` stream, and
-//! the server times each poll of `recv` until it has them. A sim sleep before each
+//! the server times each poll of its read until it has them. A `recv_into` reads into
+//! one buffer made before the bench. A sim sleep before each
 //! round lets the peer read and acknowledge. The window holds a round, so a message
 //! waits for no credit. `polls/msg` near 1 means most messages were whole at their
 //! first poll; a message that spans polls costs more. A poll also drives the session,
@@ -18,7 +19,7 @@
 use std::future;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -45,9 +46,17 @@ const CLOSED: Error = Error::PeerClosed { code: Code(0) };
 /// many more chunks.
 const SIZES: [usize; 3] = [1 << 10, 56 << 10, 1 << 20];
 const MESSAGE_BYTES_MAX: usize = 1 << 20;
+/// The reads, each over every size.
+const MODES: [Mode; 2] = [Mode::Recv, Mode::Into];
 
-/// Per size: the ns of `recv` polls per message of each round, the polls, and the
-/// allocations.
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Recv,
+    Into,
+}
+
+/// Per mode and size: the ns of read polls per message of each round, the polls, and
+/// the allocations.
 type Results = Arc<Mutex<Vec<(Vec<f64>, u64, u64)>>>;
 
 fn main() {
@@ -65,7 +74,7 @@ fn main() {
             .await
             .expect("a session");
         let clock = node.clock();
-        for bytes in SIZES {
+        for bytes in MODES.iter().flat_map(|_| SIZES) {
             let mut sender = session
                 .open_sender(Class::Complete)
                 .await
@@ -98,7 +107,8 @@ fn serve(node: &Node) -> Results {
         let config = config(&own, tasks.clone(), SERVER);
         let transport = Transport::new(config, part(&own, PORT)).expect("a transport");
         let session = transport.accept().await.expect("a session");
-        for _ in SIZES {
+        let mut buffer = vec![0; MESSAGE_BYTES_MAX];
+        for mode in MODES.iter().flat_map(|&mode| SIZES.map(|_| mode)) {
             let mut receiver = match session.accept().await {
                 Ok(incoming) => incoming.receiver,
                 Err(error) => panic!("accept: {error}"),
@@ -107,17 +117,18 @@ fn serve(node: &Node) -> Results {
             'stream: loop {
                 let mut spent = 0;
                 for _ in 0..MESSAGES {
-                    let mut recv = pin!(receiver.recv());
-                    let read = future::poll_fn(|cx| {
-                        let (poll, took, counted) = timed(|| recv.as_mut().poll(cx));
-                        spent += took;
-                        polls += 1;
-                        allocations += counted;
-                        poll
-                    })
-                    .await;
+                    let mut counts = (&mut spent, &mut polls, &mut allocations);
+                    let read = match mode {
+                        Mode::Recv => polled(pin!(receiver.recv()), &mut counts)
+                            .await
+                            .map(|message| message.map(|block: Block| block.len())),
+                        Mode::Into => {
+                            polled(pin!(receiver.recv_into(&mut buffer)), &mut counts)
+                                .await
+                        }
+                    };
                     match read {
-                        Ok(Some(message)) => drop::<Block>(message),
+                        Ok(Some(_)) => {}
                         Ok(None) => break 'stream,
                         Err(error) => panic!("read: {error}"),
                     }
@@ -134,20 +145,39 @@ fn serve(node: &Node) -> Results {
     results
 }
 
+/// Polls `read` to its end, and adds its ns, polls, and allocations to `counts`.
+async fn polled<T>(
+    mut read: Pin<&mut impl Future<Output = T>>,
+    counts: &mut (&mut u64, &mut u64, &mut u64),
+) -> T {
+    future::poll_fn(|cx| {
+        let (poll, took, counted) = timed(|| read.as_mut().poll(cx));
+        *counts.0 += took;
+        *counts.1 += 1;
+        *counts.2 += counted;
+        poll
+    })
+    .await
+}
+
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
 fn print(results: &[(Vec<f64>, u64, u64)]) {
-    println!("ns of recv polls per message, over {ROUNDS} rounds of {MESSAGES}");
+    println!("ns of read polls per message, over {ROUNDS} rounds of {MESSAGES}");
     println!(
-        "{:<10} {:>9} {:>9} {:>9} {:>10} {:>11}",
-        "bytes", "p10", "p50", "p90", "polls/msg", "allocs/msg"
+        "{:<5} {:<10} {:>9} {:>9} {:>9} {:>10} {:>11}",
+        "mode", "bytes", "p10", "p50", "p90", "polls/msg", "allocs/msg"
     );
     let messages = per((WARMUP + ROUNDS) * MESSAGES);
-    for (bytes, (nanos, polls, allocations)) in SIZES.iter().zip(results) {
+    let cases = MODES
+        .iter()
+        .flat_map(|mode| SIZES.map(|bytes| (mode, bytes)));
+    for ((mode, bytes), (nanos, polls, allocations)) in cases.zip(results) {
         let mut nanos = nanos[WARMUP..].to_vec();
         nanos.sort_unstable_by(f64::total_cmp);
         let at = |p: usize| nanos[ROUNDS * p / 100];
         println!(
-            "{bytes:<10} {:>9.1} {:>9.1} {:>9.1} {:>10.2} {:>11.2}",
+            "{:<5} {bytes:<10} {:>9.1} {:>9.1} {:>9.1} {:>10.2} {:>11.2}",
+            format!("{mode:?}"),
             at(10),
             at(50),
             at(90),
