@@ -20,8 +20,9 @@ use sim::Sim;
 use transport::stream::Incoming;
 use transport::{Address, Class, Code, Peer, Port, Transport};
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Prefix;
-use types::node::{self, PrivateKey, PublicKey, SealKey};
+use types::node::{self, PrivateKey, SealKey};
 use types::time::Span;
 use wire::Protocol;
 

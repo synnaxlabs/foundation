@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::{Name, Prefix};
-use types::node::{self, PublicKey};
+use types::node;
 
 use crate::card;
 use crate::change::{Change, Join, Malformed};

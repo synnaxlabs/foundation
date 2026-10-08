@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use env::clock::{Clock, Sleep};
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 use types::time::{Monotonic, Span};
 
 use crate::{Address, Error, quic};

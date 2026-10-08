@@ -70,9 +70,9 @@ state on `main`.
   holds the streams of each session of a carrier, so that bound does not hold for it). A
   map whose keys a peer picks is a `BTreeMap`, unless the node limits those keys to a
   small count, as `streams_max` does for the streams of one session (R16-7).
-- A key of small order needs no private key. `types::node::PublicKey::new` refuses
-  each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
-  `types`; the TLS check uses it.
+- A key of small order needs no private key. `types::ed25519::PublicKey::new`
+  refuses each one, so each check that takes a `PublicKey` has it (NODE KEY TLS).
+  Landed in `types`; the TLS check uses it.
 - Each shard signs stateless resets with one key for the node, and a connection ID
   names its shard in the first byte (ONE PORT PER NODE). A shard that gets a
   datagram with a short header for a connection of another shard signs a valid

@@ -9,7 +9,8 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::node::Node;
 use transport::{Config, Port};
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::PublicKey;
+use types::node::PrivateKey;
 use types::time::Span;
 
 pub(crate) const CLIENT: PrivateKey = PrivateKey([1; 32]);

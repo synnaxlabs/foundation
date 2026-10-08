@@ -9,6 +9,7 @@ pub mod authority;
 pub mod byte;
 pub mod channel;
 pub mod digest;
+pub mod ed25519;
 pub mod frame;
 pub mod hash;
 pub mod name;
