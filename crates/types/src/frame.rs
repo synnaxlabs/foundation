@@ -1850,6 +1850,21 @@ mod tests {
 
     proptest! {
         #[test]
+        fn zeros_only_the_padding_of_a_dirty_draft_from_lengths(
+            lens in proptest::collection::vec(0..40_usize, 4),
+        ) {
+            let (pool, set) = (pool(1 << 16), two_groups());
+            let series: Vec<_> = lens.iter().copied().enumerate().collect();
+            let mut draft = dirty_draft(&pool, Layout::new(&set, &series).unwrap());
+            let mut expected = Vec::new();
+            for &len in &lens {
+                expected.resize(expected.len().next_multiple_of(8), 0);
+                expected.extend(std::iter::repeat_n(0xff_u8, len));
+            }
+            prop_assert_eq!(draft.body_mut(), expected.as_slice());
+        }
+
+        #[test]
         fn reads_back_what_a_draft_wrote(case in cases()) {
             round_trip(&case)?;
         }
