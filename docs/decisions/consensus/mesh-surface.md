@@ -133,11 +133,16 @@
   the files of a crate, beside `buffer::Config::dir`. A change that wants it later
   moves `buffer` and `mesh` together.
   `Mesh::holder(PublicKey) -> Option<node::Key>` gives the member whose card holds a
-  public key, by a scan of the members, so a caller such as `node` admits a peer by the
-  key that its transport proves. It gives the key, not a `Member`, which a caller reads
-  with `Mesh::member` when it needs the record. A map by public key lost: it is a second
-  copy that each write of the members must keep in step. At most one member holds a
-  key: `region::State::fits` refuses a second with `Unfit::Held`, at open and at each
-  join. No change replaces a card yet; the change that first does so checks `Held`
-  against each other member. Decided by `laptop.architect` (2026-10-08T22:29:26Z):
-  https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077.
+  public key, by a scan of the members, so a caller such as `node` serves a stream of a
+  peer only when a member holds the key that its transport proves. It gives the key,
+  not a `Member`, which a caller reads with `Mesh::member` when it needs the record. A
+  map by public key lost: it is a second copy that each write of the members must keep
+  in step. At most one member holds a key: `region::State::fits` refuses a second with
+  `Unfit::Held`, at open and at each join. No change replaces a card yet; the change
+  that first does so checks `Held` against each other member. Decided by `laptop.architect` (2026-10-08T22:29:26Z):
+  https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077. The
+  scan makes `region::State::new` O(n²) in the members: 129 µs at 255 members,
+  accepted by `laptop.architect` (2026-10-08T23:10:50Z:
+  https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070861987). Trigger
+  for a map by public key: a caller of `holder` for each message, or a measured
+  `State::new` over 10 ms.
