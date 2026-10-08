@@ -463,17 +463,15 @@ impl Text {
                 .expect("invariant: a char takes at most 4 bytes")
                 .copy_from_slice(head);
             self.held = filled;
-            if filled < self.width {
-                return Ok(());
-            }
             let char = self
                 .char
                 .get(..filled)
                 .expect("invariant: a char fills 4 bytes at most");
-            if str::from_utf8(char).is_err() {
-                return Err(self.error());
+            match str::from_utf8(char) {
+                Ok(_) => self.held = 0,
+                Err(error) if error.error_len().is_none() => return Ok(()),
+                Err(_) => return Err(self.error()),
             }
-            self.held = 0;
             piece = tail;
         }
         match str::from_utf8(piece) {
@@ -2219,8 +2217,9 @@ mod tests {
 
         #[test]
         fn refuses_a_string_sample_that_is_not_utf8() {
-            let cases: [(&[u32], &[u8], usize); 7] = [
+            let cases: [(&[u32], &[u8], usize); 8] = [
                 (&[1, 3], b"a\xffb", 1),
+                (&[1, 7], b"a\xffbcdef", 1),
                 (&[1, 3], b"a\x80b", 1),
                 (&[1, 2], "\u{e9}".as_bytes(), 0),
                 (&[1, 3], b"a\xe2\x82", 1),
@@ -2250,6 +2249,17 @@ mod tests {
             elements.extend("\u{20ac}".as_bytes());
             let ends = [1_024, 1_025];
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 0 });
+        }
+
+        #[test]
+        fn takes_a_char_a_byte_at_a_time() {
+            let mut text = Text::default();
+            for byte in "\u{1f600}".bytes() {
+                assert_eq!(text.elements(&[byte]), Ok(()));
+            }
+            assert_eq!(text.end(), Ok(()));
+            let refused = [b"\xf0", b"\x9f", b"A"].map(|byte| text.elements(byte));
+            assert_eq!(refused, [Ok(()), Ok(()), Err(Error::Utf8 { sample: 1 })]);
         }
 
         #[test]
