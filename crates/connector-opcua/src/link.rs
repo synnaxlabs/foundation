@@ -339,6 +339,11 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     let outside: Vec<&str> =
         undefined.difference(&defined).map(String::as_str).collect();
     assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
+    // At `UA_MULTITHREADING` 0 the copy takes no lock.
+    assert!(
+        !outside.iter().any(|name| name.starts_with("pthread_mutex")),
+        "{outside:?}"
+    );
     let unlisted: Vec<&str> = outside
         .into_iter()
         .filter(|name| !OUTSIDE.contains(name))
@@ -412,6 +417,11 @@ fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
     let undefined = names(&objects, "--undefined-only");
     assert!(
         undefined.contains("connector_opcua_malloc"),
+        "{undefined:?}"
+    );
+    // At `UA_MULTITHREADING` 0 the copy calls no atomic.
+    assert!(
+        !undefined.iter().any(|name| name.starts_with("__aarch64_")),
         "{undefined:?}"
     );
     let unlisted: Vec<String> = undefined
