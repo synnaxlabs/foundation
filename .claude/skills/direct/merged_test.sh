@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs merged.sh against fixed answers. A stub `gh` prints `$STUB/<n>` on its call <n>,
-# and writes its arguments, one to a line, to `$STUB/args.<n>`.
-# A stub `sleep` returns at once, and stops the script when no answer is left. It keeps
-# its files in a new folder from `mktemp -d`. Exit 1 on a failure.
+# and writes its arguments, one to a line, to `$STUB/args.<n>`. A stub `date` gives a
+# fixed UTC time. A stub `sleep` returns at once, and stops the script when no answer is
+# left. It keeps its files in a new folder from `mktemp -d`. Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
@@ -19,7 +19,11 @@ cat > "$tmp/bin/sleep" <<'STUB'
 # The shell prints a note for each signal that stops a job, except SIGINT and SIGPIPE.
 [ -f "$STUB/$(($(cat "$STUB/calls") + 1))" ] || kill -PIPE "$PPID"
 STUB
-chmod +x "$tmp/bin/gh" "$tmp/bin/sleep"
+cat > "$tmp/bin/date" <<'STUB'
+#!/bin/sh
+[ "$*" = '-u +%Y-%m-%dT%H:%M:%SZ' ] && echo 2026-01-02T03:04:05Z
+STUB
+chmod +x "$tmp/bin/gh" "$tmp/bin/sleep" "$tmp/bin/date"
 failed=0
 # check <case> <want>: runs merged.sh on the answers in $tmp/<case>.
 check() {
@@ -54,10 +58,9 @@ echo '#5 +1 -1 First' > "$tmp/first/2"
 check first '#5 +1 -1 First'
 
 # Each call lists the PRs merged into main since the start, most recently updated first.
-t='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
 for n in 1 2; do
-  grep -q -x -E "base:main merged:>=$t sort:updated-desc" "$tmp/first/args.$n" &&
-    continue
+  grep -q -x -F 'base:main merged:>=2026-01-02T03:04:05Z sort:updated-desc' \
+    "$tmp/first/args.$n" && continue
   printf 'FAIL search: call %s\n' "$n"
   cat "$tmp/first/args.$n"
   failed=1
