@@ -798,6 +798,18 @@ How to read this record:
   since the bench host runs no features. Decided by `laptop.architect`
   (2026-10-07T19:05:26Z):
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
+- **NODE BENCH (#1637, 2026-10-07)** The cargo feature `bench` of `node`, off by
+  default and on only through `node`'s dev-dependency on itself, adds
+  `#[doc(hidden)] pub mod bench` with `Scope { new, spawn }` over `scope::Scope`. Only
+  the bench `benches/scope.rs` (`test = true`) uses it. Its `env::tasks::Driver` keeps
+  each task, and the bench polls that task by hand, so a time holds only
+  `Spawned::poll` and the future's poll. A `bare` line polls the boxed future directly
+  in the same binary, as the control. Lost: a time through `Node::spawn` on `sim` or
+  Tokio, which hides a 0.3 ns change in the executor's cost, and a copy of the poll
+  before `clone_from`, which #1627 decided and the `bare` control replaces. The #715
+  baseline comes from the form with `clone_from`. Decided by `laptop.architect-2`
+  (2026-10-07 23:56 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
