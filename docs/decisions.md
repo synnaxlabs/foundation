@@ -2052,8 +2052,9 @@ How to read this record:
   certificate's key only as a `PublicKey`, so a key of small order ends the handshake.
   If `PublicKey::verify` gets a check that `aws-lc-rs` does not make, both TLS verifiers
   call it. Lost: a call of `PublicKey::verify` in each TLS verifier, which moves the
-  checks of TLS 1.3 out of rustls and adds none. Decided by `laptop.architect` at
-  2026-10-08T08:04:32Z
+  check of the scheme and of the signature out of rustls, a mature library that makes
+  them, and adds no check that the handshake does not make. Decided by
+  `laptop.architect` at 2026-10-08T08:04:32Z
   (https://github.com/synnaxlabs/foundation/pull/1812#issuecomment-6055539099).
 
 ### 1.8 Consensus, regions, and the spec
@@ -2940,7 +2941,9 @@ How to read this record:
   of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, of an `Ended` is
   `Ended { .. }`, and of a `Watch` is its index only. The text of `Ended`: decided by
   `laptop.architect` (2026-10-08T04:42:48Z):
-  https://github.com/synnaxlabs/foundation/pull/1791#issuecomment-6052417077. A crate
+  https://github.com/synnaxlabs/foundation/pull/1791#issuecomment-6052417077. It
+  supersedes the `#[derive(Debug)]` of `Ended` in
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643. A crate
   outside `mesh` opens a region with `Config` and `Mesh::open`, and gives it each stream
   of a peer with `Mesh::serve`. The three are public since the senders (#1410). `Error`,
   `claim::Error`, and `region::Unfit` are public with them, because `open` and `serve`
