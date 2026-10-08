@@ -1960,8 +1960,8 @@ mod tests {
         .unwrap();
     }
 
-    // A record after a torn one, in its file or the next, was written after the torn
-    // one, whatever its version or number.
+    // A record right after a torn one, or at the start of the next file, was written
+    // after the torn one, whatever its version or number.
     #[test]
     fn refuses_a_record_of_another_version_after_a_torn_one_in_its_file() {
         let (mut sim, node) = create_node(0);
