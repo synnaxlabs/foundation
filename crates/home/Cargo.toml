@@ -7,7 +7,7 @@ publish.workspace = true
 
 [features]
 # Exposes `stored` to the `stored` bench.
-bench = []
+sim = []
 
 [dependencies]
 block = { path = "../block" }
@@ -21,8 +21,8 @@ types = { path = "../types" }
 
 [dev-dependencies]
 divan = { workspace = true }
-# Turns on `bench`, since the bench host runs no features.
-home = { path = ".", features = ["bench"] }
+# Turns on `sim`, since the bench host runs no features.
+home = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 

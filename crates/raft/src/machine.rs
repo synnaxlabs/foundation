@@ -266,6 +266,15 @@ impl Raft {
         }
     }
 
+    /// The entries that the next [`Raft::ready`] gives, in index order: appended
+    /// since the last `ready` and not yet written. A step that replaces entries
+    /// makes it start at or below the first replaced index, which can be at or
+    /// below the last index that an earlier `ready` gave.
+    #[must_use]
+    pub fn unstable(&self) -> &[Entry] {
+        self.log.unstable()
+    }
+
     /// Takes what the caller must do since the last call.
     pub fn ready(&mut self) -> Ready {
         let given = &self.given;
@@ -3099,6 +3108,24 @@ mod tests {
             assert_eq!((raft.term(), raft.leader()), (Term(3), Some(key(2))));
         }
 
+        // Only a voter that led a term at or above the committed one can forge a link.
+        #[test]
+        fn a_link_of_a_term_below_the_committed_one_is_refused() {
+            let start = Start {
+                entries: [vec![leave()], entries(&[(2, 2)])].concat(),
+                applied: 2,
+                ..start(&ALL, at_term(2))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            sent(&mut raft);
+            let heartbeat = Message {
+                proof: Some(proof(Grant::Vote, 2, &[2, 4])),
+                chain: vec![link(position(1, 3), 3, &ALL, plain(&[2, 4]))],
+                ..message(2, 3, Body::Heartbeat { commit: 0 })
+            };
+            refuses(&mut raft, heartbeat, "a term below the committed one");
+        }
+
         // Node 1 committed the leave of term 1. A second change of term 1 was voted
         // under the configuration before the term, not under the leave.
         #[test]
@@ -3352,6 +3379,30 @@ mod tests {
             let terms: Vec<Term> =
                 raft.ready().entries.iter().map(|e| e.at.term).collect();
             assert_eq!(terms, [Term(1), Term(2)]);
+        }
+
+        #[test]
+        fn unstable_starts_at_the_first_entry_that_a_step_replaces() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1), (1, 2)]), 0);
+            raft.step(message(2, 1, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(1, 1), (1, 2)]));
+            assert_eq!(raft.ready().entries, entries(&[(1, 1), (1, 2)]));
+            assert_eq!(raft.unstable(), []);
+            let body = append(position(1, 1), entries(&[(2, 2), (2, 3)]), 0);
+            raft.step(message(3, 2, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(2, 2), (2, 3)]));
+            assert_eq!(raft.ready().entries, entries(&[(2, 2), (2, 3)]));
+        }
+
+        #[test]
+        fn unstable_keeps_its_start_when_a_step_replaces_an_entry_not_given() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1), (1, 2)]), 0);
+            raft.step(message(2, 1, body)).unwrap();
+            let body = append(position(1, 1), entries(&[(2, 2)]), 0);
+            raft.step(message(3, 2, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(1, 1), (2, 2)]));
         }
 
         // The term, the vote, and the leader move only for a message that is

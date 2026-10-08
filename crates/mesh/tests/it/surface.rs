@@ -201,6 +201,27 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
+// For one set of voters, the members and the voters are the same for each place, so
+// no rule that reads only them gives the key of each of the three nodes. With one
+// voter, two places are not voters. With three, two places are not the first voter.
+#[test]
+fn key_gives_the_key_of_the_config() {
+    for voters in [1..=1, 1..=3] {
+        for place in [1, 2, 3] {
+            let voters = voters.clone();
+            solo(move |node, tasks| async move {
+                let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
+                let config = Config {
+                    voters: voters.map(key).collect(),
+                    ..create_voter_config(&node, &tasks, place, members.into())
+                };
+                let mesh = Mesh::open(config).await.unwrap();
+                assert_eq!(mesh.key(), key(place));
+            });
+        }
+    }
+}
+
 #[test]
 fn open_panics_on_a_transport_that_proves_another_key() {
     let ran = run(|node, tasks| async move {
@@ -384,7 +405,8 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 }
 
 #[test]
-fn watch_member_next_serve_and_set_home_have_the_signatures_that_a_caller_holds() {
+fn key_watch_member_next_serve_and_set_home_have_the_signatures_that_a_caller_holds() {
+    let _: fn(&Mesh) -> node::Key = Mesh::key;
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
     assert_gives_a_home(Watch::next);

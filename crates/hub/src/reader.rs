@@ -89,8 +89,8 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A reader session through the reader's channels, with a fixed credit window.
-/// Dropping it closes the session; frames that wait do not go out.
+/// A reader session through the reader's channels. Dropping it closes the session;
+/// frames that wait do not go out.
 #[derive(Debug)]
 pub struct Reader {
     session: Session,
@@ -175,8 +175,7 @@ impl Reader {
 }
 
 /// A session at the shard's home, through a mask of the reader's channels: the frames
-/// it takes, and why it ends. Each [`Reader`] drives one, and so does each stream of a
-/// remote reader.
+/// it takes, and why it ends. Each [`Reader`] drives one.
 #[derive(Debug)]
 pub(crate) struct Session {
     state: Rc<RefCell<State>>,
