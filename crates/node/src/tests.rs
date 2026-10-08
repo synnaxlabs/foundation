@@ -2676,6 +2676,19 @@ mod port {
             .expect("the run ends")
         }
 
+        /// Whether `node.key` holds a key.
+        fn key_written(sim: &mut sim::Sim, host: &sim::node::Node) -> bool {
+            sim.run_on(host, |host, _| async move {
+                let mode = env::files::Mode::Create { len: LEN as u64 };
+                let file = host.files().open(Path::new(FILE), mode).await;
+                let pool = block::Pool::heap(block::Config { budget: 4096 });
+                let into = pool.alloc(LEN).expect("a block");
+                let read = file.expect("opens").read_at(0, into).await;
+                read.expect("reads").starts_with(b"foundation/key/1")
+            })
+            .expect("the run ends")
+        }
+
         /// The bytes of the identity [`OWN`], [`KEY`].
         fn own() -> Vec<u8> {
             let identity = Identity {
@@ -2902,31 +2915,29 @@ mod port {
             assert_eq!(made[16..32], key.as_u128().to_be_bytes());
         }
 
-        /// A failed sync of the directory gives `Error::Directory`, so no key is
-        /// proven before its name is durable.
+        /// A failed sync of the directory after the key's write stops the node, so
+        /// no key is proven before its name is durable. The fault comes at each time
+        /// of the first start, because the claim and the buffers sync the directory
+        /// first.
         #[test]
-        fn a_failed_sync_of_the_directory_fails_the_load() {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 1);
-            host.fail_file(Path::new(""), env::files::Operation::SyncDir);
-            let loaded = sim
-                .run_on(&host, |host, tasks| async move {
-                    let (driver, clock) = ::clock::Clock::new(host.clock());
-                    let wall = host.wall();
-                    tasks.spawn(async move { driver.run(wall).await });
-                    identity::load(&host.files(), &clock, &host.entropy())
-                        .await
-                        .map(|identity| identity.key)
-                })
-                .expect("the run ends");
-            assert_eq!(
-                loaded,
-                Err(Error::Directory(env::files::Error::Io {
-                    path: PathBuf::new(),
-                    operation: env::files::Operation::SyncDir,
-                    code: 5,
-                }))
-            );
+        fn a_failed_sync_of_the_directory_stops_the_node() {
+            let error = Err(Error::Directory(env::files::Error::Io {
+                path: PathBuf::new(),
+                operation: env::files::Operation::SyncDir,
+                code: 5,
+            }));
+            let stopped = (0..200).any(|step| {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+                assert_eq!(sim.run_for(Span::from_nanos(step * 25_000)), Ok(()));
+                host.fail_file(Path::new(""), env::files::Operation::SyncDir);
+                assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+                node.stop();
+                assert_eq!(sim.run(), Ok(()));
+                node.join() == error && key_written(&mut sim, &host)
+            });
+            assert!(stopped, "no start stopped at the sync of the directory");
         }
 
         /// A failed sync of a new key stops the node, and can leave the key in the
