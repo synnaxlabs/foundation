@@ -1946,8 +1946,9 @@ mod tests {
         assert_eq!(cluster.take(), (Vec::new(), homes));
     }
 
+    // The others reach node 3 on the sessions that it dialed.
     #[test]
-    fn the_other_voters_agree_when_the_card_of_a_voter_has_no_address() {
+    fn each_voter_agrees_when_the_card_of_a_voter_has_no_address() {
         let mut cluster = Cluster::new(5);
         cluster.board.lock().unwrap().hidden = Some(3);
         cluster.script(home);
@@ -1957,11 +1958,8 @@ mod tests {
         let &[leader] = led.as_slice() else {
             panic!("the group took a proposal from each of {led:?}");
         };
-        let home = |id| match id {
-            3 => (id, vec![None]),
-            _ => (id, vec![None, Some(key(leader))]),
-        };
-        assert_eq!(homes, IDS.map(home).into());
+        let homes_of = |id| (id, vec![None, Some(key(leader))]);
+        assert_eq!(homes, IDS.map(homes_of).into());
     }
 
     #[test]
@@ -5561,7 +5559,8 @@ mod tests {
         });
     }
 
-    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
+    /// The drop of the last mesh stops each wait for a dial, and `ended` does not wait
+    /// for the dial.
     #[test]
     fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
         for seed in 0..32 {

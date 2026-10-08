@@ -2795,11 +2795,10 @@ mod tests {
         });
         testing::shard(&client, testing::CLIENT, move |config, node| async move {
             let pool = Rc::clone(&config.pool);
-            let part = testing::part(&node.net(), testing::address(&node));
-            let transport = Transport::new(config, part).expect("a transport");
+            let transports = testing::transports(&config, &node, 2);
             let server = testing::SERVER.public();
-            let ended = transport.dial(server, &at).await.expect("a session");
-            let waiting = transport.dial(server, &at).await.expect("a session");
+            let ended = transports[0].dial(server, &at).await.expect("a session");
+            let waiting = transports[1].dial(server, &at).await.expect("a session");
             let messages = [(&waiting, 0), (&waiting, 1), (&ended, 2)];
             for (session, byte) in messages {
                 let opened = session.open_sender(Class::Complete).await;
@@ -2945,11 +2944,11 @@ mod tests {
         testing::shard(&client, testing::CLIENT, move |config, node| async move {
             let tasks = config.tasks.clone();
             let pool = Rc::clone(&config.pool);
-            let part = testing::part(&node.net(), testing::address(&node));
-            let transport = Transport::new(config, part).expect("a transport");
+            let count = u8::try_from(sessions).expect("a few sessions");
+            let transports = testing::transports(&config, &node, count);
             let server = testing::SERVER.public();
             let mut held = Vec::new();
-            for _ in 0..sessions {
+            for transport in &transports {
                 let session = transport.dial(server, &at).await.expect("a session");
                 let streams = [(0, Class::Complete, 2), (1, Class::Latest, 3)];
                 for (byte, class, count) in streams {
@@ -2968,7 +2967,7 @@ mod tests {
                 held.push(session);
             }
             std::future::pending::<()>().await;
-            drop((transport, held));
+            drop((transports, held));
         });
         assert_eq!(sim.run_for(spans(Span::SECOND, 60)), Ok(()));
         let count = |counts: &[AtomicU32; 2]| {

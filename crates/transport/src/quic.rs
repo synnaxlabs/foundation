@@ -42,7 +42,7 @@ use crate::message::Reader;
 use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
-pub(crate) use self::carrier::{Carrier, Session};
+pub(crate) use self::carrier::{Carrier, Dialer, Session};
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
 pub(crate) use self::settings::{Role, Setup};
@@ -269,6 +269,12 @@ impl Endpoint {
         let connections = self.connections.iter_mut().flatten();
         let closed = connections.filter_map(|connection| connection.fail(error));
         self.events.extend(closed);
+    }
+
+    /// Whether the connection of `key` has not ended. A close ends it at once.
+    pub(crate) fn live(&self, key: connection::Key) -> bool {
+        let connection = self.connections.get(key.handle.0).and_then(Option::as_ref);
+        connection.is_some_and(|connection| connection.key == key && connection.live())
     }
 
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
