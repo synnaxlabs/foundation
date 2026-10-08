@@ -104,9 +104,10 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when `config.idle` is not positive, `config.window_bytes` is
-    /// below `config.message_bytes_max`, or `config.message_bytes_max` is below 1472
-    /// or over `config.pool.largest()`.
+    /// [`Error::Config`] when `config.idle` is not positive, the message limit (the
+    /// smaller of `config.message_bytes_max` and `config.pool.largest()`) is below
+    /// 1472, the largest UDP payload a node takes, or `config.window_bytes` is below
+    /// that limit.
     ///
     /// ```
     /// use transport::{Config, Error, Transport, port};
@@ -256,10 +257,9 @@ impl fmt::Debug for Transport {
 pub struct Config {
     /// The node's key. Peers authenticate the node by its public key.
     pub private_key: PrivateKey,
-    /// The largest message this node accepts on a stream, and the largest datagram.
-    /// Peers exchange their limits in the handshake, and each sender checks the
-    /// peer's. Must be at least 1472, the largest UDP payload a node takes, and at
-    /// most `pool.largest()`.
+    /// The largest message this node accepts on a stream, and the largest datagram,
+    /// at most `pool.largest()`: the transport takes the smaller of the two. Peers
+    /// exchange their limits in the handshake, and each sender checks the peer's.
     pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.
@@ -285,18 +285,24 @@ pub struct Config {
 }
 
 impl Config {
+    /// The largest message this node takes: `message_bytes_max`, clipped to the
+    /// largest block of the pool.
+    pub(crate) fn message_limit(&self) -> usize {
+        self.message_bytes_max.get().min(self.pool.largest())
+    }
+
     /// The first rule of [`Transport::new`] that this config breaks. A field's own
     /// range comes before its relation to another field, so the error names the field
     /// to change.
     fn check(&self) -> Result<(), Error> {
-        let message_bytes_max = self.message_bytes_max.get();
+        let limit = self.message_limit();
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
-        } else if message_bytes_max < MESSAGE_BYTES_MIN {
+        } else if limit < MESSAGE_BYTES_MIN && limit < self.message_bytes_max.get() {
+            ("pool", "must hold a message of at least 1472 bytes")
+        } else if limit < MESSAGE_BYTES_MIN {
             ("message_bytes_max", "must be at least 1472")
-        } else if message_bytes_max > self.pool.largest() {
-            ("message_bytes_max", "must be at most pool.largest()")
-        } else if self.window_bytes < message_bytes_max {
+        } else if self.window_bytes < limit {
             ("window_bytes", "must be at least message_bytes_max")
         } else {
             return Ok(());
@@ -317,7 +323,7 @@ mod tests {
 
     use super::{Config, Error, Transport};
     use crate::testing::{self, Shard};
-    use crate::{Address, Code, Peer, Port};
+    use crate::{Address, Class, Code, Peer, Port};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -330,9 +336,9 @@ mod tests {
         field: "message_bytes_max",
         rule: "must be at least 1472",
     };
-    const CEILING: Error = Error::Config {
-        field: "message_bytes_max",
-        rule: "must be at most pool.largest()",
+    const POOL: Error = Error::Config {
+        field: "pool",
+        rule: "must hold a message of at least 1472 bytes",
     };
     const WINDOW: Error = Error::Config {
         field: "window_bytes",
@@ -376,8 +382,8 @@ mod tests {
                 (Span::ZERO, message, message, IDLE),
                 (Span::from_nanos(-1), message, message, IDLE),
                 (Span::SECOND, 1471, 1471, FLOOR),
-                (Span::SECOND, largest + 1, largest + 1, CEILING),
                 (Span::SECOND, message - 1, message, WINDOW),
+                (Span::SECOND, largest - 1, largest + 1, WINDOW),
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
@@ -398,7 +404,6 @@ mod tests {
                 (Span::ZERO, largest + 1, largest + 1, IDLE),
                 (Span::ZERO, 0, 1 << 16, IDLE),
                 (Span::SECOND, 0, 1471, FLOOR),
-                (Span::SECOND, 0, largest + 1, CEILING),
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
@@ -411,22 +416,63 @@ mod tests {
     }
 
     #[test]
-    fn new_gives_the_floor_before_the_ceiling_of_a_small_pool() {
+    fn new_takes_a_message_limit_over_the_pool_and_a_window_of_the_pool() {
+        testing::run(0, |shard| {
+            let largest = largest(shard);
+            for message in [largest + 1, usize::MAX] {
+                let config = config(shard, Span::SECOND, largest, message);
+                let new = Transport::new(config, shard.part());
+                assert_eq!(new.err(), None, "{message} bytes");
+            }
+        });
+    }
+
+    #[test]
+    fn new_names_the_pool_when_its_largest_block_is_below_the_floor() {
         testing::run(0, |shard| {
             let budget = block::Config { budget: 1 << 10 };
             let memory = Heap::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
-            assert!(pool.largest() < 1000, "{} bytes", pool.largest());
-            for (message, error) in [(1000, FLOOR), (1472, CEILING)] {
-                let mut config = config(shard, Span::SECOND, message, message);
+            let largest = pool.largest();
+            assert!(largest < 1000, "{largest} bytes");
+            for (window, message, error) in [
+                (1 << 16, 1000, POOL),
+                (1 << 16, 1472, POOL),
+                (0, 1472, POOL),
+                (1 << 16, largest, FLOOR),
+            ] {
+                let mut config = config(shard, Span::SECOND, window, message);
                 config.pool = Rc::clone(&pool);
                 assert_eq!(
                     Transport::new(config, shard.part()).err(),
                     Some(error),
-                    "{message} bytes"
+                    "window {window}, message {message}"
                 );
             }
         });
+    }
+
+    #[test]
+    fn a_peer_sees_the_message_limit_of_the_pool() {
+        let (mut sim, _, _) = testing::sessions(
+            0,
+            |config| Config {
+                message_bytes_max: NonZeroUsize::MAX,
+                window_bytes: config.pool.largest(),
+                ..config
+            },
+            // Both sides have pools of the same budget.
+            |side| async move {
+                let opened = side.session.open_sender(Class::Command).await;
+                let sender = opened.expect("a stream");
+                assert_eq!(sender.bytes_max(), side.pool.largest());
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]

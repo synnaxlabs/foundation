@@ -134,7 +134,7 @@ impl Endpoint {
             inner: endpoint,
             datagrams_max: datagrams_max.min(settings::BATCH_MAX),
             pool: Rc::clone(&config.pool),
-            message_bytes_max: config.message_bytes_max.get(),
+            message_bytes_max: config.message_limit(),
             window_bytes: config.window_bytes,
             connections: Vec::new(),
             serial: 0,

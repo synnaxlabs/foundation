@@ -229,7 +229,7 @@ fn transport(config: &Config) -> TransportConfig {
         .max_outgoing_bytes_per_second(None)
         .crypto_buffer_size(16 << 10)
         .allow_spin(false)
-        .datagram_receive_buffer_size(Some(config.message_bytes_max.get()))
+        .datagram_receive_buffer_size(Some(config.message_limit()))
         .datagram_send_buffer_size(DATAGRAM_QUEUE_BYTES_MAX)
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
@@ -726,6 +726,21 @@ mod tests {
 
     mod datagrams {
         use super::*;
+
+        #[test]
+        fn the_limit_a_peer_gets_is_the_largest_block_of_the_pool() {
+            testing::run(1, |shard| {
+                let pair = Pair::with(shard, Span::SECOND, DELAY, |config| {
+                    config.message_bytes_max = NonZeroUsize::MAX;
+                    config.window_bytes = config.pool.largest();
+                });
+                let largest =
+                    shard.config(pair::SERVER_KEY, Span::SECOND).pool.largest();
+                let shown = format!("{:?}", pair.server.endpoint.settings.transport);
+                let limit = format!("datagram_receive_buffer_size: Some({largest}),");
+                assert!(shown.contains(&limit), "{shown}");
+            });
+        }
 
         #[test]
         fn to_a_peer_that_takes_none_are_too_large_at_any_size() {

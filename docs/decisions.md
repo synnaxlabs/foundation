@@ -1814,6 +1814,13 @@ How to read this record:
   19:55 UTC):
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
+  `Transport::new` takes the smaller of `Config::message_bytes_max` and
+  `pool.largest()` as the message limit, so no caller clips it. The hello, the QUIC
+  datagram limit, and each check on the send side use that limit. When it is below 1472
+  because of the pool, `Error::Config` names `pool`. Lost: an `Option` field whose
+  `None` means `pool.largest()`, which keeps the error and adds a case to each caller.
+  Decided by `laptop.architect-2` (#1659, 2026-10-08T06:05:25Z):
+  https://github.com/synnaxlabs/foundation/issues/1659#issuecomment-6053512557.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
