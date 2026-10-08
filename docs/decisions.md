@@ -3885,7 +3885,7 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6040051975), and
   its plan review, 2026-10-08T17:01:08Z
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210).
-  `Founding::homes` gives a founding index its home (#1931).
+  `Founding::homes` gives the home of each founding index that it holds (#1931).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
