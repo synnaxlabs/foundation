@@ -24,11 +24,9 @@ pub fn round_trip_message(bytes: &[u8]) -> Option<Vec<u8>> {
 /// The bytes that the `raft` entries in `bytes`, one after another as the log and an
 /// append hold them, encode to, or `None` when `bytes` is not such entries.
 #[must_use]
-pub fn round_trip_entries(mut bytes: &[u8]) -> Option<Vec<u8>> {
+pub fn round_trip_entries(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    while !bytes.is_empty() {
-        entry::encode(&entry::decode(&mut bytes)?, &mut out);
-    }
+    entry::encode(&entry::decode(bytes)?, &mut out);
     Some(out)
 }
 
