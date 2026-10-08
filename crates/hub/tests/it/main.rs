@@ -565,6 +565,7 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
 }
 
 /// Sessions that outlive the hub keep the commit task: it ends once the last drops.
+/// The hub drops while the task sleeps, so the write after it must wake the task.
 #[test]
 fn ends_the_commit_task_once_each_session_that_outlives_the_hub_drops() {
     run(23, |test| async move {
@@ -579,6 +580,7 @@ fn ends_the_commit_task_once_each_session_that_outlives_the_hub_drops() {
             ended,
             ..
         } = test;
+        clock.sleep(SETTLE).await;
         drop((hub, commit));
         clock.sleep(SETTLE).await;
         assert_eq!(ended.get(), 0, "the sessions hold the home");
