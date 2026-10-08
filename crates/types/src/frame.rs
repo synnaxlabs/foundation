@@ -819,9 +819,11 @@ fn bounds(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, usize) {
 /// Where a series that ends at `end` stops with its padding, and the next one starts.
 /// Saturates at `usize::MAX`.
 const fn padded(end: usize) -> usize {
-    match end.checked_next_multiple_of(SERIES_ALIGN) {
-        Some(start) => start,
-        None => usize::MAX,
+    let (sum, over) = end.overflowing_add(SERIES_ALIGN - 1);
+    if over {
+        usize::MAX
+    } else {
+        sum & !(SERIES_ALIGN - 1)
     }
 }
 
@@ -1913,6 +1915,16 @@ mod tests {
         let max = usize::MAX;
         let ends: Vec<_> = super::ends([(0, max), (1, 1)]).collect();
         assert_eq!(ends, [(0, max), (1, max)]);
+    }
+
+    proptest! {
+        #[test]
+        fn pads_an_end_to_a_multiple_of_8_or_saturates(
+            end in prop_oneof![any::<usize>(), usize::MAX - 16..=usize::MAX, 0..17_usize],
+        ) {
+            let expected = end.checked_next_multiple_of(SERIES_ALIGN);
+            prop_assert_eq!(padded(end), expected.unwrap_or(usize::MAX));
+        }
     }
 
     #[test]
