@@ -17,13 +17,11 @@ use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
-use spec::definition::Definition;
 use spec::tree::Chunks;
 use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
-use types::name::{Name, Prefix};
 use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -75,19 +73,8 @@ pub struct Config {
     pub key: node::Key,
     /// This node's private key. It signs the node's claims.
     pub private_key: PrivateKey,
-    /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
-    pub region: Prefix,
-    /// Each member of the region, this node included, one record for each node. A
-    /// member's peer proves the public key of its card, and that key signs the member's
-    /// claims.
-    pub members: Vec<Member>,
-    /// The voters before the first entry of the log, the same at each open. Each is a
-    /// member. A node that joins gives the founding voters from its join answer. A node
-    /// with no voter takes no request.
-    pub voters: BTreeSet<node::Key>,
-    /// The definitions of the region before the first change of its spec, by tree key,
-    /// the same at each open. A node that joins gives them from its join answer.
-    pub founding: BTreeMap<Name, Definition>,
+    /// The region before the first entry of its log, the same at each open.
+    pub founding: region::Founding,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
     /// The mesh's directory, relative to the data directory. The mesh makes it, and
@@ -154,11 +141,12 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// - [`Error::Member`] when the region cannot hold one of `config.members`, or two
-    ///   name one node.
-    /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
+    /// - [`Error::Member`] when the region cannot hold one of
+    ///   `config.founding.members`, or two name one node.
+    /// - [`Error::NotMember`] when `config.founding.members` lacks this node or a
+    ///   voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
-    ///   `config.members`.
+    ///   `config.founding.members`.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
     /// - [`Error::Log`] when the log does not open.
@@ -191,16 +179,17 @@ impl Mesh {
     // Opens the group with no task that sends: `outgoing` gives each message.
     async fn start(config: Config) -> Result<Self, Error> {
         let mut chunks = Chunks::default();
-        let founding = spec::region::tree(&mut chunks, &config.founding);
-        let state = region::State::new(
-            config.region,
-            config.members,
-            founding.root,
-            config.voters.clone(),
-        )
-        .map_err(Error::Member)?;
-        check_members(&state, config.key, &config.private_key, &config.voters)?;
-        put(&config.store, &config.pool, &chunks, &founding.chunks).await?;
+        let region::Founding {
+            prefix,
+            members,
+            voters,
+            definitions,
+        } = config.founding;
+        let tree = spec::region::tree(&mut chunks, &definitions);
+        let state = region::State::new(prefix, members, tree.root, voters.clone())
+            .map_err(Error::Member)?;
+        check_members(&state, config.key, &config.private_key, &voters)?;
+        put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
@@ -208,7 +197,7 @@ impl Mesh {
         let start = Start {
             hard: stored.hard,
             voters: Voters {
-                incoming: config.voters,
+                incoming: voters,
                 outgoing: BTreeSet::new(),
             },
             entries: stored.entries,
@@ -826,12 +815,12 @@ impl Group {
                 },
                 Data::Voters(change) => {
                     self.state.set_voters(change.voters);
-                    Ok(None)
+                    Ok(false)
                 }
-                Data::Empty => Ok(None),
+                Data::Empty => Ok(false),
             };
             // A refused change is a no-op on every node.
-            if let Ok(Some(_)) = applied {
+            if let Ok(true) = applied {
                 self.wake_watches();
             }
             self.applied.push(at, applied.map(|_| ()));
@@ -1142,8 +1131,10 @@ mod tests {
     use env::files::{self, Operation};
     use raft::{Answer, Grant, Hard, Proof, Term};
     use sim::{Crash, Sim, link};
+    use spec::definition::Definition;
     use spec::tree;
     use transport::{Address, Peer, Port};
+    use types::name::{Name, Prefix};
     use types::node::SealKey;
     use types::time::Monotonic;
     use wire::Protocol;
@@ -1163,6 +1154,8 @@ mod tests {
     /// The idle time of each transport.
     const IDLE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
     const INDEX: channel::Key = channel::Key::from_u128(7);
+    /// An index that a spec change can add after `INDEX`.
+    const SECOND: channel::Key = channel::Key::from_u128(8);
 
     /// What each node's watch gave, in order.
     type Homes = BTreeMap<u8, Vec<Option<node::Key>>>;
@@ -1173,6 +1166,7 @@ mod tests {
         root: Digest,
         chunks: BTreeSet<Digest>,
         holders: BTreeSet<node::Key>,
+        homes: BTreeMap<channel::Key, node::Key>,
     }
 
     /// What the voters of a cluster did and what they do next.
@@ -1196,6 +1190,8 @@ mod tests {
         hidden: Option<u8>,
         /// The records of those members on each node, at the same time.
         records: BTreeMap<u8, BTreeMap<u8, Member>>,
+        /// The home of `SECOND` on each node, at the same time.
+        seconds: BTreeMap<u8, Option<node::Key>>,
         /// The region state of each node, at the same time.
         states: BTreeMap<u8, region::State>,
         /// The spec pointer of each node, at the same time.
@@ -1268,10 +1264,12 @@ mod tests {
         Config {
             key: key(id),
             private_key: private(id),
-            region: "plant".parse().unwrap(),
-            members: common::create_members(members),
-            voters: voters.iter().map(|&id| key(id)).collect(),
-            founding: BTreeMap::new(),
+            founding: region::Founding {
+                prefix: "plant".parse().unwrap(),
+                members: common::create_members(members),
+                voters: voters.iter().map(|&id| key(id)).collect(),
+                definitions: BTreeMap::new(),
+            },
             files: node.files(),
             dir: PathBuf::new(),
             clock: node.clock(),
@@ -1287,6 +1285,20 @@ mod tests {
             pool,
             store: Rc::new(store),
         }
+    }
+
+    /// As [`config_at`], with the record of [`create_voter`] for each of `members`.
+    async fn dialed_at(
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        id: u8,
+        port: u16,
+        members: &[u8],
+        voters: &[u8],
+    ) -> Config {
+        let mut config = config_at(node, tasks, id, port, members, voters).await;
+        config.founding.members = members.iter().map(|&of| create_voter(of)).collect();
+        config
     }
 
     /// A transport of node `id` at `port` of `node`, with `pool`. Port 0 is a free
@@ -1552,8 +1564,9 @@ mod tests {
                 root,
                 chunks,
                 holders,
+                homes,
             } = spec;
-            let result = mesh.settle_spec(base, root, chunks, holders).await;
+            let result = mesh.settle_spec(base, root, chunks, holders, homes).await;
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
         }
@@ -1706,11 +1719,9 @@ mod tests {
                 create_voter(of)
             }
         };
-        let config = Config {
-            members: IDS.map(member).into(),
-            founding,
-            ..base
-        };
+        let mut config = base;
+        config.founding.members = IDS.map(member).into();
+        config.founding.definitions = founding;
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, streams) = (mesh.clone(), tasks.clone());
         tasks.spawn(async move {
@@ -1725,7 +1736,9 @@ mod tests {
                 .collect();
             // No call of `Mesh` gives the use count of a ticket.
             let state = mesh.group.borrow().state.clone();
+            let second = mesh.watch(SECOND).next().await.unwrap();
             let mut board = board.lock().unwrap();
+            board.seconds.insert(id, second);
             board.states.insert(id, state);
             board.pointers.insert(id, mesh.pointer());
             board.homes.entry(id).or_default().push(home);
@@ -1827,11 +1840,11 @@ mod tests {
                 .map(|(name, value)| tree::Change::Set(name.clone(), value.encode()));
             let update =
                 tree::apply(&mut Chunks::default(), tree::empty(), sets).unwrap();
-            let config = Config {
-                founding,
+            let mut config = Config {
                 dir: PathBuf::from("other"),
                 ..config(&node, &tasks, 1, &[1], &[1]).await
             };
+            config.founding.definitions = founding;
             let mesh = Mesh::start(config).await.unwrap();
             let expected = Pointer {
                 version: 0,
@@ -1858,6 +1871,7 @@ mod tests {
             root: common::digest(byte),
             chunks: [common::digest(byte)].into(),
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         let changes = [change(1), change(2), home(1)];
         cluster.script_each(&changes.map(|change| encoded(&change)));
@@ -1898,6 +1912,7 @@ mod tests {
             root: common::digest(1),
             chunks,
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         cluster.script_each(&[encoded(&change), encoded(&home(1))]);
         cluster.start_voter(1);
@@ -2899,7 +2914,7 @@ mod tests {
                 let mut card = common::member(2).card.card().clone();
                 card.name = "plant.node4".parse().unwrap();
                 let card = card::Signed::sign(key(4), card, &private(2));
-                config.members.push(Member {
+                config.founding.members.push(Member {
                     card,
                     ..common::member(4)
                 });
@@ -5148,10 +5163,8 @@ mod tests {
     #[test]
     fn the_root_region_takes_a_join_of_a_node_with_any_name() {
         solo(|node, tasks| async move {
-            let config = Config {
-                region: Prefix::ROOT,
-                ..config(&node, &tasks, 1, &[1], &[1]).await
-            };
+            let mut config = config(&node, &tasks, 1, &[1], &[1]).await;
+            config.founding.prefix = Prefix::ROOT;
             let mesh = Mesh::open(config).await.unwrap();
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(None));
@@ -5319,7 +5332,7 @@ mod tests {
                 let second = second.clone();
                 solo(move |node, tasks| async move {
                     let mut config = config(&node, &tasks, 1, &[1, 2, 3], &[1]).await;
-                    config.members.insert(at, second);
+                    config.founding.members.insert(at, second);
                     let opened = Mesh::start(config).await.err();
                     let duplicate =
                         Some(Error::Member(Unfit::Duplicate { key: key(2) }));
@@ -5550,10 +5563,7 @@ mod tests {
     /// The config of node 1 of `IDS`, through `Mesh::open`. No node serves the
     /// address of another member, so each dial waits for [`IDLE`].
     async fn dialing(node: &sim::node::Node, tasks: &Tasks) -> Config {
-        Config {
-            members: IDS.iter().map(|&id| create_voter(id)).collect(),
-            ..config(node, tasks, 1, &IDS, &IDS).await
-        }
+        dialed_at(node, tasks, 1, 0, &IDS, &IDS).await
     }
 
     #[test]
@@ -5615,10 +5625,8 @@ mod tests {
     #[test]
     fn ended_resolves_when_the_group_stops() {
         solo(|node, tasks| async move {
-            let config = Config {
-                voters: [key(1)].into_iter().collect(),
-                ..dialing(&node, &tasks).await
-            };
+            let mut config = dialing(&node, &tasks).await;
+            config.founding.voters = [key(1)].into_iter().collect();
             let mesh = Mesh::open(config).await.unwrap();
             let cause = fail_sync(&node);
             let mut watch = mesh.watch(INDEX);
@@ -5717,10 +5725,8 @@ mod tests {
             let mut tree = Chunks::default();
             let update = spec::region::tree(&mut tree, &founding);
             assert!(update.chunks.len() > 1, "{} chunks", update.chunks.len());
-            let config = Config {
-                founding,
-                ..config(&node, &tasks, 1, &[1], &[1]).await
-            };
+            let mut config = config(&node, &tasks, 1, &[1], &[1]).await;
+            config.founding.definitions = founding;
             let store = Rc::clone(&config.store);
             Mesh::start(config).await.unwrap();
             for digest in update.chunks {
@@ -5734,10 +5740,8 @@ mod tests {
     fn open_gives_a_failed_put_of_a_founding_chunk() {
         solo(|node, tasks| async move {
             let founding = apply::create_subjects(&["plant.a"], 1);
-            let config = Config {
-                founding,
-                ..config(&node, &tasks, 1, &[1], &[1]).await
-            };
+            let mut config = config(&node, &tasks, 1, &[1], &[1]).await;
+            config.founding.definitions = founding;
             node.fail_file(Path::new(BLOB), Operation::SyncDir);
             let cause = files::Error::Io {
                 path: BLOB.into(),
@@ -6044,9 +6048,8 @@ mod tests {
                 entries,
                 commit,
             } = opening;
-            let config = async |tasks: &Tasks, port| Config {
-                members: MEMBERS.map(create_voter).into(),
-                ..config_at(&own, tasks, id, port, &MEMBERS, &voters).await
+            let config = async |tasks: &Tasks, port| {
+                dialed_at(&own, tasks, id, port, &MEMBERS, &voters).await
             };
             let first = config(&tasks, PORT).await;
             let transport = Rc::clone(&first.transport);
@@ -6701,10 +6704,7 @@ mod tests {
             id: u8,
             bodies: Arc<Mutex<Vec<Body>>>,
         ) -> ! {
-            let config = Config {
-                members: IDS.map(create_voter).into(),
-                ..config_at(&node, &tasks, id, PORT, &IDS, &IDS).await
-            };
+            let config = dialed_at(&node, &tasks, id, PORT, &IDS, &IDS).await;
             let transport = Rc::clone(&config.transport);
             let mesh = Mesh::open(config).await.unwrap();
             if id == 1 {

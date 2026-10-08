@@ -51,6 +51,10 @@ const BEHIND: u8 = 3;
 pub const UNKNOWN: u32 = 16;
 /// Stop code: the node is not the home of the open's index.
 pub const NOT_HOME: u32 = 17;
+/// Stop code: the home's buffer failed.
+pub const FAILED: u32 = 18;
+/// Stop code: the home had no memory for a reply. A later open can succeed.
+pub const BUSY: u32 = 19;
 
 /// The first message from the reader's node, which opens the session. The run of its
 /// [`keys`] follows.
@@ -490,14 +494,13 @@ pub enum Error {
         /// The bytes of the body.
         length: u64,
     },
-    /// A message of the other client stream: a request or a response on the hello
-    /// stream.
-    Mixed {
-        /// The kind byte of the message.
-        kind: u8,
-    },
     /// A message comes after the body of a request or a response.
     Trailing,
+    /// The stream ended before its body.
+    Unfinished {
+        /// The bytes of the body that did not come.
+        remain: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -556,13 +559,13 @@ impl fmt::Display for Error {
                 "the body has {length} bytes, over the cap of {}",
                 client::BODY_BYTES_MAX
             ),
-            Self::Mixed { kind } => write!(
-                f,
-                "the hub message has kind {kind}, which the hello stream does not take"
-            ),
             Self::Trailing => {
                 f.write_str("a hub message came after the body of the stream")
             }
+            Self::Unfinished { remain } => write!(
+                f,
+                "the stream ended with {remain} bytes of its body to come"
+            ),
         }
     }
 }
@@ -1210,12 +1213,12 @@ mod tests {
                 "the body has 16777217 bytes, over the cap of 16777216",
             ),
             (
-                Error::Mixed { kind: 5 },
-                "the hub message has kind 5, which the hello stream does not take",
-            ),
-            (
                 Error::Trailing,
                 "a hub message came after the body of the stream",
+            ),
+            (
+                Error::Unfinished { remain: 3 },
+                "the stream ended with 3 bytes of its body to come",
             ),
         ];
         for (error, text) in cases {

@@ -20,7 +20,6 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -79,12 +78,14 @@ pub struct Config<M> {
     /// The node's key. It stays the same when the private key changes. A patch until
     /// the node reads it from its data directory (#1660).
     pub key: types::node::Key,
-    /// The region whose mesh the node opens, or `None` for no mesh. Give the same
-    /// value at each start: the node keeps no copy of it, and a log opened with other
-    /// founding voters checks proofs against the wrong set. A patch until the node
-    /// keeps its region in its data directory when it founds or joins one, and reads
-    /// it at each start (#1660, #1744).
-    pub region: Option<Region>,
+    /// The region whose mesh the node opens, or `None` for no mesh. One founding
+    /// member has [`Config::key`], and its card holds the public half of
+    /// [`Config::private_key`]. Give the same value at each start: the node keeps no
+    /// copy of it, and until the mesh stores it (#1209), a log opened with another
+    /// value checks proofs against the wrong voters and starts at another spec. A
+    /// patch until the node keeps its region in its data directory when it founds or
+    /// joins one, and reads it at each start (#1660, #1744).
+    pub region: Option<mesh::region::Founding>,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -101,20 +102,6 @@ impl<M> fmt::Debug for Config<M> {
             .field("region", &self.region)
             .finish_non_exhaustive()
     }
-}
-
-/// A region that a node is a member of, given with no ticket.
-#[derive(Clone, Debug)]
-pub struct Region {
-    /// The prefix of the region's names, [`types::name::Prefix::ROOT`] for the root
-    /// region.
-    pub prefix: types::name::Prefix,
-    /// Each member of the region, this node included: one card has [`Config::key`],
-    /// and holds the public half of [`Config::private_key`].
-    pub members: Vec<mesh::Member>,
-    /// The voters before the first entry of the log, the same at each start. Each is
-    /// a member.
-    pub voters: BTreeSet<types::node::Key>,
 }
 
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
@@ -620,7 +607,7 @@ struct Endpoint {
     part: transport::port::Part,
     private_key: types::ed25519::PrivateKey,
     key: types::node::Key,
-    region: Option<Region>,
+    region: Option<mesh::region::Founding>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }
@@ -663,11 +650,7 @@ impl Endpoint {
         let config = mesh::Config {
             key: self.key,
             private_key: self.private_key,
-            region: region.prefix,
-            members: region.members,
-            voters: region.voters,
-            // A region has no founding definitions until #1744 gives them.
-            founding: BTreeMap::new(),
+            founding: region,
             files,
             dir: directory::mesh(),
             clock: self.clock,

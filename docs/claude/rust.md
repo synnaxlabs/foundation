@@ -119,12 +119,18 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   `block`, `ring`, `counting`, the `memory`, `clock`, and `wall` modules of `os`, the
   `net::lowat` module of `os` (architect, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843), the
+  `net::resolve` module of `os` (architect, 2026-10-08 16:52 UTC, #1095,
+  https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287), the
   `allocate` module of `os` on macOS (architect, #931,
   https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099), and
   later FFI connectors. Such a module uses `#[expect(unsafe_code, reason = "...")]`
   and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
   cannot run, so tests on the real OS check them, and `cargo xtask miri` skips `os`
-  (BLOCK MEMORY).
+  (BLOCK MEMORY). `connector-opcua` compiles C into its tests, which Miri cannot run
+  either, so `cargo xtask miri` skips it. Its `sim` tests, with the C and Rust under
+  the sanitizers, are to check it (#1912; `laptop.architect-2`, #435,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
+  2026-10-08 02:24 UTC).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).

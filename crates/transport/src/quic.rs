@@ -38,6 +38,7 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
+use crate::message::Reader;
 use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
@@ -451,12 +452,65 @@ impl Endpoint {
         receiver: &mut Receiver,
         mut take: impl FnMut(&Pool, usize) -> Option<Unique>,
     ) -> Result<Poll<Option<Block>>, Error> {
+        self.read_with(now, receiver, |reader, pool, len| {
+            reader.fill(take(pool, len))
+        })
+    }
+
+    /// The length of the next whole message of `receiver`'s stream, which it copies
+    /// to the start of `buffer`. As [`Endpoint::read`], with no block: `Pending`
+    /// only when no whole message is here yet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::read`], and [`Error::TooLarge`] with the message's length and
+    /// `buffer.len()` when the message is longer than `buffer`. Then the message
+    /// and its room in the receive budget stay for the next read.
+    pub(crate) fn read_into(
+        &mut self,
+        now: Monotonic,
+        receiver: &mut Receiver,
+        buffer: &mut [u8],
+    ) -> Result<Poll<Option<usize>>, Error> {
+        let read = self.read_with(now, receiver, |reader, _, len| {
+            if len > buffer.len() {
+                reader.hold();
+                let bytes_max = buffer.len();
+                return Poll::Ready(Err(Error::TooLarge {
+                    bytes: len,
+                    bytes_max,
+                }));
+            }
+            reader.copy(&mut buffer[..len]);
+            Poll::Ready(Ok(len))
+        })?;
+        match read {
+            Poll::Ready(Some(landed)) => landed.map(|len| Poll::Ready(Some(len))),
+            Poll::Ready(None) => Ok(Poll::Ready(None)),
+            Poll::Pending => Ok(Poll::Pending),
+        }
+    }
+
+    /// What `land(reader, pool, len)` makes of the next whole message of
+    /// `receiver`'s stream, as [`Endpoint::read`] gives it. `land` takes the message
+    /// from `reader`, or holds it there for the next read.
+    fn read_with<T>(
+        &mut self,
+        now: Monotonic,
+        receiver: &mut Receiver,
+        mut land: impl FnMut(&mut Reader, &Pool, usize) -> Poll<T>,
+    ) -> Result<Poll<Option<T>>, Error> {
         if let Some(ended) = receiver.ended() {
             return ended;
         }
         let (key, closed) = (receiver.key().connection, receiver.closed().cloned());
         let read = self.streams(now, key, closed, |streams, inner, pool, events| {
-            streams.read(inner, receiver, |len| take(pool, len), events)
+            streams.read(
+                inner,
+                receiver,
+                |reader, len| land(reader, pool, len),
+                events,
+            )
         });
         if read.is_err() {
             receiver.clear();

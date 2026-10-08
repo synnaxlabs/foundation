@@ -15,7 +15,7 @@ use crate::status::{Connector, Error};
 use crate::text;
 
 /// The config of the quickstart page.
-const PLANT: &str = include_str!("one_node/plant.hcl");
+const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
 
 /// The channel `plant.spike`, with the quality channel `plant.quality`.
 const QUALITY: &str = include_str!("one_node/quality.hcl");
