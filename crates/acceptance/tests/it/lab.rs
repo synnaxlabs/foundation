@@ -180,7 +180,7 @@ impl Lab {
 
     /// Makes `nodes` the members of one mesh, without a ticket.
     pub(crate) fn mesh(&mut self, _nodes: &[Node]) {
-        todo!("waits on #462")
+        todo!("waits on #585")
     }
 
     /// Creates the `f64` channel `channel`, whose home is `home`.
