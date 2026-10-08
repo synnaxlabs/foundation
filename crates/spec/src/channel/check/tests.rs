@@ -119,7 +119,7 @@ fn refuses_an_edge_to_a_key_that_no_channel_has() {
 #[test]
 fn finds_two_channels_with_one_key_at_the_second_in_name_order() {
     let channels = [
-        ("c.x", index(1, None, None)),
+        ("c.x", data(1, 1, None, f64())),
         ("a.x", index(1, None, None)),
         ("b.x", data(2, 1, None, f64())),
         ("b.y", index(1, Some(9), None)),

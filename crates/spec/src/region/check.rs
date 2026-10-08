@@ -19,7 +19,8 @@ use crate::definition::{Definition, Kind};
 /// check runs on the channels that the region governs, so an edge to a channel of
 /// another region is [`channel::Problem::Dangling`].
 ///
-/// Gives every problem, in tree key order.
+/// Gives every problem, in tree key order. At one key, [`Problem::Misplaced`] comes
+/// first, then [`Problem::Ungoverned`], then each [`Problem::Channel`].
 #[must_use]
 pub fn check(
     prefix: &Prefix,
@@ -39,8 +40,7 @@ pub fn check(
     let mut channels = BTreeMap::new();
     for (key, definition) in definitions {
         let kind = definition.kind();
-        let label = kind.label(key);
-        if label.is_none() {
+        if kind.label(key).is_none() {
             problems.push((
                 key.clone(),
                 Problem::Misplaced {
@@ -49,29 +49,16 @@ pub fn check(
                 },
             ));
         }
-        let record = label.filter(|_| kind == Kind::Region);
-        let governed = match &record {
-            Some(label) => {
-                inside(prefix, label)
-                    && !children.iter().any(|child| below(label, child))
-            }
-            None => {
-                prefix.contains(key)
-                    && !children.iter().any(|child| key.starts_with(child))
-            }
-        };
-        match definition {
-            _ if !governed => problems.push((
+        if !governs(prefix, &children, key, kind) {
+            problems.push((
                 key.clone(),
                 Problem::Ungoverned {
                     name: key.clone(),
                     region: prefix.clone(),
                 },
-            )),
-            Definition::Channel(channel) => {
-                channels.insert(key.clone(), channel.clone());
-            }
-            _ => {}
+            ));
+        } else if let Definition::Channel(channel) = definition {
+            channels.insert(key.clone(), channel.clone());
         }
     }
     for problem in channel::check(&channels) {
@@ -79,6 +66,19 @@ pub fn check(
     }
     problems.sort_by(|a, b| a.0.cmp(&b.0));
     problems.into_iter().map(|(_, problem)| problem).collect()
+}
+
+// Whether the region at `prefix`, with the child regions `children`, governs a
+// definition of `kind` at `key`. A record `<p>.@region` is in the region above `<p>`.
+fn governs(prefix: &Prefix, children: &[&Name], key: &Name, kind: Kind) -> bool {
+    match kind.label(key).filter(|_| kind == Kind::Region) {
+        Some(label) => {
+            inside(prefix, &label) && !children.iter().any(|child| below(&label, child))
+        }
+        None => {
+            prefix.contains(key) && !children.iter().any(|child| key.starts_with(child))
+        }
+    }
 }
 
 // Whether `name` is under `prefix` and is not the prefix itself.
@@ -98,7 +98,7 @@ pub enum Problem {
     /// A problem of the region's channels.
     Channel(channel::Problem),
     /// The region does not govern the name: it is not under the region's prefix, or it
-    /// is under a child region.
+    /// is under a child region, or it is the region's own record `<prefix>.@region`.
     Ungoverned {
         /// The tree key.
         name: Name,

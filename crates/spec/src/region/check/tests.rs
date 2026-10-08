@@ -108,6 +108,50 @@ fn the_root_region_governs_each_name_under_no_child() {
 }
 
 #[test]
+fn gives_misplaced_before_ungoverned_at_one_key() {
+    let definitions = map(&[("site.@x.y", index(1))]);
+    assert_eq!(
+        check(&prefix("plant"), &definitions),
+        [
+            Problem::Misplaced {
+                name: name("site.@x.y"),
+                kind: Kind::Channel,
+            },
+            ungoverned("site.@x.y", "plant"),
+        ]
+    );
+}
+
+#[test]
+fn does_not_govern_a_name_above_the_prefix() {
+    let definitions = map(&[("plant.@subject", subject())]);
+    assert_eq!(
+        check(&prefix("plant.line"), &definitions),
+        [ungoverned("plant.@subject", "plant.line")]
+    );
+}
+
+#[test]
+fn governs_a_policy_at_its_own_label_and_not_its_own_record() {
+    let definitions =
+        map(&[("plant.@region", record()), ("plant.@subject", subject())]);
+    assert_eq!(
+        check(&prefix("plant"), &definitions),
+        [ungoverned("plant.@region", "plant")]
+    );
+}
+
+#[test]
+fn does_not_govern_a_channel_at_the_name_of_a_child() {
+    let definitions =
+        map(&[("plant.child", index(1)), ("plant.child.@region", record())]);
+    assert_eq!(
+        check(&prefix("plant"), &definitions),
+        [ungoverned("plant.child", "plant")]
+    );
+}
+
+#[test]
 fn gives_each_problem_a_message_and_a_fix() {
     let dangling = channel::Problem::Dangling {
         from: name("plant.pressure"),

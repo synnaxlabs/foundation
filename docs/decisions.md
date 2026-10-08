@@ -3071,6 +3071,9 @@ How to read this record:
   `spec::region::tree(chunks, definitions)` builds the tree of a region's definitions,
   and cannot fail. `mesh` calls it at open and at apply. Lost: the function in
   `spec::tree`, which then points at the model above it; and the encode in the caller.
+  `plan` (#1082) maps a key to its region with the function of `spec::region`, and
+  keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263).
   Supersedes: the panic for two channels with one key (architect, #756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890).
   Decided by `laptop.architect-2`: the check, 2026-10-08T08:41:52Z
