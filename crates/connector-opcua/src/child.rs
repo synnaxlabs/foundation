@@ -16,7 +16,8 @@ pub(crate) fn running() -> bool {
 }
 
 /// Runs the test `name` in a child process, and asserts that it passes. `cflags` is
-/// the only C flags that `cc` reads there for `target`, and `cc` adds its defaults.
+/// the only C flags that `cc` reads there for `target` built on itself, and `cc` adds
+/// its defaults.
 pub(crate) fn run(name: &str, target: &str, cflags: Option<&str>) {
     let mut child = Command::new(std::env::current_exe().unwrap());
     child.args(["--exact", name]).env(MARK, "1");
@@ -25,7 +26,6 @@ pub(crate) fn run(name: &str, target: &str, cflags: Option<&str>) {
         "CRATE_CC_NO_DEFAULTS",
         "CFLAGS",
         "HOST_CFLAGS",
-        "TARGET_CFLAGS",
         &format!("CFLAGS_{target}"),
         &format!("CFLAGS_{underscored}"),
     ] {
