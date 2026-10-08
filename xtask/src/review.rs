@@ -436,9 +436,9 @@ impl<'a> Shown<'a> {
     /// Reads `body` ([`unpadded`]) from its first top-level `## Review round `
     /// heading on, or `None` when it has none.
     fn read(body: &'a str) -> Option<Self> {
+        // The extensions of GitHub that change the blocks or the start of a line.
         let options = Options::ENABLE_TABLES
             | Options::ENABLE_FOOTNOTES
-            | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS;
         let mut events = Parser::new_ext(body, options).into_offset_iter();
         let mut depth = 0_usize;

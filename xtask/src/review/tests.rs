@@ -1166,6 +1166,7 @@ fn an_old_round_reads_each_line_of_text_that_github_shows() {
         "Confirmed[^1].\n\n[^1]: a\n    {line}",
         "> Confirmed.\n> {line}",
         "- {line}",
+        "- [ ] {line}",
     ];
     for text in shown {
         let hot = text.replace("{line}", "Hot path: `send`");
@@ -1217,4 +1218,45 @@ fn a_fence_with_a_tab_after_it_closes() {
         check(&record(vec![bot(&hidden)])),
         vec![unended("Deferred")]
     );
+}
+
+#[test]
+fn reads_the_blocks_of_the_extensions_of_github() {
+    let table =
+        old("## Review round 1\n\nNo fields.\n\nHot path: `send` | a\n--- | ---");
+    assert_eq!(
+        check(&record(vec![table, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+    let footnote = ROUND.to_string() + "\n\n[^1]: Hot path: `send`";
+    assert_eq!(
+        check(&record(vec![bot(&footnote)])),
+        vec![unended("Deferred")]
+    );
+    let rule = ROUND.to_string() + "\n\n***";
+    assert_eq!(check(&record(vec![bot(&rule)])), vec![unended("Deferred")]);
+}
+
+#[test]
+fn reads_inline_markup_as_part_of_its_line() {
+    let named = format!("**laptop.integrator-2** · author\n{ROUND}")
+        .replace("Deferred: none", "Deferred: *none*");
+    assert_eq!(check(&record(vec![bot(&named)])), Vec::<String>::new());
+    let glued = old("## Review round 1\n\nNo fields.\n\n*a*Hot path: `send`");
+    assert_eq!(
+        check(&record(vec![glued, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn reads_only_a_top_level_round_heading() {
+    for quoted in ["> ## Review round 2", "- ## Review round 2"] {
+        let comment = bot(&format!("{quoted}\n\nNo fields."));
+        assert_eq!(
+            check(&record(vec![comment, bot(ROUND)])),
+            Vec::<String>::new(),
+            "{quoted}"
+        );
+    }
 }
