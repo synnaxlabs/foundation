@@ -10,18 +10,19 @@ use transport::{Class, Code};
 use super::*;
 
 /// The largest message that node 2 takes, when a test sets no other.
-const LIMIT: usize = 1 << 16;
+pub(super) const LIMIT: usize = 1 << 16;
 
 /// A peer of node 1, with its transport.
-struct Peer {
-    node: sim::node::Node,
-    transport: Transport,
-    pool: Rc<Pool>,
+pub(super) struct Peer {
+    pub(super) node: sim::node::Node,
+    pub(super) tasks: Tasks,
+    pub(super) transport: Transport,
+    pub(super) pool: Rc<Pool>,
 }
 
 impl Peer {
     /// The next session that node 1 opens.
-    async fn session(&self) -> Session {
+    pub(super) async fn session(&self) -> Session {
         let session = self.transport.accept().await.unwrap();
         assert_eq!(session.peer(), transport::Peer::Node(public(1)));
         session
@@ -87,7 +88,7 @@ impl Peer {
         sender
     }
 
-    fn block(&self, bytes: &[u8]) -> block::Block {
+    pub(super) fn block(&self, bytes: &[u8]) -> block::Block {
         crate::bytes::block(&self.pool, bytes).unwrap()
     }
 }
@@ -122,7 +123,11 @@ async fn next(
 }
 
 /// The config of the mesh of node 1, which sends with `pool`.
-fn create_config(node: &sim::node::Node, tasks: &Tasks, pool: Rc<Pool>) -> Config {
+pub(super) fn create_config(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    pool: Rc<Pool>,
+) -> Config {
     Config {
         members: IDS.map(create_voter).into(),
         pool,
@@ -133,7 +138,7 @@ fn create_config(node: &sim::node::Node, tasks: &Tasks, pool: Rc<Pool>) -> Confi
 /// Runs `mesh` on node 1 and `peer` on node 2 for 30 s, and gives what `peer`
 /// returned. Node 2 takes a message of at most `limit` bytes, and node 1 sends at
 /// most `limit` bytes that node 2 did not read.
-fn run<M, P>(
+pub(super) fn run<M, P>(
     limit: usize,
     mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
     peer: impl FnOnce(Peer) -> P + Send + 'static,
@@ -203,6 +208,7 @@ where
         let transport = bind(&node, PORT, config);
         let side = Peer {
             node,
+            tasks,
             transport,
             pool,
         };
@@ -529,11 +535,13 @@ async fn assert_ended(clock: &Clock, transport: Rc<Transport>) {
     pending::<()>().await;
 }
 
-/// Stops the group of `mesh`: the write of the term of a heartbeat fails.
-fn stop(node: &sim::node::Node, mesh: &Mesh) {
-    fail_sync(node);
+/// Stops the group of `mesh`, and gives why: the write of the term of a heartbeat
+/// fails.
+pub(super) fn stop(node: &sim::node::Node, mesh: &Mesh) -> Stopped {
+    let stopped = fail_sync(node);
     let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
     mesh.receive(public(2), heartbeat).unwrap();
+    stopped
 }
 
 #[test]

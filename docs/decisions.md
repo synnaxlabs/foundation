@@ -961,13 +961,23 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
-  it on drop. So the task ends, and drops the commit it waits for, at its first poll
-  after the hub and each of its sessions drop, and the home and its buffer end then.
-  `node` relies on this to close a shard's ring before it lets go of the data
-  directory lock. Lost: `Hub::close(self) -> Commit`, which each caller must call, and
-  which a clone or a live session defeats. Decided by `laptop.architect`
-  (2026-10-07T18:07:55Z:
+  it on drop, and the task ends at its first poll after that. Lost:
+  `Hub::close(self) -> Commit`, which each caller must call, and which a clone or a
+  live session defeats. Decided by `laptop.architect` (2026-10-07T18:07:55Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
+  The commit that the task waits for lives in the state, and the task polls it through
+  the state. So the drop of the state drops the commit in the same call. Once the hub
+  and each of its sessions drop, the hub holds no part of the home: no `Home`, no
+  `Commit`, no `Reading`. A task that the hub spawns holds a part of the home only
+  through the state or a session. `node` takes its own commit before it gives the home
+  to the hub, drops the hub and each session, awaits the commit, which resolves once the
+  buffer's task ended, drops it, and then lets go of the data directory lock. Lost: a
+  future of the end of the task, one more step for each caller; and an order in `node`,
+  which cannot know what the hub holds. Supersedes: "So the task ends, and drops the
+  commit it waits for, at its first poll after the hub and each of its sessions drop"
+  (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
+  Decided by `laptop.architect` (2026-10-07T21:23:22Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6047128783).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1554,8 +1564,9 @@ How to read this record:
   dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
   NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
   `Transport::public_key` gives the key that the transport proves to each peer, so
-  `node` can check it against the key it loads. Decided by laptop.architect and
-  laptop.architect-2 (#1587, 2026-10-07 19:55 UTC):
+  `Mesh::open` can check it against the public half of the private key of its config
+  (MESH SURFACE). Decided by laptop.architect and laptop.architect-2 (#1587, 2026-10-07
+  19:55 UTC):
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
@@ -2309,8 +2320,15 @@ How to read this record:
   home of a forwarded change: `Error::NotMember` checks only the argument of a local
   caller, and the check of a home at apply on each node is #1273. A forwarded change
   applies at least one time: a member that got no answer forwards it again, and the
-  leader then appends a second entry. `Change::Home` sets a value, so a repeat gives the
-  state of a call that took effect last. `Change::Join` is safe to repeat while no
+  leader then appends a second entry. A try of `set_home` that gives up resets its
+  stream. A proposal that the network delivers late, before the reset, can still apply
+  after a later call returned and set the older home, until #1273 refuses it (ruled by
+  the architect, 2026-10-07T20:58:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  Supersedes the sentence that a repeat of `Change::Home` gives the state of a call
+  that took effect last:
+  https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025.
+  `Change::Join` is safe to repeat while no
   change removes a member: a repeat finds its node a member and is refused
   (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
   must keep a repeat of an older `Join` from admitting the node again, and needs a
@@ -2424,7 +2442,66 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037318501). A stop
   of the group drops each handle. When `Transport::dial` gives the one open session to a
   peer (#1363), a call can take its session from `dial`, and #1598 decides whether the
-  handle goes back to the task.
+  handle goes back to the task. `set_home` makes a member the home of an index, and
+  returns when this node applied an entry that sets it. A try starts with two checks on
+  this node: the node is a voter (`Error::NoVote`), and the home is a member
+  (`Error::NotMember`). Only the two and a stop of the group end the call with an error.
+  A voter of one half of a joint configuration is a voter here, as in the leader's check
+  of a peer (`Error::PeerNotVoter`). The try proposes on this node. When another node
+  leads, the try sends the proposal on a new two-way stream of the session to the leader
+  that the group holds, and reads one answer. The call does not dial: two dialers for
+  one peer need a rule for which session stays, and a follower sends to its leader in
+  each tick, so with no session the leader cannot be reached. A try gets no position
+  when no leader is known, when the group has no session to the leader, when the leader
+  refuses the proposal, when the stream fails, when the pool has no block for the
+  proposal or this node's group gives `Error::Pool`, and when this node's `raft` names
+  another leader or term before the answer. The call then waits one tick and starts the
+  next try. A try that waits for the answer has no time limit: the leader answers each
+  forwarded proposal or ends its stream, and a session that fails one way ends at the
+  timeout of `transport`. `Group` wakes each call at each change of the leader or the
+  term, and at a stop, so a stop ends the wait at once. A limit of one election timeout
+  on the answer lost: on a link with a round trip above it, `raft` keeps its leader,
+  and each try gave up after the leader took its proposal, so the call appended one
+  entry for each try and never returned (decided by `laptop.architect`,
+  2026-10-07T22:40:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6048332653).
+  Supersedes the limit of one election timeout in the plan that this approval took:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407. It also
+  supersedes point 3 of
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552, a stop
+  that ends a forward at most 11 ticks late. With a position,
+  the call waits with no time limit until this node applied the entry of that term at
+  that index, or until the log has a different entry there, and then it proposes again:
+  a new leader commits an entry of its term, which decides each older position. A time
+  limit lost: a slow group gets the change again at each timeout. A `request` number
+  with a map of open requests lost: the stream is the request (MESH WIRE). `Applied`
+  keeps the term of each applied entry only above the lowest floor of an open try, and
+  the term of the last entry, so it holds one pair while no call waits (MEMORY BOUNDS).
+  A dropped call leaves no waker and no floor, and its stream stops. A node that is not
+  a voter gets `NoVote` and does not wait, because the leader gives it only code 16,
+  which a full pool also gives (approved by the architect with two changes, `NoVote` and
+  the bound of `Applied`, 2026-10-07T11:54:56Z:
+  https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407). The
+  `NoVote` check reads the configuration of this node's log, which changes when the node
+  appends a change of voters, before the commit. A promoted node gets `NoVote` until it
+  appends that change, and a new leader that replaces the entry changes the result back.
+  `NotMember` reads what this node applied (ruled by the architect,
+  2026-10-07T20:58:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046723849).
+  Supersedes the sentence that a promoted node gets `NoVote` until it applies that
+  change: https://github.com/synnaxlabs/foundation/issues/471#issuecomment-6037364407.
+  `Ok`
+  means that the entry at the position of the try applied. That is an entry that sets
+  the home only while `State::apply` never refuses a home change. A change kind that
+  lets `apply` refuse a home change (such as a removal of a member) must also make
+  `set_home` tell a refused entry from one that set the home. The surface as built, the
+  doc of `set_home`, and three points that the plan did not state (a joint
+  configuration, `Error::Pool`, and `NoVote` before `NotMember`) are approved by the
+  architect, 2026-10-07T20:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The
+  ruling of 2026-10-07T20:58:20Z above adds the sentence on a late proposal to that
+  doc. Its sentences on what `NoVote` and `NotMember` read supersede the last sentence
+  of the doc text in that comment ("The first two read what this node applied").
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
@@ -2452,17 +2529,37 @@ How to read this record:
   #1460 gave the module its new name. `Error` adds `raft::Error` and `transport::Error`
   to the types of other crates. `Config` and `serve` add types that the caller builds:
   `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
-  `env::tasks::Tasks`, `clock::Reader`, `block::Pool`, `transport::Transport`,
+  `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
-  So a crate that opens a region has `env`, `clock`, `block`, and `transport` in its
-  line of the crate map. `open` does not check that the transport proves the key of
-  `Config.private_key`, because `Transport` has no call that gives its key (#1587). The
-  `Debug` text of a `Config` does not show the private key. The calls that change the
-  region and the change records stay private. The surface is approved by the architect,
-  2026-10-07T16:24:54Z:
+  So a crate that opens a region has `env`, `block`, and `transport` in its line of the
+  crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
+  `Status`: no public call reads the one or gives the two. The join answer of #336
+  decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
+  Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, in
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
+  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
+  key that is not the public half of `Config.private_key`. `node` builds both from the
+  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
+  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
+  the architect, 2026-10-07T19:55:13Z:
+  https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
+  Supersedes the sentence that `open` does not check the key of the transport:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
+  `Debug` text of a `Config` does not show the private key. `Mesh::set_home` is the
+  first public call that changes the region (#471), and `Error::NoVote` is public with
+  it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
+  The line "Private still" of the plan names `set_home` (4c-2) as the first call that
+  changes the region
+  (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
+  the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  surface as built, with the types that the caller builds and the sentence on the key of
-  the transport, is approved by the architect, 2026-10-07T19:55:12Z:
+  other calls that change the region and the change records stay private. The surface
+  is approved in the same comment. The surface as built, with the types that the caller
+  builds and the sentence that `open` does not check the key of the transport
+  (superseded above), is approved by the architect, 2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
   is approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
@@ -2605,8 +2702,16 @@ How to read this record:
   checks the expiry against the stamp, not against the time of the commit, so a join
   that commits after the expiry still admits its node, and every node checks the same
   stamp at every replay. A voter with no mesh time with a known error at or after the
-  Unix epoch stamps no join (`Error::Unsynced`): a guess at the expiry is the case that
-  the later edge stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  Unix epoch stamps no join: a guess at the expiry is the case that the later edge
+  stops. Decided by `laptop.architect` (2026-10-07T13:11:29Z):
+  https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. The stamp
+  is crate-private. Until the join answer of #336 calls it, it takes the mesh time as an
+  argument and gives its own type, `driver::Unstamped`, so `mesh::Config` has no mesh
+  time and `mesh::Error` has no case for a join that no voter stamps. #336 decides with
+  its caller whether such a join goes out of `Mesh` as an `Error`, or back to the node
+  as a stop code or an answer. Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
+  Supersedes, for the type that `stamp` gives, the `Error::Unsynced` of
   https://github.com/synnaxlabs/foundation/pull/1390#issuecomment-6038661706. So a
   region whose voters all have an unknown clock error admits no node by ticket, and the
   operator adds a voter with a known error: a Linux or macOS node, or, after #145, a
@@ -4093,6 +4198,31 @@ How to read this record:
   comes from the spec (NODE SETTINGS), not from the caller of `Node::start`.
   Decided by the architect on #1287:
   https://github.com/synnaxlabs/foundation/pull/1287#issuecomment-6034425115.
+- **NODE SPAWN (2026-10-07)** `Node::spawn(task)` calls `task` with the node's one hub,
+  on shard 0, once each shard has opened its buffer, then runs its future. It has the
+  shape and the rules of `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a
+  panic ends shard 0 and fails the node (`Error::Panicked`). Shard 0 calls the tasks
+  with the hub in the order of their calls, so their closure bodies run in that order;
+  their futures run in no set order. A task that is given before the hub exists waits
+  for it. A node that stops or fails before shard 0 calls a task drops it uncalled, and
+  a stop drops each running future. A future that completes drops at once. The task runs
+  on shard 0's thread, so it may hold values that are not `Send`, such as sessions.
+  `node` depends on `hub`, and `Node::interner` goes away: shard 0 builds the hub with
+  the interner when it comes back from the last shard. Decided by `laptop.architect-2`
+  (2026-10-07T18:04:23Z):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
+  `hub::Config` stays as it is, one interner by value for one shard, and sessions on the
+  home of each shard wait for #1566. Decided by `laptop.architect`
+  (2026-10-07T18:02:03Z):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043797070, with the
+  director's OK for the deferral (2026-10-07T18:15:18Z):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6044020168.
+  The call order and no result decided by `laptop.architect-2` (2026-10-07T19:49:12Z):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6045597072.
+  Supersedes the start order of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411. When a
+  caller outside the tests of `node` builds a result channel, file an `interface` issue
+  for a result from `spawn`.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -4293,6 +4423,7 @@ How to read this record:
 | FACTORY HOST (daily renewal by the coordinator) | AWS CEILING |
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
+| HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 
 ---
 
