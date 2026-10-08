@@ -938,7 +938,10 @@ impl Sending {
     ) -> Poll<()> {
         let order = self.share.order();
         // A message that waits for room does not hold back a write.
-        if !self.budget.charge(half.key, half.body, &mut half.claim, order) {
+        if !self
+            .budget
+            .charge(half.key, half.body, &mut half.claim, order)
+        {
             half.keep(given, Cursor::default());
             return Poll::Pending;
         }
@@ -4619,7 +4622,9 @@ mod tests {
                 parts,
                 at: Cursor::default(),
             };
-            sources.flat_map(|source| source.bytes(block).to_vec()).collect()
+            sources
+                .flat_map(|source| source.bytes(block).to_vec())
+                .collect()
         }
 
         proptest! {
