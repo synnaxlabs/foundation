@@ -3557,20 +3557,24 @@ mod tests {
     fn a_dropped_watch_leaves_no_waker() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let held = Arc::new(Idle);
-            let waker = Waker::from(Arc::clone(&held));
-            let mut cx = Context::from_waker(&waker);
+            let (kept, dropped) = (Arc::new(Idle), Arc::new(Idle));
+            let count = || (Arc::strong_count(&kept), Arc::strong_count(&dropped));
             let mut watches = Vec::new();
-            for _ in 0..4 {
+            for held in [&dropped, &dropped, &kept, &dropped] {
+                let waker = Waker::from(Arc::clone(held));
+                let mut cx = Context::from_waker(&waker);
                 let mut watch = mesh.watch(INDEX);
                 assert_eq!(watch.next().await, Ok(None));
                 assert!(pin!(watch.next()).poll(&mut cx).is_pending());
                 watches.push(watch);
             }
-            // `held`, `waker`, and the waker that the group holds for each watch.
-            assert_eq!(Arc::strong_count(&held), 6);
-            watches.truncate(1);
-            assert_eq!(Arc::strong_count(&held), 3);
+            // Each `Arc` here, and the waker that the group holds for each watch.
+            assert_eq!(count(), (2, 4));
+            let stays = watches.remove(2);
+            drop(watches);
+            assert_eq!(count(), (2, 1));
+            drop(stays);
+            assert_eq!(count(), (1, 1));
         });
     }
 
