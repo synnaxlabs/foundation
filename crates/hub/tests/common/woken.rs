@@ -36,7 +36,7 @@ impl Woken {
         tasks: Tasks,
         indexes: usize,
     ) -> Self {
-        let (mut shard, mut interner, stamp) = shard(node, tasks).await;
+        let (mut shard, mut interner, stamp, _) = shard(node, tasks).await;
         let key = |n| channel::Key::from_u128(u128::try_from(n).expect("few"));
         let channels: Vec<_> = (0..indexes)
             .map(|n| {
