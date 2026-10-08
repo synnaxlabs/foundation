@@ -192,6 +192,19 @@ fn a_dropped_influx_ends_its_shard() {
 }
 
 #[test]
+fn a_dropped_influx_ends_its_shard_when_the_test_panics() {
+    let mut influx = Influx::default();
+    influx.serve();
+    let store = Arc::clone(&influx.store);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _influx = influx;
+        panic!("the test broke");
+    }));
+    unwound.expect_err("the test panics");
+    assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
+}
+
+#[test]
 #[should_panic(expected = "the simulated InfluxDB serves with no panic")]
 fn a_dropped_influx_panics_when_its_server_panicked() {
     let mut influx = Influx::default();
