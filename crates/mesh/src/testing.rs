@@ -54,7 +54,7 @@ pub fn seal_log_record(bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ops::Range;
 
     use raft::{
@@ -102,8 +102,15 @@ mod tests {
 
     #[test]
     fn each_spec_change_input_is_what_its_name_says() {
-        let inputs =
-            inputs!("mesh_change": "spec", "spec_chunks_1024", "spec_chunks_1025");
+        let inputs = inputs!(
+            "mesh_change": "spec",
+            "spec_chunks_0",
+            "spec_chunks_1024",
+            "spec_chunks_1025",
+            "spec_held",
+            "spec_held_chunks_1024",
+            "spec_holders_out_of_order",
+        );
         let digest = |at: usize| {
             let mut bytes = [0; 32];
             bytes[30..].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
@@ -116,23 +123,126 @@ mod tests {
             },
             root: Digest([3; 32]),
             chunks,
+            holders: [key(1)].into(),
         };
         for (name, chunks) in [
-            ("spec", [Digest([4; 32]), Digest([5; 32])].into()),
-            ("spec_chunks_1024", (0..CHUNKS_MAX).map(digest).collect()),
+            ("spec_chunks_0", BTreeSet::new()),
+            ("spec_held", [Digest([4; 32]), Digest([5; 32])].into()),
+            (
+                "spec_held_chunks_1024",
+                (0..CHUNKS_MAX).map(digest).collect(),
+            ),
         ] {
             assert_eq!(Change::decode(inputs[name]), Ok(spec(chunks)), "{name}");
             let round_trip = round_trip_change(inputs[name]);
             assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
+        }
+        // These two have the byte form before the holders, which ends where the count
+        // of holders starts.
+        for (name, held_name) in [
+            ("spec", "spec_held"),
+            ("spec_chunks_1024", "spec_held_chunks_1024"),
+        ] {
+            let mut held = inputs[name].to_vec();
+            held.extend(1_u16.to_le_bytes());
+            held.extend(key(1).as_u128().to_le_bytes());
+            assert_eq!(held, inputs[held_name], "{name}");
         }
         // The chunk count is after the kind, the base, and the root.
         let mut over = inputs["spec_chunks_1024"].to_vec();
         over[73..75].copy_from_slice(&1025_u16.to_le_bytes());
         over.extend(digest(CHUNKS_MAX).0);
         assert_eq!(inputs["spec_chunks_1025"], over);
-        let length = over.len();
-        let body = Malformed::Body { kind: 4, length };
-        assert_eq!(Change::decode(&over), Err(body));
+        for name in [
+            "spec",
+            "spec_chunks_1024",
+            "spec_chunks_1025",
+            "spec_holders_out_of_order",
+        ] {
+            let length = inputs[name].len();
+            let body = Malformed::Body { kind: 4, length };
+            assert_eq!(Change::decode(inputs[name]), Err(body), "{name}");
+            assert_eq!(round_trip_change(inputs[name]), None, "{name}");
+        }
+        let mut order = spec(BTreeSet::new());
+        let Change::Spec { holders, .. } = &mut order else {
+            unreachable!()
+        };
+        *holders = [key(1), key(2)].into();
+        let mut bytes = Vec::new();
+        order.encode(&mut bytes);
+        bytes[77..].rotate_left(16);
+        assert_eq!(inputs["spec_holders_out_of_order"], bytes);
+    }
+
+    #[test]
+    fn each_spec_change_input_with_a_repeated_or_falling_key_does_not_decode() {
+        let inputs = inputs!(
+            "mesh_change": "spec_chunks_equal",
+            "spec_chunks_falling",
+            "spec_holders_equal",
+        );
+        let encoded = |chunks: &[u8], holders: &[u8]| {
+            let mut bytes = Vec::new();
+            Change::Spec {
+                base: Pointer {
+                    version: 1,
+                    root: Digest([2; 32]),
+                },
+                root: Digest([3; 32]),
+                chunks: chunks.iter().map(|&chunk| Digest([chunk; 32])).collect(),
+                holders: holders.iter().map(|&holder| key(holder)).collect(),
+            }
+            .encode(&mut bytes);
+            bytes
+        };
+        // Each chunk is 32 bytes from byte 75.
+        let mut equal = encoded(&[4, 5], &[]);
+        let mut falling = equal.clone();
+        equal[107..139].fill(4);
+        assert_eq!(inputs["spec_chunks_equal"], equal);
+        falling[75..139].rotate_left(32);
+        assert_eq!(inputs["spec_chunks_falling"], falling);
+        // The count of holders is at byte 107, after one chunk.
+        let mut twice = encoded(&[5], &[3]);
+        twice[107..109].copy_from_slice(&2_u16.to_le_bytes());
+        twice.extend(key(3).as_u128().to_le_bytes());
+        assert_eq!(inputs["spec_holders_equal"], twice);
+        for (name, bytes) in inputs {
+            let body = Malformed::Body {
+                kind: 4,
+                length: bytes.len(),
+            };
+            assert_eq!(Change::decode(bytes), Err(body), "{name}");
+            assert_eq!(round_trip_change(bytes), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn each_holder_bound_input_is_what_its_name_says() {
+        let inputs = inputs!("mesh_change": "spec_holders_64", "spec_holders_65");
+        let at_bound = Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks: BTreeSet::new(),
+            holders: (1..=64).map(key).collect(),
+        };
+        let mut bytes = Vec::new();
+        at_bound.encode(&mut bytes);
+        assert_eq!(inputs["spec_holders_64"], bytes);
+        assert_eq!(Change::decode(&bytes), Ok(at_bound));
+        // The count of holders is after the count of chunks, which is 0.
+        bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
+        bytes.extend(key(65).as_u128().to_le_bytes());
+        assert_eq!(inputs["spec_holders_65"], bytes);
+        let body = Malformed::Body {
+            kind: 4,
+            length: bytes.len(),
+        };
+        assert_eq!(Change::decode(&bytes), Err(body));
     }
 
     fn at(term: u64, index: u64) -> Position {

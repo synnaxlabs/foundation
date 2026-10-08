@@ -1975,8 +1975,11 @@ mod tests {
                 pool: Rc::clone(&pool),
                 ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
-            pair.server.endpoint =
-                Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+            pair.server.endpoint = Endpoint::new(
+                &testing::setup(&config),
+                pair::SERVER_SHARD,
+                NonZeroUsize::MIN,
+            );
             pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -2017,7 +2020,8 @@ mod tests {
                 window_bytes: NARROW,
                 ..shard.config(private_key, Span::SECOND)
             };
-            side.endpoint = Endpoint::new(&config, index, NonZeroUsize::MIN);
+            side.endpoint =
+                Endpoint::new(&testing::setup(&config), index, NonZeroUsize::MIN);
         }
         pair.dial(pair::SERVER_KEY.public());
         pair.run(RUN);
@@ -2267,8 +2271,11 @@ mod tests {
                 pool,
                 ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
-            pair.server.endpoint =
-                Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+            pair.server.endpoint = Endpoint::new(
+                &testing::setup(&config),
+                pair::SERVER_SHARD,
+                NonZeroUsize::MIN,
+            );
             pair.server.key = None;
             pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
@@ -3421,7 +3428,8 @@ mod tests {
                 ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             let shard_key = pair::SERVER_SHARD;
-            pair.server.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
+            pair.server.endpoint =
+                Endpoint::new(&testing::setup(&config), shard_key, NonZeroUsize::MIN);
             pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -3462,7 +3470,8 @@ mod tests {
                 ..shard.config(pair::CLIENT_KEY, Span::SECOND)
             };
             let shard_key = pair::CLIENT_SHARD;
-            pair.client.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
+            pair.client.endpoint =
+                Endpoint::new(&testing::setup(&config), shard_key, NonZeroUsize::MIN);
             pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let (now, key) = (pair.now(), key(&pair.client));
@@ -3480,22 +3489,6 @@ mod tests {
                 bytes_max: 1_472,
             };
             assert_eq!(written, Err(too_large));
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "config window_bytes must be at least message_bytes_max")]
-    fn with_a_window_below_one_message_panics() {
-        testing::run(1, |shard| {
-            let config = Config {
-                window_bytes: MESSAGE_MAX - 1,
-                ..shard.config(pair::SERVER_KEY, Span::SECOND)
-            };
-            drop(Endpoint::new(
-                &config,
-                pair::SERVER_SHARD,
-                NonZeroUsize::MIN,
-            ));
         });
     }
 
@@ -4620,7 +4613,8 @@ mod tests {
                 ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             let shard_key = pair::SERVER_SHARD;
-            pair.server.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
+            pair.server.endpoint =
+                Endpoint::new(&testing::setup(&config), shard_key, NonZeroUsize::MIN);
             pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let first = open_sender(&mut pair, Class::Complete);

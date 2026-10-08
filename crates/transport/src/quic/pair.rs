@@ -19,7 +19,7 @@ use types::time::{Monotonic, Span};
 use super::settings::{MTU_MIN, Settings};
 use super::{Endpoint, Event, SERVER_NAME, cid, connection, find, queue};
 use crate::Config;
-use crate::testing::Shard;
+use crate::testing::{self, Shard};
 
 /// The client's address. The server's is [`SERVER`].
 pub(super) const CLIENT: SocketAddr =
@@ -139,10 +139,12 @@ impl Pair {
     ) -> Self {
         let mut config = shard.config(CLIENT_KEY, idle);
         change(&mut config);
-        let client = Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
+        let client =
+            Endpoint::new(&testing::setup(&config), CLIENT_SHARD, NonZeroUsize::MIN);
         let mut config = shard.config(SERVER_KEY, idle);
         change(&mut config);
-        let server = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+        let server =
+            Endpoint::new(&testing::setup(&config), SERVER_SHARD, NonZeroUsize::MIN);
         Self {
             now: Duration::ZERO,
             delay,
@@ -203,7 +205,8 @@ impl Pair {
     /// shard, as a restart does. The old connection is gone.
     pub(super) fn restart(&mut self, shard: &Shard) {
         let config = shard.config(SERVER_KEY, self.idle);
-        self.server.endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+        self.server.endpoint =
+            Endpoint::new(&testing::setup(&config), SERVER_SHARD, NonZeroUsize::MIN);
         self.server.key = None;
     }
 
@@ -331,7 +334,8 @@ impl Foreign {
         change: impl FnOnce(&mut TransportConfig),
     ) -> Self {
         let config = shard.config(FOREIGN_KEY, Span::SECOND);
-        let (settings, endpoint) = Settings::foreign(&config, FOREIGN_SHARD, change);
+        let (settings, endpoint) =
+            Settings::foreign(&testing::setup(&config), FOREIGN_SHARD, change);
         Self {
             epoch: config.clock.epoch(),
             settings,

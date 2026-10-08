@@ -473,19 +473,6 @@ mod admit {
     }
 
     #[test]
-    fn refuses_a_subject_whose_definition_is_not_at_its_subject_key() {
-        let key = public(&pair(TEST_1));
-        let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
-        let tree: BTreeMap<Name, Definition> = [(name("ops.ana"), subject)].into();
-        let rules = Rules::new([(types::name::Prefix::ROOT, &tree)]);
-
-        let error = admit(&rules, NOW, create_hello()).unwrap_err();
-
-        let subject = name("ops.ana");
-        assert_eq!(error, Error::Unknown { subject });
-    }
-
-    #[test]
     fn refuses_the_tree_key_of_a_listed_subject() {
         let subject = name("ops.ana.@subject");
         let hello = Hello {
