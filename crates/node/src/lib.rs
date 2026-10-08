@@ -181,7 +181,7 @@ impl Node {
     /// If a shard's part of the budget needs more address space than a `usize` holds,
     /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
-    pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
+    pub fn start<M: block::Memory + 'static>(mut config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
         let parts = match parts(config.budget, config.disk, cores) {
             Ok(parts) => parts,
@@ -205,13 +205,15 @@ impl Node {
                 return Self::failed(Error::Port { listen, error });
             }
         };
-        let part = part.expect("invariant: a port splits into the parts asked for");
         let endpoint = Endpoint {
+            part: part.expect("invariant: a port splits into the parts asked for"),
             private_key: config.private_key.clone(),
+            key: config.key,
+            region: config.region.take(),
             clock: config.clock.clone(),
             entropy: config.entropy.clone(),
         };
-        Self::launch(config, part, endpoint, parts.into_iter().zip(0..count))
+        Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
     /// A node that failed with `error` before any shard started.
@@ -225,10 +227,9 @@ impl Node {
     }
 
     /// Starts the shards of `config`, each with its part and its number in `parts`.
-    /// Shard 0 serves the node's `part` of its port with `endpoint`.
+    /// Shard 0 opens `endpoint`.
     fn launch<M: block::Memory + 'static>(
         config: Config<M>,
-        part: transport::port::Part,
         endpoint: Endpoint,
         parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
@@ -248,10 +249,7 @@ impl Node {
         let serve = Serve {
             interner: last,
             inbox,
-            part,
             endpoint,
-            key: config.key,
-            region: config.region,
         };
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let roles = Role::all(mesh, wall, first, serve, cores);
@@ -607,33 +605,35 @@ impl Open {
 }
 
 /// What shard 0 serves the node's tasks and port with: the interner, once the last
-/// shard has opened its buffer, the tasks given to the node, the node's part of its
-/// port, its endpoint, and the node's key and region, which its mesh opens with.
+/// shard has opened its buffer, the tasks given to the node, and its endpoint.
 struct Serve {
     interner: Take<Interner>,
     inbox: task::Inbox<task::Task>,
-    part: transport::port::Part,
     endpoint: Endpoint,
-    key: types::node::Key,
-    region: Option<Region>,
 }
 
-/// What the node's transport and mesh prove the node's key with, and their clock and
-/// entropy.
+/// What shard 0 opens the node's transport and mesh from, but its files, pool, and
+/// tasks.
 struct Endpoint {
+    /// The node's part of its port.
+    part: transport::port::Part,
     private_key: types::node::PrivateKey,
+    key: types::node::Key,
+    region: Option<Region>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }
 
 impl Endpoint {
-    /// The node's transport on `part`, on `pool` and `tasks`.
-    fn transport(
-        &self,
-        part: transport::port::Part,
+    /// Opens the node's transport on `pool` and `tasks`, then, when the node has a
+    /// region, the mesh of that region over it, in directory [`directory::mesh`] of
+    /// `files`. Gives the error of a mesh that did not open.
+    async fn open(
+        self,
+        files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
-    ) -> transport::Transport {
+    ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), mesh::Error> {
         let message = NonZeroUsize::new(MESSAGE.min(pool.largest()));
         let config = transport::Config {
             private_key: self.private_key.clone(),
@@ -643,49 +643,42 @@ impl Endpoint {
             idle: IDLE,
             clock: self.clock.clone(),
             entropy: self.entropy.clone(),
-            tasks,
-            pool,
+            tasks: tasks.clone(),
+            pool: Rc::clone(&pool),
         };
-        transport::Transport::new(config, part)
-            .expect("invariant: a buffer's pool holds a block of a whole UDP payload")
-    }
-
-    /// The config of the mesh of `region` for the node `key`, in directory
-    /// [`directory::MESH`] of `files`, over `transport`.
-    fn mesh(
-        &self,
-        key: types::node::Key,
-        region: Region,
-        files: env::files::Files,
-        pool: Rc<block::Pool>,
-        tasks: env::tasks::Tasks,
-        transport: Rc<transport::Transport>,
-    ) -> mesh::Config {
-        mesh::Config {
-            key,
-            private_key: self.private_key.clone(),
+        let transport = transport::Transport::new(config, self.part)
+            .expect("invariant: a buffer's pool holds a block of a whole UDP payload");
+        let transport = Rc::new(transport);
+        let Some(region) = self.region else {
+            return Ok((transport, None));
+        };
+        let config = mesh::Config {
+            key: self.key,
+            private_key: self.private_key,
             region: region.prefix,
             members: region.members,
             voters: region.voters,
             files,
-            dir: directory::MESH.into(),
-            clock: self.clock.clone(),
-            entropy: self.entropy.clone(),
+            dir: directory::mesh(),
+            clock: self.clock,
+            entropy: self.entropy,
             tasks,
             pool,
-            transport,
-        }
+            transport: Rc::clone(&transport),
+        };
+        let mesh = mesh::Mesh::open(config).await?;
+        Ok((transport, Some(mesh)))
     }
 }
 
 impl Serve {
-    /// Opens the node's transport on `pool` and the mesh of its region, in `files`,
-    /// then runs each task given with a hub over `home`, and serves the node's port,
-    /// until `guard` completes or the transport stops. A transport that stops goes
-    /// into `failed` before any task drops. Then drops the tasks, the hub, `home`,
-    /// `guard`, and each session, and waits for each task of the mesh to end, so the
-    /// mesh's log closes before it returns. Runs no task and takes no session when a
-    /// shard did not open, or when the mesh did not open, which goes into `failed`.
+    /// Opens the endpoint, then runs each task given with a hub over `home`, and
+    /// serves the node's port, until `guard` completes or the transport stops. A
+    /// transport that stops goes into `failed` before any task drops. Then drops the
+    /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
+    /// and waits for each task of the mesh to end, the last of which drops the
+    /// transport. Runs no task and takes no session when a shard did not open, or when
+    /// the mesh did not open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -703,28 +696,11 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let transport =
-            self.endpoint
-                .transport(self.part, Rc::clone(&pool), tasks.clone());
-        let transport = Rc::new(transport);
-        let mesh = match self.region {
-            None => None,
-            Some(region) => {
-                let (key, transport) = (self.key, Rc::clone(&transport));
-                let config = self.endpoint.mesh(
-                    key,
-                    region,
-                    files,
-                    pool,
-                    tasks.clone(),
-                    transport,
-                );
-                match mesh::Mesh::open(config).await {
-                    Ok(mesh) => Some(mesh),
-                    Err(error) => return fail(Error::Mesh(error)),
-                }
-            }
-        };
+        let (transport, mesh) =
+            match self.endpoint.open(files, pool, tasks.clone()).await {
+                Ok(opened) => opened,
+                Err(error) => return fail(Error::Mesh(error)),
+            };
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
