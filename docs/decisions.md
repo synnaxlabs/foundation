@@ -4380,16 +4380,22 @@ How to read this record:
   subject at its plain name, which takes that name from a channel or a connector and
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
-  `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
-  that key from the hello's subject with `spec::definition::Kind::key`, so no caller
-  builds it and only `spec` holds the key form. A subject that makes no key gives
-  `Error::Unknown`. Lost: a public `Kind::label` in `spec`, which only `access` calls.
-  The first ruling kept each subject by `<name>` (`laptop.architect`,
+  `access::Rules` keeps each subject by its label, which
+  `spec::definition::Kind::label` gives for its tree key, and skips a subject
+  definition at a key that gives no label. `admit` and `verify` look up the hello's
+  subject and build no key, so only `spec` holds the key form, and `@admin`, a label
+  that `Kind::key` refuses, can sign (FIRST ADMIN). A subject with no definition gives
+  `Error::Unknown`. `Kind::label` is public: `access`, the `plan` of #1744, and
+  `export` call it. Decided by `laptop.architect` at 2026-10-08T11:00:08Z
+  (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812). The
+  first ruling kept each subject by `<name>` (`laptop.architect`,
   2026-10-08T06:56:19Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
-  tree key was decided by `laptop.architect` at 2026-10-08T08:10:33Z
-  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), which
-  supersedes the `<name>` of the first.
+  tree key, which `admit` built with `Kind::key`, was decided by `laptop.architect` at
+  2026-10-08T08:10:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). The
+  ruling of 11:00:08Z supersedes it and its lost option, a public `Kind::label` that
+  only `access` calls.
 - **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
   `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
   builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
