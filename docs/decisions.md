@@ -3917,15 +3917,19 @@ How to read this record:
   backticks and one final comma, period, or semicolon removed, is the word that is
   checked. Decided by the director at 2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
-  check reads a code block so: a fence of three or more backticks or tildes, after at
-  most three spaces, opens it, and a like fence closes it, or it runs to the end of the
-  comment. It does not see a fence after a list marker or a quote mark, or the end of
-  an HTML block or comment; https://github.com/synnaxlabs/foundation/issues/1783 reads
-  the comment as GitHub does. A
+  check ends a line at `\n`, `\r\n`, or a lone `\r`, and reads a code block so: a
+  fence of three or more backticks or tildes, after at most three spaces, opens it, and
+  a like fence closes it, or it runs to the end of the comment. It does not see an HTML
+  block or HTML comment, or a fence after a list marker or a quote mark;
+  https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
+  does. Decided by the director at 2026-10-08T04:01:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239). A
   round comment posted before the cutoff `CUTOFF` in `xtask/src/review.rs`
   (2026-10-08T03:00:00Z) is checked as before: an earlier free-form round passes, and it
   needs no end lines. A `Hot path:` line anywhere in its text that names a function
-  still needs `performance`. Decided by the director at 2026-10-08T02:44:00Z
+  still needs `performance`, named by a `Reviewers:` line anywhere in its text. Both
+  lines start at the start of their line. Decided by the director at
+  2026-10-08T02:44:00Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051099968).
   Supersedes the reviewers of a later round in ruling 2 of
   https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6040439732

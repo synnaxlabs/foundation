@@ -118,6 +118,8 @@ fn reaches_itself_by_full_sha_and_by_prefix() {
     let (repo, end) = Repo::with_pr("itself");
     assert_eq!(repo.reaches(&end, &end), Ok(true));
     assert_eq!(repo.reaches(&end[..7], &end), Ok(true));
+    let child = repo.commit("a.md", "text\n");
+    assert_eq!(repo.reaches(&format!("{child}^"), &end), Ok(false));
 }
 
 #[test]
@@ -268,6 +270,10 @@ fn a_range_may_start_at_the_parent_of_a_commit() {
         Ok(None)
     );
     assert_eq!(repo.code_change(&format!("{fix}^"), &end), Ok(None));
+    assert_eq!(
+        repo.code_change(&end, &format!("{fix}^")),
+        Ok(Some(format!("has `{fix}^`, which names no commit")))
+    );
     assert_eq!(
         repo.code_change(&format!("{short}^^"), &head),
         Ok(Some(format!("has `{short}^^`, which names no commit")))

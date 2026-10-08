@@ -257,12 +257,13 @@ fn approval(record: &Record, head: &str) -> Option<String> {
     })
 }
 
-/// Reports whether a `Reviewers:` line in `paragraphs` names `performance`.
+/// Reports whether a `Reviewers:` line in `paragraphs` names `performance`. The line
+/// starts at the start of its line, as a `Hot path:` line does for [`named`].
 fn performer(paragraphs: &[Vec<&str>]) -> bool {
     paragraphs
         .iter()
         .flatten()
-        .filter_map(|l| l.trim_start().strip_prefix("Reviewers: "))
+        .filter_map(|l| l.strip_prefix("Reviewers: "))
         .any(|r| listed(r).contains("performance"))
 }
 
@@ -279,6 +280,8 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 /// set them. The last paragraph is the end lines ([`END`]), unless the comment is
 /// `old`, posted before [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
+    // A lone `\r` ends a line, as in CommonMark.
+    let body = body.replace("\r\n", "\n").replace('\r', "\n");
     // Only the end lines keep their indent: an indented one is a quote, not a line.
     // Only spaces and tabs may end a closing fence.
     let mut lines = body.lines().map(|l| l.trim_end_matches([' ', '\t']));

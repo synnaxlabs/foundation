@@ -36,7 +36,7 @@ impl<'a> History<'a> {
     ///
     /// A failed `git` command, also when the base ref does not exist.
     pub(crate) fn reaches(&self, end: &str, head: &str) -> Result<bool, String> {
-        let Some(end) = self.named(end)? else {
+        let Some(end) = self.sha(end)? else {
             return Ok(false);
         };
         let base = self.base()?;
@@ -79,7 +79,7 @@ impl<'a> History<'a> {
     /// a removed one.
     ///
     /// `None` when no line is code. `from` and `end` are SHAs or prefixes of at least
-    /// 7 digits, each with an optional final `^` for its first parent; text that names
+    /// 7 digits, and `from` may end in one `^` for its first parent; text that names
     /// no single commit gives the phrase "has `<text>`, which names no commit".
     ///
     /// # Errors
@@ -95,7 +95,7 @@ impl<'a> History<'a> {
         let Some(from_sha) = self.named(from)? else {
             return Ok(Some(unnamed(from)));
         };
-        let Some(end_sha) = self.named(end)? else {
+        let Some(end_sha) = self.sha(end)? else {
             return Ok(Some(unnamed(end)));
         };
         let base = self.base()?;

@@ -988,3 +988,36 @@ fn an_old_malformed_round_that_names_performance_needs_no_performance() {
     );
     assert_eq!(check(&record(vec![free, bot(ROUND)])), Vec::<String>::new());
 }
+
+#[test]
+fn an_indented_reviewers_line_of_an_old_round_names_no_performance() {
+    let indented = old("## Review round 1\n\nConfirmed findings.\n\n    \
+         Reviewers: reviewer, performance\n\nHot path: `send`");
+    assert_eq!(
+        check(&record(vec![indented, bot(ROUND)])),
+        vec![
+            "review round 1 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_lone_carriage_return_ends_a_line() {
+    // "```\r\r\n" is a closing fence and a blank line, so the last fence hides the
+    // last end lines, and the end lines GitHub shows name `send`.
+    let hidden = later("reviewer, breaker").replace(
+        "weakening.\n\n",
+        "weakening.\n\n```\ncode\n```\r\r\n\
+         Deferred: none\nPublic surface: none\nHot path: `send`\n\n```\n\n",
+    );
+    assert_ne!(hidden, later("reviewer, breaker"));
+    assert_eq!(
+        check(&record(vec![bot(&hidden)])),
+        vec![unended("Deferred")]
+    );
+    let crlf = ROUND.replace('\n', "\r\n");
+    assert_eq!(check(&record(vec![bot(&crlf)])), Vec::<String>::new());
+    let cr = ROUND.replace('\n', "\r");
+    assert_eq!(check(&record(vec![bot(&cr)])), Vec::<String>::new());
+}
