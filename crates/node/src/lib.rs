@@ -181,7 +181,7 @@ impl Node {
     /// If a shard's part of the budget needs more address space than a `usize` holds,
     /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
-    pub fn start<M: block::Memory + 'static>(mut config: Config<M>) -> Self {
+    pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
         let parts = match parts(config.budget, config.disk, cores) {
             Ok(parts) => parts,
@@ -209,7 +209,7 @@ impl Node {
             part: part.expect("invariant: a port splits into the parts asked for"),
             private_key: config.private_key.clone(),
             key: config.key,
-            region: config.region.take(),
+            region: config.region.clone(),
             clock: config.clock.clone(),
             entropy: config.entropy.clone(),
         };
