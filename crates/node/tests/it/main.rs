@@ -21,7 +21,7 @@ fn text(bytes: &[u8]) -> &str {
 
 #[test]
 fn an_operation_prints_its_output_and_exits_0() {
-    let output = foundation(&["version"], b"");
+    let output = rig::Rig::new().run(&["version"]);
     assert_eq!(
         (
             output.status.code(),
