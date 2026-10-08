@@ -38,5 +38,6 @@
   21:36:08Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069514013), and the
   order "in the order they began" and the dropped request at 21:38:44Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). The
-  retry, the `MALFORMED` close, and the room of the pool: approval owed.
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
+  approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128).

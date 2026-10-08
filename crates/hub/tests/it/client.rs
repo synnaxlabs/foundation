@@ -756,6 +756,36 @@ fn sends_a_body_over_the_largest_block_of_its_pool() {
     );
 }
 
+/// A pool with less room than the node's flow window gives `Error::Pool` for a large
+/// body, and the next request of the client still gets its reply.
+#[test]
+fn gives_a_pool_error_for_a_body_over_the_room_of_its_pool() {
+    serve_session(
+        143,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let config = block::Config { budget: 1 << 17 };
+            let pool = block::Pool::new(
+                config.clone(),
+                block::Heap::new(config.reservation()),
+            );
+            let client = connect_with(&node, tasks, at, AGENT, Rc::new(pool))
+                .await
+                .expect("connects");
+            assert_eq!(
+                client.request(&body(256 << 10)).await,
+                Err(Error::Pool(block::Error::Exhausted {
+                    requested: 65_536,
+                    available: 64_896,
+                }))
+            );
+            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+        },
+    );
+}
+
 /// A request that the turn gave to and that dropped before it polled again hands the
 /// turn on.
 #[test]
