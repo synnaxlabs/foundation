@@ -23,13 +23,11 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 
 For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
 number, its merge commit, its issue, and its crates. It checks tests, the review trail,
-design, performance, and defects, by the rules on `main` that `.claude/agents/audit.md`
-names (each round and the code of its range when it started, the rest of the PR when its
-last round started, and a defect in the code by the rules at the merge commit), never by
-a rule in an open PR or in your branch. Check each problem that it reports yourself, and
-drop the ones you cannot confirm. Post its verdict as one comment on the PR: your name
-line, then its rating and summary as given, then each problem you confirmed and each
-check that passed. Then act on each problem:
+design, performance, and defects, by the rules that `.claude/agents/audit.md` names. It
+never uses a rule in an open PR or in your branch. Check each problem that it reports
+yourself, and drop the ones you cannot confirm. Post its verdict as one comment on the
+PR: your name line, then its rating and summary as given, then each problem you
+confirmed and each check that passed. Then act on each problem:
 
 - A defect: an item of an open issue in its crate when its fix is a small change, else
   an issue with its `crate:` label (`docs/coordination.md`, "Small changes").
