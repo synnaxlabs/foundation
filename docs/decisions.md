@@ -2268,9 +2268,9 @@ How to read this record:
   only the first applies. The state machine never reads chunks and never runs a check: a
   committed spec with problems moves the pointer, and the node keeps the last spec it
   used (#1741). The pointer before the first change is version 0 at the root of the tree
-  of `Config::founding.definitions`. No BQ12 signature check on the change in this milestone
-  (#1213). Trigger: #1887 moves `mesh::Pointer` to `spec::Pointer` before a `wire`
-  message carries it (`laptop.architect`, 2026-10-08T13:26:52Z,
+  of `Config::founding.definitions`. No BQ12 signature check on the change in this
+  milestone (#1213). Trigger: #1887 moves `mesh::Pointer` to `spec::Pointer` before a
+  `wire` message carries it (`laptop.architect`, 2026-10-08T13:26:52Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
   `Mesh::open` runs no check of the founding definitions: the founding is agreed region
   state, and a check at each open stops a node on a later build whose checks find more
@@ -3609,12 +3609,13 @@ How to read this record:
   with its voters as `Start.voters` (RAFT VOTERS). A node that joins is not one of its
   members: its record comes from its own `Join` in the log. Changed by
   `laptop.architect`, 2026-10-08T10:34:37Z, from "the founding voters and their cards":
-  https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061. Until snapshots (#253), a region
-  whose founders all left cannot admit a node. `secret` finds no key itself: `ops` and
-  `node` read the member and pass its seal key. A rotation, a new card, and `Remove`
-  wait for a caller; a rotation that only the node signs lets a stolen key lock the node
-  out. Lost: a record that only the admitting voter checks (a voter that lies admits any
-  key, against BQ12). A `card::Signed` holds the `node::Key` that its signature covers
+  https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061.
+  Until snapshots (#253), a region whose founders all left cannot admit a node. `secret`
+  finds no key itself: `ops` and `node` read the member and pass its seal key. A
+  rotation, a new card, and `Remove` wait for a caller; a rotation that only the node
+  signs lets a stolen key lock the node out. Lost: a record that only the admitting
+  voter checks (a voter that lies admits any key, against BQ12). A `card::Signed` holds
+  the `node::Key` that its signature covers
   (`Signed::key`): the key cannot come from the public key, which can rotate, so the
   signed card is its one place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). A
@@ -5871,12 +5872,13 @@ How to read this record:
   `Config::private_key`; both are patches until #1660 moves them to node-local disk.
   `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
   member of: its prefix, its members (one card has `Config::key`), the voters before the
-  first entry of the log, and its founding definitions. The caller gives the same region at each start: the node keeps no
-  copy of it. `None` opens no mesh. The `Option` is a dark patch: the `None` stays in
-  `node`, and no lower crate gets an `Option` of the mesh. PR 4 of #585, which gives the
-  mesh to the hub, makes the region required, unless #1660 and #1744 have already taken
-  it out of `Config`. The long-term path takes it out of `Config`: the node keeps its
-  membership in its data directory when it founds or joins, and reads it at each start.
+  first entry of the log, and its founding definitions. The caller gives the same
+  region at each start: the node keeps no copy of it. `None` opens no mesh. The `Option`
+  is a dark patch: the `None` stays in `node`, and no lower crate gets an `Option` of
+  the mesh. PR 4 of #585, which gives the mesh to the hub, makes the region required,
+  unless #1660 and #1744 have already taken it out of `Config`. The long-term path takes
+  it out of `Config`: the node keeps its membership in its data directory when it founds
+  or joins, and reads it at each start.
   With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last shard
   has opened its buffer and before it takes the first session. Its directory is `mesh`
   in the data directory (`mesh::Config::dir`; the directory by `laptop.architect`,
@@ -5895,20 +5897,22 @@ How to read this record:
   peer that proved a node key goes to `Mesh::serve`, which checks each message against
   the region; the error of `serve` ends only its stream. A mesh stream of a client, or
   of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
-  4 of #585). Shard 0 opens the mesh with the founding definitions of
-  `Config::region`, and no caller gives definitions yet. From PR 1 of #1744, it gives the root region the
-  definitions that `spec::founding::create` gives, and each other region an empty map.
+  4 of #585). Shard 0 opens the mesh with `Config::region` unchanged, and no caller
+  gives definitions yet. From PR 1 of #1744, the code that builds `Config::region` gives
+  the root region the definitions that `spec::founding::create` gives, and each other
+  region an empty map.
   Decided by `laptop.architect` at 2026-10-08T06:11:30Z
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
   `mesh::region::Founding` replaced `node::Region`, which copied three fields of
   `mesh::Config`, so `node` maps no `mesh` value by hand (#1859). Decided by
   `laptop.architect` at 2026-10-08T10:23:48Z
   (https://github.com/synnaxlabs/foundation/pull/1857#issuecomment-6057800438) and
-  10:34:37Z (https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061). A mesh
-  that stops does not stop the node until #1780, before PR 4 gives the mesh to the hub.
-  Lost: `Node::found(region)` at run time, which needs a second open path and a node
-  that runs with no region before it; the key in `Region`, because a node's identity is
-  not region data, and PR 4 needs it with no region. Decided by `laptop.architect-2`
+  10:34:37Z (https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
+  A mesh that stops does not stop the node until #1780, before PR 4 gives the mesh to
+  the hub. Lost: `Node::found(region)` at run time, which needs a second open path and a
+  node that runs with no region before it; the key in `Region`, because a node's
+  identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2`
   (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
