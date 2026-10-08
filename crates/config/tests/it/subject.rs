@@ -91,6 +91,22 @@ fn refuses_a_subject_at_the_name_of_a_connector_in_upper_case() {
     assert_eq!(config::check(&[connector, subject], &kinds()), expected);
 }
 
+#[test]
+fn notes_the_first_connector_of_a_name_in_two_cases() {
+    let upper = CONNECTOR.replace("plc", "PLC");
+    for (first, second) in [(CONNECTOR, upper.as_str()), (&upper, CONNECTOR)] {
+        let files = [read(0, first), read(1, second), read(2, SUBJECT)];
+        let Err(diagnostics) = config::check(&files, &kinds()) else {
+            panic!("two connectors of one name passed");
+        };
+        let refusal = diagnostics
+            .into_iter()
+            .filter(|d| d.code == Code::new("config.subject-is-connector"))
+            .collect::<Vec<_>>();
+        assert_eq!(refusal, refused(&files[2], &files[0], PLC), "{first}");
+    }
+}
+
 fn slice(file: &Document) -> &[Document] {
     std::slice::from_ref(file)
 }
