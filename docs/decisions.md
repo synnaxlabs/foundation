@@ -5480,6 +5480,18 @@ How to read this record:
   host with a NUL byte is `NotFound`, with no lookup. Decided by `laptop.architect-2`
   (#1095,
   https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287).
+  `EAI_NONAME` with errno `EMFILE` or `ENFILE` is `Io` with that code: glibc gives it
+  when it cannot load its name service modules. Each lookup runs `getaddrinfo` on an
+  OS thread of its own, which ends with the lookup, also after its future drops, and
+  reads errno right after the call. A spawn that fails gives `Io` with its errno.
+  Nothing caps the threads in flight. The caller on record, `connector::http`, makes
+  one lookup for each new connection, so the threads in flight are at most the new
+  connections per second times about 30 s, while no name server answers. Add a cap
+  before a caller can start lookups at a rate that grows with peers, devices, or data.
+  Lost: Tokio's blocking pool, because the drop of a runtime waits for each of its
+  blocking tasks, and `os` drops each runtime it builds. The literal grammar waits on
+  #1927. Decided by `laptop.architect-2` (2026-10-08 17:08 UTC, #1919,
+  https://github.com/synnaxlabs/foundation/pull/1919#issuecomment-6065081738).
   From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
   mean to a caller. Amended (2026-10-07, #1117): `Mode::Create` makes a missing file
   with `len` zeroed bytes. It treats an empty file that is there as missing and
