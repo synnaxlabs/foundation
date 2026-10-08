@@ -5824,8 +5824,9 @@ How to read this record:
   the copy, with no `[patch.crates-io]`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
   2026-10-08 10:08 UTC). `fuzz/` is a workspace of its own, so `fuzz/Cargo.toml` holds
-  the same `[patch.crates-io]` table (#1864). The PR that changes a copy of a Rust crate
-  lists its mutants as `docs/dependencies.md`, "Local patches", states
+  the `[patch.crates-io]` table of the root `Cargo.toml` (#1864). The PR that changes a
+  copy of a Rust crate lists its mutants as `docs/dependencies.md`, "Local patches",
+  states
   (`laptop.architect-2`, 2026-10-08T11:36:09Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337, and
   2026-10-08T12:05:01Z for hand mutants,
