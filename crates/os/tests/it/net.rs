@@ -359,6 +359,34 @@ fn a_write_of_no_parts_after_an_unseen_reset_is_reset() {
         let (_listener, client, mut server) = create_pair(&net).await;
         let remote = reset_unseen(client, &mut server).await;
         assert_eq!(write(&mut server, &[]).await, Err(Error::Reset { remote }));
+        assert_eq!(close(&mut server).await, Err(Error::Reset { remote }));
+        let read = read(&mut server, &mut [0; 8]).await;
+        assert_eq!(read, Err(Error::Reset { remote }));
+    });
+}
+
+/// After a short write, a write of no parts waits, as the next write of bytes does.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_write_of_no_parts_waits_after_a_short_write() {
+    on_thread("net-none-short", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.send_buffer_bytes = 1 << 14;
+        config.options.unsent_bytes_max = 1 << 20;
+        let mut client = net.connect(&config).await.expect("the listener accepts");
+        let _server = accept(&mut listener).await;
+        write(&mut client, &[&[7]]).await.expect("one byte");
+        let bytes = vec![7; 1 << 16];
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            let none = client.poll_write(&mut cx, &[]);
+            if write_once(&mut client, &bytes).is_pending() {
+                assert_eq!(none, Poll::Pending);
+                break;
+            }
+        }
     });
 }
 
