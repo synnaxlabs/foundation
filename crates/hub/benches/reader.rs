@@ -1,8 +1,8 @@
-//! The per-frame cost of a `hub` reader, on one shard of a sim node. Run with
+//! The per-frame cost of a `hub` write and read, on one shard of a sim node. Run with
 //! `cargo bench -p hub --bench reader`.
 //!
 //! Each round writes `FRAMES` frames of one sample on an index and one data channel,
-//! and times seven lines:
+//! and times these lines:
 //!
 //! - `timer`: an empty closure, the floor of each line's figure.
 //! - `first write`: the first `Writer::write` of a round, after the round before it
@@ -27,7 +27,8 @@
 //! The write reads the sim clock once, which costs less than an `os` read, so compare a
 //! figure only with the control or with another build. The `timer` floor is a large
 //! part of a poll's figure, so judge a change in a poll by `net`, its p50 less the
-//! floor's. To compare two builds, run each several times in turn on one pinned core.
+//! floor's. To compare two builds, run each several times in turn on one pinned core
+//! whose SMT sibling is idle: a busy sibling doubles `write`.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
