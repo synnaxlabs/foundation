@@ -2650,6 +2650,9 @@ mod port {
         /// A time by which the mesh of a node opens, and before its first write after
         /// the open.
         const OPEN: Span = Span::from_nanos(10_000_000);
+        /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
+        /// fails from [`OPEN`] stops the group in the sim.
+        const WRITE: i64 = 1_792_298_042;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -2971,6 +2974,51 @@ mod port {
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
 
+        /// A task that wakes as the group stops, and panics after three yields, when
+        /// the group has stopped but the node has not seen it: `join` gives the panic.
+        #[test]
+        fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let at =
+                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            let own = host.clone();
+            node.spawn(move |_| async move {
+                own.clock().sleep_until(at).await;
+                for _ in 0..3 {
+                    let mut yielded = false;
+                    poll_fn(|cx| {
+                        if yielded {
+                            return Poll::Ready(());
+                        }
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    })
+                    .await;
+                }
+                panic!("a task panics");
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: "a task panics".into(),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(
+                node.join(),
+                Err(Error::Panicked(thread::Panicked {
+                    name: "shard-0".into()
+                }))
+            );
+        }
+
         /// Breaks the node's UDP socket from a task on shard 0 at `OPEN + after`, with
         /// each write of the log failing from `OPEN`. Gives whether the task ran, and
         /// the node's `join`.
@@ -2994,12 +3042,9 @@ mod port {
         }
 
         /// Of a transport and a group that stop, `join` gives the one that the node
-        /// sees first. At one instant, the sim's transport sees its fault one poll
-        /// after the group's write fails, so the group's stop is first.
+        /// sees first, which at one instant can be either.
         #[test]
-        fn join_gives_the_stop_that_shard_0_sees_first() {
-            // The write of the log fails at `OPEN + WRITE`.
-            const WRITE: i64 = 1_792_298_042;
+        fn join_gives_the_stop_that_the_node_sees_first() {
             let error = transport::Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };

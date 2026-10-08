@@ -6078,11 +6078,15 @@ How to read this record:
   changed by `laptop.architect-2` at 17:32:00Z
   (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136): the
   stop has its own variant. Lost: `Error::Mesh` with `mesh::Error::Stopped`, which
-  gives one variant two meanings. The rank by what the node sees first was changed by
+  gives one variant two meanings. The rank by what the node sees first supersedes item
+  2 of https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136, and
+  the private rank of shard 0's stop is a fixed tie-break with no contract. Decided by
   `laptop.architect-2` at 17:49:13Z
-  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217), since
-  the transport sees its own fault one poll after a group that stops at the same
-  instant. Lost: "the transport's when both stop at once", which the node cannot keep.
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217). Lost:
+  "the transport's when both stop at once", because the node sees each stop only at
+  its next poll, so of two stops at one instant either can come first (the breaker,
+  https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065770160 and
+  https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065929818).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
