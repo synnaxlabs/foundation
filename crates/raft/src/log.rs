@@ -14,10 +14,10 @@ pub struct Entry {
 }
 
 impl Entry {
-    // Each claim a change carries, with its signature; nothing for other data.
-    pub(crate) fn claims(
-        &self,
-    ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+    /// Each claim the entry carries, with its signature: for a change, its votes in
+    /// the entry's term in rising key order, then the leader's change. Nothing for
+    /// other data. A `Raft` keeps each signature as it came.
+    pub fn claims(&self) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
         let change = match &self.data {
             Data::Voters(change) => Some(change),
             Data::Empty | Data::Bytes(_) => None,
@@ -186,6 +186,22 @@ impl Log {
         self.voters_through(self.committed)
     }
 
+    // Whether a committed configuration removed `key`: the configuration before the
+    // entries or a configuration entry at or below `committed` held it, and the last
+    // of those lacks it.
+    pub(crate) fn removed(&self, key: node::Key) -> bool {
+        let through = self
+            .configs
+            .partition_point(|&config| config <= self.committed);
+        let mut held = self.before_entries().contains(key);
+        let mut present = held;
+        for &index in &self.configs[..through] {
+            present = self.config(index).1.voters.contains(key);
+            held |= present;
+        }
+        held && !present
+    }
+
     // The configuration before `index`: the one before the entries with no
     // configuration entry before `index`.
     pub(crate) fn voters_before(&self, index: u64) -> Voters {
@@ -335,8 +351,13 @@ impl Log {
     }
 
     // The entries no `Ready` has given to write yet.
+    pub(crate) fn unstable(&self) -> &[Entry] {
+        let stable = usize::try_from(self.stable).unwrap_or(usize::MAX);
+        &self.entries[stable..]
+    }
+
     pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
-        let entries = self.slice(self.stable + 1, u64::MAX, usize::MAX);
+        let entries = self.unstable().to_vec();
         self.stable = self.last().index;
         entries
     }
@@ -564,6 +585,54 @@ mod tests {
     }
 
     #[test]
+    fn claims_gives_the_votes_then_the_change_of_a_change_and_nothing_else() {
+        let entry = config(3, 2, 7);
+        let signature = Signature([9; 64]);
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
+        };
+        let vote = Claim::Grant {
+            voter: node::Key::from_u128(1),
+            grant: crate::Grant::Vote,
+            term: Term(3),
+            candidate: node::Key::from_u128(1),
+        };
+        let wrote = Claim::Change {
+            leader: node::Key::from_u128(1),
+            at: position(3, 2),
+            voters: &change.voters,
+        };
+        let mut signed = entry.clone();
+        signed.sign(&mut |_| signature);
+        let claims: Vec<_> = signed.claims().collect();
+        assert_eq!(claims, [(vote, Some(signature)), (wrote, Some(signature))]);
+        assert_eq!(entry.claims().count(), 2);
+        for data in [Data::Empty, Data::Bytes(vec![1])] {
+            let other = Entry {
+                at: position(3, 2),
+                data,
+            };
+            assert_eq!(other.claims().count(), 0);
+        }
+    }
+
+    #[test]
+    fn a_link_claims_what_the_entry_of_its_change_claims() {
+        let mut entry = config(3, 2, 7);
+        entry.sign(&mut |_| Signature([9; 64]));
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
+        };
+        let link = crate::Link {
+            at: entry.at,
+            change: change.clone(),
+        };
+        let claims: Vec<_> = link.claims().collect();
+        assert_eq!(claims, entry.claims().collect::<Vec<_>>());
+        assert_eq!(claims.len(), 2);
+    }
+
+    #[test]
     fn holds_the_last_configuration_it_wrote() {
         let mut log = log(&[1]);
         assert_eq!(log.voters(), (Position::default(), &Voters::default()));
@@ -631,6 +700,69 @@ mod tests {
         assert_eq!(log.committed_voters(), voters(1));
         assert_eq!(log.append(run(position(1, 1), vec![entry(2, 2)])), Ok(2));
         assert_eq!(log.committed_voters(), Voters::default());
+    }
+
+    // The base holds 1, entry 2 holds 2, and entry 3 holds 3. A node is removed once
+    // a configuration at or below the commit held it and the last such lacks it.
+    #[test]
+    fn removed_needs_a_held_node_that_the_last_committed_configuration_lacks() {
+        let entries = [entry(1, 1), config(1, 2, 2), config(1, 3, 3)];
+        let cases = [
+            (0, [false, false, false, false]),
+            (1, [false, false, false, false]),
+            (2, [true, false, false, false]),
+            (3, [true, true, false, false]),
+        ];
+        for (applied, want) in cases {
+            let log = Log::new(voters(1), entries.to_vec(), applied).unwrap();
+            let got = [1, 2, 3, 9].map(|id| log.removed(node::Key::from_u128(id)));
+            assert_eq!(got, want, "committed {applied}");
+        }
+        let mut log = Log::new(voters(1), entries.to_vec(), 0).unwrap();
+        log.commit_to(3);
+        assert!(log.removed(node::Key::from_u128(2)));
+    }
+
+    // With no voters at the start, the founding set of the first configuration entry
+    // is the configuration before the entries.
+    #[test]
+    fn with_no_voters_removed_counts_the_founding_set_as_held() {
+        let set =
+            |ids: &[u128]| ids.iter().map(|&id| node::Key::from_u128(id)).collect();
+        let join = Voters {
+            incoming: set(&[1, 2]),
+            outgoing: set(&[1]),
+        };
+        let leave = Voters {
+            incoming: set(&[2]),
+            outgoing: set(&[1, 2]),
+        };
+        let entries = vec![
+            Entry {
+                at: position(1, 1),
+                data: change(join.clone()),
+            },
+            Entry {
+                at: position(1, 2),
+                data: change(join.leave()),
+            },
+            Entry {
+                at: position(1, 3),
+                data: change(leave.clone()),
+            },
+            Entry {
+                at: position(1, 4),
+                data: change(leave.leave()),
+            },
+        ];
+        let one = node::Key::from_u128(1);
+        let log = Log::new(Voters::default(), entries.clone(), 0).unwrap();
+        assert!(!log.removed(one));
+        let log = Log::new(Voters::default(), entries.clone(), 3).unwrap();
+        assert!(!log.removed(one));
+        let log = Log::new(Voters::default(), entries, 4).unwrap();
+        assert!(log.removed(one));
+        assert!(!log.removed(node::Key::from_u128(2)));
     }
 
     #[test]

@@ -700,6 +700,7 @@ mod tests {
             area.push(&mut group, header(1, Path::Live, 2 * first), part.into());
             let closed = group.close(&mut area.writer);
             let sealed = area.commit(closed);
+            area.writer.synced(sealed.ends());
             if first == 0 {
                 tail = sealed.ends().record;
             }

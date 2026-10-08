@@ -115,8 +115,8 @@ state on `main`.
 - The first message of a stream, and each datagram, starts with a `wire` header
   (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
   counts such a datagram. A client opens only hub streams; `node` refuses the other
-  protocols from a client. `wire::header` landed; the dispatch table in `node` is not
-  built.
+  protocols from a client. `node` stops and resets each stream until a protocol has a
+  server. It reads no datagram yet (#1661), and admits every peer (#1628).
 
 ### Subject to owner
 
@@ -190,7 +190,8 @@ state on `main`.
   only on that answer from a voter of its own configuration (#1105). No node serves
   mesh streams yet (#471).
   A voter that lies can still break safety, because a false `AppendReply` counts as
-  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed
+  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
+  voter that lies writes gives its node the key it names (MESH DRIVER). A signed
   `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
@@ -350,19 +351,21 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
-| `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
-| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
+| `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
+| `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
-| `spec_data_type` | `spec::channel::DataType` | Prints as the text it was read from |
+| `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
-| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, and each definition decodes to itself; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
@@ -379,6 +382,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages (#1470), `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
-tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.
+and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`),
+`mesh::Member::decode` (the join answer of #336 adds its target), `spec` tree chunks
+(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), and
+each connector's protocol parser.

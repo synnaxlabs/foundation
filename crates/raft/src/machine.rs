@@ -254,6 +254,14 @@ impl Raft {
         &self.voters
     }
 
+    /// Whether a committed configuration removed `key`: the configuration before the
+    /// entries or a committed `Voters` entry held it, and the last committed
+    /// configuration lacks it. An entry past the commit counts for neither.
+    #[must_use]
+    pub fn removed(&self, key: node::Key) -> bool {
+        self.log.removed(key)
+    }
+
     /// The state that must be on disk before a message of this term leaves.
     /// [`Ready::hard`] says when to write it.
     #[must_use]
@@ -264,6 +272,15 @@ impl Raft {
             leader: self.led,
             proof: self.proof.clone(),
         }
+    }
+
+    /// The entries that the next [`Raft::ready`] gives, in index order: appended
+    /// since the last `ready` and not yet written. A step that replaces entries
+    /// makes it start at or below the first replaced index, which can be at or
+    /// below the last index that an earlier `ready` gave.
+    #[must_use]
+    pub fn unstable(&self) -> &[Entry] {
+        self.log.unstable()
     }
 
     /// Takes what the caller must do since the last call.
@@ -3370,6 +3387,30 @@ mod tests {
             let terms: Vec<Term> =
                 raft.ready().entries.iter().map(|e| e.at.term).collect();
             assert_eq!(terms, [Term(1), Term(2)]);
+        }
+
+        #[test]
+        fn unstable_starts_at_the_first_entry_that_a_step_replaces() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1), (1, 2)]), 0);
+            raft.step(message(2, 1, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(1, 1), (1, 2)]));
+            assert_eq!(raft.ready().entries, entries(&[(1, 1), (1, 2)]));
+            assert_eq!(raft.unstable(), []);
+            let body = append(position(1, 1), entries(&[(2, 2), (2, 3)]), 0);
+            raft.step(message(3, 2, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(2, 2), (2, 3)]));
+            assert_eq!(raft.ready().entries, entries(&[(2, 2), (2, 3)]));
+        }
+
+        #[test]
+        fn unstable_keeps_its_start_when_a_step_replaces_an_entry_not_given() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1), (1, 2)]), 0);
+            raft.step(message(2, 1, body)).unwrap();
+            let body = append(position(1, 1), entries(&[(2, 2)]), 0);
+            raft.step(message(3, 2, body)).unwrap();
+            assert_eq!(raft.unstable(), entries(&[(1, 1), (2, 2)]));
         }
 
         // The term, the vote, and the leader move only for a message that is

@@ -72,9 +72,10 @@ use types::sample::{self, Scalar};
 use types::time::Span;
 
 use crate::access::{Action, Actions, Policy};
-use crate::channel::{self, Channel, Data, DataType};
+use crate::channel::{self, Channel, Data};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
+use crate::data_type::DataType;
 use crate::node_settings;
 use crate::placement;
 use crate::region::{Delegation, NoVoters};

@@ -1,75 +1,21 @@
 //! A hub on one shard of a sim node, with `time` and `value` on it, and the writes to
 //! it, for the tests and benches that count or time the hub.
 
-use std::path::PathBuf;
-use std::rc::Rc;
-
-use block::{Heap, Pool};
 use env::tasks::Tasks;
 use hub::home::Outcome;
 use hub::writer::Writer;
 use hub::{Channel, Hub};
 use types::channel;
-use types::frame::key_set::Interner;
 use types::frame::{Draft, Form, Label, Path};
-use types::name::Name;
 use types::sample::{Scalar, Type};
-use types::time::{Span, Stamp};
+use types::time::Span;
 
-const COMMIT: Span = Span::from_nanos(10_000_000);
+use crate::shard::{name, shard};
+
 /// Past the commit of a write.
 pub(crate) const SETTLE: Span = Span::from_nanos(20_000_000);
 
-pub(crate) fn name(name: &str) -> Name {
-    name.parse().expect("a valid name")
-}
-
-/// A home shard on a new ring of `node`, its interner, and the node's mesh time now
-/// once it has one.
-pub(crate) async fn shard(
-    node: &sim::node::Node,
-    tasks: Tasks,
-) -> (home::Shard, Interner, i64) {
-    let config = block::Config { budget: 1 << 23 };
-    let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-    let (clock, mesh) = clock::Clock::new(node.clock());
-    let wall = node.wall();
-    tasks.spawn(async move { clock.run(wall).await });
-    let mut interner = Interner::new();
-    let config = buffer::Config {
-        files: node.files(),
-        dir: PathBuf::from("shard-0"),
-        pool: Rc::clone(&pool),
-        clock: node.clock(),
-        tasks,
-        entropy: node.entropy(),
-        // A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
-        // nothing frees the ring until #160, so a run fills it at 1023 one-frame
-        // commits.
-        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
-        commit: COMMIT,
-    };
-    let buffer = buffer::Buffer::open(config, interner.slots())
-        .await
-        .expect("opens");
-    let shard = home::Shard::new(home::Config {
-        shard: 0,
-        buffer,
-        clock: mesh.clone(),
-        limits: home::order::Limits {
-            earliest: Stamp::from_nanos(1),
-            ahead: Span::from_nanos(1_000_000_000),
-        },
-    });
-    loop {
-        if let Some(now) = mesh.now().mesh {
-            return (shard, interner, now.latest.nanos());
-        }
-        node.clock().sleep(Span::from_nanos(1)).await;
-    }
-}
-
-/// A hub on [`shard`], with `time` and `value` defined, and the node's mesh time now.
+/// A hub on a new shard, with `time` and `value` defined, and the node's mesh time now.
 pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
     let (home, interner, now) = shard(node, tasks.clone()).await;
     let hub = Hub::new(hub::Config {
