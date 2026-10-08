@@ -3,8 +3,8 @@
 
 use std::future::pending;
 
+use transport::Class;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code};
 
 use super::send::{self, LIMIT, Peer, create_config, stop};
 use super::*;

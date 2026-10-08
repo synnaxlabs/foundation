@@ -160,8 +160,11 @@ state on `main`.
   stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
   `raft` checks the index a heartbeat or an append answer names, the order of an
   append's entries, and that no entry is above the append's term. A node that a
-  change removed and that missed its release can win an election once no voter has
-  a lease, and lead until it commits the leave (#483).
+  change removed and that missed its release campaigns; a voter whose log holds the
+  leave refuses the request, with `removed` once the leave commits, and the node stops
+  (#1105). A voter whose log lacks the leave entry admits the request until #1107, so
+  in `raft` alone such a node can win an election once no voter has a lease, and lead
+  until it commits the leave.
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
@@ -181,7 +184,11 @@ state on `main`.
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
-  refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
+  refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
+  code 17) only to a sender that a committed configuration removed, so a stranger
+  cannot learn from the answer which nodes the log held, and a sender stops its group
+  only on that answer from a voter of its own configuration (#1105). No node serves
+  mesh streams yet (#471).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
   voter that lies writes gives its node the key it names (MESH DRIVER). A signed
@@ -271,14 +278,16 @@ state on `main`.
   #348. They do not have the `security` label: each needed a writer of the file, or,
   for the small body of #300, a `Layout` from the node's own config (a new ring with
   a body of 4 to 54 bytes stopped the node at its first `append`).
-- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Fixed: #392
+- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Its inputs
+  reach a record of four blocks, an entry table of four blocks, a tail at each block
+  of the area, a wrap record, a full ring, and the end of the offsets. Fixed: #392
   (three ways a ring lost data it reported durable or could not open), #566 (a write
   of a dead process could land on a ring that a new process opened), #572 (`append`
   took a record over the pool's largest block, and then each open failed), #657 (an
   open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
-  #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold the two fields of #393.
+  #393 (two CRC-valid fields stopped the node at open); the `area_16` and
+  `below_tail_16` inputs hold the two fields of #393.
 
 ### Device to connector
 
@@ -345,6 +354,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
+| `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body message is where `body` says and no longer than the rest of the body; each refusal is the one the state gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
@@ -371,7 +381,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `types_sample` | `sample::Type` | Prints as the text it was read from |
 | `types_frame_ends` | `frame::Layout::from_ends`, `frame::check`, `frame::split` | Refuses exactly the ends that break a rule, with an error that names a broken rule; the layout is the one that `Layout::new` gives for the lengths; a frame drafted from the ends has them, and `split` cuts its series at them; `check` refuses exactly the ends that do not fit a body whose length the input gives, and `split` cuts a body that `check` took at them. Not reached: the panics of `split`, a body over 64 KiB |
-| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
+| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private, not built, or not reached from a file:
@@ -380,5 +390,6 @@ No target yet, because the decoder is private, not built, or not reached from a 
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the header and
 hard state of a mesh log record (#1711), the names of a mesh log directory
 (`mesh::log::sequence`, #1746), each connector's protocol parser, and
-`connector::reader::read`, which no file reaches until `config::check` takes a kind
-table (#1153).
+`connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
+which no file reaches until `config::check` takes a kind table (#1153) and `node` puts
+the influx kind in its table (#1734).

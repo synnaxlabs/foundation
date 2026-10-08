@@ -86,7 +86,7 @@ const EXAMPLES: [&str; 6] = [
 /// `Display` gives the message: a lower-case clause with no final period.
 /// [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error(pub sample::Error);
+pub struct Error(sample::Error);
 
 impl Error {
     /// What to do instead: a sentence with no final period.
