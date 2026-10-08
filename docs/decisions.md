@@ -5349,7 +5349,7 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
   `node::Region` copies three fields of `mesh::Config`. One `mesh` value of what a node
   knows of its region at open replaces it (#1859) when the first of PR 1 of #1744 and
-  the join answer of #336 lands, since each needs all four fields. Decided by
+  the join answer of #336 lands, because each needs all four fields. Decided by
   `laptop.architect` at 2026-10-08T10:23:48Z
   (https://github.com/synnaxlabs/foundation/pull/1857#issuecomment-6057800438). A mesh
   that stops does not stop the node until #1780, before PR 4 gives the mesh to the hub.
