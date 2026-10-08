@@ -623,9 +623,38 @@ connector \"a\" {
         (0, value(text, "home", "\"m\"")),
         "the placement `a` names the home `m`, but the connector `a` runs on the node \
          `n`",
-        "Name `n` as the `home`, or leave out `home`",
+        "Name `n` as the `home`, or leave out `home`, and keep `n` out of `standby` \
+         and `copies`",
     );
     assert_eq!(found, [expected]);
+}
+
+#[test]
+fn plans_a_connector_after_each_way_of_the_connector_home_fix() {
+    let text = |placement: &str| {
+        format!(
+            "\
+connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+placement \"a\" {{
+  select = \"a\"
+{placement}}}
+"
+        )
+    };
+    let refused = text("  home = \"m\"\n  standby = \"n\"\n");
+    let refused = problems(Spec::create_empty().plan(&[&refused], &["m", "n"]));
+    assert_eq!(
+        refused.iter().map(|p| p.0).collect::<Vec<_>>(),
+        ["config.connector-home"]
+    );
+    for fixed in ["  home = \"n\"\n  standby = \"m\"\n", "  standby = \"m\"\n"] {
+        let plan = Spec::create_empty().plan(&[&text(fixed)], &["m", "n"]);
+        assert!(plan.is_ok(), "{plan:?}");
+    }
 }
 
 #[test]

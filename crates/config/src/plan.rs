@@ -266,7 +266,10 @@ fn connectors<'f>(
                      `{name}` runs on the node `{node}`",
                     label(placement)
                 ),
-                format!("Name `{node}` as the `home`, or leave out `home`"),
+                format!(
+                    "Name `{node}` as the `home`, or leave out `home`, and keep \
+                     `{node}` out of `standby` and `copies`"
+                ),
             )),
             Ok(_) => {}
             Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
