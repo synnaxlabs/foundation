@@ -2412,11 +2412,9 @@ mod port {
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
 
-    /// The node gives a hub stream of a node to its hub, which stops an open of a
-    /// channel that the node does not know, and resets its reply half, with
-    /// `UNKNOWN`.
-    #[test]
-    fn a_hub_stream_of_a_node_goes_to_the_hub() {
+    /// The header of a hub stream, then an open of the channel 9, which no node
+    /// knows.
+    fn open_unknown() -> [Vec<u8>; 3] {
         let header = wire::header::encode(wire::Protocol::Hub);
         let open = wire::hub::Open {
             mode: wire::hub::Mode::Complete { limit_bytes: 0 },
@@ -2426,9 +2424,17 @@ mod port {
         open.encode(&mut opened);
         let mut keys = [0; wire::hub::keys::LEN];
         wire::hub::keys::encode(&[types::channel::Key::from_u128(9)], &mut keys);
-        let Seen { sent, read, .. } =
-            sees(Some(CLIENT), &[&header, &opened, &keys], Size::MEBIBYTE);
-        let code = Code(wire::hub::UNKNOWN);
+        [header.to_vec(), opened, keys.to_vec()]
+    }
+
+    /// A node with no region has no members, so it stops a hub stream of a node, and
+    /// resets its reply half, with the code of a rejected header.
+    #[test]
+    fn rejects_a_hub_stream_of_a_node_with_no_region() {
+        let first = open_unknown();
+        let first: Vec<&[u8]> = first.iter().map(Vec::as_slice).collect();
+        let Seen { sent, read, .. } = sees(Some(CLIENT), &first, Size::MEBIBYTE);
+        let code = Code(wire::header::REJECTED);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -3019,6 +3025,47 @@ mod port {
             let seen = seen.lock().unwrap().take();
             seen.expect("the peer ran")
                 .expect("the dial reaches the node")
+        }
+
+        /// What a peer with `key` sees when it sends [`open_unknown`] to the node
+        /// [`OWN`] of a region with [`OTHER`].
+        ///
+        /// [`open_unknown`]: super::open_unknown
+        fn opened(key: PrivateKey) -> Seen {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let node = start(&hosts[0], (OWN, KEY), region(&pair(&hosts)));
+            let first = super::open_unknown();
+            let first: Vec<&[u8]> = first.iter().map(Vec::as_slice).collect();
+            let seen = dial(&mut sim, &hosts[0], Some(key), &first);
+            assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let seen = seen.lock().unwrap().take();
+            seen.expect("the peer ran")
+                .expect("the dial reaches the node")
+        }
+
+        /// The node gives a hub stream of a member to its hub, which stops an open of
+        /// a channel that the node does not know, and resets its reply half, with
+        /// `UNKNOWN`.
+        #[test]
+        fn a_hub_stream_of_a_member_goes_to_the_hub() {
+            let Seen { sent, read, .. } = opened(OTHER.1);
+            let code = Code(wire::hub::UNKNOWN);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// The node stops a hub stream of a node that is not a member, and resets its
+        /// reply half, with the code of a rejected header.
+        #[test]
+        fn rejects_a_hub_stream_of_a_node_that_is_not_a_member() {
+            let Seen { sent, read, .. } = opened(CLIENT);
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
         }
 
         /// The mesh serves a mesh stream: at the first message that is not a mesh

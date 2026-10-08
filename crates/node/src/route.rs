@@ -52,7 +52,7 @@ async fn serve(
 
 /// Reads the header of `incoming`, its first message, and routes the stream that
 /// `peer` opened by its protocol. A `Mesh` stream of a node goes to `mesh`, and a
-/// `Hub` stream of a node to `link`; each other stream is rejected.
+/// `Hub` stream of a member of the region to `link`; each other stream is rejected.
 async fn route(mut incoming: Incoming, peer: Peer, mesh: Option<Mesh>, link: Link) {
     let Ok(first) = incoming.receiver.recv().await else {
         return;
@@ -68,11 +68,13 @@ async fn route(mut incoming: Incoming, peer: Peer, mesh: Option<Mesh>, link: Lin
             }
             (Peer::Client, _) | (_, None) => reject(incoming),
         },
-        Protocol::Hub => match peer {
-            // `serve` stops the stream with the code of its error.
-            Peer::Node(_) => drop(link.serve(incoming).await),
-            // Until `node` handles a `Served::Request` (#1744).
-            Peer::Client => reject(incoming),
+        Protocol::Hub => match (peer, mesh) {
+            (Peer::Node(key), Some(mesh)) if mesh.holder(key).is_some() => {
+                // `serve` stops the stream with the code of its error.
+                drop(link.serve(incoming).await);
+            }
+            // A program waits until `node` handles a `Served::Request` (#1744).
+            (Peer::Node(_) | Peer::Client, _) => reject(incoming),
         },
         Protocol::Clock | Protocol::Replica | Protocol::Blob => reject(incoming),
     }
