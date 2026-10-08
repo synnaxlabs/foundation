@@ -30,8 +30,8 @@ use types::node::{self, SealKey};
 use types::time::Span;
 
 use super::{Applied, apply};
+use crate::common::{PLANT, Reader, files, front_ends, name, placed_site};
 use crate::error::Error;
-use crate::plan::tests::{PLANT, Reader, files, front_ends, name, placed_site};
 use crate::plan::{self, Counts, Output, plan};
 
 const NODE: node::Key = node::Key::from_u128(1);

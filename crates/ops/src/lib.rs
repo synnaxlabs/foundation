@@ -11,6 +11,8 @@ use serde_json::{Value, json};
     expect(dead_code, reason = "the table entries of #1744 call it")
 )]
 mod apply;
+#[cfg(test)]
+mod common;
 mod error;
 #[cfg_attr(
     not(test),

@@ -14,7 +14,7 @@ use crate::error::{Error, Place, Problem};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 /// The change from the files to the spec at `base`, and the plan that `apply` takes.
 /// `Source(i)` is `files[i]`.

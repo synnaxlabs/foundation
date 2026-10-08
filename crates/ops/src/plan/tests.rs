@@ -3,10 +3,9 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use connector::cancel;
-use connector::kind::{self, Channels, Context, Table};
+use connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Document, Position, Source, Span};
+use document::{Position, Source, Span};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
@@ -16,75 +15,9 @@ use types::name::Name;
 use types::sample;
 
 use super::{Output, plan};
+use crate::common::{PLANT, Reader, SITE, files, front_ends, hcl, name, placed_site};
 use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd};
-
-pub(crate) const PLANT: &str =
-    include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
-pub(crate) const SITE: &str =
-    include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
-
-/// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
-/// each attribute, so it stands in for each kind of the fixtures.
-pub(crate) struct Reader;
-
-impl kind::Kind for Reader {
-    type Config = Vec<Name>;
-
-    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
-        let reads = config
-            .blocks
-            .iter()
-            .filter(|block| &*block.keyword == "read");
-        Ok(reads
-            .map(|block| block.labels[0].text.parse().expect("a name"))
-            .collect())
-    }
-
-    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
-        Ok(Channels {
-            reads: Vec::new(),
-            writes: writes.clone(),
-        })
-    }
-
-    fn discover(
-        &self,
-        _: &cancel::Token,
-    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
-        std::future::ready(Ok(Vec::new()))
-    }
-
-    fn run(
-        &self,
-        _: Context<Vec<Name>>,
-    ) -> impl Future<Output = Result<(), kind::Error>> {
-        std::future::ready(Ok(()))
-    }
-}
-
-fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
-}
-
-pub(crate) fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
-    BTreeMap::from([("hcl", FrontEnd { read: hcl })])
-}
-
-pub(crate) fn name(text: &str) -> Name {
-    text.parse().expect("a name")
-}
-
-pub(crate) fn files(files: &[(&str, &str)]) -> Vec<File> {
-    files
-        .iter()
-        .map(|(path, text)| File {
-            path: PathBuf::from(path),
-            text: (*text).to_owned(),
-        })
-        .collect()
-}
 
 fn empty() -> spec::Pointer {
     spec::Pointer {
@@ -123,11 +56,6 @@ fn channel(key: u128, kind: channel::Kind) -> Definition {
         key: Key::from_u128(key),
         kind,
     })
-}
-
-/// `site.hcl` with a placement that homes its index on `edge`.
-pub(crate) fn placed_site() -> String {
-    format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
 const INDEX: channel::Kind = channel::Kind::Index {
