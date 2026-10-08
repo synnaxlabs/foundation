@@ -287,18 +287,14 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 }
 
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>`
-/// heading, also in its source when it is not `old` and has raw HTML. The fields are
+/// heading, also one that raw HTML hides when it is not `old`. The fields are
 /// the first block after the heading, so the findings text cannot set them. The last
 /// block is the end lines ([`END`]), unless the comment is `old`, posted before
 /// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = unpadded(body);
     let shown = Shown::read(&body);
-    let number = match shown.number {
-        // Raw HTML can hide from the parser a heading that GitHub shows.
-        None if !old && shown.html.is_some() => heading(&body)?,
-        number => number?,
-    };
+    let number = shown.number.or(shown.hidden.filter(|_| !old))?;
     let text = &shown.text;
     let lines = shown.fields().iter().copied();
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
@@ -439,6 +435,10 @@ struct Shown<'a> {
     /// line of text that starts with `<` and a letter, `!`, `/`, or `?`. GitHub can
     /// read such a line in a different way, or hide the text after it.
     html: Option<&'a str>,
+    /// The text after `## Review round ` in the first line of a top-level HTML block
+    /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
+    /// line as a heading.
+    hidden: Option<&'a str>,
 }
 
 impl<'a> Shown<'a> {
@@ -460,6 +460,7 @@ impl<'a> Shown<'a> {
         for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
             let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
+            let source = &body[start..range.start + line.len()];
             let paragraph = open.last().copied().flatten().filter(|_| fresh);
             let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
             let raw = match &event {
@@ -472,7 +473,10 @@ impl<'a> Shown<'a> {
                 _ => false,
             };
             if raw && shown.html.is_none() {
-                shown.html = Some(body[start..range.start + line.len()].trim());
+                shown.html = Some(source.trim());
+            }
+            if matches!(event, Event::Html(_)) && open.len() == 1 {
+                shown.hidden = shown.hidden.or(heading(source));
             }
             match event {
                 Event::Start(tag) if !inline(tag.to_end()) => {
@@ -582,16 +586,14 @@ fn unpadded(text: &str) -> String {
     unpadded
 }
 
-/// The text after `## Review round ` in the first line of `body` that starts with it
-/// after at most three spaces.
-fn heading(body: &str) -> Option<&str> {
-    body.split(['\n', '\r']).find_map(|line| {
-        let heading = line.trim_start_matches(' ');
-        let indent = line.len() - heading.len();
-        (indent < 4)
-            .then_some(heading)?
-            .strip_prefix("## Review round ")
-    })
+/// The text after `## Review round ` in `line` when it starts with it after at most
+/// three spaces.
+fn heading(line: &str) -> Option<&str> {
+    let heading = line.trim_start_matches(' ');
+    let indent = line.len() - heading.len();
+    (indent < 4)
+        .then_some(heading)?
+        .strip_prefix("## Review round ")
 }
 
 /// Whether `prefix`, the source of a line before some text, holds only the indent and

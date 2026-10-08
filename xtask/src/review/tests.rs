@@ -1359,7 +1359,10 @@ fn reads_only_a_top_level_round_heading() {
         "- ## Review round 2",
         "    ## Review round 2",
         "```\n## Review round 2\n```",
-        "<div>\n\n    ## Review round 2",
+        "<search\n    ## Review round 2",
+        "- <search\n  ## Review round 2",
+        "<!-- a -->\n\n```\n## Review round 2\n```",
+        "<b>a</b>\n\n~~~\n## Review round 2\n~~~",
     ] {
         let comment = bot(&format!("{quoted}\n\nNo fields."));
         assert_eq!(
