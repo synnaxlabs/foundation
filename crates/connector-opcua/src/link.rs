@@ -259,10 +259,10 @@ fn the_copy_links_the_timer() {
     assert_eq!(distinct.len(), functions.len());
 }
 
-/// Each symbol outside the copy and `shim.c` that they may name in glibc: on x86-64
-/// with GCC or Clang at each optimization level, and on 64-bit Arm with Clang at
-/// `-O2` and `-moutline-atomics`. None gives or takes a heap block, so no block
-/// crosses between the allocator of libc and `src/alloc.rs`.
+/// Each symbol outside the copy and `shim.c` that they may name, in glibc and in the
+/// outline atomics of libgcc: on x86-64 with GCC or Clang at each optimization level,
+/// and on 64-bit Arm with Clang at `-O2` and `-moutline-atomics`. None gives or takes a
+/// heap block, so no block crosses between the allocator of libc and `src/alloc.rs`.
 const OUTSIDE: [&str; 43] = [
     "_GLOBAL_OFFSET_TABLE_",
     "__aarch64_cas8_acq_rel",
@@ -357,7 +357,9 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
 
 /// GCC 10 and later, and Clang, default to `-moutline-atomics` on 64-bit Arm Linux,
 /// which the host build does not show. So this preprocesses each source of the copy
-/// as the host build does and compiles it for 64-bit Arm with that default.
+/// as the host build does and compiles it for 64-bit Arm with that default. The
+/// preprocessing is the host's, so the test finds the names that the code generation
+/// for Arm adds, not the names of a branch of the source for Arm only.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
