@@ -3815,8 +3815,8 @@ How to read this record:
   `Settings::name` of `None` for a reader with no `name` of
   https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089
   (`laptop.architect-2`,
-  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653,
-  2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653, 2026-10-08
+  05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item

@@ -30,10 +30,9 @@ pub struct Settings {
 
 /// Reads the `select` attribute of `config` and its one `reader` block, with the
 /// attributes `mode` (`"complete"` or `"latest"`, as a string or a reference) and
-/// `hold`. With no `reader` block, the reader is complete and has no hold. `keys`
-/// and `blocks` are the kind's own attributes and blocks. Each other key of `config`
-/// that `read` does not read gives `document.unknown-attribute` or
-/// `document.unknown-block`.
+/// `hold`. With no `reader` block, the reader is complete and has no hold. `keys` and
+/// `blocks` are the kind's own attributes and blocks. Each other key of `config` that
+/// `read` does not read gives `document.unknown-attribute` or `document.unknown-block`.
 ///
 /// # Errors
 ///
