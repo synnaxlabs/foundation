@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use connector::cancel;
@@ -529,4 +531,50 @@ fn gives_two_paths_that_differ_two_texts() {
          error[ops.unknown-extension]: no config syntax reads \"a\\n.yaml\"\n\
          fix: Use a file that ends in `.hcl`\n"
     );
+}
+
+fn bytes(paths: &[&[u8]], text: &str) -> Vec<File> {
+    paths
+        .iter()
+        .map(|path| File {
+            path: PathBuf::from(OsStr::from_bytes(path)),
+            text: text.to_owned(),
+        })
+        .collect()
+}
+
+#[test]
+fn quotes_each_byte_of_a_path_that_is_not_utf8() {
+    let error = plan(
+        &bytes(&[b"a\xff.yaml", b"a\xfe.yaml"], ""),
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &front_ends(),
+        &Table::new(),
+    )
+    .expect_err("problems");
+    assert_eq!(
+        error.text(),
+        "error[ops.unknown-extension]: no config syntax reads \"a\\xFF.yaml\"\n\
+         fix: Use a file that ends in `.hcl`\n\
+         \n\
+         error[ops.unknown-extension]: no config syntax reads \"a\\xFE.yaml\"\n\
+         fix: Use a file that ends in `.hcl`\n"
+    );
+}
+
+#[test]
+fn reads_a_name_that_is_not_utf8_by_its_extension() {
+    let placed = placed_site();
+    let planned = plan(
+        &bytes(&[b"\xff.hcl"], &placed),
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::from([name("edge")]),
+        &front_ends(),
+        &Table::new(),
+    )
+    .expect("a plan");
+    assert_eq!(planned.added, 3);
 }

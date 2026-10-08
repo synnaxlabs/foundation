@@ -50,8 +50,12 @@ pub(crate) fn read(
         let front_end = file
             .path
             .file_name()
-            .and_then(|name| name.to_str()?.rsplit_once('.'))
-            .and_then(|(_, extension)| front_ends.get(extension));
+            .and_then(|name| {
+                let name = name.as_encoded_bytes();
+                let dot = name.iter().rposition(|&byte| byte == b'.')?;
+                std::str::from_utf8(&name[dot + 1..]).ok()
+            })
+            .and_then(|extension| front_ends.get(extension));
         let Some(front_end) = front_end else {
             diagnostics.push(unknown(&file.path, front_ends));
             continue;
@@ -75,6 +79,10 @@ pub(crate) fn read(
 }
 
 /// The `ops.unknown-extension` diagnostic of `path`.
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "`Debug` quotes the path and escapes each byte that is not UTF-8"
+)]
 pub(crate) fn unknown(
     path: &Path,
     front_ends: &BTreeMap<&'static str, FrontEnd>,
@@ -92,7 +100,7 @@ pub(crate) fn unknown(
     Diagnostic::new(
         UNKNOWN_EXTENSION,
         None,
-        format!("no config syntax reads {:?}", path.display().to_string()),
+        format!("no config syntax reads {path:?}"),
         format!("Use a file that ends in {extensions}"),
     )
 }
