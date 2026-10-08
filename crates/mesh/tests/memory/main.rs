@@ -38,10 +38,10 @@ const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
 const FEW: usize = 8;
 /// The applies after which the heap is read the last time.
 const MANY: usize = 264;
-/// The bytes for each apply by which the heap of two runs can grow apart with no
-/// refusal kept: the periodic writes of the node fall at other applies in each run.
-/// A kept refusal holds its index and two pointers, more than 80 bytes.
-const SLACK: i128 = 8;
+/// The bytes for each apply by which the slopes of two runs can differ with no
+/// refusal kept. The periodic writes of the node fall at other applies in each run,
+/// and the slopes differ by 1.4 bytes. A `u32` kept for each refusal adds 6.5.
+const SLACK: i128 = 3;
 
 fn main() {
     many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect();
