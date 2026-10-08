@@ -2,11 +2,13 @@
 
 use std::collections::BTreeMap;
 
+use types::authority::Authority;
 use types::channel::Key;
 use types::ed25519::PublicKey;
-use types::name::{Name, Prefix};
+use types::name::{Name, Prefix, Selector};
 use types::sample::{self, Scalar};
 
+use crate::access::{Action, Policy};
 use crate::channel::{Channel, Data, Kind};
 use crate::data_type::DataType;
 use crate::definition::Definition;
@@ -23,6 +25,16 @@ pub(super) fn prefix(text: &str) -> Prefix {
 
 pub(super) fn subject() -> Definition {
     Definition::Subject(Subject::new(vec![PublicKey::new([3; 32]).unwrap()]).unwrap())
+}
+
+pub(super) fn access() -> Definition {
+    let select = |text| Selector::new([text]).unwrap();
+    Definition::Access(Policy::new(
+        select("@admin"),
+        select("**"),
+        [Action::Read].into_iter().collect(),
+        Authority(0),
+    ))
 }
 
 pub(super) fn record() -> Definition {

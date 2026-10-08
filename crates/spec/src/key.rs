@@ -44,19 +44,19 @@ impl Kind {
         })
     }
 
-    /// The label of `key` when `key` is a tree key of this kind, as [`Kind::key`] gives
-    /// it, or `None` when it is not.
+    /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
+    /// when it does not. The label of a kind with a segment can be reserved, which
+    /// [`Kind::key`] refuses.
     pub(crate) fn label(self, key: &Name) -> Option<Name> {
-        let label = match self {
-            Self::Connector | Self::Channel => key.clone(),
+        match self {
+            Self::Connector | Self::Channel => (!key.reserved()).then(|| key.clone()),
             _ => key
                 .as_str()
                 .strip_suffix(self.as_str())?
                 .strip_suffix(".@")?
                 .parse()
-                .ok()?,
-        };
-        (!label.reserved()).then_some(label)
+                .ok(),
+        }
     }
 
     /// The name of the kind, such as `node_settings`: the keyword a file format names
@@ -299,8 +299,19 @@ mod tests {
         ] {
             assert_eq!(Kind::Access.label(&name(key)), None, "{key}");
         }
-        assert_eq!(Kind::Access.label(&name("plant.@x.@access")), None);
         assert_eq!(Kind::Channel.label(&name("plant.@access")), None);
         assert_eq!(Kind::Connector.label(&name("plant.@x.y")), None);
+    }
+
+    #[test]
+    fn gives_a_reserved_label_for_a_kind_with_a_segment() {
+        assert_eq!(
+            Kind::Access.label(&name("plant.@x.@access")),
+            Some(name("plant.@x"))
+        );
+        assert_eq!(
+            Kind::Subject.label(&name("@admin.@subject")),
+            Some(name("@admin"))
+        );
     }
 }

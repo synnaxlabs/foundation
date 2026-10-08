@@ -4,7 +4,7 @@ use types::channel::Key;
 use super::*;
 use crate::channel::Edge;
 use crate::region::common::{
-    create_definitions, data, index, name, prefix, record, subject,
+    access, create_definitions, data, index, name, prefix, record, subject,
 };
 
 fn ungoverned(key: &str, region: &str) -> Problem {
@@ -198,6 +198,27 @@ fn does_not_govern_a_channel_at_the_name_of_a_child() {
     assert_eq!(
         check(&prefix("plant"), &definitions),
         [ungoverned("plant.child", "plant")]
+    );
+}
+
+#[test]
+fn finds_no_problem_in_the_founding_definitions_at_a_reserved_label() {
+    let definitions = create_definitions(&[
+        ("@admin.@access", access()),
+        ("@admin.@subject", subject()),
+    ]);
+    assert_eq!(check(&Prefix::ROOT, &definitions), []);
+}
+
+#[test]
+fn finds_a_channel_at_a_reserved_key_misplaced() {
+    let definitions = create_definitions(&[("@admin.@subject", index(1))]);
+    assert_eq!(
+        check(&Prefix::ROOT, &definitions),
+        [Problem::Misplaced {
+            name: name("@admin.@subject"),
+            kind: Kind::Channel,
+        }]
     );
 }
 
