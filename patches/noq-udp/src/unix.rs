@@ -402,10 +402,56 @@ fn send(
             }
         }
     }
+    let e = match send_one(state, &io, transmit, encode_src_ip) {
+        Err(e) => e,
+        sent => return sent,
+    };
+
+    // Some network adapters and drivers do not support GSO. Unfortunately, Linux
+    // offers no easy way for us to detect this short of an EIO or sometimes EINVAL
+    // when we try to actually send datagrams using it. A bad transmit (a source
+    // that is not local, port 0) gives the same errors, so GSO stays on unless
+    // the first datagram goes out alone.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let (Some(libc::EIO | libc::EINVAL), Some(segment_size @ 1..)) =
+        (e.raw_os_error(), transmit.effective_segment_size())
+    {
+        let mut datagrams = transmit.contents.chunks(segment_size).map(|contents| Transmit {
+            contents,
+            segment_size: None,
+            ..*transmit
+        });
+        if let Some(first) = datagrams.next() {
+            send_one(state, &io, &first, encode_src_ip)?;
+        }
+        // Prevent new transmits from being scheduled using GSO. Existing GSO transmits
+        // may already be in the pipeline, so we need to tolerate additional failures.
+        if state.max_gso_segments().get() > 1 {
+            crate::log::info!("`libc::sendmsg` failed with {e}; halting segmentation offload");
+            state.max_gso_segments.store(1, Ordering::Relaxed);
+        }
+        for datagram in datagrams {
+            send_one(state, &io, &datagram, encode_src_ip)?;
+        }
+        return Ok(());
+    }
+    Err(e)
+}
+
+/// Sends `transmit` in one `sendmsg`. On `EINVAL` to an IPv4 destination, retries
+/// once with no `IP_TOS`, and keeps that fallback only if the retry succeeds.
+#[cfg(not(any(apple, target_os = "openbsd", target_os = "netbsd")))]
+fn send_one(
+    state: &UdpSocketState,
+    io: &SockRef<'_>,
+    transmit: &Transmit<'_>,
+    encode_src_ip: bool,
+) -> io::Result<()> {
     let mut msg_hdr: libc::msghdr = unsafe { mem::zeroed() };
     let mut iovec: libc::iovec = unsafe { mem::zeroed() };
     let mut cmsgs = cmsg::Aligned([0u8; cmsg::LEN]);
     let dst_addr = socket2::SockAddr::from(transmit.destination);
+    let mut sendmsg_einval = state.sendmsg_einval();
     prepare_msg(
         transmit,
         &dst_addr,
@@ -413,13 +459,16 @@ fn send(
         &mut iovec,
         &mut cmsgs,
         encode_src_ip,
-        state.sendmsg_einval(),
+        sendmsg_einval,
     );
 
     loop {
         let n = unsafe { libc::sendmsg(io.as_raw_fd(), &msg_hdr, 0) };
 
         if n >= 0 {
+            if sendmsg_einval && !state.sendmsg_einval() {
+                state.set_sendmsg_einval();
+            }
             return Ok(());
         }
 
@@ -429,25 +478,13 @@ fn send(
             io::ErrorKind::Interrupted => continue,
             io::ErrorKind::WouldBlock => return Err(e),
             _ => {
-                // Some network adapters and drivers do not support GSO. Unfortunately, Linux
-                // offers no easy way for us to detect this short of an EIO or sometimes EINVAL
-                // when we try to actually send datagrams using it.
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                if let Some(libc::EIO) | Some(libc::EINVAL) = e.raw_os_error() {
-                    // Prevent new transmits from being scheduled using GSO. Existing GSO transmits
-                    // may already be in the pipeline, so we need to tolerate additional failures.
-                    if state.max_gso_segments().get() > 1 {
-                        crate::log::info!(
-                            "`libc::sendmsg` failed with {e}; halting segmentation offload"
-                        );
-                        state.max_gso_segments.store(1, Ordering::Relaxed);
-                    }
-                }
-
-                // Some arguments to `sendmsg` are not supported. Switch to
-                // fallback mode and retry if we haven't already.
-                if e.raw_os_error() == Some(libc::EINVAL) && !state.sendmsg_einval() {
-                    state.set_sendmsg_einval();
+                // Some arguments to `sendmsg` are not supported. Retry once without
+                // `IP_TOS`, the only argument that the fallback drops.
+                if e.raw_os_error() == Some(libc::EINVAL)
+                    && !sendmsg_einval
+                    && is_ipv4(transmit.destination)
+                {
+                    sendmsg_einval = true;
                     prepare_msg(
                         transmit,
                         &dst_addr,
@@ -455,7 +492,7 @@ fn send(
                         &mut iovec,
                         &mut cmsgs,
                         encode_src_ip,
-                        state.sendmsg_einval(),
+                        sendmsg_einval,
                     );
                     continue;
                 }
@@ -576,6 +613,13 @@ pub(crate) fn recv_single(
     Ok(1)
 }
 
+/// True for IPv4 or IPv4-Mapped IPv6.
+#[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
+fn is_ipv4(destination: SocketAddr) -> bool {
+    destination.is_ipv4()
+        || matches!(destination.ip(), IpAddr::V6(addr) if addr.to_ipv4_mapped().is_some())
+}
+
 #[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
 fn prepare_msg(
     transmit: &Transmit<'_>,
@@ -606,10 +650,7 @@ fn prepare_msg(
     hdr.msg_controllen = cmsg::LEN as _;
     let mut encoder = unsafe { cmsg::Encoder::new(hdr) };
     let ecn = transmit.ecn.map_or(0, |x| x as libc::c_int);
-    // True for IPv4 or IPv4-Mapped IPv6
-    let is_ipv4 = transmit.destination.is_ipv4()
-        || matches!(transmit.destination.ip(), IpAddr::V6(addr) if addr.to_ipv4_mapped().is_some());
-    if is_ipv4 {
+    if is_ipv4(transmit.destination) {
         if !sendmsg_einval {
             #[cfg(not(target_os = "netbsd"))]
             {
