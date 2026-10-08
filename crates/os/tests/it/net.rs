@@ -340,7 +340,25 @@ fn a_write_of_no_parts_waits_at_the_unsent_bound() {
         let bytes = vec![7; 1 << 22];
         while write_once(&mut client, &bytes).is_ready() {}
         let mut cx = Context::from_waker(Waker::noop());
-        assert_eq!(client.poll_write(&mut cx, &[]), Poll::Pending);
+        assert_eq!(client.poll_write(&mut cx, &[]), Poll::Pending, "no parts");
+        let empty = [IoSlice::new(&[]); 3];
+        assert_eq!(
+            client.poll_write(&mut cx, &empty),
+            Poll::Pending,
+            "empty parts"
+        );
+    });
+}
+
+/// A write of no parts reports a reset that no poll has reported, as a write of
+/// bytes does.
+#[test]
+fn a_write_of_no_parts_after_an_unseen_reset_is_reset() {
+    on_thread("net-none-reset", || async {
+        let net = net();
+        let (_listener, client, mut server) = create_pair(&net).await;
+        let remote = reset_unseen(client, &mut server).await;
+        assert_eq!(write(&mut server, &[]).await, Err(Error::Reset { remote }));
     });
 }
 
