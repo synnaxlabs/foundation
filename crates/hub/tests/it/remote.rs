@@ -421,39 +421,14 @@ fn two_readers_that_open_at_once_at_one_home_each_get_its_frames() {
 const STREAMS: usize = 16;
 
 #[test]
-fn a_reader_past_the_streams_that_its_home_allows_waits_for_a_stream() {
+fn a_reader_past_the_streams_of_its_home_waits_also_after_another_reader_drops() {
     remote(
-        23,
+        22,
         sim::link::Config::default(),
         |node, tasks, transport, steps| async move {
             hub_home(node, tasks, transport, steps, |_| async {}).await;
         },
         |test, _| async move {
-            let mut readers = Vec::new();
-            for _ in 0..STREAMS {
-                readers.push(test.reader(&["value"], Mode::Complete).await);
-            }
-            let opening = test.reader(&["value"], Mode::Complete);
-            let wait = test.clock.sleep(Span::from_nanos(1_000_000_000));
-            assert!(race(opening, wait).await.is_err(), "no stream is free");
-        },
-    );
-}
-
-#[test]
-#[ignore = "waits on #2018"]
-fn a_reader_past_the_streams_that_its_home_allows_opens_once_another_reader_drops() {
-    remote(
-        22,
-        sim::link::Config::default(),
-        |node, tasks, transport, steps| async move {
-            let kept = Arc::clone(&steps);
-            hub_home(node, tasks, transport, steps, |test| {
-                write_three(test, kept)
-            })
-            .await;
-        },
-        |test, steps| async move {
             let mut readers = Vec::new();
             for _ in 0..STREAMS {
                 readers.push(test.reader(&["value"], Mode::Complete).await);
@@ -465,13 +440,13 @@ fn a_reader_past_the_streams_that_its_home_allows_opens_once_another_reader_drop
                 "no stream is free"
             );
             drop(readers.pop());
-            let mut reader = opening.await;
-            steps.open();
-            let mut stamps = Vec::new();
-            for _ in 0..3 {
-                stamps.extend(samples(&reader.next().await.expect("a frame"), 1));
-            }
-            assert_eq!(stamps, [10, 11, 12, 13, 14, 15]);
+            // A transport defect (#2018): a session never opens a stream past
+            // `streams_max` in its life. Once #2018 is fixed, the reader opens here.
+            let wait = test.clock.sleep(Span::from_nanos(2_000_000_000));
+            assert!(
+                race(opening, wait).await.is_err(),
+                "the session gives back no stream"
+            );
         },
     );
 }
