@@ -99,18 +99,13 @@ impl Places {
             let (_, descriptors, body) = parts(&frame.0);
             return charge(descriptors.len(), body.len());
         }
-        // The body holds each series padded, but the last in place order unpadded.
-        let (mut series, mut padding, mut last, mut len) = (0, 0, 0, 0);
-        each(held, frame, |at, bounds| {
-            let place = held.entries[at].1;
+        // Block payloads step by 64 bytes, so padding the last series too, which a
+        // frame does not, leaves the charge as it is.
+        let (mut series, mut body) = (0, 0);
+        each(held, frame, |_, bounds| {
             series += 1;
-            padding += padded(bounds.len());
-            // Places are unique, so only the first series can equal `last`.
-            if place >= last {
-                (last, len) = (place, bounds.len());
-            }
+            body += padded(bounds.len());
         });
-        let body = padding - padded(len) + len;
         charge(series, body)
     }
 }
