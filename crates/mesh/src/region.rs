@@ -14,9 +14,9 @@ use raft::Voters;
 use crate::card;
 use crate::change::{Change, Join, Malformed};
 use crate::member::Member;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
+use spec::Pointer;
 
 /// The region state that this node holds: its members, its tickets, the homes that it
 /// applied, and its spec pointer.

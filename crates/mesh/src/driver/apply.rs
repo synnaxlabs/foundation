@@ -11,8 +11,8 @@ use types::node;
 use super::{Mesh, put};
 use crate::change::{CHUNKS_MAX, Change};
 use crate::error::Error;
-use crate::pointer::Pointer;
 use crate::region::{self, Refused};
+use spec::Pointer;
 
 impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still

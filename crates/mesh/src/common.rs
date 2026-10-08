@@ -21,9 +21,9 @@ use crate::card::{self, Card};
 use crate::change::{Change, Join};
 use crate::claim::Signer;
 use crate::member::Member;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{Options, Ticket, Voter};
+use spec::Pointer;
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);

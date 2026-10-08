@@ -2326,10 +2326,7 @@ How to read this record:
   committed spec with problems moves the pointer, and the node keeps the last spec it
   used (#1741). The pointer before the first change is version 0 at the root of the tree
   of `Config::founding`. No BQ12 signature check on the change in this milestone
-  (#1213). Trigger: #1887 moves `mesh::Pointer` to `spec::Pointer` before a `wire`
-  message carries it (`laptop.architect`, 2026-10-08T13:26:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
-  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region
+  (#1213). The pointer is `spec::Pointer` (#1887). `Mesh::open` runs no check of `Config::founding`: the founding is agreed region
   state, and a check at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).

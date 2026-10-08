@@ -35,12 +35,12 @@ use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
-use crate::pointer::Pointer;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
 pub use end::Ended;
 use end::Spawner;
 use send::Senders;
+use spec::Pointer;
 
 mod apply;
 mod end;

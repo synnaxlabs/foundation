@@ -14,9 +14,9 @@ use crate::bytes::{
     take_public_key, take_stamp,
 };
 use crate::card;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::Options;
+use spec::Pointer;
 
 /// A change record: the data of one log entry.
 #[derive(Clone, Debug, PartialEq, Eq)]

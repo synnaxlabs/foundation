@@ -68,7 +68,7 @@ mod tests {
     use crate::bytes::{put_change, put_position};
     use crate::change::{CHUNKS_MAX, Malformed};
     use crate::common::key;
-    use crate::pointer::Pointer;
+    use spec::Pointer;
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {

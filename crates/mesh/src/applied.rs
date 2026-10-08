@@ -133,7 +133,7 @@ mod tests {
     use types::digest::Digest;
 
     use super::*;
-    use crate::pointer::Pointer;
+    use spec::Pointer;
 
     fn at(index: u64, term: u64) -> Position {
         Position {
