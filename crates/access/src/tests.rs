@@ -4,11 +4,17 @@ use document::Document;
 use document::encoding::Checked;
 use proptest::prelude::*;
 use spec::channel::{Channel, Kind as ChannelKind};
+use spec::compression::{self, Mode};
 use spec::connector::Connector;
 use spec::definition::Kind;
+use spec::placement::{self, Nodes};
 use spec::region::Delegation;
+use spec::time::{self, Peers};
+use spec::{node_settings, retention};
+use types::byte::Size;
 use types::channel;
 use types::name::Selector;
+use types::time::Span;
 
 use super::*;
 
@@ -204,7 +210,8 @@ fn takes_the_connectors_of_each_region_tree() {
 }
 
 #[test]
-fn gives_no_grant_from_a_channel_or_a_region_record() {
+fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
+    let all = || Selector::new(["**"]).unwrap();
     let index = ChannelKind::Index {
         error: None,
         control: None,
@@ -213,14 +220,49 @@ fn gives_no_grant_from_a_channel_or_a_region_record() {
         key: channel::Key::from_u128(1),
         kind: index,
     };
-    let region = Delegation::new(1, [name("node_1")]).unwrap();
-    let region_key = Kind::Region.key("site_a").unwrap();
+    let home = Nodes {
+        home: Some(name("node_1")),
+        ..Nodes::default()
+    };
+    let compression = compression::Policy {
+        select: all(),
+        mode: Mode::Raw,
+    };
     let tree = Tree::from([
         (name("site_a.daq"), Definition::Channel(channel)),
-        (region_key.clone(), Definition::Region(region)),
+        (
+            Kind::Access.key("site_a.k").unwrap(),
+            Definition::Access(policy("ops.*", "**", &[Action::Read], 0)),
+        ),
+        (
+            Kind::Region.key("site_a").unwrap(),
+            Definition::Region(Delegation::new(1, [name("node_1")]).unwrap()),
+        ),
+        (
+            Kind::NodeSettings.key("site_a.k").unwrap(),
+            Definition::NodeSettings(
+                node_settings::Policy::new(all(), Some(Size::GIBIBYTE), None).unwrap(),
+            ),
+        ),
+        (
+            Kind::Compression.key("site_a.k").unwrap(),
+            Definition::Compression(compression),
+        ),
+        (
+            Kind::Placement.key("site_a.k").unwrap(),
+            Definition::Placement(placement::Policy::new(all(), home).unwrap()),
+        ),
+        (
+            Kind::Time.key("site_a.k").unwrap(),
+            Definition::Time(time::Policy::new(all(), Peers::default())),
+        ),
+        (
+            Kind::Retention.key("site_a.k").unwrap(),
+            Definition::Retention(retention::Policy::new(all(), Span::SECOND).unwrap()),
+        ),
     ]);
     let rules = Rules::new([(Prefix::ROOT, &tree)]);
-    for subject in [name("site_a.daq"), region_key] {
+    for subject in tree.keys() {
         let on = format!("{subject}.pt_1");
         let under = grant(&rules, subject.as_str(), &on);
         assert_eq!(under.actions(), Actions::NONE, "{subject}");
