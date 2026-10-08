@@ -561,23 +561,25 @@ impl Readers {
                 let Some(i) = self.find(key) else {
                     return;
                 };
-                if self.complete[i].named.is_none() {
-                    self.end(i);
-                    return;
+                match now {
+                    Some(now) => self.end_at(i, now),
+                    None if self.complete[i].named.is_some() => {
+                        panic!("named complete session {key} closed with no mesh time")
+                    }
+                    None => drop(self.end(i)),
                 }
-                let Some(now) = now else {
-                    panic!("named complete session {key} closed with no mesh time");
-                };
-                self.end_named(i, now);
             }
             Key::Latest(key) => self.close_latest(key),
         }
     }
 
-    /// Ends the named complete session at `i` at `now`. Its reader holds from `now`.
-    fn end_named(&mut self, i: usize, now: Stamp) {
+    /// Removes the complete session at `i` at `now`, as [`Readers::end`] does. A named
+    /// one holds its position from `now`.
+    fn end_at(&mut self, i: usize, now: Stamp) {
         let session = self.end(i);
-        let reader = session.named.expect("invariant: the session is named");
+        let Some(reader) = session.named else {
+            return;
+        };
         let closed = Closed {
             reader: *reader,
             hold: session.hold,
@@ -662,7 +664,7 @@ impl Readers {
             return self.remove_latest(reader).map(Key::from);
         };
         let key = self.complete[i].key;
-        self.end_named(i, now);
+        self.end_at(i, now);
         Some(key.into())
     }
 
@@ -762,8 +764,12 @@ impl Credit {
 
 impl Session {
     fn record(&self) -> Option<Record> {
-        let reader = self.named.as_deref()?;
-        Some(record(reader, self.position, self.hold, None))
+        Some(Record {
+            reader: self.named.as_deref()?.clone(),
+            position: self.position,
+            hold: self.hold,
+            closed: None,
+        })
     }
 }
 
@@ -776,21 +782,12 @@ impl Closed {
     }
 
     fn record(&self) -> Record {
-        record(&self.reader, self.position, self.hold, Some(self.at))
-    }
-}
-
-fn record(
-    reader: &named::Key,
-    position: Position,
-    hold: Span,
-    closed: Option<Stamp>,
-) -> Record {
-    Record {
-        reader: reader.clone(),
-        position,
-        hold,
-        closed,
+        Record {
+            reader: self.reader.clone(),
+            position: self.position,
+            hold: self.hold,
+            closed: Some(self.at),
+        }
     }
 }
 

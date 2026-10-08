@@ -1,4 +1,4 @@
-//! Readers with a name.
+//! The key of a named reader.
 
 use types::name::Name;
 
