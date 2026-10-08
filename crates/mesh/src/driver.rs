@@ -148,8 +148,11 @@ impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
     /// its task on `config.tasks`. Homes are known again when this node applies the
     /// log, after it hears the leader. It puts each chunk of the founding tree in
-    /// `config.store`. It reads the spec that the file in `<config.dir>/spec` names,
-    /// or the founding spec when there is no file, and removes each other file there.
+    /// `config.store`. It reads the spec of the newest pointer that a file in
+    /// `<config.dir>/spec` names, or the founding spec when there is no file, and
+    /// removes the file of each older pointer. A spec that does not read or has
+    /// problems is not an error: the node then uses no spec, and [`Mesh::spec`] gives
+    /// the cause in `behind`.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the

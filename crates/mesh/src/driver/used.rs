@@ -224,8 +224,8 @@ pub(super) struct Opening<'a> {
 }
 
 /// Makes the directory of the file in `dir`, and reads the spec that its file names,
-/// or the founding spec when there is no file. It removes each file but the one of
-/// the highest version.
+/// or the founding spec when there is no file. It removes the file of each older
+/// pointer.
 ///
 /// # Errors
 ///
@@ -303,8 +303,8 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
     }
 }
 
-// The state of a node that uses no spec, since the read of the spec of `pointer`
-// failed.
+// The state of a node that uses no spec, because the read of the spec of
+// `pointer` failed.
 fn behind(pointer: Pointer, failed: Done) -> Used {
     let newest = Newest {
         pointer,
