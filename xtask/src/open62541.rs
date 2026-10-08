@@ -1,9 +1,9 @@
-//! Copies a release of open62541 into `patches/open62541/`: each C file that our
-//! options compile and each header that it includes, unchanged.
+//! Copies a release of open62541 into `patches/open62541/`, and checks a copy: each
+//! C file that our options compile and each header that it includes.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 use serde_json::Value;
 
@@ -11,6 +11,9 @@ use crate::files;
 
 /// The upstream repository.
 pub(crate) const URL: &str = "https://github.com/open62541/open62541.git";
+
+/// The place of the copy, under the workspace root.
+const DEST: &str = "patches/open62541";
 
 /// The `cmake` options of our build: no architecture, so the event loop and the clock
 /// are ours, and no feature the connector does not use.
@@ -26,16 +29,6 @@ const OPTIONS: [&str; 11] = [
     "-DUA_ENABLE_DA=OFF",
     "-DUA_NAMESPACE_ZERO=MINIMAL",
     "-DUA_ENABLE_DETERMINISTIC_RNG=ON",
-];
-
-/// Options that change only the objects that [`clock_calls`] reads: no inlining, no
-/// folding of identical functions, and no LTO, so each call keeps the function that
-/// holds it in the source.
-const ANALYSIS: [&str; 4] = [
-    "-DCMAKE_BUILD_TYPE=Release",
-    "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
-    "-DCMAKE_C_FLAGS=-fno-inline -fno-ipa-icf",
-    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 ];
 
 /// The global clock functions. Our shim gives each a fixed time, so a call reads no
@@ -64,29 +57,47 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
 ];
 
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
-/// replaces `patches/open62541/` with its compiled sources, their headers, `LICENSE`,
-/// `sources.txt` (each `.c` file), and `VERSION` (tag and commit). Needs Linux,
-/// `git`, `cmake`, Python 3, GCC, and GNU `objdump`.
+/// replaces `patches/open62541/` with its compiled sources, the headers in the clone
+/// that they include, `LICENSE`, `sources.txt` (each `.c` file), `flags.txt` (the
+/// `-D`, `-I`, and `-std` flags of each compile), and `VERSION` (tag and commit).
+/// Then it gives what [`check`] gives for the new copy. Needs Linux, `git`, `cmake`,
+/// Python 3, a C compiler `cc`, and GNU `objdump`.
 ///
 /// # Errors
 ///
-/// A step that fails, a header outside the source and build trees, or a call of a
-/// clock function that [`CLOCK_CALLS`] does not list, or an entry it lists that no
-/// call matches. On an error, `patches/open62541/` does not change.
+/// A step that fails, and each error of [`check`]. On an error,
+/// `patches/open62541/` does not change.
 pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
     let work = root.join("target/open62541");
-    let (src, build) = (work.join("src"), work.join("build"));
+    let (src, build, stage) = (work.join("src"), work.join("build"), work.join("copy"));
     let trees = Trees {
         src: &src,
         build: &build,
     };
     let commit = compile(&work, &trees, url, tag).map_err(|e| vec![e])?;
-    let (copy, mut problems) = collect(&trees).map_err(|e| vec![e])?;
-    problems.extend(unlisted(&copy.calls));
-    if !problems.is_empty() {
-        return Err(problems);
-    }
-    write(root, &src, &copy.files, &format!("{tag}\n{commit}")).map_err(|e| vec![e])
+    let found = collect(&trees).map_err(|e| vec![e])?;
+    write(&stage, &src, &found, &format!("{tag}\n{commit}")).map_err(|e| vec![e])?;
+    inspect(&stage, &work.join("check"))?;
+    let dest = root.join(DEST);
+    remove(&dest)
+        .and_then(|()| {
+            std::fs::rename(&stage, &dest).map_err(|e| format!("{DEST}: {e}"))
+        })
+        .map_err(|e| vec![e])
+}
+
+/// Builds each file of `sources.txt` in `patches/open62541/` from the copy alone,
+/// with its `flags.txt`, no optimization, and no inlining, so each call stays in the
+/// function that holds it in the source.
+///
+/// # Errors
+///
+/// A build that fails, a header outside the copy, a call of a clock function from a
+/// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, and a data
+/// section that holds the address of a clock function, through which any code can
+/// call it.
+pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
+    inspect(&root.join(DEST), &root.join("target/open62541/check"))
 }
 
 /// Clones and builds `tag` of `url` in `work`, and gives its commit.
@@ -101,7 +112,11 @@ fn compile(
     exec(Command::new("git").args(clone).arg(trees.src))?;
     let mut cmake = Command::new("cmake");
     cmake.arg("-S").arg(trees.src).arg("-B").arg(trees.build);
-    exec(cmake.args(OPTIONS).args(ANALYSIS))?;
+    let build = [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    ];
+    exec(cmake.args(OPTIONS).args(build))?;
     let mut make = Command::new("cmake");
     make.arg("--build").arg(trees.build);
     exec(make.args(["--target", "open62541", "--parallel"]))?;
@@ -113,46 +128,45 @@ fn compile(
     )
 }
 
-/// What a built clone holds.
-struct Copy {
-    /// Each (from, to): each source of the library and each header that it includes,
-    /// other than a system header.
+/// What a built clone gives to the copy.
+struct Found {
+    /// Each (from, to): each source of the library and each header in the clone that
+    /// it includes. A header outside the clone is left out, and [`check`] fails on
+    /// one that a source needs.
     files: BTreeSet<(PathBuf, PathBuf)>,
-    /// Each (file, function) that calls a function of [`CLOCKS`].
-    calls: BTreeSet<(String, String)>,
+    /// The `-D`, `-I`, and `-std` flags of each compile, with each `-I` relative to
+    /// the copy.
+    flags: Vec<String>,
 }
 
-/// The [`Copy`] of a built clone, and an error for each header outside the clone.
-fn collect(trees: &Trees<'_>) -> Result<(Copy, Vec<String>), String> {
+/// The [`Found`] of a built clone.
+fn collect(trees: &Trees<'_>) -> Result<Found, String> {
     let commands = std::fs::read_to_string(trees.build.join("compile_commands.json"))
         .map_err(|e| format!("compile_commands.json: {e}"))?;
-    let mut copy = Copy {
-        files: BTreeSet::new(),
-        calls: BTreeSet::new(),
-    };
-    let mut outside = Vec::new();
-    for (source, object) in objects(&commands, trees.build)? {
-        let file = trees.relative(&source)?;
-        let text = exec(Command::new("objdump").arg("-dr").arg(&object))?;
-        for function in clock_calls(&text) {
-            copy.calls.insert((file.display().to_string(), function));
+    let mut files = BTreeSet::new();
+    let mut flags: Option<Vec<String>> = None;
+    for entry in entries(&commands, trees.build)? {
+        let file = trees.relative(&entry.source)?;
+        let these = trees.flags(&entry.arguments)?;
+        match &flags {
+            Some(first) if *first != these => {
+                return Err(format!("{} compiles with other flags", file.display()));
+            }
+            _ => flags = Some(these),
         }
-        let depfile = std::fs::read_to_string(object.with_extension("o.d"))
-            .map_err(|e| format!("{}.d: {e}", object.display()))?;
+        let depfile = std::fs::read_to_string(entry.object.with_extension("o.d"))
+            .map_err(|e| format!("{}.d: {e}", entry.object.display()))?;
         for header in headers(&depfile) {
-            if header.starts_with("/usr") {
-                continue;
-            }
-            match trees.relative(&header) {
-                Ok(path) => {
-                    copy.files.insert((header, path));
-                }
-                Err(e) => outside.push(e),
+            if let Ok(path) = trees.relative(&header) {
+                files.insert((header, path));
             }
         }
-        copy.files.insert((source, file));
+        files.insert((entry.source, file));
     }
-    Ok((copy, outside))
+    Ok(Found {
+        files,
+        flags: flags.ok_or("compile_commands.json has no file of the library")?,
+    })
 }
 
 /// The source and build trees of one clone.
@@ -167,37 +181,173 @@ impl Trees<'_> {
     fn relative(&self, path: &Path) -> Result<PathBuf, String> {
         let path = files::normalize(path);
         if let Ok(generated) = path.strip_prefix(self.build.join("src_generated")) {
-            return Ok(Path::new("src_generated").join(generated));
+            return Ok(files::normalize(
+                &Path::new("src_generated").join(generated),
+            ));
         }
         path.strip_prefix(self.src)
             .map(Path::to_path_buf)
             .map_err(|_outside| format!("{} is outside the clone", path.display()))
     }
+
+    /// The `-D`, `-I`, and `-std` flags of a compile, with each `-I` relative to the
+    /// copy.
+    fn flags(&self, arguments: &[String]) -> Result<Vec<String>, String> {
+        let mut flags = Vec::new();
+        for argument in arguments {
+            if let Some(dir) = argument.strip_prefix("-I") {
+                let dir = self.relative(Path::new(dir))?;
+                flags.push(format!("-I{}", dir.display()));
+            } else if argument.starts_with("-D") || argument.starts_with("-std=") {
+                flags.push(argument.clone());
+            }
+        }
+        Ok(flags)
+    }
 }
 
-/// Each (source, object) of the `open62541` library in `compile_commands.json`.
-fn objects(commands: &str, build: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+/// One compile of the `open62541` library in `compile_commands.json`.
+#[derive(Debug, PartialEq)]
+struct Entry {
+    source: PathBuf,
+    object: PathBuf,
+    arguments: Vec<String>,
+}
+
+/// Each [`Entry`] of the `open62541` library in `compile_commands.json`.
+fn entries(commands: &str, build: &Path) -> Result<Vec<Entry>, String> {
     let commands: Value =
         serde_json::from_str(commands).map_err(|e| format!("compile_commands: {e}"))?;
-    let entries = commands
+    let list = commands
         .as_array()
         .ok_or("compile_commands is not a list")?;
-    let mut objects = Vec::new();
-    for entry in entries {
-        let (Some(file), Some(output)) =
-            (entry["file"].as_str(), entry["output"].as_str())
-        else {
+    let mut entries = Vec::new();
+    for entry in list {
+        let fields = (
+            entry["file"].as_str(),
+            entry["output"].as_str(),
+            entry["command"].as_str(),
+        );
+        let (Some(file), Some(output), Some(command)) = fields else {
             return Err(format!(
-                "compile_commands entry with no file or output: {entry}"
+                "compile_commands entry with no file, output, or command: {entry}"
             ));
         };
         if output.contains("/open62541-object.dir/")
             || output.contains("/open62541-plugins.dir/")
         {
-            objects.push((PathBuf::from(file), build.join(output)));
+            entries.push(Entry {
+                source: PathBuf::from(file),
+                object: build.join(output),
+                arguments: arguments(command),
+            });
         }
     }
-    Ok(objects)
+    Ok(entries)
+}
+
+/// The arguments of a shell command as `cmake` writes one: words split on whitespace,
+/// with `"` quotes and `\` escapes.
+fn arguments(command: &str) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut argument = None::<String>;
+    let mut quoted = false;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                argument.get_or_insert_default();
+            }
+            '\\' => argument.get_or_insert_default().extend(chars.next()),
+            c if c.is_whitespace() && !quoted => arguments.extend(argument.take()),
+            c => argument.get_or_insert_default().push(c),
+        }
+    }
+    arguments.extend(argument);
+    arguments
+}
+
+/// Builds the copy in `copy` into `out`, and gives each error of [`check`].
+fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
+    let read = |name: &str| {
+        std::fs::read_to_string(copy.join(name))
+            .map_err(|e| vec![format!("{}: {e}", copy.join(name).display())])
+    };
+    let (sources, flags) = (read("sources.txt")?, read("flags.txt")?);
+    remove(out)
+        .and_then(|()| std::fs::create_dir_all(out).map_err(|e| format!("{e}")))
+        .map_err(|e| vec![e])?;
+    let objects = build(copy, &sources, &flags, out).map_err(|e| vec![e])?;
+    let mut calls = BTreeSet::new();
+    let mut problems = Vec::new();
+    for (source, object) in objects {
+        let disassembly = exec(Command::new("objdump").arg("-dr").arg(&object));
+        for function in clock_calls(&disassembly.map_err(|e| vec![e])?) {
+            calls.insert((source.to_owned(), function));
+        }
+        let relocations = exec(Command::new("objdump").arg("-r").arg(&object));
+        for (section, symbol) in data_clocks(&relocations.map_err(|e| vec![e])?) {
+            problems.push(format!(
+                "{source}: the section `{section}` holds the address of `{symbol}`, \
+                 so a call through it escapes CLOCK_CALLS"
+            ));
+        }
+        let depfile = std::fs::read_to_string(object.with_extension("d"))
+            .map_err(|e| vec![format!("{}.d: {e}", object.display())])?;
+        for header in headers(&depfile) {
+            if !inside(&header) {
+                problems.push(format!(
+                    "{source}: includes {}, which is outside the copy",
+                    header.display()
+                ));
+            }
+        }
+    }
+    problems.extend(mismatches(&calls));
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// Whether `path`, relative to the copy, stays inside it.
+fn inside(path: &Path) -> bool {
+    let mut depth = 0_usize;
+    path.components().all(|component| match component {
+        Component::Normal(_) => {
+            depth += 1;
+            true
+        }
+        Component::CurDir => true,
+        Component::ParentDir => depth.checked_sub(1).map(|d| depth = d).is_some(),
+        Component::RootDir | Component::Prefix(_) => false,
+    })
+}
+
+/// Compiles each source of `sources` in `copy` into `out` at once, and gives each
+/// (source, object). Each object has a depfile of the headers outside the system
+/// directories beside it.
+fn build<'a>(
+    copy: &Path,
+    sources: &'a str,
+    flags: &str,
+    out: &Path,
+) -> Result<Vec<(&'a str, PathBuf)>, String> {
+    let mut children = Vec::new();
+    for (index, source) in sources.lines().enumerate() {
+        let object = out.join(format!("{index}.o"));
+        let mut cc = Command::new("cc");
+        cc.current_dir(copy)
+            .args(["-c", "-MMD", "-O0", "-fno-inline"]);
+        cc.args(flags.lines()).arg("-o").arg(&object).arg(source);
+        children.push((source, object, spawn(&mut cc)?));
+    }
+    children
+        .into_iter()
+        .map(|(source, object, child)| wait(child).map(|_| (source, object)))
+        .collect()
 }
 
 /// The functions in the output of `objdump -dr` that refer to a function of
@@ -208,29 +358,67 @@ fn clock_calls(text: &str) -> BTreeSet<String> {
     for line in text.lines() {
         if let Some(name) = line.strip_suffix(">:").and_then(|l| l.split_once(" <")) {
             function = name.1.split('.').next().unwrap_or(name.1);
-        } else if let Some((_, relocation)) = line.split_once(": R_") {
-            let symbol = relocation.split_whitespace().last().unwrap_or_default();
-            let symbol = symbol.split(['+', '-']).next().unwrap_or_default();
-            if CLOCKS.contains(&symbol) {
-                calls.insert(function.to_owned());
-            }
+        } else if let Some((_, relocation)) = line.split_once(": R_")
+            && clock(relocation).is_some()
+        {
+            calls.insert(function.to_owned());
         }
     }
     calls
 }
 
-/// Each header that a Make depfile names.
+/// Each (section, clock function) in the output of `objdump -r` where a section that
+/// is not code refers to a function of [`CLOCKS`].
+fn data_clocks(text: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut section = "";
+    for line in text.lines() {
+        if let Some(name) = line.strip_prefix("RELOCATION RECORDS FOR [") {
+            section = name.trim_end_matches("]:");
+        } else if !section.starts_with(".text")
+            && let Some(symbol) = clock(line)
+        {
+            found.push((section.to_owned(), symbol.to_owned()));
+        }
+    }
+    found
+}
+
+/// The clock function that a relocation line refers to.
+fn clock(relocation: &str) -> Option<&'static str> {
+    let symbol = relocation.split_whitespace().last()?;
+    let symbol = symbol.split(['+', '-']).next()?;
+    CLOCKS.into_iter().find(|&clock| clock == symbol)
+}
+
+/// Each header that a Make depfile names, with its escapes read: `\ ` for a space,
+/// `\#` for `#`, `$$` for `$`, and `\` at the end of a line to go on.
 fn headers(depfile: &str) -> Vec<PathBuf> {
-    depfile
-        .split_whitespace()
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = depfile.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(&(' ' | '#'))) | ('$', Some('$')) => word.extend(chars.next()),
+            ('\\', Some('\n')) => {
+                chars.next();
+                words.push(std::mem::take(&mut word));
+            }
+            (c, _) if c.is_whitespace() => words.push(std::mem::take(&mut word)),
+            (c, _) => word.push(c),
+        }
+    }
+    words.push(word);
+    words
+        .into_iter()
         .map(PathBuf::from)
         .filter(|path| path.extension().is_some_and(|e| e == "h"))
         .collect()
 }
 
-/// Each call in `found` that [`CLOCK_CALLS`] does not list, and each listed call that
-/// `found` does not hold.
-fn unlisted(found: &BTreeSet<(String, String)>) -> Vec<String> {
+/// An error for each call in `found` that [`CLOCK_CALLS`] does not list, and for each
+/// listed call that `found` does not hold.
+fn mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
     let listed: BTreeSet<(String, String)> = CLOCK_CALLS
         .iter()
         .map(|&(file, function)| (file.to_owned(), function.to_owned()))
@@ -249,30 +437,26 @@ fn unlisted(found: &BTreeSet<(String, String)>) -> Vec<String> {
     new.chain(gone).collect()
 }
 
-/// Replaces `patches/open62541/` with each (from, to) of `copy`.
-fn write(
-    root: &Path,
-    src: &Path,
-    copy: &BTreeSet<(PathBuf, PathBuf)>,
-    version: &str,
-) -> Result<(), String> {
-    let dest = root.join("patches/open62541");
-    remove(&dest)?;
+/// Writes the copy of `found` to `stage`, with `LICENSE` from `src`.
+fn write(stage: &Path, src: &Path, found: &Found, version: &str) -> Result<(), String> {
+    remove(stage)?;
     let mut sources = String::new();
     let license = (src.join("LICENSE"), PathBuf::from("LICENSE"));
-    for (from, to) in copy.iter().chain([&license]) {
+    for (from, to) in found.files.iter().chain([&license]) {
         if to.extension().is_some_and(|e| e == "c") {
             sources.push_str(&to.display().to_string());
             sources.push('\n');
         }
-        let to = dest.join(to);
+        let to = stage.join(to);
         let dir = to.parent().ok_or("a file with no directory")?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::fs::copy(from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
     }
-    std::fs::write(dest.join("sources.txt"), sources)
-        .and_then(|()| std::fs::write(dest.join("VERSION"), format!("{version}\n")))
-        .map_err(|e| format!("{}: {e}", dest.display()))
+    let flags = found.flags.join("\n") + "\n";
+    std::fs::write(stage.join("sources.txt"), sources)
+        .and_then(|()| std::fs::write(stage.join("flags.txt"), flags))
+        .and_then(|()| std::fs::write(stage.join("VERSION"), format!("{version}\n")))
+        .map_err(|e| format!("{}: {e}", stage.display()))
 }
 
 /// Removes `dir` when it exists.
@@ -287,8 +471,25 @@ fn remove(dir: &Path) -> Result<(), String> {
 
 /// Runs `command` and gives its trimmed standard output.
 fn exec(command: &mut Command) -> Result<String, String> {
+    wait(spawn(command)?)
+}
+
+/// Starts `command` with no input, and with its output captured.
+fn spawn(command: &mut Command) -> Result<(String, Child), String> {
     let name = command.get_program().to_string_lossy().into_owned();
-    let output = command.output().map_err(|e| format!("{name}: {e}"))?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().map_err(|e| format!("{name}: {e}"))?;
+    Ok((name, child))
+}
+
+/// Waits for a command from [`spawn`], and gives its trimmed standard output.
+fn wait((name, child): (String, Child)) -> Result<String, String> {
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("{name}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "{name} failed: {}",
@@ -323,16 +524,76 @@ Disassembly of section .text.setDefaultConfig:
     }
 
     #[test]
-    fn headers_reads_each_header_of_a_depfile() {
-        let depfile = "a.c.o: /s/src/a.c /s/src/a.h \\\n /s/src/../deps/b.h /usr/x.h\n";
+    fn data_clocks_names_each_section_other_than_code_that_refers_to_a_clock() {
+        let text = "\
+RELOCATION RECORDS FOR [.text]:
+OFFSET           TYPE              VALUE
+0000000000000005 R_X86_64_PLT32    UA_DateTime_now-0x0000000000000004
+
+RELOCATION RECORDS FOR [.text.log]:
+0000000000000005 R_X86_64_PLT32    UA_DateTime_nowMonotonic-0x0000000000000004
+
+RELOCATION RECORDS FOR [.data.rel]:
+OFFSET           TYPE              VALUE
+0000000000000000 R_X86_64_64       UA_DateTime_now
+0000000000000008 R_X86_64_64       UA_DateTime_nowMore
+
+RELOCATION RECORDS FOR [.rodata]:
+0000000000000000 R_AARCH64_ABS64   UA_DateTime_localTimeUtcOffset+0x8
+";
+        assert_eq!(
+            data_clocks(text),
+            [
+                (".data.rel".to_owned(), "UA_DateTime_now".to_owned()),
+                (
+                    ".rodata".to_owned(),
+                    "UA_DateTime_localTimeUtcOffset".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn headers_reads_each_header_of_a_depfile_with_its_escapes() {
+        let depfile = "a\\ b/0.o: a\\ b/a.c a\\ b/a.h \\\n /s/../deps/b.h \
+                       /s/c\\#$$.h\\\n/s/d.h\n";
         assert_eq!(
             headers(depfile),
             [
-                PathBuf::from("/s/src/a.h"),
-                PathBuf::from("/s/src/../deps/b.h"),
-                PathBuf::from("/usr/x.h"),
+                PathBuf::from("a b/a.h"),
+                PathBuf::from("/s/../deps/b.h"),
+                PathBuf::from("/s/c#$.h"),
+                PathBuf::from("/s/d.h"),
             ]
         );
+    }
+
+    #[test]
+    fn arguments_splits_a_command_on_whitespace_outside_quotes() {
+        let command =
+            "/usr/bin/cc  -DA=\"x y\" \"-I/a b/include\" -I/c\\ d\t-o \"\" x.c";
+        assert_eq!(
+            arguments(command),
+            [
+                "/usr/bin/cc",
+                "-DA=x y",
+                "-I/a b/include",
+                "-I/c d",
+                "-o",
+                "",
+                "x.c",
+            ]
+        );
+    }
+
+    #[test]
+    fn inside_refuses_a_path_that_leaves_the_copy() {
+        for path in ["include/a.h", "./src/../src/a.h", "src/../a.h"] {
+            assert!(inside(Path::new(path)), "{path}");
+        }
+        for path in ["/usr/include/a.h", "../a.h", "src/../../a.h", "src/../.."] {
+            assert!(!inside(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
@@ -350,56 +611,92 @@ Disassembly of section .text.setDefaultConfig:
             Ok(PathBuf::from("src_generated/open62541/config.h"))
         );
         assert_eq!(
+            trees.relative(Path::new("/w/build/src_generated/")),
+            Ok(PathBuf::from("src_generated"))
+        );
+        assert_eq!(
             trees.relative(Path::new("/w/build/other.h")),
             Err("/w/build/other.h is outside the clone".to_owned())
         );
     }
 
     #[test]
-    fn objects_keeps_the_library_objects_only() {
-        let commands = r#"[
-            {"file": "/w/src/src/ua_types.c",
-             "output": "CMakeFiles/open62541-object.dir/src/ua_types.c.o"},
-            {"file": "/w/src/plugins/ua_log_stdout.c",
-             "output": "CMakeFiles/open62541-plugins.dir/plugins/ua_log_stdout.c.o"},
-            {"file": "/w/src/tools/x.c", "output": "CMakeFiles/x.dir/tools/x.c.o"}
-        ]"#;
-        let build = Path::new("/w/build");
+    fn flags_keeps_each_define_include_and_standard() {
+        let trees = Trees {
+            src: Path::new("/w/src"),
+            build: Path::new("/w/build"),
+        };
+        let arguments = [
+            "/usr/bin/cc",
+            "-DUA_X",
+            "-I/w/src/include",
+            "-I/w/build/src_generated",
+            "-std=c99",
+            "-O3",
+            "-o",
+            "x.o",
+        ]
+        .map(str::to_owned);
         assert_eq!(
-            objects(commands, build),
-            Ok(vec![
-                (
-                    PathBuf::from("/w/src/src/ua_types.c"),
-                    build.join("CMakeFiles/open62541-object.dir/src/ua_types.c.o"),
-                ),
-                (
-                    PathBuf::from("/w/src/plugins/ua_log_stdout.c"),
-                    build.join(
-                        "CMakeFiles/open62541-plugins.dir/plugins/ua_log_stdout.c.o"
-                    ),
-                ),
-            ])
+            trees.flags(&arguments),
+            Ok(["-DUA_X", "-Iinclude", "-Isrc_generated", "-std=c99"]
+                .map(str::to_owned)
+                .to_vec())
         );
         assert_eq!(
-            objects(r#"[{"file": "a.c"}]"#, build),
-            Err(
-                r#"compile_commands entry with no file or output: {"file":"a.c"}"#
-                    .to_owned()
-            )
+            trees.flags(&["-I/w/build".to_owned()]),
+            Err("/w/build is outside the clone".to_owned())
         );
     }
 
     #[test]
-    fn unlisted_names_a_new_call_and_a_listed_call_that_is_gone() {
+    fn entries_keeps_the_library_compiles_only() {
+        let commands = r#"[
+            {"file": "/w/src/src/ua_types.c", "command": "cc -DA -c x",
+             "output": "CMakeFiles/open62541-object.dir/src/ua_types.c.o"},
+            {"file": "/w/src/plugins/ua_log_stdout.c", "command": "cc",
+             "output": "CMakeFiles/open62541-plugins.dir/plugins/ua_log_stdout.c.o"},
+            {"file": "/w/src/tools/x.c", "command": "cc",
+             "output": "CMakeFiles/x.dir/tools/x.c.o"}
+        ]"#;
+        let build = Path::new("/w/build");
+        assert_eq!(
+            entries(commands, build),
+            Ok(vec![
+                Entry {
+                    source: PathBuf::from("/w/src/src/ua_types.c"),
+                    object: build
+                        .join("CMakeFiles/open62541-object.dir/src/ua_types.c.o"),
+                    arguments: ["cc", "-DA", "-c", "x"].map(str::to_owned).to_vec(),
+                },
+                Entry {
+                    source: PathBuf::from("/w/src/plugins/ua_log_stdout.c"),
+                    object: build.join(
+                        "CMakeFiles/open62541-plugins.dir/plugins/ua_log_stdout.c.o"
+                    ),
+                    arguments: vec!["cc".to_owned()],
+                },
+            ])
+        );
+        assert_eq!(
+            entries(r#"[{"file": "a.c", "output": "a.o"}]"#, build),
+            Err("compile_commands entry with no file, output, or command: \
+                 {\"file\":\"a.c\",\"output\":\"a.o\"}"
+                .to_owned())
+        );
+    }
+
+    #[test]
+    fn mismatches_names_a_new_call_and_a_listed_call_that_is_gone() {
         let mut found: BTreeSet<(String, String)> = CLOCK_CALLS
             .iter()
             .map(|&(file, function)| (file.to_owned(), function.to_owned()))
             .collect();
-        assert_eq!(unlisted(&found), Vec::<String>::new());
+        assert_eq!(mismatches(&found), Vec::<String>::new());
         found.remove(&("src/util/ua_util.c".to_owned(), "UA_random_seed".to_owned()));
         found.insert(("src/ua_types.c".to_owned(), "UA_new".to_owned()));
         assert_eq!(
-            unlisted(&found),
+            mismatches(&found),
             [
                 "src/ua_types.c: `UA_new` calls a global clock function. Find whether \
                  a node runs it; if not, add it to CLOCK_CALLS with the reason",
@@ -409,10 +706,11 @@ Disassembly of section .text.setDefaultConfig:
         );
     }
 
-    /// A directory of the test `name`, empty, in the temporary directory.
+    /// A directory of the test `name`, empty, in the temporary directory, with a
+    /// space in its path.
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join(format!("xtask-open62541-{name}-{}", std::process::id()));
+            .join(format!("xtask open62541-{name}-{}", std::process::id()));
         remove(&dir).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -436,26 +734,31 @@ Disassembly of section .text.setDefaultConfig:
                 .args(["-c", "user.name=x", "-c", "user.email=x@x"]);
             exec(git.args(args)).unwrap()
         };
-        git(&["add", "."]);
+        git(&["add", "-A"]);
         git(&["commit", "-q", "-m", tag]);
         git(&["tag", tag]);
     }
 
+    /// C text that includes `clock.h` and a system header, with each function of
+    /// `functions` calling a clock function.
+    fn calls(functions: &[&str]) -> String {
+        let mut text = "#include <stdio.h>\n#include \"clock.h\"\n".to_owned();
+        for function in functions {
+            text = text
+                + "long long "
+                + function
+                + "(void) { return UA_DateTime_now(); }\n";
+        }
+        text
+    }
+
     /// A project with the layout of open62541: the `open62541` library from two
     /// object libraries, with a call of a clock function at each place that
-    /// [`CLOCK_CALLS`] lists, a generated header, and a system header.
+    /// [`CLOCK_CALLS`] lists, and a generated header.
     fn create_project(repo: &Path) {
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
-        let call = |functions: &[&str]| {
-            let body = "(void) { return UA_DateTime_now(); }\n";
-            let mut text = "#include <stdio.h>\n#include \"clock.h\"\n".to_owned();
-            for function in functions {
-                text = text + "long long " + function + body;
-            }
-            text
-        };
-        let util =
-            "#include \"open62541/config.h\"\n".to_owned() + &call(&["UA_random_seed"]);
+        let util = "#include \"open62541/config.h\"\n".to_owned()
+            + &calls(&["UA_random_seed"]);
         create_files(
             repo,
             &[
@@ -465,8 +768,8 @@ Disassembly of section .text.setDefaultConfig:
                     "cmake_minimum_required(VERSION 3.20)\nproject(fixture C)\n\
                      configure_file(config.h.in src_generated/open62541/config.h)\n\
                      file(WRITE ${CMAKE_BINARY_DIR}/other.h \"\")\n\
-                     include_directories(include ${CMAKE_BINARY_DIR}/src_generated \
-                     ${CMAKE_BINARY_DIR})\n\
+                     include_directories(include ${CMAKE_BINARY_DIR}/src_generated)\n\
+                     add_compile_definitions(NAME=\"a b\")\n\
                      file(GLOB more src/more/*.c)\n\
                      add_library(open62541-object OBJECT src/util/ua_util.c \
                      src/util/ua_encryptedsecret.c ${more})\n\
@@ -481,27 +784,41 @@ Disassembly of section .text.setDefaultConfig:
                 ("src/util/ua_util.c", &util),
                 (
                     "src/util/ua_encryptedsecret.c",
-                    &call(&["encryptUserIdentityTokenEcc"]),
+                    &calls(&["encryptUserIdentityTokenEcc"]),
                 ),
                 (
                     "plugins/ua_config_default.c",
-                    &call(&["setDefaultConfig", "interruptServer"]),
+                    &calls(&["setDefaultConfig", "interruptServer"]),
                 ),
-                ("plugins/ua_log_stdout.c", &call(&["UA_Log_Stdout_log"])),
+                ("plugins/ua_log_stdout.c", &calls(&["UA_Log_Stdout_log"])),
                 ("tools/tool.c", "int main(void) { return 0; }\n"),
             ],
         );
     }
 
+    /// Runs [`run`] on the tag `v1` of a project from [`create_project`], changed by
+    /// `change`, with a file `kept.c` in the copy before it. Gives the root, the
+    /// repository, and what [`run`] gave.
+    fn run_on(
+        name: &str,
+        change: impl FnOnce(&Path),
+    ) -> (PathBuf, PathBuf, Result<(), Vec<String>>) {
+        let (root, repo) =
+            (temp(&format!("{name}-root")), temp(&format!("{name}-repo")));
+        create_project(&repo);
+        change(&repo);
+        tag(&repo, "v1");
+        create_files(&root, &[("patches/open62541/kept.c", "")]);
+        let url = format!("file://{}", repo.display());
+        let result = run(&root, &url, "v1");
+        (root, repo, result)
+    }
+
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
     fn run_copies_each_compiled_source_and_its_headers() {
-        let (root, repo) = (temp("copies-root"), temp("copies-repo"));
-        create_project(&repo);
-        tag(&repo, "v1");
-        create_files(&root, &[("patches/open62541/stale.c", "")]);
-        let url = format!("file://{}", repo.display());
-        assert_eq!(run(&root, &url, "v1"), Ok(()));
+        let (root, repo, result) = run_on("copies", |_| {});
+        assert_eq!(result, Ok(()));
         let dest = root.join("patches/open62541");
         let mut copied: Vec<_> = walk(&dest)
             .iter()
@@ -513,6 +830,7 @@ Disassembly of section .text.setDefaultConfig:
             [
                 "LICENSE",
                 "VERSION",
+                "flags.txt",
                 "include/clock.h",
                 "plugins/ua_config_default.c",
                 "plugins/ua_log_stdout.c",
@@ -528,6 +846,10 @@ Disassembly of section .text.setDefaultConfig:
             "plugins/ua_config_default.c\nplugins/ua_log_stdout.c\n\
              src/util/ua_encryptedsecret.c\nsrc/util/ua_util.c\n"
         );
+        assert_eq!(
+            read("flags.txt"),
+            "-DNAME=\"a b\"\n-Iinclude\n-Isrc_generated\n-DNDEBUG\n"
+        );
         let mut git = Command::new("git");
         let commit = exec(git.arg("-C").arg(&repo).args(["rev-parse", "v1"])).unwrap();
         assert_eq!(read("VERSION"), format!("v1\n{commit}\n"));
@@ -535,36 +857,125 @@ Disassembly of section .text.setDefaultConfig:
             read("src/util/ua_util.c"),
             std::fs::read_to_string(repo.join("src/util/ua_util.c")).unwrap()
         );
+        assert_eq!(check(&root), Ok(()));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
-    fn run_refuses_a_new_clock_call_and_a_header_outside_the_clone() {
-        let (root, repo) = (temp("refuses-root"), temp("refuses-repo"));
-        create_project(&repo);
-        create_files(
-            &repo,
-            &[(
-                "src/more/ua_types.c",
-                "#include \"clock.h\"\n#include \"other.h\"\n\
-                     long long UA_new(void) { return UA_DateTime_now(); }\n",
-            )],
-        );
-        tag(&repo, "v2");
-        create_files(&root, &[("patches/open62541/kept.c", "")]);
-        let url = format!("file://{}", repo.display());
-        let build = root.join("target/open62541/build");
+    fn run_refuses_a_clock_address_a_header_outside_the_copy_and_a_new_call() {
+        let (root, repo, result) = run_on("refuses", |repo| {
+            create_files(
+                repo,
+                &[
+                    (
+                        "src/more/ua_types.c",
+                        &("#include \"../../../build/other.h\"\n".to_owned()
+                            + &calls(&["UA_new"])),
+                    ),
+                    (
+                        "src/more/ua_clock.c",
+                        "#include \"clock.h\"\n\
+                         long long (*UA_clock)(void) = UA_DateTime_now;\n",
+                    ),
+                ],
+            );
+        });
         assert_eq!(
-            run(&root, &url, "v2"),
+            result,
             Err(vec![
-                format!("{} is outside the clone", build.join("other.h").display()),
+                "src/more/ua_clock.c: the section `.data.rel` holds the address of \
+                 `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
+                    .to_owned(),
+                "src/more/ua_types.c: includes src/more/../../../build/other.h, which \
+                 is outside the copy"
+                    .to_owned(),
                 "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
                  whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
                     .to_owned(),
             ])
         );
         assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_names_a_static_helper_that_calls_a_clock() {
+        let (root, repo, result) = run_on("helper", |repo| {
+            let log = "#include \"clock.h\"\n\
+                       static long long helper(void) { return UA_DateTime_now(); }\n\
+                       long long UA_Log_Stdout_log(void) { return helper(); }\n";
+            create_files(repo, &[("plugins/ua_log_stdout.c", log)]);
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "plugins/ua_log_stdout.c: `helper` calls a global clock function. Find \
+                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                    .to_owned(),
+                "plugins/ua_log_stdout.c: `UA_Log_Stdout_log` no longer calls a clock. \
+                 Remove it from CLOCK_CALLS"
+                    .to_owned(),
+            ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_refuses_a_source_with_other_flags() {
+        let (root, repo, result) = run_on("flags", |repo| {
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap()
+                + "set_source_files_properties(plugins/ua_log_stdout.c PROPERTIES \
+                   COMPILE_DEFINITIONS LOG=1)\n";
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "plugins/ua_log_stdout.c compiles with other flags".to_owned()
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_keeps_the_copy_when_a_file_is_missing() {
+        let (root, repo, result) = run_on("license", |repo| {
+            std::fs::remove_file(repo.join("LICENSE")).unwrap();
+        });
+        let license = root.join("target/open62541/src/LICENSE");
+        assert_eq!(
+            result,
+            Err(vec![format!(
+                "{}: No such file or directory (os error 2)",
+                license.display()
+            )])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn check_finds_a_clock_call_added_to_the_copy() {
+        let (root, repo, result) = run_on("check", |_| {});
+        assert_eq!(result, Ok(()));
+        let util = root.join("patches/open62541/src/util/ua_util.c");
+        let text = std::fs::read_to_string(&util).unwrap() + &calls(&["later"]);
+        std::fs::write(&util, text).unwrap();
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                "src/util/ua_util.c: `later` calls a global clock function. Find \
+                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                    .to_owned(),
+            ])
+        );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 

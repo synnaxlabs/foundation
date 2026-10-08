@@ -33,12 +33,13 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
+        ["open62541"] => open62541::check(root),
         ["open62541", tag] => open62541::run(root, open62541::URL, tag),
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
                 "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
-                 cargo xtask open62541 <tag>\n       \
+                 cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>"
             );
             return ExitCode::FAILURE;
