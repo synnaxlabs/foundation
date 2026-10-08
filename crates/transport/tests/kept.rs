@@ -1,8 +1,7 @@
 //! After a read that gives a whole long message, in one poll or over many, the
 //! receiver keeps a list of at most 64 chunks, not one sized by the message, both
 //! before and after it reads the end of the stream. The count covers each thread, so
-//! this binary has no test harness. The sim runs on one
-//! thread, so the count is exact.
+//! this binary has no test harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -31,13 +30,17 @@ const CLIENT: PrivateKey = PrivateKey([1; 32]);
 const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
-/// each slot is 32 bytes. After the end of the stream the drop gives back exactly
-/// this; before it, the drop also stops the stream, which allocates a few bytes.
+/// each slot is 32 bytes.
 const KEPT_MAX: usize = 2 << 10;
 /// When the server reads after it accepts the stream, once the message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
-/// How long the client lives after its send: past the server's read.
-const LIVE: Span = Span::from_nanos(2_000_000_000);
+/// When the client resets the stream after its send: past the server's read.
+const RESET: Span = Span::from_nanos(1_500_000_000);
+/// How long the server waits after its read of a stream that the client resets,
+/// before it drops the receiver: past the reset.
+const DROP: Span = Span::from_nanos(2_000_000_000);
+/// How long the client lives after it ends the stream: past the server's drop.
+const LIVE: Span = Span::from_nanos(3_000_000_000);
 
 /// How the server reads the message.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +49,17 @@ enum Reading {
     Whole,
     /// Each millisecond from when the stream comes, until the message is in.
     Parts,
+}
+
+/// How the client ends the stream after its message.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    /// It finishes the stream, and the server reads the end before the drop.
+    Finish,
+    /// It resets the stream after the server's read, and the server drops the
+    /// receiver with no more reads. The reset stream needs no stop, so the drop
+    /// allocates nothing.
+    Reset,
 }
 
 /// What the server's reads give.
@@ -65,7 +79,7 @@ fn main() {
     for reading in [Reading::Whole, Reading::Parts] {
         for (len, end) in [100_000, 240_000, 1 << 18]
             .into_iter()
-            .flat_map(|len| [(len, false), (len, true)])
+            .flat_map(|len| [(len, End::Finish), (len, End::Reset)])
         {
             let out = run(reading, len, end);
             assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
@@ -76,12 +90,13 @@ fn main() {
                 out.pending
             );
             assert_eq!(
-                out.ended, end,
-                "{reading:?}, {len} bytes, end read {end}: the end of the stream"
+                out.ended,
+                matches!(end, End::Finish),
+                "{reading:?}, {len} bytes, {end:?}: the read of the end of the stream"
             );
             assert!(
                 out.kept <= KEPT_MAX,
-                "{reading:?}, {len} bytes, end read {end}: the receiver keeps {} bytes \
+                "{reading:?}, {len} bytes, {end:?}: the receiver keeps {} bytes \
                  after a whole message",
                 out.kept
             );
@@ -90,8 +105,8 @@ fn main() {
 }
 
 /// The [`Out`] of the server's read of a message of `len` bytes in the way of
-/// `reading`, and of the end of the stream if `end`.
-fn run(reading: Reading, len: usize, end: bool) -> Out {
+/// `reading`, on a stream that the client ends in the way of `end`.
+fn run(reading: Reading, len: usize, end: End) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
@@ -111,16 +126,23 @@ fn run(reading: Reading, len: usize, end: bool) -> Out {
             .await
             .expect("a stream");
         sender.send(filled(&pool, len)).await.expect("sent");
-        sender.finish().expect("finished");
+        match end {
+            End::Finish => sender.finish().expect("finished"),
+            End::Reset => {
+                node.clock().sleep(RESET).await;
+                drop(sender);
+            }
+        }
         node.clock().sleep(LIVE).await;
     })
     .expect("the run ends");
     *out.lock().expect("not poisoned")
 }
 
-/// Starts the server on `node`. It reads the message in the way of `reading`, then
-/// the end once it comes if `end`, drops the receiver, and puts the [`Out`] in `out`.
-fn serve(node: &Node, reading: Reading, end: bool, out: Arc<Mutex<Out>>) {
+/// Starts the server on `node`. It reads the message in the way of `reading`, then,
+/// as `end` says, the end once it comes or nothing until the reset. It then drops the
+/// receiver and puts the [`Out`] in `out`.
+fn serve(node: &Node, reading: Reading, end: End, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -137,7 +159,13 @@ fn serve(node: &Node, reading: Reading, end: bool, out: Arc<Mutex<Out>>) {
         }
         let (read, pending) = next(&mut receiver, &clock).await;
         let len = read.ok().flatten().map(|block| block.len());
-        let ended = end && matches!(next(&mut receiver, &clock).await.0, Ok(None));
+        let ended = match end {
+            End::Finish => matches!(next(&mut receiver, &clock).await.0, Ok(None)),
+            End::Reset => {
+                clock.sleep(DROP).await;
+                false
+            }
+        };
         let before = ALLOCATOR.held();
         drop(receiver);
         let kept = before.saturating_sub(ALLOCATOR.held());
