@@ -2362,8 +2362,9 @@ How to read this record:
   architect, 2026-10-08T01:49:20Z:
   https://github.com/synnaxlabs/foundation/issues/1711#issuecomment-6050509924; the
   doc of the seal that writes the length, 2026-10-08T03:38:57Z:
-  https://github.com/synnaxlabs/foundation/pull/1740#issuecomment-6051674927, which
-  supersedes the link above for that doc).
+  https://github.com/synnaxlabs/foundation/pull/1740#issuecomment-6051674927. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1711#issuecomment-6050509924 for the
+  doc of the seal).
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
   `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
   that a follower forwards to the leader, and its two answers (the position of the

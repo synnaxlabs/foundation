@@ -1923,7 +1923,9 @@ mod tests {
             record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
             let past = (2 * SEGMENT).to_le_bytes();
             record[CHECK + 10..CHECK + 18].copy_from_slice(&past);
-            seal(&mut record);
+            // Not `seal`, which writes the true length.
+            let head = check(&record[CHECK..HEADER]);
+            record[..CHECK].copy_from_slice(&head);
             put(&node, "log-0", 0, &record).await;
         })
         .unwrap();

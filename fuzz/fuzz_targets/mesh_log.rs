@@ -2,8 +2,8 @@
 //! record it reads encodes to the same bytes.
 //!
 //! The target seals each input before the decode: it writes the length and both
-//! checks, so a change to a field, or a byte put in or taken out of the body, still
-//! reaches the decode of the hard state and the entries.
+//! checks, so a change to the number or the body, or a byte put in or taken out of
+//! the body, still reaches the decode of the hard state and the entries.
 
 #![no_main]
 
