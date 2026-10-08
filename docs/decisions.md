@@ -3775,11 +3775,11 @@ How to read this record:
   2026-10-08 03:59 UTC).
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
   an out connector: the `select` attribute and one `reader` block with `mode`
-  (`hub::reader::Mode`, as a string or a reference) and `hold`. With no block the
-  reader is complete and holds nothing. A second `reader`
-  block is `document.repeated-block`, and `read` reads only the first, where a label is
-  `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
-  #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  (`hub::reader::Mode`, as a string or a reference) and `hold`. With no block the reader
+  is complete and holds nothing. A second `reader` block is `document.repeated-block`,
+  and `read` reads only the first, where a label is `document.label-count`. A negative
+  `hold` is `document.negative-span` (READER RULES, #94; `laptop.architect-2`,
+  2026-10-08T07:04:36Z,
   https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
   Supersedes `config.repeated-block` and `config.label-count` of
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967
