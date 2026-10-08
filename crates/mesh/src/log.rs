@@ -2125,11 +2125,11 @@ mod tests {
         }
     }
 
-    /// The name and the length of each file of the log.
     fn named((name, len): (&str, u64)) -> (PathBuf, u64) {
         (name.into(), len)
     }
 
+    /// The name and the length of each file of the log.
     async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
         let mut lens = Vec::new();
         for name in node.files().list(Path::new(DIR)).await.unwrap() {
