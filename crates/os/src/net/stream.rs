@@ -161,9 +161,6 @@ impl tcp::Driver for Stream {
             .take_while(|buffer| buffer.is_empty())
             .count();
         let buffers = &buffers[skip..];
-        if buffers.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
         #[cfg(not(target_os = "macos"))]
         let sent =
             ready!(stream.poll_write_vectored(cx, buffers)).map_err(|e| errno(&e));
@@ -373,7 +370,9 @@ mod tests {
     }
 
     /// Only `ENOTCONN` and `EINVAL` say the connection ended. Another code keeps
-    /// the pending error for the poll that reports it.
+    /// the pending error for the poll that reports it. No public call fails with
+    /// another code after a reset, so this calls `ended`. The `INVAL` call reads and
+    /// clears the pending error, so it comes last.
     #[test]
     fn only_not_connected_and_invalid_read_the_pending_error() {
         let (client, server) = create_pair();
@@ -399,6 +398,7 @@ mod tests {
             sockopt::set_socket_recv_buffer_size(listener, 1 << 14).unwrap();
         });
         client.set_nonblocking(true).unwrap();
+        let segment = super::super::lowat::segment(client.as_fd()).unwrap();
         let (local, peer) = (client.local_addr().unwrap(), client.peer_addr().unwrap());
         let mut stream = Stream::new(client, local, peer, options, None).unwrap();
         let block = vec![7; part];
@@ -415,8 +415,6 @@ mod tests {
             written
         });
         let received = rustix::io::ioctl_fionread(&server).unwrap();
-        let fd = stream.socket.fd().unwrap();
-        let segment = super::super::lowat::segment(fd).unwrap();
         (
             written - usize::try_from(received).unwrap(),
             usize::try_from(segment).unwrap(),

@@ -58,6 +58,10 @@ impl Bound {
         };
         loop {
             ready!(stream.poll_write_ready(cx)).map_err(|e| errno(&e))?;
+            // macOS refuses a `writev` of no parts with `EINVAL`.
+            if buffers.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
             let mut sent = Err(Errno::AGAIN);
             // `WouldBlock` from the closure clears the readiness, unless an event
             // came during the write.
