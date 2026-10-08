@@ -70,8 +70,8 @@ const JOIN: u8 = 2;
 const TICKET: u8 = 3;
 const SPEC: u8 = 4;
 
-/// The most chunk digests that one `Spec` change lists, so that the change (about
-/// 32 KiB) fits in an append of 64 KiB with room for the rest of the message.
+/// The most chunk digests that one `Spec` change lists, so that one change (about
+/// 32 KiB) fits in an append of 64 KiB.
 pub(crate) const CHUNKS_MAX: usize = 1024;
 
 impl Change {

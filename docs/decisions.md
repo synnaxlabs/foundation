@@ -2071,9 +2071,12 @@ How to read this record:
   new root (32), the chunk count (2 bytes, little-endian), then each digest (32), in
   strictly rising order. The new version is `base.version + 1`. Lost: a version in the
   record, which can disagree with the base. A record lists at most `CHUNKS_MAX` = 1024
-  digests, about 32 KiB, so that it fits in an append of 64 KiB, a node's limit, with
-  room for the rest of the message; decode refuses a larger count. An entry over a
-  member's limit is never sent, and `raft` sends it again with no end (#1361). #1741
+  digests, about 32 KiB, so that one record fits in an append of 64 KiB, a node's
+  limit; decode refuses a larger count. An entry over a member's limit is never sent,
+  and `raft` sends it again with no end (#1361). `raft` bounds an `Append` by its count
+  of entries, not by its bytes, so two records at the bound in one `Append` go over
+  64 KiB. #1361 bounds it by bytes before a milestone applies a spec change to a region
+  of more than one member. #1741
   decides how a change of more new chunks applies. Every member applies a change whose
   base is the pointer, and refuses one whose base is not (`Refused::Stale`), so of two
   changes from one base only the first applies. The state machine never reads chunks
@@ -2097,7 +2100,11 @@ How to read this record:
   the trigger for `Pointer`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
   check of the founding at open, 2026-10-08T08:41:43Z
-  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
+  bound of an `Append` in bytes, 2026-10-08T08:44:55Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with
+  "member" for "voter", 2026-10-08T08:46:16Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056189352).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
@@ -2981,9 +2988,13 @@ How to read this record:
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
   crate map. `Config::founding` adds `spec::definition::Definition` and
   `types::name::Name`, and `Mesh::pointer` gives a `Pointer`, whose root is a
-  `types::digest::Digest`. So a crate that opens a region also has `spec` in its line
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771,
-  https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  `types::digest::Digest`. So a crate that opens a region also has `spec` in its line.
+  Decided by `laptop.architect`: the founding definitions, 2026-10-08T06:12:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
+  pointer, 2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); this
+  text, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
   `Status`: no public call reads the one or gives the two. The join answer of #336
   decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
