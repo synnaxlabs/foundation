@@ -463,6 +463,7 @@ mod tests {
     use types::channel::{self, Slot};
     use types::frame::key_set::Group;
     use types::frame::{Form, Frame, Path, Range};
+    use types::sample::Sides;
 
     use super::*;
     use crate::common::{create_interner, create_pool, data_type, key, values};
@@ -509,7 +510,7 @@ mod tests {
     }
 
     /// The count that a fixed-width series of the wrong length holds, so its encoded
-    /// form fails as its raw form does. A variable series holds `count`.
+    /// form fails as its raw form does. A variable or zero-width series holds `count`.
     fn held(set: &KeySet, entry: usize, count: u32, values: &[u8]) -> u32 {
         match set.entries()[entry].data_type.width() {
             Some(width) if width > 0 => {
@@ -955,6 +956,61 @@ mod tests {
                     ),
                 ];
                 for (draft, slot, error) in cases {
+                    let mut scratch = Scratch::default();
+
+                    let mut split = scratch.split(&set, draft);
+
+                    let channel = key(Slot::new(slot));
+                    assert_eq!(
+                        groups(&mut split),
+                        [(0, Err(Error { channel, error }))]
+                    );
+                }
+            }
+
+            #[test]
+            fn refuses_an_array_or_matrix_series_that_codec_refuses_in_either_form() {
+                let element = Scalar::U8;
+                let sides = Sides {
+                    rows: 2,
+                    columns: 2,
+                };
+                let set = create_interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[
+                        (key(Slot::new(2)), Type::Array { element, len: 2 }),
+                        (key(Slot::new(3)), Type::Matrix { element, sides }),
+                    ],
+                }]);
+                let index = [10_u64, 20].map(u64::to_le_bytes).concat();
+                let mut matrix = encoded(&set, 2, 2, &[7; 8]);
+                matrix[0] = 9;
+                let pool = create_pool(1 << 16);
+                let cases = [
+                    (
+                        Form::Raw,
+                        vec![(0, index.clone()), (1, vec![1, 2, 3])],
+                        2,
+                        codec::Error::Length {
+                            expected: 4,
+                            actual: 3,
+                        },
+                    ),
+                    (
+                        Form::Encoded,
+                        vec![(0, encoded(&set, 0, 2, &index)), (2, matrix)],
+                        3,
+                        codec::Error::Tag { vector: 0, tag: 9 },
+                    ),
+                ];
+                for (form, entries, slot, error) in cases {
+                    let lens: Vec<_> =
+                        entries.iter().map(|(e, b)| (*e, b.len())).collect();
+                    let mut draft = Draft::new(&pool, &set, form, &lens).expect("room");
+                    for ((_, series), (_, bytes)) in draft.iter_mut().zip(&entries) {
+                        series.copy_from_slice(bytes);
+                    }
+                    draft.set_count(0, 2);
                     let mut scratch = Scratch::default();
 
                     let mut split = scratch.split(&set, draft);
@@ -1412,7 +1468,7 @@ mod tests {
     /// and a write of some of its groups and entries.
     fn writes() -> impl Strategy<Value = (Arc<KeySet>, BTreeMap<u32, Samples>)> {
         let group = (
-            prop::collection::vec(data_type(0..=3, 0..=2), 0..4),
+            prop::collection::vec(data_type(0..=6, 0..=2), 0..4),
             any::<bool>(),
             0_u32..1100,
         );
