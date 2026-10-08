@@ -76,12 +76,13 @@ Check:
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a
-  peer, a file, or a user), does "Fuzz targets" in `docs/security.md` name its target,
-  or name it under "No target yet" with an open issue? If not, it is a finding. Does its
-  target make inputs that reach each arm that the PR adds or changes, such as each
-  `sample::Type` that the decoder takes? If not, it is a finding, which an answer may
-  defer to an open issue that names the gap ("Findings" step 3). So is each sentence of
-  its entry in "Fuzz targets" that the PR makes false.
+  peer, a file, or a user), does "Fuzz targets" in `docs/security.md` name its target?
+  If not, it is a finding, which an answer may defer to an open issue that "No target
+  yet" names ("Findings" step 3). Does its target make inputs that reach each arm that
+  the PR adds or changes, such as each `sample::Type` that the decoder takes? If not, it
+  is a finding, which an answer may defer to an open issue that names the gap
+  ("Findings" step 3). So is each sentence of its entry in "Fuzz targets" that the PR
+  makes false.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?
 
 Start the report with the rating and the summary of code quality that "Rating" in
