@@ -2451,14 +2451,25 @@ mod tests {
                 for sender in &mut senders {
                     sends.push(Box::pin(sender.send(side.block(&vec![0; LARGE]))));
                 }
-                for send in &mut sends {
-                    poll_once(Pin::new(send)).await;
+                let mut pending = Vec::new();
+                for mut send in sends {
+                    if poll_once(Pin::new(&mut send)).await.is_none() {
+                        pending.push(send);
+                    }
                 }
                 // QUIC takes the first message whole, and the window only part of the
                 // second. The second and third hold the budget, so the others wait.
                 assert_eq!(side.transport.status().budget_waits, 2);
-                drop(sends);
+                for send in &mut pending {
+                    poll_once(Pin::new(send)).await;
+                }
+                assert_eq!(side.transport.status().budget_waits, 2);
+                drop(pending);
                 side.session.close(Code(4));
+                let closed = Error::Closed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+                side.node.clock().sleep(spans(IDLE, 3)).await;
+                assert_eq!(side.transport.status().budget_waits, 2);
             },
             |side| async move {
                 let closed = Error::PeerClosed { code: Code(4) };
