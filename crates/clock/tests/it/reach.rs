@@ -78,17 +78,36 @@ fn completes_on_the_first_poll_for_a_stamp_already_reached() {
 fn waits_for_the_first_mesh_time() {
     let (mut sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
-    let at = Stamp::from_nanos(1_000);
+    let (at, start) = (Stamp::from_nanos(1_000), node.clock().now());
     let done = wait(&node, &reader, at);
-    sim.run_for(Span::from_nanos(3_500_000_000)).expect("runs");
+    sim.run_for(Span::from_nanos(2_500_000_000)).expect("runs");
     assert_eq!(*done.lock().expect("not poisoned"), None);
     push(&node, &mut clock, Span::ZERO);
     let pushed = node.clock().now();
     sim.run().expect("the run ends");
     let Time { monotonic, mesh } = done.lock().expect("not poisoned").expect("done");
     assert!(mesh.expect("mesh time").latest >= at);
-    assert!(
-        monotonic > pushed && monotonic <= pushed + Span::SECOND,
-        "{monotonic:?} after a push at {pushed:?}"
-    );
+    let read = start + Span::from_nanos(3_000_000_000);
+    assert_eq!(monotonic, read, "after a push at {pushed:?}");
+}
+
+/// A narrower estimate inside the wait moves the edge back, so the reading that the
+/// first slew gave is too early, and the wait reads again.
+#[test]
+fn waits_on_when_a_new_estimate_moves_the_edge_back() {
+    let (mut sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let source = clock.add();
+    let wide = Measurement::new(node.clock().now(), Span::ZERO, Span::SECOND);
+    clock.push(source, wide.expect("valid"));
+    let start = reader.now().mesh.expect("mesh time").latest;
+    let at = start + Span::from_nanos(10_000_000_000);
+    let done = wait(&node, &reader, at);
+    sim.run_for(Span::from_nanos(5_000_000_000)).expect("runs");
+    let narrow = Measurement::new(node.clock().now(), Span::ZERO, ms(10));
+    clock.push(source, narrow.expect("valid"));
+    sim.run().expect("the run ends");
+    let Time { mesh, .. } = done.lock().expect("not poisoned").expect("done");
+    let latest = mesh.expect("mesh time").latest;
+    assert!(latest >= at, "{latest:?} before {at:?}");
 }
