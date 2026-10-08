@@ -24,6 +24,7 @@ use types::time::Monotonic;
 use super::stream::{Incoming, Receiver, Sender};
 use super::wait::{self, RETRY};
 use super::{Endpoint, Event, Setup, connection};
+use crate::stream::Part;
 use crate::{Class, Code, Error, PAYLOAD_IPV4, Peer, Status, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
@@ -406,9 +407,9 @@ impl Session {
         )
     }
 
-    /// Writes `message` when it is `Some`, and takes it. Ready once the stream holds
-    /// no message: it took all of `message`, or with `None`, all of the one before.
-    /// Ready with the error.
+    /// Writes `parts` of `message` when it is `Some`, as [`Endpoint::write`] does,
+    /// and takes the block. Ready once the stream holds no message: it took all of
+    /// `message`, or with `None`, all of the one before. Ready with the error.
     ///
     /// # Errors
     ///
@@ -422,9 +423,10 @@ impl Session {
         cx: &mut Context<'_>,
         sender: &Sender,
         message: &mut Option<Block>,
+        parts: &[Part],
     ) -> Poll<Result<(), Error>> {
         self.with(|endpoint, clock, slot, _| {
-            match endpoint.write(clock.now(), sender, message) {
+            match endpoint.write(clock.now(), sender, message, parts) {
                 Ok(Poll::Pending) => {
                     register_one(&mut slot.writing, sender.key().id, cx.waker());
                     Poll::Pending
@@ -448,8 +450,8 @@ impl Session {
         self.with(|endpoint, clock, _, _| endpoint.finish(clock.now(), sender))
     }
 
-    /// Puts `message` on `sender`'s stream when the stream can take it now, as
-    /// [`Endpoint::try_write`] does. Else gives it back.
+    /// Puts `parts` of `message` on `sender`'s stream when the stream can take it
+    /// now, as [`Endpoint::try_write`] does. Else gives the block back.
     ///
     /// # Errors
     ///
@@ -462,9 +464,10 @@ impl Session {
         &self,
         sender: &Sender,
         message: Block,
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
         self.with(|endpoint, clock, _, _| {
-            endpoint.try_write(clock.now(), sender, message)
+            endpoint.try_write(clock.now(), sender, message, parts)
         })
     }
 
@@ -884,7 +887,7 @@ mod tests {
     use types::ed25519::PrivateKey;
     use types::time::{Monotonic, Span};
 
-    use super::{BATCHES, Carrier, Retry, Socket, register};
+    use super::{BATCHES, Carrier, Part, Retry, Socket, register};
     use crate::quic::{Endpoint, connection, stream, wait};
     use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::{Class, Code, Error, Peer};
@@ -1435,12 +1438,14 @@ mod tests {
             assert!(session.state.borrow().endpoint.drained());
             let block = || testing::block(&pool, b"a");
             let mut message = Some(block());
-            let written = poll_fn(|cx| session.poll_write(cx, &sender, &mut message));
+            let whole = [Part::whole(&block())];
+            let written =
+                poll_fn(|cx| session.poll_write(cx, &sender, &mut message, &whole));
             assert_eq!(written.await, Err(closed.clone()));
             assert!(message.is_some());
-            let flushed = poll_fn(|cx| session.poll_write(cx, &sender, &mut None));
+            let flushed = poll_fn(|cx| session.poll_write(cx, &sender, &mut None, &[]));
             assert_eq!(flushed.await, Err(closed.clone()));
-            let given = session.try_write(&sender, block());
+            let given = session.try_write(&sender, block(), &whole);
             assert_eq!(given.map(|given| given.is_some()), Err(closed.clone()));
             assert_eq!(session.finish(&mut finishing), Err(closed.clone()));
             let read = poll_fn(|cx| session.poll_read(cx, &mut receiver)).await;

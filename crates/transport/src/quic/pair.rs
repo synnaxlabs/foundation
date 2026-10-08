@@ -5,8 +5,10 @@ use std::mem;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use block::Block;
 use bytes::{Bytes, BytesMut};
 use env::net::udp::{Meta, TRANSMIT_BYTES_MAX};
 use noq_proto::{
@@ -17,9 +19,11 @@ use types::ed25519::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
 use super::settings::{MTU_MIN, Settings};
+use super::stream::Sender;
 use super::{Endpoint, Event, SERVER_NAME, cid, connection, find, queue};
-use crate::Config;
+use crate::stream::Part;
 use crate::testing::{self, Shard};
+use crate::{Config, Error};
 
 /// The client's address. The server's is [`SERVER`].
 pub(super) const CLIENT: SocketAddr =
@@ -76,6 +80,28 @@ pub(super) fn connection(
     let connection = find(&mut endpoint.connections, key).expect("a connection");
     queue(&mut endpoint.ready, connection);
     &mut connection.inner
+}
+
+/// [`Endpoint::write`] of all of `message`.
+pub(super) fn write(
+    endpoint: &mut Endpoint,
+    now: Monotonic,
+    sender: &Sender,
+    message: &mut Option<Block>,
+) -> Result<Poll<()>, Error> {
+    let whole = message.as_ref().map(Part::whole);
+    endpoint.write(now, sender, message, whole.as_slice())
+}
+
+/// [`Endpoint::try_write`] of all of `message`.
+pub(super) fn try_write(
+    endpoint: &mut Endpoint,
+    now: Monotonic,
+    sender: &Sender,
+    message: Block,
+) -> Result<Option<Block>, Error> {
+    let whole = Part::whole(&message);
+    endpoint.try_write(now, sender, message, &[whole])
 }
 
 /// The time `elapsed` after the start of a run.
