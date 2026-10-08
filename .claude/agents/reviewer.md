@@ -81,9 +81,10 @@ Check:
   in `testing.md`? Does an entry skip code that the PR adds or changes, when the entry
   is wider than one function or its reason ends with the PR (a stub that it fills)? The
   PR narrows or removes that entry.
-- Copies: when the PR corrects what a doc, a comment, or a decision states, search
-  the workspace (`git grep`) and the open issues (`gh issue list --search`) for each
-  other copy of the old statement. Each copy that the PR leaves is a finding.
+- Copies: when the PR corrects what a doc, a comment, or a decision states, or renames
+  or removes a name that a text uses (a code, an item, a key), search the workspace
+  (`git grep`) and the open issues (`gh issue list --search`) for each other copy of the
+  old statement or name. Each copy that the PR leaves is a finding.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a
