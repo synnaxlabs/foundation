@@ -158,8 +158,10 @@ name = "buffer"
 version = "0.0.0"
 dependencies = [
  "block",
+ "buffer",
  "counting",
  "crc32c",
+ "divan",
  "env",
  "proptest",
  "sim",
@@ -370,6 +372,7 @@ dependencies = [
  "proptest",
  "sim",
  "types",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -1900,6 +1903,12 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "unicode-properties"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "unicode-segmentation"

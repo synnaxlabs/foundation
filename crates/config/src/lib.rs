@@ -1595,7 +1595,8 @@ mod tests {
     }
 
     mod channels {
-        use spec::channel::{self, Data, DataType};
+        use spec::channel::{self, Data};
+        use spec::data_type::DataType;
         use spec::unit::Unit;
         use types::sample::{self, Scalar};
 
