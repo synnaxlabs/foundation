@@ -254,6 +254,14 @@ impl Raft {
         &self.voters
     }
 
+    /// Whether a committed configuration removed `key`: the configuration before the
+    /// entries or a committed `Voters` entry held it, and the last committed
+    /// configuration lacks it. An entry past the commit counts for neither.
+    #[must_use]
+    pub fn removed(&self, key: node::Key) -> bool {
+        self.log.removed(key)
+    }
+
     /// The state that must be on disk before a message of this term leaves.
     /// [`Ready::hard`] says when to write it.
     #[must_use]

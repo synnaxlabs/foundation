@@ -70,13 +70,14 @@ impl Voters {
         }
     }
 
-    // Whether `key` is in either set.
-    pub(crate) fn contains(&self, key: node::Key) -> bool {
+    /// Whether `key` is in `incoming` or `outgoing`.
+    #[must_use]
+    pub fn contains(&self, key: node::Key) -> bool {
         self.incoming.contains(&key) || self.outgoing.contains(&key)
     }
 
-    // Every node in either set, once.
-    pub(crate) fn nodes(&self) -> impl Iterator<Item = node::Key> + '_ {
+    /// Each node of `incoming` and `outgoing`, once, in key order.
+    pub fn nodes(&self) -> impl Iterator<Item = node::Key> + '_ {
         self.incoming.union(&self.outgoing).copied()
     }
 
