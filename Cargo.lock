@@ -1013,6 +1013,7 @@ dependencies = [
  "home",
  "hub",
  "loom",
+ "mesh",
  "node",
  "ops",
  "os",

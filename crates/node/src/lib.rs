@@ -20,6 +20,7 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -75,6 +76,9 @@ pub struct Config<M> {
     pub listen: SocketAddr,
     /// The node's key. Its transport proves the key to each peer.
     pub private_key: types::node::PrivateKey,
+    /// The region whose mesh the node opens, or `None` for no mesh. A patch until
+    /// the node reads its region from its data directory (#1660, #1732).
+    pub region: Option<Region>,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -87,8 +91,25 @@ impl<M> fmt::Debug for Config<M> {
             .field("entropy", &self.entropy)
             .field("disk", &self.disk)
             .field("listen", &self.listen)
+            .field("region", &self.region)
             .finish_non_exhaustive()
     }
+}
+
+/// A region that a node is a member of, given with no ticket.
+#[derive(Clone, Debug)]
+pub struct Region {
+    /// This node's key, the key of one card in `members`.
+    pub key: types::node::Key,
+    /// The prefix of the region's names, [`types::name::Prefix::ROOT`] for the root
+    /// region.
+    pub prefix: types::name::Prefix,
+    /// Each member of the region, this node included. The card of this node holds
+    /// the public half of [`Config::private_key`].
+    pub members: Vec<mesh::Member>,
+    /// The voters before the first entry of the log, the same at each start. Each is
+    /// a member.
+    pub voters: BTreeSet<types::node::Key>,
 }
 
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
@@ -210,6 +231,7 @@ impl Node {
             mut memory,
             mut files,
             entropy,
+            region,
             ..
         } = config;
         let stop = Stop::default();
@@ -220,6 +242,7 @@ impl Node {
             interner: last,
             inbox,
             endpoint,
+            region,
         };
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let roles = Role::all(mesh, wall, first, serve, cores);
@@ -287,7 +310,18 @@ impl Node {
     where
         F: Future<Output = ()> + 'static,
     {
-        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
+        self.queue
+            .push(Box::new(move |input| Box::pin(task(input.hub))));
+    }
+
+    /// [`Node::spawn`], with the mesh too.
+    #[cfg(test)]
+    fn spawn_input<F>(&self, task: impl FnOnce(task::Input) -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        self.queue
+            .push(Box::new(move |input| Box::pin(task(input))));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -452,10 +486,10 @@ impl Open {
                 tasks.spawn(async { mesh.run(wall).await });
                 let lock = self.claim(&files, closed.len() + 1, give).await;
                 let (shard, pool) = (tasks.clone(), Rc::new(pool));
-                let own = Rc::clone(&pool);
+                let (own, mesh) = (Rc::clone(&pool), files.clone());
                 let failed = Arc::clone(&self.failed);
                 let hold = async move |home, guard| {
-                    serve.run(home, own, shard, guard, &failed).await;
+                    serve.run(home, mesh, own, shard, guard, &failed).await;
                 };
                 self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
@@ -573,14 +607,17 @@ impl Open {
 }
 
 /// What shard 0 serves the node's tasks and port with: the interner, once the last
-/// shard has opened its buffer, the tasks given to the node, and its endpoint.
+/// shard has opened its buffer, the tasks given to the node, its endpoint, and its
+/// region.
 struct Serve {
     interner: Take<Interner>,
     inbox: task::Inbox<task::Task>,
     endpoint: Endpoint,
+    region: Option<Region>,
 }
 
-/// What shard 0 makes the node's transport from, but its pool and tasks.
+/// What shard 0 makes the node's transport and mesh from, but its files, pool, and
+/// tasks.
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
@@ -614,15 +651,18 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Runs each task given with a hub over `home`, and serves the node's port with
-    /// a transport on `pool`, until `guard` completes or the transport stops. A
-    /// transport that stops goes into `failed` before any task drops. Then drops the
-    /// tasks, the hub, `home`, and `guard`. Each session and the transport drop after
-    /// `guard` when `guard` completes, and before the tasks when the transport stops.
-    /// Runs no task and takes no session when a shard did not open.
+    /// Opens the mesh of the node's region over a transport on `pool`, then runs
+    /// each task given with a hub over `home`, and serves the node's port, until
+    /// `guard` completes or the transport stops. A transport that stops goes into
+    /// `failed` before any task drops. Then drops the tasks, the hub, `home`, and
+    /// `guard`. Each session and the transport drop after `guard` when `guard`
+    /// completes, and before the tasks when the transport stops. Runs no task and
+    /// takes no session when a shard did not open, or when the mesh did not open,
+    /// which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
+        files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
@@ -631,13 +671,48 @@ impl Serve {
         let Some(interner) = self.interner.await else {
             return;
         };
+        let private_key = self.endpoint.private_key.clone();
+        let (clock, entropy) =
+            (self.endpoint.clock.clone(), self.endpoint.entropy.clone());
+        let transport = Rc::new(self.endpoint.open(Rc::clone(&pool), tasks.clone()));
+        let mesh = match self.region {
+            None => None,
+            Some(region) => {
+                let config = mesh::Config {
+                    key: region.key,
+                    private_key,
+                    region: region.prefix,
+                    members: region.members,
+                    voters: region.voters,
+                    files,
+                    clock,
+                    entropy,
+                    tasks: tasks.clone(),
+                    pool,
+                    transport: Rc::clone(&transport),
+                };
+                match mesh::Mesh::open(config).await {
+                    Ok(mesh) => Some(mesh),
+                    Err(error) => {
+                        failed.set(Error::Mesh(error)).expect(
+                            "invariant: shard 0 serves only once its claim and open \
+                             succeed",
+                        );
+                        return;
+                    }
+                }
+            }
+        };
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
             tasks: tasks.clone(),
         });
-        let transport = self.endpoint.open(pool, tasks.clone());
-        let mut port = pin!(route::accept(transport, tasks.clone()));
+        let input = task::Input {
+            hub,
+            mesh: mesh.clone(),
+        };
+        let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
         let mut guard = pin!(guard);
         let stop = poll_fn(|cx| {
             if guard.as_mut().poll(cx).is_ready() {
@@ -651,7 +726,7 @@ impl Serve {
                 );
             })
         });
-        self.inbox.serve(hub, tasks, stop).await;
+        self.inbox.serve(input, tasks, stop).await;
     }
 }
 
@@ -701,6 +776,8 @@ pub enum Error {
     /// The transport of the node's port stopped, as when the OS breaks its socket.
     /// The node stops.
     Transport(transport::Error),
+    /// The mesh of the node's region did not open. The node took no session.
+    Mesh(mesh::Error),
     /// The node's port did not bind. No shard started.
     Port {
         /// The address of the bind.
@@ -737,6 +814,7 @@ impl fmt::Display for Error {
             Self::Transport(error) => {
                 write!(f, "the node's transport stopped: {error}")
             }
+            Self::Mesh(error) => write!(f, "cannot open the node's mesh: {error}"),
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }

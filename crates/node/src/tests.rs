@@ -72,6 +72,7 @@ fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block:
         net: host.net(),
         listen: listen(host),
         private_key: KEY,
+        region: None,
     }
 }
 
@@ -377,7 +378,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
              budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, \
-             listen: {listen:?}, .. }}",
+             listen: {listen:?}, region: None, .. }}",
             listen = config.listen,
         )
     );
@@ -2585,5 +2586,244 @@ mod port {
         node.stop();
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
+    }
+
+    mod mesh {
+        use std::collections::BTreeMap;
+
+        use ::mesh::card::addresses::Addresses;
+        use ::mesh::card::{self, Card};
+        use ::mesh::status::Status;
+        use ::mesh::{Member, Stopped};
+        use types::channel;
+        use types::node::SealKey;
+
+        use super::*;
+        use crate::Region;
+
+        /// The key of the node with private key [`KEY`].
+        const OWN: types::node::Key = types::node::Key::from_u128(1);
+        /// The key and private key of a second node.
+        const OTHER: (types::node::Key, PrivateKey) =
+            (types::node::Key::from_u128(2), PrivateKey([3; 32]));
+        const INDEX: channel::Key = channel::Key::from_u128(7);
+
+        type Home = Arc<Mutex<Option<Result<Option<types::node::Key>, Stopped>>>>;
+
+        /// The public half of `private_key`, from a transport made with it.
+        fn public_key(private_key: PrivateKey) -> types::node::PublicKey {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = sim.node(sim::node::Config::default());
+            let key = sim.run_on(&host, move |host, tasks| async move {
+                transport(&host, tasks, private_key).0.public_key()
+            });
+            key.expect("the run ends")
+        }
+
+        /// The member `key` with `private_key`, whose node listens on `host`.
+        fn member(
+            key: types::node::Key,
+            private_key: &PrivateKey,
+            host: &sim::node::Node,
+        ) -> Member {
+            let card = Card {
+                name: format!("plant.node{key}").parse().unwrap(),
+                public_key: public_key(private_key.clone()),
+                seal_key: SealKey::new([9; 32]).unwrap(),
+                addresses: Addresses::new(vec![Address::Udp(listen(host))]).unwrap(),
+                version: 1,
+            };
+            Member {
+                card: card::Signed::sign(key, card, private_key),
+                admission: [0; 64],
+                ephemeral: None,
+                status: Status::new(BTreeMap::new()).unwrap(),
+            }
+        }
+
+        /// The region `plant` of node `key`, where each of `members` is a voter.
+        fn region(key: types::node::Key, members: &[Member]) -> Region {
+            Region {
+                key,
+                prefix: "plant".parse().unwrap(),
+                members: members.to_vec(),
+                voters: members.iter().map(|member| member.card.key()).collect(),
+            }
+        }
+
+        /// Starts a node on `host` with `private_key` and `region`.
+        fn start(
+            host: &sim::node::Node,
+            private_key: PrivateKey,
+            region: Region,
+        ) -> Node {
+            Node::start(Config {
+                private_key,
+                region: Some(region),
+                ..config(host, Size::MEBIBYTE, Box::new(heap))
+            })
+        }
+
+        /// The node with key [`OWN`] on `host`, the one member and voter of its region.
+        fn start_alone(host: &sim::node::Node) -> Node {
+            start(host, KEY, region(OWN, &[member(OWN, &KEY, host)]))
+        }
+
+        /// Gives `node` a task that waits for a home of [`INDEX`], and gives what the
+        /// watch gave.
+        fn watch(node: &Node) -> Home {
+            let home = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&home);
+            node.spawn_input(move |input| async move {
+                let mut watch = input.mesh.expect("a mesh").watch(INDEX);
+                let mut given = watch.next().await;
+                while given == Ok(None) {
+                    given = watch.next().await;
+                }
+                *out.lock().unwrap() = Some(given);
+            });
+            home
+        }
+
+        /// A home set on one node of a region reaches the other: each node serves the
+        /// mesh streams of its port.
+        #[test]
+        fn a_home_that_one_node_sets_reaches_the_other() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let members = [
+                member(OWN, &KEY, &hosts[0]),
+                member(OTHER.0, &OTHER.1, &hosts[1]),
+            ];
+            let nodes = [
+                start(&hosts[0], KEY, region(OWN, &members)),
+                start(&hosts[1], OTHER.1, region(OTHER.0, &members)),
+            ];
+            let set = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&set);
+            nodes[1].spawn_input(move |input| async move {
+                let mesh = input.mesh.expect("a mesh");
+                *out.lock().unwrap() = Some(mesh.set_home(INDEX, OTHER.0).await);
+            });
+            let home = watch(&nodes[0]);
+            let ten = Span::from_nanos(10 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(ten), Ok(()));
+            assert_eq!(*set.lock().unwrap(), Some(Ok(())));
+            assert_eq!(*home.lock().unwrap(), Some(Ok(Some(OTHER.0))));
+            for node in &nodes {
+                node.stop();
+            }
+            assert_eq!(sim.run(), Ok(()));
+            for node in nodes {
+                assert_eq!(node.join(), Ok(()));
+            }
+        }
+
+        /// A node with no mesh has none in the input of its tasks.
+        #[test]
+        fn a_node_with_no_region_has_no_mesh() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            let mesh = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&mesh);
+            node.spawn_input(move |input| async move {
+                *out.lock().unwrap() = Some(input.mesh.is_some());
+            });
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            assert_eq!(*mesh.lock().unwrap(), Some(false));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// What a peer that is not a member sees when it sends `header` to a node
+        /// with a region.
+        fn sent(header: &[u8]) -> Seen {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let seen = dial(&mut sim, &host, header);
+            assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let seen = seen.lock().unwrap().take();
+            seen.expect("the peer ran")
+                .expect("the dial reaches the node")
+        }
+
+        /// The mesh serves a mesh stream: at the first message that is not a mesh
+        /// message, it stops the stream and resets its reply half with the code of
+        /// a malformed message.
+        #[test]
+        fn the_mesh_serves_a_mesh_stream() {
+            let header = wire::header::encode(wire::Protocol::Mesh);
+            let Seen { sent, read, .. } = sent(&header);
+            let code = Code(2);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// A header with a byte after it names no protocol, so a node with a mesh
+        /// rejects the stream too.
+        #[test]
+        fn a_header_with_a_byte_after_it_is_rejected() {
+            let mut header = wire::header::encode(wire::Protocol::Mesh).to_vec();
+            header.push(0);
+            let code = Code(wire::header::REJECTED);
+            let Seen { sent, read, .. } = sent(&header);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// A mesh that does not open stops the node, and `join` gives why.
+        #[test]
+        fn a_mesh_that_does_not_open_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("log/log-0"), env::files::Operation::Open);
+            let node = start_alone(&host);
+            assert_eq!(sim.run(), Ok(()));
+            let error =
+                ::mesh::Error::Log(::mesh::log::Error::Files(env::files::Error::Io {
+                    path: PathBuf::from("log/log-0"),
+                    operation: env::files::Operation::Open,
+                    code: 5,
+                }));
+            assert_eq!(node.join(), Err(Error::Mesh(error.clone())));
+            assert_eq!(
+                Error::Mesh(error.clone()).to_string(),
+                format!("cannot open the node's mesh: {error}")
+            );
+        }
+
+        /// A node that starts again with its region opens the log it left: the home
+        /// it set before is back, and no one sets it again.
+        #[test]
+        fn a_restart_opens_the_log_of_the_last_run() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let set = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&set);
+            node.spawn_input(move |input| async move {
+                let mesh = input.mesh.expect("a mesh");
+                *out.lock().unwrap() = Some(mesh.set_home(INDEX, OWN).await);
+            });
+            let ten = Span::from_nanos(10 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(ten), Ok(()));
+            assert_eq!(*set.lock().unwrap(), Some(Ok(())));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let node = start_alone(&host);
+            let home = watch(&node);
+            assert_eq!(sim.run_for(ten), Ok(()));
+            assert_eq!(*home.lock().unwrap(), Some(Ok(Some(OWN))));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
     }
 }
