@@ -5279,7 +5279,8 @@ How to read this record:
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
   transport and the mesh, and never a zero key. #1660 changes only where `node` gets
   the key. The test waits on #1744, whose client hello is the first that a `node` test
-  can admit through `Hub::link`, with `via` set to the node's key. Decided by `laptop.architect` (2026-10-08T18:36:19Z,
+  can admit through `Hub::link`, with `via` set to the node's key. Decided by
+  `laptop.architect` (2026-10-08T18:36:19Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
