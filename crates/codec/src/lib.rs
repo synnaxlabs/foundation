@@ -140,13 +140,27 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
         }
         Shape::Variable { element, max, utf8 } => {
             let front = element.front(count)?;
-            let (elements, rest) = ends(count, bytes, max, None)?;
+            // One vector of ends decodes here, so that the UTF-8 check reads it again.
+            let mut first = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
+            let first = first
+                .split_at_mut(Layout::END.raw_len(count.min(VECTOR_LEN))?)
+                .0;
+            let decoded = count <= VECTOR_LEN;
+            let (elements, rest) =
+                ends(count, bytes, max, decoded.then_some(&mut *first))?;
             let len = front.raw_len(elements)?;
             let after = element.check(elements, rest, vectors(count))?;
             if utf8 {
-                let ends = bytes.split_at(bytes.len().strict_sub(rest.len())).0;
+                let ends = if decoded {
+                    text::Pieces::raw(first)
+                } else {
+                    text::Pieces::ends(
+                        count,
+                        bytes.split_at(bytes.len().strict_sub(rest.len())).0,
+                    )
+                };
                 let vectors = rest.split_at(rest.len().strict_sub(after.len())).0;
-                text::encoded(count, ends, elements, vectors)?;
+                text::encoded(ends, elements, vectors)?;
             }
             (len, after)
         }
@@ -2150,6 +2164,28 @@ mod tests {
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 2 });
             let ends = [1_000, 2_049, 2_051];
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 1 });
+        }
+
+        #[test]
+        fn checks_utf8_with_ends_in_two_vectors() {
+            let mut samples = vec!["\u{e9}".as_bytes(); 1_100];
+            let (count, values) = variable(1, &samples);
+            let encoded = encode_type(Type::String, count, &values);
+            assert_eq!(validate(Type::String, count, &encoded), Ok(values.len()));
+            samples[1_050] = b"\xff";
+            let (count, values) = variable(1, &samples);
+            let encoded = [
+                encode(Scalar::U32, &values[..4 * count]),
+                encode(Scalar::U8, &values[4 * count..]),
+            ]
+            .concat();
+            let expected = Err(Error::Utf8 { sample: 1_050 });
+            assert_eq!(
+                validate(Type::String, count, &encoded).map(|_| ()),
+                expected
+            );
+            let mut out = vec![0; values.len()];
+            assert_eq!(decode(Type::String, count, &encoded, &mut out), expected);
         }
 
         #[test]

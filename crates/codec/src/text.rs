@@ -16,16 +16,15 @@ pub(crate) fn raw(ends: &[u8], elements: &[u8]) -> Result<(), Error> {
     };
     let from = vector.strict_mul(VECTOR_LEN);
     let piece = elements.split_at(from).1;
-    check(Pieces::Raw(Some(ends)), from, piece, Pieces::Raw(None))
+    check(Pieces::raw(ends), from, piece, Pieces::Raw(None))
 }
 
-/// Checks that each sample of an encoded `String` series of `count` samples is UTF-8,
-/// given its encoded `ends` and the encoded `vectors` of its `elements`, which are
-/// valid. It decodes each vector once, and the ends only when a vector is not ASCII.
+/// Checks that each sample of an encoded `String` series is UTF-8, given its `ends`,
+/// which are valid, and the encoded `vectors` of its `elements`, which are valid. It
+/// decodes each vector once, and reads the ends only when a vector is not ASCII.
 #[expect(clippy::unwrap_in_result, reason = "the caller checked the vectors")]
 pub(crate) fn encoded(
-    count: usize,
-    ends: &[u8],
+    ends: Pieces<'_>,
     elements: usize,
     vectors: &[u8],
 ) -> Result<(), Error> {
@@ -35,7 +34,6 @@ pub(crate) fn encoded(
     while let Some(vector) = vectors.next(&mut out) {
         let vector = vector.expect("invariant: the vectors were checked");
         if !vector.is_ascii() {
-            let ends = Pieces::Encoded(Decoder::new(Scalar::U32, count, ends));
             return check(ends, from, vector, Pieces::Encoded(vectors));
         }
         from = from.strict_add(vector.len());
@@ -86,13 +84,23 @@ fn check(
 }
 
 /// Raw bytes, or encoded vectors of them, a piece at a time.
-enum Pieces<'a> {
+pub(crate) enum Pieces<'a> {
     /// The bytes, until taken.
     Raw(Option<&'a [u8]>),
     Encoded(Decoder<'a>),
 }
 
 impl<'a> Pieces<'a> {
+    /// The raw ends of a series.
+    pub(crate) const fn raw(ends: &'a [u8]) -> Self {
+        Self::Raw(Some(ends))
+    }
+
+    /// The encoded ends of a series of `count` samples.
+    pub(crate) fn ends(count: usize, ends: &'a [u8]) -> Self {
+        Self::Encoded(Decoder::new(Scalar::U32, count, ends))
+    }
+
     /// The next piece, decoded into `out` when encoded.
     fn next<'o>(&mut self, out: &'o mut [u8]) -> Option<&'o [u8]>
     where
