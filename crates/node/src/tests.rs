@@ -491,48 +491,27 @@ fn fate(fate: &Mutex<Fate>) -> Fate {
     *fate.lock().unwrap()
 }
 
-/// `join` gives the node's own failure, else the first shard error by core, else the
-/// first panic by core, and joins every shard.
+/// `join` waits for each shard, also after a failure. It calls the private `error`:
+/// under `sim` each shard ends before `join`, and on real threads only a race shows a
+/// shard that `join` did not wait for.
 #[test]
-fn join_gives_errors_in_order_of_precedence() {
-    let panicked = |core: usize| thread::Panicked {
-        name: format!("shard-{core}"),
-    };
+fn join_waits_for_each_shard_after_a_failure() {
     let memory = Error::Memory {
         core: 2,
         error: os::memory::Error::Refused,
     };
-    let shards = |stored: usize| Error::Shards { stored, cores: 3 };
+    let panicked = thread::Panicked {
+        name: "shard-0".into(),
+    };
+    let shards = Error::Shards {
+        stored: 2,
+        cores: 3,
+    };
     let mut joined = 0;
-    let all = [
-        (Err(panicked(0)), Some(shards(2))),
-        (Ok(()), Some(shards(4))),
-    ];
+    let all = [(Err(panicked), Some(shards)), (Ok(()), None)];
     let all = all.into_iter().inspect(|_| joined += 1);
     assert_eq!(crate::error(Some(memory.clone()), all), Err(memory));
     assert_eq!(joined, 2);
-    let cases = [
-        (
-            vec![(Err(panicked(0)), None), (Ok(()), Some(shards(2)))],
-            shards(2),
-        ),
-        (
-            vec![(Ok(()), Some(shards(2))), (Ok(()), Some(shards(4)))],
-            shards(2),
-        ),
-        (
-            vec![
-                (Ok(()), None),
-                (Err(panicked(1)), None),
-                (Err(panicked(2)), None),
-            ],
-            Error::Panicked(panicked(1)),
-        ),
-    ];
-    for (shards, error) in cases {
-        assert_eq!(crate::error(None, shards.into_iter()), Err(error));
-    }
-    assert_eq!(crate::error(None, [(Ok(()), None)].into_iter()), Ok(()));
 }
 
 mod buffer {
@@ -907,6 +886,19 @@ mod buffer {
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
+            // Before the restart, which would make a ring that a stop cut.
+            for core in 0..3 {
+                let dir = format!("shard-{core}");
+                if !listed.contains(&PathBuf::from(&dir)) {
+                    continue;
+                }
+                let ring = [PathBuf::from("ring")];
+                let files = super::listed(&mut sim, &host, &dir);
+                assert_eq!(files, ring, "{dir} at {after:?}");
+                // `DISK` splits into three whole parts, with no remainder.
+                let len = ring_len(&mut sim, &host, core);
+                assert_eq!(len, DISK.bytes() / 3, "{dir} at {after:?}");
+            }
             assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
         }
         assert_eq!(seen[2..], [true; 4], "a stop after each step");
@@ -1066,6 +1058,9 @@ mod buffer {
 }
 
 mod directory {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
 
     /// Makes the record of a node of `stored` shards in `host`'s data directory.
@@ -1422,6 +1417,44 @@ mod directory {
             seen, [true; 2],
             "a panic before and after the claim started"
         );
+    }
+
+    /// On the real OS, shard 0 runs while the later shards get their memory, so its
+    /// claim can fail before a shard gets no memory. `join` gives the shard with no
+    /// memory.
+    #[test]
+    fn join_gives_a_shard_with_no_memory_over_a_claim_that_failed_first() {
+        let error = os::memory::Error::Refused;
+        for seed in 0..32 {
+            let sim = Rc::new(RefCell::new(sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            })));
+            let host = host(&mut sim.borrow_mut(), 3);
+            record(&mut sim.borrow_mut(), &host, 2);
+            let (mut core, run) = (0, Rc::clone(&sim));
+            let memory: Memory = Box::new(move |len| {
+                core += 1;
+                if core < 3 {
+                    return heap(len);
+                }
+                let claim = Span::from_nanos(5_000_000);
+                assert_eq!(run.borrow_mut().run_for(claim), Ok(()));
+                Err(error)
+            });
+            let node = Node::start(config(&host, Size::MEBIBYTE, memory));
+            assert_eq!(sim.borrow_mut().run(), Ok(()), "seed {seed}");
+            // A private read: `join` gives one error, so no public call shows the
+            // claim's.
+            let claimed = node.shards[0].failed.get().cloned();
+            let shards = Error::Shards {
+                stored: 2,
+                cores: 3,
+            };
+            assert_eq!(claimed, Some(shards), "seed {seed}");
+            let memory = Error::Memory { core: 2, error };
+            assert_eq!(node.join(), Err(memory), "seed {seed}");
+        }
     }
 }
 
