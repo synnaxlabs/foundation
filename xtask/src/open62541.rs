@@ -52,7 +52,8 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
     ),
-    // The seed, which `UA_ENABLE_DETERMINISTIC_RNG` keeps from the clock.
+    // The start value of the random state, which `UA_ENABLE_DETERMINISTIC_RNG` keeps
+    // from the clock.
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
