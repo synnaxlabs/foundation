@@ -40,8 +40,10 @@ For each `interface` issue (the proposed signature and the reason):
    design lessons. Each new public item needs a caller on the milestone path.
 2. Inside the locked decisions: approve it on the issue with the exact signature, or
    refuse it with the reason. The crate's builder makes the change.
-3. A change to a locked decision, a contract, or an oracle: ask the person (the problem,
-   the fix, its cost, patch or long-term path, your recommendation).
+3. A change to a locked decision, a contract, or an oracle: ask the person in a comment
+   on the issue (the problem, the fix, its cost, patch or long-term path, your
+   recommendation), then send `laptop.coordinator` the link to that comment at once
+   (`docs/coordination.md`, "Messages"). A comment alone reaches no one.
 4. After it merges, file an issue for each crate that must follow, and send the links to
    `laptop.coordinator`.
 
