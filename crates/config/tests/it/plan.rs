@@ -695,8 +695,8 @@ placement \"a\" {{
 /// `p` wins for a connector on another node.
 fn exclude(connector: &str, p: &str, node: &str) -> String {
     format!(
-        "Exclude the connector `{connector}` and its indexes from the `select` of `{p}`, \
-         and select them with a placement whose `home` is `{node}`"
+        "Exclude the connector `{connector}` and its indexes from the `select` of \
+         `{p}`, and select them with a placement whose `home` is `{node}`"
     )
 }
 
@@ -755,6 +755,26 @@ placement \"c\" {
         &text("n", all, "m", ""),
         &[RENAMED.into(), RENAMED.into(), RENAMED.into()],
         &text("n", all, "n", ""),
+    );
+    let b = "\
+placement \"b\" {
+  select = \"p.b\"
+  home = \"m\"
+}
+";
+    plans_after_connector_home(
+        &text("m", all, "k", ""),
+        &[
+            exclude("p.a", "p", "n"),
+            exclude("p.b", "p", "m"),
+            exclude("p.c", "p", "n"),
+        ],
+        &text(
+            "m",
+            "[\"p.**\", \"!p.a\", \"!p.a.time\", \"!p.b\", \"!p.c\"]",
+            "k",
+            &(fixed.to_owned() + b),
+        ),
     );
 }
 
@@ -1024,8 +1044,8 @@ connector \"a\" {
     let expected = split(
         text,
         "a_time",
-        "the placement `a_time` wins for the index `a.time`, but the placement `a` wins \
-         for the connector `a`",
+        "the placement `a_time` wins for the index `a.time`, but the placement `a` \
+         wins for the connector `a`",
         "a",
         "a",
         "a.time",
@@ -1177,7 +1197,8 @@ fn plans_after_the_split_placement_fix() {
         (a.clone() + &placement("a", "a"), a_fix, &fixed_a),
         (
             d.clone() + &placement("d", "d.**") + &placement("e", "d.e"),
-            "Make the placement `e` win for the connector `d.e` and the index `d.e.time`",
+            "Make the placement `e` win for the connector `d.e` and the index \
+             `d.e.time`",
             &(d.clone() + &placement("d", "d.**") + &placement("e", "d.e.**")),
         ),
     ];
@@ -1233,6 +1254,35 @@ connector \"b\" {
   node = \"n\"
   writes = [\"b.time\"]
 }
+channel \"d.e.time\" {
+  kind = \"index\"
+}
+placement \"d\" {
+  select = \"d.**\"
+  home = \"n\"
+}
+placement \"e_1\" {
+  select = \"d.e\"
+  home = \"n\"
+}
+placement \"e_2\" {
+  select = \"d.e\"
+  home = \"n\"
+}
+placement \"t\" {
+  select = \"d.e.time\"
+  home = \"n\"
+}
+connector \"d\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+connector \"d.e\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"d.e.time\"]
+}
 ";
     let found = problems(Spec::create_empty().plan(&[text], &["n"]));
     let tie = |at, first, second| {
@@ -1247,7 +1297,11 @@ connector \"b\" {
              name more specifically",
         )
     };
-    let expected = [tie("a.time", "a_1", "a_2"), tie("b", "b_1", "b_2")];
+    let expected = [
+        tie("a.time", "a_1", "a_2"),
+        tie("b", "b_1", "b_2"),
+        tie("d.e", "e_1", "e_2"),
+    ];
     assert_eq!(found, expected);
 }
 
