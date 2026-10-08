@@ -108,7 +108,9 @@ where
         let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");
         let link = test.hub.link(session.clone());
+        let mut accepted = 0;
         while let Ok(mut incoming) = session.accept().await {
+            accepted += 1;
             let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
             tasks.spawn(async move {
                 header(&mut incoming).await;
@@ -117,6 +119,10 @@ where
             });
         }
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
+        // The end of this future drops each serve task that has not yet recorded.
+        while kept.lock().expect("not poisoned").len() < accepted {
+            node.clock().sleep(Span::MICROSECOND).await;
+        }
         drop((link, test));
     };
     run(seed, home, program);
