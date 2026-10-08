@@ -81,8 +81,7 @@ impl Tls {
     /// Makes a self-signed certificate for the node key. The same key always gives
     /// the same bytes.
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
-        let pair = Pair::new(private_key);
-        let certificate = issue(&pair.public().to_bytes(), |tbs| pair.sign(tbs));
+        let certificate = certificate(private_key);
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
         let key = any_eddsa_type(&pkcs8)
             .expect("invariant: the PKCS#8 template holds an Ed25519 key");
@@ -189,6 +188,13 @@ fn provider() -> CryptoProvider {
     }
 }
 
+/// The self-signed certificate of the node with `private_key`.
+#[must_use]
+pub fn certificate(private_key: &PrivateKey) -> Vec<u8> {
+    let pair = Pair::new(private_key);
+    issue(&pair.public().to_bytes(), |tbs| pair.sign(tbs))
+}
+
 /// The template certificate for `key`, with the signature `sign` gives for its
 /// to-be-signed part.
 fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> [u8; 64]) -> Vec<u8> {
@@ -234,6 +240,25 @@ pub(crate) fn peer(
                 .expect("invariant: a verifier accepted this chain"),
         ),
     })
+}
+
+/// The peer that a node's server makes of a dialer's `chain` once they agree on
+/// [`ALPN`]: the client verifier, then [`peer`]. rustls calls no verifier for an empty
+/// chain.
+///
+/// # Errors
+///
+/// The verifier's error.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn accept(chain: &[CertificateDer<'_>]) -> Result<Peer, rustls::Error> {
+    let verifier = AnyKey {
+        algorithms: provider().signature_verification_algorithms,
+    };
+    let now = Epoch.current_time().expect("invariant: Epoch has a time");
+    if let Some((end_entity, intermediates)) = chain.split_first() {
+        verifier.verify_client_cert(end_entity, intermediates, now)?;
+    }
+    peer(Some(ALPN), Some(chain))
 }
 
 /// The node key that a chain carries. Refuses a chain that is not one certificate of
@@ -458,7 +483,7 @@ mod tests {
         ResolvesClientCert::resolve(&*certified.resolver, &[], &schemes).expect("a key")
     }
 
-    fn certificate(tls: &Tls) -> CertificateDer<'static> {
+    fn presented(tls: &Tls) -> CertificateDer<'static> {
         certified(tls).cert[0].clone()
     }
 
@@ -931,7 +956,7 @@ mod tests {
 
         #[test]
         fn refuses_a_key_that_is_not_ed25519() {
-            let mut der = certificate(&Tls::new(&PrivateKey([1; 32]))).to_vec();
+            let mut der = presented(&Tls::new(&PrivateKey([1; 32]))).to_vec();
             let at = der
                 .windows(SPKI.len())
                 .position(|window| window == SPKI)
@@ -977,6 +1002,41 @@ mod tests {
         }
     }
 
+    /// Pins the verifier's error, which `fuzzing::peer` drops.
+    #[cfg(feature = "fuzzing")]
+    mod accept {
+        use super::*;
+
+        #[test]
+        fn when_chain_is_empty_the_peer_is_a_client() {
+            assert_eq!(accept(&[]), Ok(Peer::Client));
+        }
+
+        #[test]
+        fn when_chain_is_a_node_certificate_the_peer_is_the_node() {
+            let private_key = PrivateKey([1; 32]);
+            let chain = [CertificateDer::from(certificate(&private_key))];
+            assert_eq!(accept(&chain), Ok(Peer::Node(private_key.public())));
+        }
+
+        #[test]
+        fn when_chain_has_two_certificates_it_refuses() {
+            let der = CertificateDer::from(certificate(&PrivateKey([1; 32])));
+            assert_eq!(
+                accept(&[der.clone(), der]),
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_certificate_is_not_der_it_refuses() {
+            assert_eq!(
+                accept(&[CertificateDer::from(vec![1, 2, 3])]),
+                Err(CertificateError::BadEncoding.into())
+            );
+        }
+    }
+
     mod certificate {
         use super::*;
 
@@ -984,7 +1044,7 @@ mod tests {
             #[test]
             fn carries_the_public_key(bytes: [u8; 32]) {
                 let private_key = PrivateKey(bytes);
-                let certificate = certificate(&Tls::new(&private_key));
+                let certificate = presented(&Tls::new(&private_key));
                 prop_assert_eq!(key(&certificate, &[]), Ok(private_key.public()));
             }
 
@@ -1005,22 +1065,22 @@ mod tests {
             let golden =
                 include_str!("../../../oracles/conformance/transport/certificate.txt");
             let golden = golden.split_whitespace().collect::<String>();
-            let certificate = certificate(&Tls::new(&PrivateKey([1; 32])));
+            let certificate = presented(&Tls::new(&PrivateKey([1; 32])));
             let hex = certificate.iter().map(|byte| format!("{byte:02x}"));
             assert_eq!(hex.collect::<String>(), golden);
         }
 
         #[test]
         fn is_the_same_for_the_same_key() {
-            let first = certificate(&Tls::new(&PrivateKey([1; 32])));
-            let second = certificate(&Tls::new(&PrivateKey([1; 32])));
+            let first = presented(&Tls::new(&PrivateKey([1; 32])));
+            let second = presented(&Tls::new(&PrivateKey([1; 32])));
             assert_eq!(first, second);
         }
 
         #[test]
         fn is_signed_by_its_own_key() {
             let private_key = PrivateKey([1; 32]);
-            let certificate = certificate(&Tls::new(&private_key));
+            let certificate = presented(&Tls::new(&private_key));
             let der = certificate.as_ref();
             let tbs = &der[CERTIFICATE.len()..][..TBS_BYTES];
             let signature = der[der.len() - 64..].try_into().unwrap();

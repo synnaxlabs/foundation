@@ -407,6 +407,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-opcua"
+version = "0.0.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1168,10 +1175,12 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "counting",
  "divan",
  "env",
  "getrandom 0.4.3",
  "libc",
+ "os",
  "proptest",
  "rustix",
  "tokio",
