@@ -89,7 +89,8 @@ that pass in CI.
   case is `box2.connector`: a connector against a locked `hub` contract with a device
   simulator.
 - **Machine work at night.** The red-teams run simulation campaigns, fuzz, and mutants.
-  Each failure becomes a day-lane issue with a reduced repro.
+  Each failure becomes a day-lane issue, or an item of one when its fix is small
+  (`docs/coordination.md`, "Small changes"), with a reduced repro.
 - Night PRs merge through the queue like day PRs.
 
 ## Messages
@@ -141,4 +142,5 @@ that pass in CI.
 
 Opus 5.5 everywhere. Fable only on an issue the person or the architect labels
 `model:fable`. The weekly `code-quality` and `drift` agents run on Sonnet; search
-subagents run on Haiku.
+subagents run on Haiku. COST TRIALS in `docs/decisions.md` runs some reviewers on
+Sonnet.
