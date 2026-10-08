@@ -3773,6 +3773,9 @@ How to read this record:
   look-alike shows. The `config-hcl` writer keeps its own rule, because a person edits
   what it writes. Lost: Rust's `Debug` form, which no file reads; `$$` and `%%`, which
   only HCL reads. Decided by the architect (#941).
+  Until `types::text::Quoted` is on `main` (#941), a producer quotes text from a file
+  with `{:?}`, and #941 changes each such quote to `Quoted`. Decided by the architect
+  (https://github.com/synnaxlabs/foundation/issues/941#issuecomment-6053293087).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
