@@ -1,6 +1,7 @@
 src_generated/open62541/statuscodes.c
 src_generated/open62541/transport_generated.c
 src_generated/open62541/types_generated.c
+arch/common/timer.c
 deps/base64.c
 deps/dtoa.c
 deps/itoa.c
