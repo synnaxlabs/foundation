@@ -1913,7 +1913,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z, and
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
-  2026-10-07T17:08:02Z).
+  2026-10-07T17:08:02Z). Amended (approved by `laptop.architect`,
+  2026-10-07T20:35:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046363822,
+  2026-10-07T20:47:58Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046560645, and
+  2026-10-07T20:51:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046617974,
+  #1589): the rule is that a message `step` refuses or drops by its header gives no
+  claim. So it also gives no claim of a message for another node, from this node, or
+  from a second leader of this term (`Misrouted`, `Loopback`, `SecondLeader`). One
+  predicate, `Raft::reads`, holds each refusal and drop by the header, and decides
+  both. A grant or a proof that `step` reads past the header and then ignores is
+  still a claim (#1613 holds the design that removes the class).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
