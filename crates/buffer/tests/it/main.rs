@@ -1806,7 +1806,7 @@ fn a_ring_with_no_checkpoint_takes_the_layout_of_the_open() {
 /// An open makes a ring with no checkpoint again. A crash at any point of it leaves
 /// a ring that opens: with the layout of its checkpoint when it has one, or else
 /// with the layout of that open. The cuts leave each state that the remake goes
-/// through.
+/// through, and the file with no bytes that a crash in its create leaves.
 #[test]
 fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
     let (old, new) = (layout(2 * AREA, BODY_MAX), layout(AREA, BODY_MAX));
@@ -1829,7 +1829,7 @@ fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
             }
             ended
         });
-        let zero = lens.map(Found::Unwritten);
+        let zero = [0, lens[0], lens[1]].map(Found::Unwritten);
         let all = [Found::Absent, Found::Written].into_iter().chain(zero);
         assert_eq!(left, all.collect(), "{crash:?}");
     }
@@ -3311,6 +3311,38 @@ fn a_failed_record_write_ends_the_buffer_with_its_error() {
     .expect("the buffer ends");
 }
 
+/// A `Commit` answers only for the entries appended before its call: past the drop,
+/// a later failed write does not change its result.
+#[test]
+fn a_commit_held_past_the_drop_gives_ok_when_a_later_write_fails() {
+    let (mut sim, node) = create_node(113);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let early = buffer.committed();
+        assert_eq!(buffer.committed().await, Ok(()));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, Some(40), Parts::default())])
+            .expect("queues");
+        let late = buffer.committed();
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(early.await, Ok(()));
+        assert_eq!(late.await, Err(failed));
+    })
+    .expect("the buffer ends");
+}
+
 #[test]
 fn an_append_with_no_block_for_its_record_header_is_refused() {
     run(112, Memory::default(), |shard| async move {
@@ -4089,8 +4121,8 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
     });
 }
 
-/// A `Commit` taken before a later append and held past the drop resolves only when
-/// the task wrote that append and ended, so a reopen after it recovers everything.
+/// A `Commit` taken before a later append and held past the drop resolves once the
+/// task ended, here after it wrote that append, so a reopen recovers both entries.
 #[test]
 fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
     run(137, Memory::default(), |shard| async move {
@@ -4128,6 +4160,66 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
             buffer.tail(slots.assign(key(1)), Path::Live),
             tail(2, Some(2))
         );
+    });
+}
+
+/// A drop while a commit runs, with nothing queued, ends the task at the end of that
+/// commit: not at once, and not at its next deadline.
+#[test]
+fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
+    run(162, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        drop(buffer);
+        shard.clock.sleep(tenths(1)).await;
+        assert_eq!(shard.memory.open_files(), 1, "the sync still runs");
+        shard.clock.sleep(tenths(2)).await;
+        assert_eq!(shard.memory.open_files(), 0, "the task ended at the sync");
+    });
+}
+
+/// A drop while a commit runs ends the task when that commit fails: it never writes
+/// the entries queued at the drop, nor waits for its next deadline.
+#[test]
+fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
+    run(161, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let opened = shard.memory.syncs();
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues while the first sync runs");
+        let commit = buffer.committed();
+        drop(buffer);
+        let dropped = shard.clock.now();
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(commit.await, Err(failed));
+        assert_eq!(shard.clock.now() - dropped, tenths(2), "at the failed sync");
+        assert_eq!(shard.memory.syncs() - opened, 1, "no write after the drop");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
     });
 }
 

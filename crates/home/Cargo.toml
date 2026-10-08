@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes `stored` to the `stored` bench.
+sim = []
+
 [dependencies]
 block = { path = "../block" }
 buffer = { path = "../buffer" }
@@ -16,8 +20,16 @@ env = { path = "../env" }
 types = { path = "../types" }
 
 [dev-dependencies]
+divan = { workspace = true }
+# Turns on `sim`, since the bench host runs no features.
+home = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
+
+[[bench]]
+name = "stored"
+harness = false
+test = true
 
 [lints]
 workspace = true

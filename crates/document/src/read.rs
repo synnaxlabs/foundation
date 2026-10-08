@@ -8,8 +8,11 @@ use types::{byte, time};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
-use crate::{Label, Span};
+use crate::{Document, Label, Span};
 
+const UNKNOWN_ATTRIBUTE: Code = Code::new("document.unknown-attribute");
+const UNKNOWN_BLOCK: Code = Code::new("document.unknown-block");
+const MISSING_ATTRIBUTE: Code = Code::new("document.missing-attribute");
 const BAD_SIZE: Code = Code::new("document.bad-size");
 const BAD_NAME: Code = Code::new("document.bad-name");
 const BAD_SELECTOR: Code = Code::new("document.bad-selector");
@@ -28,7 +31,7 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
     };
     let Kind::String(text) = &value.kind else {
         return Err(bad(
-            format!("a byte size is a string, not {}", noun(&value.kind)),
+            format!("a byte size is a string, not {}", value.kind.noun()),
             "Write a string such as \"200GiB\"".into(),
         ));
     };
@@ -86,7 +89,7 @@ pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
     };
     let Kind::String(text) = &value.kind else {
         return Err(bad(
-            format!("a span is a string, not {}", noun(&value.kind)),
+            format!("a span is a string, not {}", value.kind.noun()),
             "Write a string such as \"3d\"".into(),
         ));
     };
@@ -132,7 +135,7 @@ pub fn name(value: &Value) -> Result<Name, Diagnostic> {
         kind => Err(Diagnostic::new(
             BAD_NAME,
             value.span,
-            format!("a name is a string or a reference, not {}", noun(kind)),
+            format!("a name is a string or a reference, not {}", kind.noun()),
             "Write a name such as \"site_a.node_1\"".into(),
         )),
     }
@@ -181,7 +184,10 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
                 return Err(Diagnostic::new(
                     BAD_SELECTOR,
                     pattern.span,
-                    format!("a pattern is a string or a reference, not {}", noun(kind)),
+                    format!(
+                        "a pattern is a string or a reference, not {}",
+                        kind.noun()
+                    ),
                     "Write a string such as \"site_a.*\"".into(),
                 ));
             }
@@ -198,6 +204,112 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
     Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
 }
 
+/// Reports each attribute of `body` whose key is not in `keys`, and each block whose
+/// keyword is not in `blocks`, in that order. `of` names `body` in each message, such
+/// as "the `retention` block".
+///
+/// Returns a `document.unknown-attribute` diagnostic at the key of each such
+/// attribute, and a `document.unknown-block` diagnostic at the keyword of each such
+/// block. Each fix names the keys and blocks it takes.
+#[must_use]
+pub fn unknown(
+    body: &Document,
+    of: &str,
+    keys: &[&str],
+    blocks: &[&str],
+) -> Vec<Diagnostic> {
+    let attributes = body
+        .attributes
+        .iter()
+        .filter(|attribute| !keys.contains(&&*attribute.key))
+        .map(|attribute| {
+            Diagnostic::new(
+                UNKNOWN_ATTRIBUTE,
+                attribute.key_span,
+                format!("`{}` is not an attribute of {of}", attribute.key),
+                match (keys, blocks) {
+                    ([], [_, ..]) => format!(
+                        "Move it into the {} block that it sets, or remove it",
+                        one_of(blocks)
+                    ),
+                    _ => use_or_remove(keys),
+                },
+            )
+        });
+    let inner = body
+        .blocks
+        .iter()
+        .filter(|block| !blocks.contains(&&*block.keyword))
+        .map(|block| {
+            Diagnostic::new(
+                UNKNOWN_BLOCK,
+                block.keyword_span,
+                format!("{of} cannot hold the `{}` block", block.keyword),
+                use_or_remove(blocks),
+            )
+        });
+    attributes.chain(inner).collect()
+}
+
+/// A `document.missing-attribute` diagnostic at `at`: `of` has none of `keys`.
+///
+/// # Panics
+///
+/// When `keys` is empty: the caller's list is internal.
+#[must_use]
+pub fn missing(of: &str, at: Option<Span>, keys: &[&str], fix: String) -> Diagnostic {
+    assert!(!keys.is_empty(), "`missing` needs at least one key");
+    Diagnostic::new(
+        MISSING_ATTRIBUTE,
+        at,
+        format!("{of} has no {}", one_of(keys)),
+        fix,
+    )
+}
+
+/// Reads the attribute `key` of `body`, which `of` names, with `read`.
+///
+/// # Errors
+///
+/// The diagnostic of `read`, or, when `body` has no `key`, the one of [`missing`] at
+/// `at` with `fix`.
+pub fn required<T>(
+    body: &Document,
+    of: &str,
+    at: Option<Span>,
+    key: &str,
+    read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
+    fix: String,
+) -> Result<T, Diagnostic> {
+    match body.attributes.get(key) {
+        Some(attribute) => read(&attribute.value),
+        None => Err(missing(of, at, &[key], fix)),
+    }
+}
+
+/// "Use" and the keys, "or remove it"; or only "Remove it" when there are none.
+fn use_or_remove(keys: &[&str]) -> String {
+    if keys.is_empty() {
+        "Remove it".into()
+    } else {
+        format!("Use {}, or remove it", one_of(keys))
+    }
+}
+
+/// `words` in backticks, as a list that ends with "or".
+fn one_of(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [word] => format!("`{word}`"),
+        [first, second] => format!("`{first}` or `{second}`"),
+        [rest @ .., last] => {
+            let rest: Vec<String> =
+                rest.iter().map(|word| format!("`{word}`")).collect();
+            format!("{}, or `{last}`", rest.join(", "))
+        }
+    }
+}
+
 /// The items of a value that holds one item or a list: the items of a list, or the
 /// value itself.
 fn items(value: &Value) -> &[Value] {
@@ -209,20 +321,6 @@ fn items(value: &Value) -> &[Value] {
 
 fn diagnose(code: Code, span: Option<Span>, error: &Error) -> Diagnostic {
     Diagnostic::new(code, span, error.to_string(), error.fix().into())
-}
-
-/// The noun for a kind of value, with its article.
-fn noun(kind: &Kind) -> &'static str {
-    match kind {
-        Kind::Bool(_) => "a bool",
-        Kind::Integer(_) => "an integer",
-        Kind::Float(_) => "a float",
-        Kind::String(_) => "a string",
-        Kind::Reference(_) => "a reference",
-        Kind::List(_) => "a list",
-        Kind::Map(_) => "a map",
-        Kind::Call(_) => "a call",
-    }
 }
 
 #[cfg(test)]
@@ -397,11 +495,6 @@ mod tests {
                 "Use at most \"18446744073709551615B\"",
             ),
         ]);
-    }
-
-    #[test]
-    fn names_a_string_as_a_string() {
-        assert_eq!(noun(&Kind::String("200GiB".into())), "a string");
     }
 
     #[test]
@@ -960,6 +1053,208 @@ mod tests {
                     prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
                 }
             }
+        }
+    }
+
+    mod keys {
+        use super::*;
+        use crate::{Attribute, Block, read};
+
+        /// A body with an attribute at the offset of each key, and a block at the
+        /// offset of each keyword.
+        fn body(keys: &[(u32, &str)], keywords: &[(u32, &str)]) -> Document {
+            let attributes = keys.iter().map(|(offset, key)| Attribute {
+                key: (*key).into(),
+                key_span: at(*offset),
+                value: Value {
+                    kind: text("x"),
+                    span: at(offset.saturating_add(1)),
+                },
+            });
+            let blocks = keywords.iter().map(|(offset, keyword)| Block {
+                keyword: (*keyword).into(),
+                keyword_span: at(*offset),
+                labels: Vec::new(),
+                body: Document::default(),
+                span: at(*offset),
+            });
+            Document {
+                attributes: Map::new(attributes.collect()).unwrap(),
+                blocks: blocks.collect(),
+            }
+        }
+
+        fn diagnostic(
+            code: &'static str,
+            at: u32,
+            message: &str,
+            fix: &str,
+        ) -> Diagnostic {
+            Diagnostic::new(Code::new(code), self::at(at), message.into(), fix.into())
+        }
+
+        #[test]
+        fn reports_each_unknown_attribute_then_each_unknown_block() {
+            let body = body(
+                &[(20, "colour"), (10, "select"), (30, "size")],
+                &[(5, "inner"), (40, "reader")],
+            );
+            let of = "the `influx` connector";
+            assert_eq!(
+                unknown(&body, of, &["select", "address"], &["reader"]),
+                [
+                    diagnostic(
+                        "document.unknown-attribute",
+                        20,
+                        "`colour` is not an attribute of the `influx` connector",
+                        "Use `select` or `address`, or remove it",
+                    ),
+                    diagnostic(
+                        "document.unknown-attribute",
+                        30,
+                        "`size` is not an attribute of the `influx` connector",
+                        "Use `select` or `address`, or remove it",
+                    ),
+                    diagnostic(
+                        "document.unknown-block",
+                        5,
+                        "the `influx` connector cannot hold the `inner` block",
+                        "Use `reader`, or remove it",
+                    ),
+                ]
+            );
+        }
+
+        #[test]
+        fn tells_attributes_and_blocks_apart() {
+            let body = body(&[(1, "reader")], &[(2, "select")]);
+            let found = unknown(&body, "the connector", &["select"], &["reader"]);
+            let codes: Vec<_> =
+                found.iter().map(|d| (d.code.as_str(), d.span)).collect();
+            assert_eq!(
+                codes,
+                [
+                    ("document.unknown-attribute", at(1)),
+                    ("document.unknown-block", at(2)),
+                ]
+            );
+        }
+
+        #[test]
+        fn says_only_remove_it_when_it_takes_no_key() {
+            let body = body(&[(1, "disk")], &[(2, "inner")]);
+            assert_eq!(
+                unknown(&body, "the `retention` block", &[], &[]),
+                [
+                    diagnostic(
+                        "document.unknown-attribute",
+                        1,
+                        "`disk` is not an attribute of the `retention` block",
+                        "Remove it",
+                    ),
+                    diagnostic(
+                        "document.unknown-block",
+                        2,
+                        "the `retention` block cannot hold the `inner` block",
+                        "Remove it",
+                    ),
+                ]
+            );
+        }
+
+        #[test]
+        fn says_to_move_an_attribute_into_a_block_when_it_takes_only_blocks() {
+            let body = body(&[(1, "disk")], &[]);
+            assert_eq!(
+                unknown(&body, "a file", &[], &["channel", "retention"]),
+                [diagnostic(
+                    "document.unknown-attribute",
+                    1,
+                    "`disk` is not an attribute of a file",
+                    "Move it into the `channel` or `retention` block that it sets, or \
+                     remove it",
+                )]
+            );
+        }
+
+        #[test]
+        fn reports_nothing_when_each_key_is_known() {
+            let body = body(&[(1, "select")], &[(2, "reader")]);
+            assert_eq!(
+                unknown(&body, "the connector", &["select"], &["reader"]),
+                []
+            );
+        }
+
+        #[test]
+        fn names_one_two_or_more_missing_keys() {
+            let cases = [
+                (&["keep"][..], "the `retention` block has no `keep`"),
+                (
+                    &["disk", "pool"],
+                    "the `retention` block has no `disk` or `pool`",
+                ),
+                (
+                    &["home", "standby", "copies"],
+                    "the `retention` block has no `home`, `standby`, or `copies`",
+                ),
+            ];
+            for (keys, message) in cases {
+                assert_eq!(
+                    missing("the `retention` block", at(7), keys, "Add it".into()),
+                    diagnostic("document.missing-attribute", 7, message, "Add it"),
+                );
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "`missing` needs at least one key")]
+        fn refuses_to_name_no_missing_key() {
+            drop(missing(
+                "the `retention` block",
+                at(7),
+                &[],
+                "Add it".into(),
+            ));
+        }
+
+        #[test]
+        fn reads_a_required_attribute() {
+            let body = body(&[(1, "name")], &[]);
+            let read = required(&body, "the reader", at(0), "name", name, "Add".into());
+            assert_eq!(read, Ok("x".parse().unwrap()));
+        }
+
+        #[test]
+        fn gives_the_diagnostic_of_a_required_attribute_that_does_not_read() {
+            let body = body(&[(1, "keep")], &[]);
+            let read =
+                required(&body, "the block", at(0), "keep", read::span, "Add".into());
+            let value = &body.attributes.get("keep").unwrap().value;
+            assert_eq!(read, Err(read::span(value).unwrap_err()));
+        }
+
+        #[test]
+        fn reports_a_missing_required_attribute_at_the_place_given() {
+            let body = body(&[(1, "other")], &[]);
+            let fix = "Add a `keep` attribute";
+            let read = required(
+                &body,
+                "the `retention` block",
+                at(0),
+                "keep",
+                read::span,
+                fix.into(),
+            );
+            assert_eq!(
+                read,
+                Err(diagnostic(
+                    "document.missing-attribute",
+                    0,
+                    "the `retention` block has no `keep`",
+                    fix,
+                ))
+            );
         }
     }
 }

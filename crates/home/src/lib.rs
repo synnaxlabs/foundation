@@ -5,6 +5,9 @@ use std::fmt;
 
 use types::channel;
 
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod bench;
 #[cfg(test)]
 mod common;
 mod handoff;

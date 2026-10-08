@@ -132,6 +132,7 @@ fn restarted(id: u8, old: Voters, log: &[Entry]) -> Raft {
             candidate: key(1),
             voters: [1, 2].map(|id| (key(id), None)).into(),
         }),
+        chain: Vec::new(),
     };
     raft.step(append).unwrap();
     let ready = raft.ready();

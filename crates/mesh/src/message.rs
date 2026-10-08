@@ -3,15 +3,16 @@
 //! A message has one byte form: [`Message::decode`] takes only what
 //! [`Message::encode`] gives. The stream's header carries the format version.
 
-use raft::{Answer, Body, Position, Term};
+use raft::{Answer, Body, Link, Position, Term};
 use types::node;
 
 use crate::bytes::{
-    put_key, put_optional_proof, put_position, put_signature, take, take_bool,
-    take_key, take_position, take_proof, take_signature,
+    put_change, put_count, put_key, put_optional_proof, put_position, put_signature,
+    take, take_bool, take_change, take_count, take_key, take_position, take_proof,
+    take_signature,
 };
+use crate::change::Change;
 use crate::entry;
-use crate::region::Change;
 
 const RAFT: u8 = 1;
 const PROPOSE: u8 = 2;
@@ -70,6 +71,7 @@ impl Message {
                 put_key(message.to, &mut out);
                 out.extend(message.term.0.to_le_bytes());
                 put_optional_proof(message.proof.as_ref(), &mut out);
+                put_chain(&message.chain, &mut out);
                 body(&message.body, &mut out);
             }
             Self::Propose { change } => {
@@ -104,12 +106,14 @@ impl Message {
                 } else {
                     None
                 };
+                let chain = take_chain(bytes)?;
                 Self::Raft(raft::Message {
                     from,
                     to,
                     term,
                     body: take_body(bytes)?,
                     proof,
+                    chain,
                 })
             }
             PROPOSE => Self::Propose {
@@ -126,6 +130,27 @@ impl Message {
         };
         bytes.is_empty().then_some(message)
     }
+}
+
+// A chain is a count of links as 8 little-endian bytes, then each link's position
+// and change.
+fn put_chain(chain: &[Link], out: &mut Vec<u8>) {
+    put_count(chain.len(), out);
+    for link in chain {
+        put_position(link.at, out);
+        put_change(&link.change, out);
+    }
+}
+
+fn take_chain(bytes: &mut &[u8]) -> Option<Vec<Link>> {
+    let count = take_count(bytes)?;
+    let mut chain = Vec::new();
+    for _ in 0..count {
+        let at = take_position(bytes)?;
+        let change = take_change(bytes)?;
+        chain.push(Link { at, change });
+    }
+    Some(chain)
 }
 
 fn body(body: &Body, out: &mut Vec<u8>) {
@@ -159,9 +184,7 @@ fn body(body: &Body, out: &mut Vec<u8>) {
             out.push(APPEND);
             put_position(*prev, out);
             out.extend(commit.to_le_bytes());
-            for entry in entries {
-                entry::encode(entry, out);
-            }
+            entry::encode(entries, out);
         }
         Body::AppendReply { last } => {
             out.push(APPEND_REPLY);
@@ -196,10 +219,7 @@ fn take_body(bytes: &mut &[u8]) -> Option<Body> {
         APPEND => {
             let prev = take_position(bytes)?;
             let commit = u64::from_le_bytes(take(bytes)?);
-            let mut entries = Vec::new();
-            while !bytes.is_empty() {
-                entries.push(entry::decode(bytes)?);
-            }
+            let entries = entry::decode(std::mem::take(bytes))?;
             Body::Append {
                 prev,
                 entries,
@@ -247,6 +267,11 @@ mod tests {
     use raft::{Data, Entry, Grant, Proof, Signature, Voters};
     use types::channel;
 
+    /// The bytes of a link whose change has three incoming voters, three outgoing
+    /// voters, and three votes: the position, two key sets, the votes, and the
+    /// signature.
+    const LINK: usize = 16 + (8 + 3 * 16) * 2 + (1 + 16 + 8 + 3 * (16 + 64)) + 64;
+
     use super::*;
 
     fn node(bits: u128) -> node::Key {
@@ -279,21 +304,27 @@ mod tests {
         ]
     }
 
+    fn a_change() -> impl Strategy<Value = raft::Change> {
+        (keys(), keys(), a_proof(), a_signature()).prop_map(
+            |(incoming, outgoing, votes, signature)| raft::Change {
+                voters: Voters { incoming, outgoing },
+                votes,
+                signature: Some(signature),
+            },
+        )
+    }
+
     fn an_entry() -> impl Strategy<Value = Entry> {
         let data = prop_oneof![
             Just(Data::Empty),
             prop::collection::vec(any::<u8>(), 0..48).prop_map(Data::Bytes),
-            (keys(), keys(), a_proof(), a_signature()).prop_map(
-                |(incoming, outgoing, votes, signature)| {
-                    Data::Voters(raft::Change {
-                        voters: Voters { incoming, outgoing },
-                        votes,
-                        signature: Some(signature),
-                    })
-                },
-            ),
+            a_change().prop_map(Data::Voters),
         ];
         (a_position(), data).prop_map(|(at, data)| Entry { at, data })
+    }
+
+    fn a_link() -> impl Strategy<Value = Link> {
+        (a_position(), a_change()).prop_map(|(at, change)| Link { at, change })
     }
 
     fn a_body() -> impl Strategy<Value = Body> {
@@ -341,14 +372,16 @@ mod tests {
             any::<u64>(),
             a_body(),
             prop::option::of(a_proof()),
+            prop::collection::vec(a_link(), 0..3),
         );
-        let raft = fields.prop_map(|(from, to, term, body, proof)| {
+        let raft = fields.prop_map(|(from, to, term, body, proof, chain)| {
             Message::Raft(raft::Message {
                 from: node(from),
                 to: node(to),
                 term: Term(term),
                 body,
                 proof,
+                chain,
             })
         });
         let propose =
@@ -411,12 +444,47 @@ mod tests {
             term: Term(3),
             body,
             proof: None,
+            chain: Vec::new(),
         })
     }
 
-    /// The bytes of [`raft`] before the body, with no proof.
+    /// The bytes of [`raft`] before the body: no proof, then an empty chain.
     fn head() -> Vec<u8> {
-        [&[RAFT][..], &key(1), &key(2), &le(3), &[0]].concat()
+        [&[RAFT][..], &key(1), &key(2), &le(3), &[0], &le(0)].concat()
+    }
+
+    /// The length of [`head`].
+    const HEAD: usize = 1 + 16 + 16 + 8 + 1 + 8;
+
+    /// Where the proof's presence byte is in [`head`].
+    const PROOF_AT: usize = HEAD - 9;
+
+    /// The change of leader 1 to the incoming voters 1 and 2 from the outgoing
+    /// voter 2, with the vote of voter 1 and `signature`.
+    fn change(signature: Option<Signature>) -> raft::Change {
+        raft::Change {
+            voters: Voters {
+                incoming: [node(1), node(2)].into(),
+                outgoing: [node(2)].into(),
+            },
+            votes: Proof {
+                grant: Grant::Vote,
+                candidate: node(1),
+                voters: [(node(1), Some(self::signature(5)))].into(),
+            },
+            signature,
+        }
+    }
+
+    /// A heartbeat of [`raft`] with `chain`.
+    fn chained(chain: Vec<Link>) -> Message {
+        Message::Raft(raft::Message {
+            chain,
+            ..match raft(Body::Heartbeat { commit: 6 }) {
+                Message::Raft(message) => message,
+                _ => unreachable!(),
+            }
+        })
     }
 
     #[test]
@@ -469,6 +537,7 @@ mod tests {
 
     #[test]
     fn a_proof_has_a_fixed_byte_form() {
+        assert_eq!(head().len(), HEAD);
         let message = Message::Raft(raft::Message {
             from: node(1),
             to: node(2),
@@ -480,13 +549,61 @@ mod tests {
                 voters: [(node(1), Some(signature(5))), (node(4), Some(signature(6)))]
                     .into(),
             }),
+            chain: Vec::new(),
         });
         let voters = [&le(2)[..], &key(1), &[5; 64], &key(4), &[6; 64]].concat();
         let proof = [&[1, 1][..], &key(1), &voters].concat();
-        let head = &head()[..head().len() - 1];
-        let expected = [head, &proof, &[5], &le(6)].concat();
+        let head = &head()[..PROOF_AT];
+        let expected = [head, &proof, &le(0), &[5], &le(6)].concat();
         assert_eq!(message.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(message));
+    }
+
+    #[test]
+    fn a_chain_has_a_fixed_byte_form() {
+        let link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        let message = chained(vec![link]);
+        let position = [le(2), le(4)].concat();
+        let incoming = [&le(2)[..], &key(1), &key(2)].concat();
+        let outgoing = [&le(1)[..], &key(2)].concat();
+        let votes = [&[1][..], &key(1), &le(1), &key(1), &[5; 64]].concat();
+        let link = [position, incoming, outgoing, votes, vec![6; 64]].concat();
+        let head = &head()[..head().len() - 8];
+        let expected = [head, &le(1), &link, &[5], &le(6)].concat();
+        assert_eq!(message.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(message));
+    }
+
+    #[test]
+    fn a_link_of_three_voters_is_457_bytes() {
+        assert_eq!(LINK, 457);
+        let bare = chained(Vec::new()).encode().len();
+        for count in [2, 20] {
+            let chain = (1..=count)
+                .map(|index| Link {
+                    at: at(2, index),
+                    change: raft::Change {
+                        voters: Voters {
+                            incoming: [1, 2, 3].map(node).into(),
+                            outgoing: [1, 2, 4].map(node).into(),
+                        },
+                        votes: Proof {
+                            grant: Grant::Vote,
+                            candidate: node(1),
+                            voters: [1_u8, 2, 3]
+                                .map(|id| (node(id.into()), Some(signature(id))))
+                                .into(),
+                        },
+                        signature: Some(signature(6)),
+                    },
+                })
+                .collect();
+            let encoded = chained(chain).encode().len();
+            assert_eq!(encoded - bare, LINK * usize::try_from(count).unwrap());
+        }
     }
 
     #[test]
@@ -527,15 +644,23 @@ mod tests {
         *body.last_mut().unwrap() = 10;
         let mut tail = heartbeat.clone();
         tail.push(0);
-        let proof_at = head().len() - 1;
         let mut presence = heartbeat.clone();
-        presence[proof_at] = 2;
-        let grant = [&head()[..proof_at], &[1, 2], &key(1), &le(0), &[6]].concat();
+        presence[PROOF_AT] = 2;
+        let grant =
+            [&head()[..PROOF_AT], &[1, 2], &key(1), &le(0), &le(0), &[6]].concat();
         let proven = |voters: [u8; 2]| {
             let voters = voters.map(|voter| [key(voter), vec![voter; 64]].concat());
             let proof = [&[1, 1][..], &key(1), &le(2), &voters.concat()].concat();
-            [&head()[..proof_at], &proof, &[6]].concat()
+            [&head()[..PROOF_AT], &proof, &le(0), &[6]].concat()
         };
+        let link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        let chained = chained(vec![link]).encode();
+        let cut_link = [&chained[..head().len() + 16], &[5], &le(6)].concat();
+        let mut counted = heartbeat.clone();
+        counted[head().len() - 8] = 1;
         // Two keys that fall, and one key twice: the count of the outgoing set, the
         // votes of one voter, and the signature follow the two incoming keys.
         let after = 8 + (1 + 16 + 8 + 16 + 64) + 64;
@@ -546,7 +671,9 @@ mod tests {
         twice.swap(len - after - 32, len - after - 16);
         twice[len - after - 32] = 2;
         twice[len - after - 16] = 2;
-        let cases: [(&str, &[u8]); 13] = [
+        let cases: [(&str, &[u8]); 15] = [
+            ("a chain cut in a link", &cut_link),
+            ("a chain count with no link", &counted),
             ("no bytes", &[]),
             ("an unknown kind", &[0]),
             ("a cut message", &heartbeat[..heartbeat.len() - 1]),
@@ -567,6 +694,17 @@ mod tests {
         assert!(Message::decode(&change_append([1, 2])).is_some());
         assert!(Message::decode(&proven([1, 2])).is_some());
         assert!(Message::decode(&granted).is_some());
+        assert!(Message::decode(&chained).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
+    fn encode_panics_on_an_unsigned_link() {
+        chained(vec![Link {
+            at: at(2, 4),
+            change: change(None),
+        }])
+        .encode();
     }
 
     #[test]
@@ -612,6 +750,7 @@ mod tests {
                 candidate: node(1),
                 voters: [(node(1), None), (node(2), Some(signature(2)))].into(),
             }),
+            chain: Vec::new(),
         })
         .encode();
     }

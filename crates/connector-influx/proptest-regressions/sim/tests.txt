@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0e834e21b2ec37f5e0dfb12af330125ec7d252939be0715129ddca194174f709 # shrinks to measurement = "time", keys = {"a\u{7f}": (false, "time", Float(Float(0.0))), "¡": (false, "time", Float(Float(0.0)))}, time = 0
