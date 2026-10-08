@@ -794,6 +794,7 @@ mod tests {
             reader.admit();
             let read = reader.read(|max| Ok(source.take(max)));
             assert_eq!(read, Ok(Step::Block(100)));
+            // Private: no call shows the heap that the reader keeps.
             assert_eq!(reader.held(), (None, 10));
             assert!(reader.fill(None).is_pending());
             assert_eq!(reader.held(), (Some((100, 100)), 0));
