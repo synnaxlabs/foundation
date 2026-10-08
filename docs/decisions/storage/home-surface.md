@@ -35,18 +35,19 @@
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
-  Amended (2026-10-08T22:24:43Z, #2020): `Shard::shed` stops carrying an index, the
-  pair of `carry`. Its control gate goes, and each named reader of the index stops
-  holding its position. Its frames stay in the buffer, so a later `carry` of the slot
-  continues each path from its tail. It panics on an open writer or reader of the
-  index: the hub ends each session on the index first. A shed frees the place of the
+  Amended (2026-10-08T22:24:43Z, #2020): `Shard::shed` stops carrying an index, the pair
+  of `carry`. Its control gate goes, and with it a handoff that waits for room. Each
+  named reader of the index stops holding its position. Its frames stay in the buffer,
+  and a later `carry` of the slot continues each path where it stood: the live path
+  continues after the seq of each lost frame. It panics on an open writer or reader of
+  the index: the hub ends each session on the index first. A shed frees the place of the
   index in the shard, and the index at the last place moves there. The hub sheds an
   index only when its key leaves the definitions; a rename or a changed definition at
   the same key ends its sessions and keeps the index. No reader key is given twice, also
   after a shed and a carry: `delivery::Readers::end` gives the number after each key of
-  a shed index, and the shard carries each index with `Readers::after` at the highest
-  of these. So a hub finds a session by its home key alone. Decided by
-  `laptop.architect`
+  a shed index, and panics while a record waits to be taken, and the shard carries each
+  index with `Readers::after` at the highest of these. So a hub finds a session by its
+  home key alone. Decided by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814, and
   the `delivery` items:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046).
