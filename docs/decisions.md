@@ -3639,7 +3639,11 @@ How to read this record:
   2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
   rest at `finish`, which drops the diagnostics when a caller returns early;
   `unknown_attributes` and `unknown_blocks` as two functions; a public
-  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on. `read::one_of` lists words in
+  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list, as
+  `missing` does. It is public for the `config.bad-action` fix, so no copy goes into
+  `config`. Decided by `laptop.architect-2` at 2026-10-08T03:54:12Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -3857,6 +3861,31 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
+- **ACCESS BLOCK (2026-10-08)** `access "<name>" { subjects, select, allow, authority }`
+  (C8) gives a `spec::access::Policy` at `<name>.@access`. `subjects` and `select` are
+  selectors. `allow` is one action or a list of actions, each a string or a bare word,
+  so `["read", "write"]` and `[read, write]` read the same; a repeat is one action, and
+  an empty list is `config.empty-allow`. A word that is not an action is
+  `config.bad-action`. `authority` is optional, an integer from 0 to 255
+  (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
+  the least, as default deny gives the least. Such a writer still takes control when no
+  writer holds it (GATE RULES). Lost: an `authority` that `write` makes required, a
+  rule that C8 does not have. The action words are a table in `config` until a second
+  reader needs them, such as the `plan` output of access; then they move to `spec` as
+  `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
+  An `authority` with no `write` in an `allow` that reads is
+  `config.authority-without-write`, also `authority = 0`: only a write uses an
+  authority, so the value is a mistake. `Policy::new` still sets the authority of a
+  policy with no `write` to zero. Lost: no diagnostic, which hides the mistake. Decided
+  by `laptop.architect-2` at 2026-10-08T04:00:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051909712).
+  It reads two attributes together, so it runs only when each attribute of the block is
+  known and reads, as `config::check` states for a whole definition. Decided by
+  `laptop.architect-2` at 2026-10-08T04:24:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6052187547).
+  Supersedes the silent `authority` of
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
 
 ### 1.12 Access, identity, and secrets
 
