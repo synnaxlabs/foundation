@@ -3518,15 +3518,23 @@ How to read this record:
   the `.`. #363.
 - **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
   a body that its reader does not take, with the attribute keys and the block keywords
-  apart, so a key that names an attribute never passes as a block.
-  `read::missing` reports a body with none of some keys, and `read::required` reads
-  one key or gives that diagnostic. `config` and every kind use them, so one mistake
-  has one code: `document.unknown-attribute`, `document.unknown-block`, and
-  `document.missing-attribute`. Decided by `laptop.architect-2` on #1153
-  ([ruling](https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019),
-  2026-10-08 03:05 UTC). A top-level attribute or an unknown kind of block in a file
-  uses them too: decided by the `config` builder in #1772. Lost: a `Body` value that records each key read and reports
-  the rest at `finish`, which drops the diagnostics when a caller returns early.
+  apart, so a key that names an attribute never passes as a block. One function holds
+  both checks, so a kind cannot forget one half. When a body takes blocks and no
+  attribute, as a file does, the fix of an attribute is to move it into one of those
+  blocks. `read::missing` reports a body with none of some keys, and panics on an
+  empty list, which is a defect of the caller. `read::required` reads one key or gives
+  that diagnostic. `config` and every kind use them, also at the top level of a file,
+  so one mistake has one code: `document.unknown-attribute`, `document.unknown-block`,
+  and `document.missing-attribute`. Decided by `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
+  2026-10-08 03:05 UTC) and on #1772
+  (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
+  2026-10-08 03:27 UTC, and
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
+  2026-10-08 03:29 UTC). Lost: a
+  `Body` value that records each key read and reports the rest at `finish`, which
+  drops the diagnostics when a caller returns early; `unknown_attributes` and
+  `unknown_blocks` as two functions.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for

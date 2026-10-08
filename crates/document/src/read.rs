@@ -210,7 +210,8 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
 ///
 /// Returns a `document.unknown-attribute` diagnostic at the key of each such
 /// attribute, and a `document.unknown-block` diagnostic at the keyword of each such
-/// block. Each fix names the keys it takes.
+/// block. Each fix names the keys it takes. When `body` takes blocks and no
+/// attribute, the fix of an attribute is to move it into one of those blocks.
 #[must_use]
 pub fn unknown(
     body: &Document,
@@ -227,7 +228,13 @@ pub fn unknown(
                 UNKNOWN_ATTRIBUTE,
                 attribute.key_span,
                 format!("`{}` is not an attribute of {of}", attribute.key),
-                use_or_remove(keys),
+                match (keys, blocks) {
+                    ([], [_, ..]) => format!(
+                        "Move it into the {} block that it sets, or remove it",
+                        one_of(blocks)
+                    ),
+                    _ => use_or_remove(keys),
+                },
             )
         });
     let inner = body
@@ -1153,6 +1160,21 @@ mod tests {
                         "Remove it",
                     ),
                 ]
+            );
+        }
+
+        #[test]
+        fn says_to_move_an_attribute_into_a_block_when_it_takes_only_blocks() {
+            let body = body(&[(1, "disk")], &[]);
+            assert_eq!(
+                unknown(&body, "a file", &[], &["channel", "retention"]),
+                [diagnostic(
+                    "document.unknown-attribute",
+                    1,
+                    "`disk` is not an attribute of a file",
+                    "Move it into the `channel` or `retention` block that it sets, or \
+                     remove it",
+                )]
             );
         }
 

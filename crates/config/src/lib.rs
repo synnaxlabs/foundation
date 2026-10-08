@@ -533,7 +533,8 @@ mod tests {
                 "document.unknown-attribute",
                 at(0, 3),
                 "`disk` is not an attribute of a file",
-                "Remove it",
+                "Move it into the `channel`, `node_settings`, `placement`, or `retention` \
+                 block that it sets, or remove it",
             )])
         );
     }
