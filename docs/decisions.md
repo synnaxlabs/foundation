@@ -2041,9 +2041,10 @@ How to read this record:
   `hub::client` the private key of a subject. Ordered by `laptop.director` at
   2026-10-08T05:41:28Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
-  `types::ed25519::PrivateKey::public` is the one place that derives the public key
-  from the private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
-  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
+  `types::ed25519::Pair::new` is the one place that derives the public key from the
+  private key. `PrivateKey::public` derives through it for a holder that does not
+  sign, and a signer keeps its public key in its `Pair` (ruling of `Pair` below).
+  `mesh`, `transport`, and `node` keep no copy of the derive. So `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
   crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
   Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
   and the copies, which grow with each crate that needs the key. Decided by
