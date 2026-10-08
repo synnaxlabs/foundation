@@ -846,6 +846,49 @@ placement \"on_d\" {
 }
 
 #[test]
+fn plans_nested_connectors_with_no_inner_index_after_the_connector_home_fix() {
+    let text = |channel: &str, placement: &str, more: &str| {
+        format!(
+            "\
+{channel}connector \"d\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+connector \"d.e\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = []
+}}
+placement \"d\" {{
+{placement}}}
+{more}"
+        )
+    };
+    let e = "\
+placement \"e\" {
+  select = \"d.e\"
+  home = \"m\"
+}
+";
+    let outer = "channel \"d.f.time\" {\n  kind = \"index\"\n}\n";
+    for (channel, roles) in [
+        ("", "  home = \"n\"\n"),
+        (outer, "  home = \"n\"\n  standby = \"k\"\n"),
+    ] {
+        plans_after_connector_home(
+            &text(channel, &format!("  select = \"d.**\"\n{roles}"), ""),
+            &[exclude("d.e", "d", "m")],
+            &text(
+                channel,
+                &format!("  select = [\"d.**\", \"!d.e\"]\n{roles}"),
+                e,
+            ),
+        );
+    }
+}
+
+#[test]
 fn places_a_connector_at_its_node_with_its_placement() {
     let text = "\
 channel \"a.time\" {
