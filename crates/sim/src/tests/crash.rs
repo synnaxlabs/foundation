@@ -1324,7 +1324,7 @@ fn a_process_crash_applies_a_rename_in_flight_and_a_power_cut_can_drop_it() {
 /// The synced file `a` is there, a file `c` is made, and `a` is renamed to `b`, with
 /// no `sync_dir` after.
 #[test]
-fn a_power_cut_keeps_the_changes_in_the_order_of_their_calls() {
+fn a_power_cut_keeps_the_changes_in_the_order_that_the_calls_end() {
     let outcomes = listed_after_power(0..64, |node| async move {
         let mut file = create_synced(&node).await;
         drop(create(&node, "c", 1_024).await);
@@ -1391,7 +1391,7 @@ fn made_in_two_dirs(seed: u64, synced: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
 }
 
 #[test]
-fn a_power_cut_keeps_the_changes_of_two_directories_in_the_order_of_their_calls() {
+fn a_power_cut_keeps_the_changes_of_two_directories_in_the_order_that_the_calls_end() {
     let outcomes: BTreeSet<_> =
         (0..64).map(|seed| made_in_two_dirs(seed, false)).collect();
     let (a, b) = (vec![PathBuf::from("a")], vec![PathBuf::from("b")]);
