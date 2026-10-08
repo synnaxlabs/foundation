@@ -210,7 +210,6 @@ mod tests {
     use types::time::Span;
 
     use crate::testing::{self, CLIENT, IDLE, SERVER, join, poll_once, spans};
-    use crate::tls::public;
     use crate::{Address, Class, Code, Config, Error, Transport, message};
 
     #[test]
@@ -227,7 +226,7 @@ mod tests {
             node.clock().sleep(Span::MILLISECOND).await;
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let connected = node.clock().now();
             let closed = Error::PeerClosed { code: Code(0) };
@@ -536,7 +535,7 @@ mod tests {
         let pool = Rc::clone(&config.pool);
         let part = testing::part(&node.net(), testing::address(&node));
         let transport = Transport::new(config, part).expect("a transport");
-        let server = public(&SERVER);
+        let server = SERVER.public();
         let first = transport.dial(server, &at).await.expect("a session");
         let second = transport.dial(server, &at).await.expect("a session");
         for (session, byte) in [(&first, 1), (&second, 2)] {

@@ -2286,10 +2286,8 @@ mod port {
         };
         let own = peer.clone();
         let started = peer.shards().start(shard, move |tasks| async move {
-            // The node's public key, from a transport made with its private key.
-            let node = transport(&own, tasks.clone(), KEY).0.public_key();
             let (transport, pool) = transport(&own, tasks, CLIENT);
-            let dialed = transport.dial(node, &[Address::Udp(listen)]).await;
+            let dialed = transport.dial(KEY.public(), &[Address::Udp(listen)]).await;
             let session = match dialed {
                 Ok(session) => session,
                 Err(error) => {
@@ -2341,20 +2339,11 @@ mod port {
             .expect("the dial reaches the node")
     }
 
-    /// The node's key, as a peer sees it.
-    fn node_key(sim: &mut sim::Sim) -> types::ed25519::PublicKey {
-        let host = sim.node(sim::node::Config::default());
-        let key = sim.run_on(&host, |host, tasks| async move {
-            transport(&host, tasks, KEY).0.public_key()
-        });
-        key.expect("the run ends")
-    }
-
     /// The node stops a stream it serves no protocol for, and resets its reply half,
     /// with the code of a rejected header. The node proves its key.
     #[test]
     fn a_stream_of_a_known_protocol_is_rejected() {
-        let key = node_key(&mut sim::Sim::new(sim::Config::default()));
+        let key = KEY.public();
         let header = wire::header::encode(wire::Protocol::Mesh);
         let code = Code(wire::header::REJECTED);
         let Seen {
@@ -2487,7 +2476,7 @@ mod port {
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
-            peer: node_key(&mut sim::Sim::new(sim::Config::default())),
+            peer: KEY.public(),
             attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)],
         };
         assert_eq!(seen, Err(unreachable));
