@@ -4,10 +4,11 @@
 //! keeps each packet's bytes in place until their spare bytes pass the larger of
 //! 32 KiB and 1.5 times the bytes it holds, which these messages do not reach. So
 //! the only heap block that holds all of a longer pattern is that buffer. A read of
-//! 65 chunks also makes one allocation more than a read of 64: the buffer, and no
-//! larger list. A second copy makes none, and a read of a short message after it
-//! makes none: the reader keeps its list. The counts cover each thread, so this
-//! binary has no test harness. The sim runs on one thread, so the counts are exact.
+//! 64 chunks makes no more allocations than a list that doubles to 64 slots, and one
+//! of 65 chunks makes one more: the buffer, and no larger list. A second copy makes
+//! none, and a read of a short message after it makes none: the reader keeps its
+//! list. The counts cover each thread, so this binary has no test harness. The sim
+//! runs on one thread, so the counts are exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -48,9 +49,9 @@ const SECOND: usize = 110_000;
 /// Where the pattern starts in a message of 1 << 18 bytes: past its first 128
 /// packets, and in fewer than 64 after them, so no copy of a full list holds it.
 const LAST: usize = 190_000;
-/// When the server reads after it accepts the stream, once the whole message is in.
+/// When the server reads after it accepts the stream, once both messages are in.
 const READ: Span = Span::from_nanos(1_000_000_000);
-/// How long the client lives after its send: past the server's read.
+/// How long the client lives after its sends: past the server's reads.
 const LIVE: Span = Span::from_nanos(2_000_000_000);
 
 /// The server's one poll of a read, the heap blocks that hold the pattern that the
@@ -95,6 +96,10 @@ fn main() {
     let [full, past, second, _] = allocations[..] else {
         unreachable!("four cases")
     };
+    assert!(
+        full <= 7,
+        "a list that doubles from 1 slot reaches 64 in 7 allocations, not {full}"
+    );
     assert_eq!(
         past.checked_sub(full),
         Some(1),
