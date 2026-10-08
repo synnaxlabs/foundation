@@ -5339,8 +5339,11 @@ How to read this record:
   the region; the error of `serve` ends only its stream. A mesh stream of a client, or
   of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
   4 of #585). Shard 0 opens the mesh with no founding definitions
-  (`mesh::Config::founding`) until #1744 gives the region its founding. A mesh that
-  stops does not stop the node until #1780, before PR 4 gives the mesh to the hub.
+  (`mesh::Config::founding`) until PR 1 of #1744 gives the region its founding.
+  Decided by `laptop.architect` at 2026-10-08T06:11:30Z
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101). A
+  mesh that stops does not stop the node until #1780, before PR 4 gives the mesh to the
+  hub.
   Lost: `Node::found(region)` at run time, which needs a second open path and a node
   that runs with no region before it; the key in `Region`, because a node's identity is
   not region data, and PR 4 needs it with no region. Decided by `laptop.architect-2`
