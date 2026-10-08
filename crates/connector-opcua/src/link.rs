@@ -348,7 +348,9 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
 
 /// GCC 10 and later, and Clang, default to `-moutline-atomics` on 64-bit Arm Linux,
 /// which the host build does not show. So this preprocesses each source of the copy
-/// as the host build does and compiles it for 64-bit Arm with that default.
+/// as the host build does and compiles it for 64-bit Arm with that default. The
+/// preprocessing is the host's, so the test finds the names that the code generation
+/// for Arm adds, not the names of a branch of the source for Arm only.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
