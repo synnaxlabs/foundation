@@ -4266,6 +4266,16 @@ How to read this record:
   since our config always has an event loop. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
   2026-10-08 02:27 UTC).
+  The copy also holds `arch/common/timer.c` and `timer.h`, which the build with
+  `UA_ARCHITECTURE=none` does not compile. `cargo xtask open62541` takes them from a
+  closed list of extra release files, with the reason of each, and compiles them with
+  the flags of `flags.txt`. The event loop of `connector-opcua` holds a `UA_Timer` and
+  gives it the time of `env`. Lost: timers in Rust, a copy of library code that already
+  takes the time as an input. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC; the release path,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
+  2026-10-08 18:08 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
