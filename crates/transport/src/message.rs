@@ -520,6 +520,29 @@ mod tests {
         }
 
         #[test]
+        fn when_stream_ends_inside_a_prefix_while_admit_refuses_it_fails() {
+            let pool = pool(1 << 16);
+            for split in 1..=7 {
+                for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
+                    let mut source = Source::new(cut.to_vec(), split);
+                    let mut reader = Reader::new(16);
+                    let read = reader.read(
+                        |_| false,
+                        |len| pool.alloc(len).ok(),
+                        |max| Ok(source.take(max)),
+                    );
+                    assert_eq!(
+                        read.map(|read| read.map(|block| block.is_some())),
+                        Err(Error::Broken {
+                            reason: "the stream ended inside a message".to_owned()
+                        }),
+                        "{cut:x?}, {split} per chunk"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn gives_messages_at_each_prefix_size() {
             let messages: Vec<_> = [0, 63, 64, 16_383, 16_384, 70_000]
                 .into_iter()
