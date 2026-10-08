@@ -5,6 +5,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Output, Stdio};
 
+mod quickstart;
+
 fn foundation(args: &[&str], input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
         .args(args)
