@@ -98,8 +98,11 @@ again once to prove that the failure replays (r16 59).
 - **Assert through the public calls of the type.** A read of a private field, or a
   compare of the `Debug` string of the type under test, checks private state: a new
   field breaks the test while the behavior stays. Use one only with a written reason.
-- **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
-  second test feature (r16 57).
+- **Test-only constructors and hooks sit behind the `sim` feature**, also a hook that
+  only a bench or a fuzz target uses. A crate has no second test feature (r16 57), so
+  one check finds a `default` feature that turns on a hook (`laptop.director`,
+  https://github.com/synnaxlabs/foundation/issues/1570#issuecomment-6049919776,
+  2026-10-08T00:55:11Z).
 - **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
   frames, bad offsets, stale fences) (r16 54). A check against a bound has a test at
   the bound and one on each side. `cargo mutants` turns `>=` only into `<`, so it
