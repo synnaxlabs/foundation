@@ -12,7 +12,8 @@ use types::channel::Key;
 use types::name::Name;
 use types::sample;
 
-use super::{Planned, Problems, plan};
+use super::{Output, plan};
+use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd};
 
 const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
@@ -90,7 +91,7 @@ fn empty() -> spec::Pointer {
 fn run(
     texts: &[(&str, &str)],
     applied: &BTreeMap<Name, Definition>,
-) -> Result<Planned, Problems> {
+) -> Result<Output, Error> {
     let kinds = Table::new().with("influx", Reader).with("opcua", Reader);
     let members = BTreeSet::from([name("edge")]);
     plan(
@@ -103,8 +104,12 @@ fn run(
     )
 }
 
-fn problems(texts: &[(&str, &str)]) -> Problems {
+fn problems(texts: &[(&str, &str)]) -> Error {
     run(texts, &BTreeMap::new()).expect_err("problems")
+}
+
+fn json(output: &Output) -> serde_json::Value {
+    serde_json::to_value(output).expect("JSON")
 }
 
 fn channel(key: u128, kind: channel::Kind) -> Definition {
@@ -128,7 +133,7 @@ const INDEX: channel::Kind = channel::Kind::Index {
 fn shows_each_definition_in_file_order_then_the_counts() {
     let planned = run(&[("plant.hcl", PLANT)], &BTreeMap::new()).expect("a plan");
     assert_eq!(
-        planned.to_string(),
+        planned.text(),
         "\
 + channel plant.time
 + channel plant.spike
@@ -153,7 +158,7 @@ placement \"p\" {
 ";
     let planned = run(&[("b.hcl", b), ("a.hcl", a)], &BTreeMap::new()).expect("a plan");
     assert_eq!(
-        planned.to_string(),
+        planned.text(),
         "\
 + channel b.time
 + placement p
@@ -180,7 +185,7 @@ fn shows_a_change_then_a_removal() {
     let placed = placed_site();
     let planned = run(&[("site.hcl", &placed)], &applied).expect("a plan");
     assert_eq!(
-        planned.to_string(),
+        planned.text(),
         "\
 ~ channel site.temp
 + placement p
@@ -194,15 +199,20 @@ fn shows_a_change_then_a_removal() {
 fn gives_the_json_of_the_site_plan() {
     let placed = placed_site();
     let planned = run(&[("site.hcl", &placed)], &BTreeMap::new()).expect("a plan");
-    let json = serde_json::to_string_pretty(&planned.json()).expect("JSON");
-    assert_eq!(format!("{json}\n"), include_str!("site.golden.json"));
+    let value = json(&planned);
+    let text = serde_json::to_string_pretty(&value).expect("JSON");
+    assert_eq!(format!("{text}\n"), include_str!("site.golden.json"));
+    assert_eq!(
+        serde_json::from_value::<Output>(value).expect("an output"),
+        planned
+    );
 }
 
 #[test]
 fn gives_each_problem_with_its_place_and_fix() {
     let wrong = PLANT.replacen("data_type", "datatype", 1);
     assert_eq!(
-        problems(&[("plant.hcl", &wrong)]).to_string(),
+        problems(&[("plant.hcl", &wrong)]).text(),
         "\
 error[document.missing-attribute]: the `channel` block has no `data_type`
   --> plant.hcl:5:1
@@ -219,7 +229,7 @@ fix: Use `kind`, `data_type`, `index`, `quality`, or `unit`, or remove it
 fn refuses_a_file_that_no_front_end_reads() {
     let problems = problems(&[("plant.yaml", ""), ("site.hcl", SITE), ("plant", "")]);
     assert_eq!(
-        problems.to_string(),
+        problems.text(),
         "\
 error[ops.unknown-extension]: no config syntax reads `plant.yaml`
 fix: Use a file that ends in `.hcl`
@@ -266,7 +276,7 @@ fn gives_each_note_with_its_place() {
     let time = "channel \"a.time\" { kind = \"index\" }\n";
     let problems = problems(&[("one.hcl", time), ("two.hcl", time)]);
     assert_eq!(
-        problems.to_string(),
+        problems.text(),
         "\
 error[config.duplicate-name]: the name \"a.time\" repeats the earlier `channel` name \
  \"a.time\"
@@ -283,14 +293,10 @@ note: the earlier name
             "message": "the name \"a.time\" repeats the earlier `channel` name \
                 \"a.time\"",
             "fix": "Give each `channel` block a name that differs by more than case",
-            "file": "two.hcl",
-            "line": 1,
-            "column": 9,
+            "place": { "file": "two.hcl", "line": 1, "column": 9 },
             "notes": [{
                 "text": "the earlier name",
-                "file": "one.hcl",
-                "line": 1,
-                "column": 9,
+                "place": { "file": "one.hcl", "line": 1, "column": 9 },
             }],
         }]})
     );
@@ -301,7 +307,7 @@ fn reads_a_file_named_only_by_its_extension() {
     let placed = placed_site();
     let planned = run(&[("configs/.hcl", &placed)], &BTreeMap::new()).expect("a plan");
     assert_eq!(
-        planned.to_string(),
+        planned.text(),
         "\
 + channel site.time
 + channel site.temp
@@ -346,7 +352,7 @@ channel \"a.v\" {
                space only after the comma of a list";
     let problems = problems(&[("a.hcl", text)]);
     assert_eq!(
-        problems.to_string(),
+        problems.text(),
         format!(
             "error[config.bad-data-type]: {message}\n  --> a.hcl:4:15\nfix: {fix}\n"
         )
@@ -357,9 +363,7 @@ channel \"a.v\" {
             "code": "config.bad-data-type",
             "message": message,
             "fix": fix,
-            "file": "a.hcl",
-            "line": 4,
-            "column": 15,
+            "place": { "file": "a.hcl", "line": 4, "column": 15 },
             "notes": [],
         }]})
     );
@@ -374,7 +378,7 @@ fn gives_the_problems_of_a_front_end_and_of_each_extension_in_file_order() {
         ("x.yaml", ""),
     ]);
     assert_eq!(
-        problems.to_string(),
+        problems.text(),
         "\
 error[hcl.syntax]: the file needs a key, a block, or the end of the body here
   --> bad.hcl:2:1
@@ -402,7 +406,8 @@ fn gives_the_json_of_a_change_and_a_removal() {
         (name("old.time"), channel(4, INDEX)),
     ]);
     let planned = run(&[("site.hcl", &placed_site())], &applied).expect("a plan");
-    let changes = &planned.json()["changes"];
+    let json = json(&planned);
+    let changes = &json["changes"];
     assert_eq!(
         *changes,
         serde_json::json!([
@@ -410,23 +415,18 @@ fn gives_the_json_of_a_change_and_a_removal() {
                 "action": "change",
                 "kind": "channel",
                 "name": "site.temp",
-                "file": "site.hcl",
-                "line": 2,
-                "column": 9,
+                "place": { "file": "site.hcl", "line": 2, "column": 9 },
             },
             {
                 "action": "add",
                 "kind": "placement",
                 "name": "p",
-                "file": "site.hcl",
-                "line": 6,
-                "column": 11,
+                "place": { "file": "site.hcl", "line": 6, "column": 11 },
             },
             { "action": "remove", "kind": "channel", "name": "gone.time" },
             { "action": "remove", "kind": "channel", "name": "old.time" },
         ])
     );
-    let json = planned.json();
     let counts = ["added", "changed", "removed"].map(|count| json[count].clone());
     assert_eq!(counts, [1, 1, 2].map(serde_json::Value::from));
 }
@@ -442,4 +442,27 @@ fn refuses_an_empty_table_of_front_ends() {
         &BTreeMap::new(),
         &Table::new(),
     ));
+}
+
+#[test]
+fn names_one_problem_or_the_count_and_exits_with_2() {
+    let wrong = PLANT.replacen("data_type", "datatype", 1);
+    let two = problems(&[("plant.hcl", &wrong)]);
+    assert_eq!(
+        (two.to_string(), two.status()),
+        ("the config files have 2 problems".to_owned(), 2)
+    );
+    assert_eq!(
+        problems(&[("x.yaml", "")]).to_string(),
+        "no config syntax reads `x.yaml`"
+    );
+}
+
+#[test]
+fn escapes_a_control_character_in_the_text_of_a_problem() {
+    assert_eq!(
+        problems(&[("a\u{1b}[2J\n.yaml", "")]).text(),
+        "error[ops.unknown-extension]: no config syntax reads `a\\u{1b}[2J\\n.yaml`\n\
+         fix: Use a file that ends in `.hcl`\n"
+    );
 }

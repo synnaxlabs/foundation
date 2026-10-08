@@ -206,11 +206,9 @@ fn a_bad_argument_gives_the_code_message_and_fix_as_json() {
     let error: Value = serde_json::from_str(&exit.stderr).expect("json");
     assert_eq!(
         error,
-        json!({
-            "code": "ops.argument",
+        json!({ "errors": [{ "code": "ops.argument",
             "message": "unexpected argument found: `--nope`",
-            "fix": "Match the arguments to the operation in `foundation docs`",
-        })
+            "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
     );
 }
 
@@ -226,7 +224,7 @@ fn no_operation_gives_the_same_error_as_text_and_as_json() {
     let error: Value = serde_json::from_str(&json.stderr).expect("json");
     assert_eq!(
         error,
-        json!({ "code": "ops.argument", "message": message, "fix": fix })
+        json!({ "errors": [{ "code": "ops.argument", "message": message, "fix": fix, "notes": [] }] })
     );
 }
 
@@ -276,11 +274,12 @@ fn a_json_error_keeps_the_callers_text() {
     let error: Value = serde_json::from_str(&exit.stderr).expect("json");
     assert_eq!(
         error,
-        json!({
+        json!({ "errors": [{
             "code": "ops.unknown-operation",
             "message": "no operation is named `\u{1b}x`",
             "fix": "Use a name from `foundation docs`",
-        })
+            "notes": [],
+        }] })
     );
 }
 
@@ -353,11 +352,9 @@ fn a_json_flag_with_a_value_gives_its_error_as_json() {
             (status, error),
             (
                 2,
-                json!({
-                    "code": "ops.argument",
+                json!({ "errors": [{ "code": "ops.argument",
                     "message": "unexpected value for an argument found: `--json`",
-                    "fix": "Match the arguments to the operation in `foundation docs`",
-                })
+                    "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
             ),
             "{value:?}"
         );
@@ -384,22 +381,18 @@ fn an_unknown_operation_suggests_the_closest_name() {
         call(&json!({ "name": "versoin" })),
         failed_call(
             "no operation is named `versoin`",
-            &json!({
-                "code": "ops.unknown-operation",
+            &json!({ "errors": [{ "code": "ops.unknown-operation",
                 "message": "no operation is named `versoin`",
-                "fix": "Use `version`, the closest name",
-            })
+                "fix": "Use `version`, the closest name", "notes": [] }] })
         )
     );
 }
 
 #[test]
 fn an_unknown_operation_far_from_every_name_points_to_the_docs() {
-    let expected = json!({
-        "code": "ops.unknown-operation",
+    let expected = json!({ "errors": [{ "code": "ops.unknown-operation",
         "message": "no operation is named `zzz`",
-        "fix": "Use a name from `foundation docs`",
-    });
+        "fix": "Use a name from `foundation docs`", "notes": [] }] });
     assert_eq!(
         call(&json!({ "name": "zzz" })),
         failed_call("no operation is named `zzz`", &expected)
@@ -419,11 +412,9 @@ fn a_call_with_a_bad_argument_names_it() {
         call(&json!({ "name": "version", "arguments": { "nope": 1 } })),
         failed_call(
             message,
-            &json!({
-                "code": "ops.argument",
+            &json!({ "errors": [{ "code": "ops.argument",
                 "message": message,
-                "fix": "Match the arguments to the operation in `foundation docs`",
-            })
+                "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
         )
     );
 }
@@ -455,16 +446,19 @@ fn error_codes_and_fixes_match_the_golden_file() {
     ];
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
+        // `Config` holds the codes of the front ends, of `config`, and the one below.
         match error {
             Error::Argument { .. }
             | Error::Unknown { .. }
             | Error::Input { .. }
-            | Error::Output { .. } => {}
+            | Error::Output { .. }
+            | Error::Config(_) => {}
         }
     }
     let mut lines: Vec<_> = every
         .iter()
-        .map(|error| format!("{}\t{}\n", error.code(), error.fix()))
+        .flat_map(|error| error.problems().into_owned())
+        .map(|problem| format!("{}\t{}\n", problem.code, problem.fix))
         .collect();
     let front_ends = BTreeMap::from([(
         "hcl",
@@ -678,7 +672,7 @@ mod mcp {
         for name in ["mcpp", "hepl", "-h", "--json"] {
             assert_eq!(
                 ask(&request(json!(1), "tools/call", json!({ "name": name })))["error"]
-                    ["data"]["fix"],
+                    ["data"]["errors"][0]["fix"],
                 "Use a name from `foundation docs`",
                 "{name}"
             );
@@ -688,7 +682,7 @@ mod mcp {
                 json!(1),
                 "tools/call",
                 json!({ "name": "versoin" })
-            ))["error"]["data"]["fix"],
+            ))["error"]["data"]["errors"][0]["fix"],
             "Use `version`, the closest name"
         );
     }
@@ -861,11 +855,12 @@ mod serve {
         assert_eq!(status, 1);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&stderr).expect("json"),
-            serde_json::json!({
+            serde_json::json!({ "errors": [{
                 "code": "ops.output",
                 "message": format!("standard output could not be written: {message}"),
                 "fix": "Give standard output a destination that can be written",
-            })
+                "notes": [],
+            }] })
         );
     }
 

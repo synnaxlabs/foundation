@@ -8,27 +8,33 @@
   "changes": [
     {
       "action": "add",
-      "column": 9,
-      "file": "site.hcl",
       "kind": "channel",
-      "line": 1,
-      "name": "site.time"
+      "name": "site.time",
+      "place": {
+        "column": 9,
+        "file": "site.hcl",
+        "line": 1
+      }
     },
     {
       "action": "add",
-      "column": 9,
-      "file": "site.hcl",
       "kind": "channel",
-      "line": 2,
-      "name": "site.temp"
+      "name": "site.temp",
+      "place": {
+        "column": 9,
+        "file": "site.hcl",
+        "line": 2
+      }
     },
     {
       "action": "add",
-      "column": 11,
-      "file": "site.hcl",
       "kind": "placement",
-      "line": 6,
-      "name": "p"
+      "name": "p",
+      "place": {
+        "column": 11,
+        "file": "site.hcl",
+        "line": 6
+      }
     }
   ],
   "homes": {
