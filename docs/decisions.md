@@ -3968,13 +3968,17 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
   2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
   production, and each thread with none draws the same fixed values. So
-  `connector-opcua` (PR 4 of #435) sets the start value, taken from the randomness of
-  `env`, on each thread before that thread calls open62541, and runs each server and
-  each client on one thread. Its test server sets the start value of the test at
-  start, and its end-to-end check asserts the same run for the same value. A state
-  for each `UA_Server` and `UA_Client` lost: the draw functions and the security
-  policy plugins take no server, so each call site changes, and LOCAL PATCHES does
-  that work again at each release.
+  `connector-opcua` (PR 4 of #435) sets the start value with
+  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
+  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  thread calls open62541, and runs each server and each client on one thread. Its
+  test server sets the start value of the test at start, and its end-to-end check
+  asserts the same run for the same value. A state for each `UA_Server` and
+  `UA_Client` lost: the draw functions and the security policy plugins take no
+  server, so each call site changes, and LOCAL PATCHES does that work again at each
+  release. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
+  2026-10-08 15:49 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
