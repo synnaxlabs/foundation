@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes the hello decoder to the fuzz crate.
+# Exposes the hello decoder and the server's reading of certificates to the fuzz crate.
 fuzzing = []
 
 [dependencies]
