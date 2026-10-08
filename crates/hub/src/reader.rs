@@ -24,10 +24,13 @@ const STREAK: u32 = 128;
 /// Which frames a reader gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Each live frame, after the commit that holds it. A session that misses a frame
-    /// ends with [`Ended::Behind`] after the frames before it: it misses one that
-    /// comes when the frames it has not given back (the one it holds and those it has
-    /// not taken) reach a window.
+    /// Each live frame, after the commit that holds it. Once the frames that the
+    /// reader has not given back (the one it holds and those it has not taken) reach
+    /// a window, a later frame waits until the reader gives frames back. A frame that
+    /// still waits when the hub releases the next commit with frames of the index is
+    /// a miss: the session ends with [`Ended::Behind`] after the frames before it. So
+    /// a reader that takes the frames of each commit before the next such commit ends
+    /// misses none.
     Complete,
     /// The newest live frame, before its commit.
     Latest,

@@ -535,22 +535,30 @@ How to read this record:
   session gets no frame, so no later grant would replace a lost one. The home drops a
   grant for a session it closed. The home sends a whole frame while the bytes it has
   spent are below the limit, so it passes the limit by less than one frame and never
-  splits a frame. After a refusal, the session gets no later frame until it has the
-  refused one; frames from catch-up spend credit too. A frame costs its charge,
-  `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
-  `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  costs its length plus the header and at most 64 bytes or a quarter of its length more,
-  and a frame with only empty series still costs its headers. The charge depends only on
-  the frame's length, so the home and the `hub` compute the same charge for the same
-  frame. A remote complete reader gets only the series of its view (M2): the home sends
-  a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
-  that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
-  frames"), #267. Each complete session has a `delivery::complete::Charge`: `Whole` (a
-  local reader) spends the home's frame, and `Places` (a remote reader) spends the
-  frame of one series for each slot it lists that the frame holds, in listing order,
-  the first listing of a slot only. Catch-up uses the same `Charge`. So a remote
-  session pins home blocks up to its window times the ratio of the home's frame to its
-  view. laptop.architect decided this on 2026-10-07T22:47:54Z:
+  splits a frame. A frame that finds the limit spent waits at the home, and so does each
+  later frame; the session takes it while the bytes it spent are below a later grant. A
+  frame that still waits when the home releases the next commit with frames of its index
+  is refused. A grant wakes no session: the task that grants takes after it. So a reader
+  that takes the frames of each commit before the next such commit ends is never
+  refused, whatever the size of the commit. laptop.architect decided this on
+  2026-10-08T07:23:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1170#issuecomment-6054827276 (#1170).
+  After a refusal, the session gets no later frame until it has the refused one; frames
+  from catch-up spend credit too. A frame costs its charge, `Frame::charge`: the bytes a
+  block of the frame's length takes from a pool. That is `block`'s header plus the whole
+  frame (M3), rounded up to its size class, so a frame costs its length plus the header
+  and at most 64 bytes or a quarter of its length more, and a frame with only empty
+  series still costs its headers. The charge depends only on the frame's length, so the
+  home and the `hub` compute the same charge for the same frame. A remote complete
+  reader gets only the series of its view (M2): the home sends a frame of those series
+  in the reader's entry order (HUB WIRE), and both ends charge that frame. The person
+  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. Each
+  complete session has a `delivery::complete::Charge`: `Whole` (a local reader) spends
+  the home's frame, and `Places` (a remote reader) spends the frame of one series for
+  each slot it lists that the frame holds, in listing order, the first listing of a slot
+  only. Catch-up uses the same `Charge`. So a remote session pins home blocks up to its
+  window times the ratio of the home's frame to its view. laptop.architect decided this
+  on 2026-10-07T22:47:54Z:
   https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
   `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
   it, so `hub` does not depend on `delivery`. The `Charge` adds about 7 ns per frame to
@@ -582,9 +590,12 @@ How to read this record:
   message. It sizes one window per reader from the link's bandwidth-delay product,
   adapts it, and divides it among the indexes the reader reads. Each session with room
   can pass its limit by one frame, so the `hub` counts one largest frame per such
-  session against the window, and a reader pins at most its window. Replaces r11 5.2 (a
-  window beyond the acknowledged position): flow control stays apart from durable acks.
-  Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
+  session against the window, and a reader pins at most its window, plus the frames of
+  the last release of each index it reads that wait for it. The sessions of an index
+  share those frames, which memory held until that release; on a quiet index they stay
+  until each session takes them or closes. Replaces r11 5.2 (a window beyond the
+  acknowledged position): flow control stays apart from durable acks. Basis: B3, M3,
+  MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync. The current value is
@@ -1037,10 +1048,10 @@ How to read this record:
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
   nothing outside a Tokio runtime. A complete session that misses a frame (one that
-  comes when the frames it has not given back, held or untaken, reach a window) gets no
-  later frame, as there is no catch-up from the buffer yet. The director chose that
-  `delivery` reports the miss and wakes the session, and that `next` then ends with an
-  error (2026-10-07T06:01:39Z:
+  still waits for credit when the next commit with frames of its index is released,
+  CREDIT RULES) gets no later frame, as there is no catch-up from the buffer yet. The
+  director chose that `delivery` reports the miss and wakes the session, and that `next`
+  then ends with an error (2026-10-07T06:01:39Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
   `delivery::Readers::release` also names a session that missed a frame and has none
   waiting, and `Readers::take` gives `Next::Behind` after the frames before the miss.
@@ -1050,34 +1061,38 @@ How to read this record:
   second list to drain for an event that happens once per session. A `delivery` model
   property test and a 32-run `sim` test stand in for loom and shuttle: the wake never
   crosses a thread. Decided by `laptop.architect` (2026-10-07T06:36:57Z:
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901).
-  `take` gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind`
-  and `Shard::behind` go. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). `take`
+  gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind` and
+  `Shard::behind` go. Supersedes
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901 in its lost
   design "an error from `take`": a third case is not an error, each caller of `take`
   uses one path for both modes, and #274 may give a gap from `take`. Lost: `woken` names
   a reader that is behind in a second list, which keeps the two steps and moves the
   state into the hub. Decided by `laptop.architect` (2026-10-08T01:43:19Z:
-  https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671).
-  A waiting hub reader has given back every frame, as it grants at each `next` call,
-  so no hub test reaches the wake of a session that missed a frame with none waiting.
-  The `delivery` tests and the home `sim` test
+  https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671). A
+  waiting hub reader has given back every frame, as it grants at each `next` call, so no
+  hub test reaches the wake of a session that missed a frame with none waiting. The
+  `delivery` tests and the home `sim` test
   `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
   `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
-  miss while a frame waits gives no wake. The hub `sim` test is
-  `ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window`: one
-  commit of more than a window wakes a waiting reader, which gets each frame before the
-  miss, then `Ended::Behind`, with no hang. Decided by `laptop.architect`
-  (2026-10-07T07:24:41Z:
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119). #1170
-  sizes the window to one commit. After a warmup, a write and `next` make no heap
-  allocation, while frames wait, while a reader waits, and in the write that wakes a
-  latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
-  does not count the commit task. `next` gives a `types::frame::View` of the reader's
-  channels and their index (M2), never the frame. The view borrows the reader, which
-  releases the frame at the next call, not at its first poll, and grants credit for it
-  there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
-  keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
+  miss while a frame waits gives no wake. The hub `sim` test
+  `gives_a_waiting_complete_reader_each_frame_of_a_commit_past_its_window` checks that
+  one commit of about three windows wakes a waiting reader, which gets each frame, with
+  no hang. The hub `sim` test
+  `ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame` checks that a
+  reader that takes no frame until a second commit past its window ends gets each frame
+  before the miss, then `Ended::Behind`. Decided by `laptop.architect`
+  (2026-10-08T07:23:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1170#issuecomment-6054827276).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119.
+  After a warmup, a write and `next` make no heap allocation, while frames wait, while a
+  reader waits, and in the write that wakes a latest reader, which a counting allocator
+  test binary checks (COUNTING ALLOCATOR); it does not count the commit task. `next`
+  gives a `types::frame::View` of the reader's channels and their index (M2), never the
+  frame. The view borrows the reader, which releases the frame at the next call, not at
+  its first poll, and grants credit for it there (CREDIT RULES): `next` is a plain `fn`
+  that returns a future. A caller that keeps data copies it. A session that ends gives
+  `reader::Ended`. `Hub::define` stands.
   Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:
@@ -1201,18 +1216,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359 and
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
-  pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
-  that falls behind is served from disk. When the pool is full, a live write records a
-  gap and backfill waits. The current value of B4 pins one block per index that had a
-  live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
-  person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
-  resident. A purge of a block smaller than a page gives no page back, so it frees no
-  budget. When an allocation finds no room, the pool gives back the whole carved range
-  and budget of size classes whose carved blocks are all free, until the allocation
-  fits. Under this pressure, at most two partial pages per class stay resident, and
-  `Config::budget` states that slack. An idle class that no allocation presses keeps
-  its pages until the purge after idle. A class that a reader keeps partly in use
-  keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  pages lazily, and purge after idle. Credits cap the blocks a reader can pin, apart
+  from the frames of the last release of each index that wait for a grant (CREDIT
+  RULES). A reader that falls behind is served from disk. When the pool is full, a live
+  write records a gap and backfill waits. The current value of B4 pins one block per
+  index that had a live frame, with no reader open and no cap. A smaller copy is a 5.3
+  tunable. The person decided on 2026-10-05: "Accept it" (#139). The budget counts what
+  stays resident. A purge of a block smaller than a page gives no page back, so it frees
+  no budget. When an allocation finds no room, the pool gives back the whole carved
+  range and budget of size classes whose carved blocks are all free, until the
+  allocation fits. Under this pressure, at most two partial pages per class stay
+  resident, and `Config::budget` states that slack. An idle class that no allocation
+  presses keeps its pages until the purge after idle. A class that a reader keeps partly
+  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
   wait in a follow-up issue. When the system refuses to commit pages, the pool gives
   back one idle size at a time, in the order a purge for room in the budget uses,
