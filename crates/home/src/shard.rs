@@ -1304,25 +1304,66 @@ mod tests {
         shard.open_complete(slot, CREDIT, Charge::Whole).into()
     }
 
-    /// The seq of the index group `group` of each frame `reader` takes now.
-    fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
-        iter::from_fn(|| reader::held(shard.take(reader)))
-            .map(|frame| frame.range(group).expect("the index is present"))
-            .collect()
+    /// Each frame that `reader` takes now, then the [`reader::Next`] after them.
+    fn drain(
+        shard: &mut Shard,
+        reader: impl Into<reader::Key>,
+    ) -> (Vec<Frame>, reader::Next) {
+        let reader = reader.into();
+        let mut frames = Vec::new();
+        loop {
+            match shard.take(reader) {
+                reader::Next::Frame(frame) => frames.push(frame),
+                end @ (reader::Next::Empty | reader::Next::Behind) => {
+                    return (frames, end);
+                }
+            }
+        }
     }
 
-    /// Whether `take` gives `reader` [`reader::Next::Behind`], not
+    /// The seq of the index group `group` of each frame that `reader` takes before
     /// [`reader::Next::Empty`].
     ///
     /// # Panics
     ///
-    /// If a frame waits for `reader`.
-    fn behind(shard: &mut Shard, reader: impl Into<reader::Key>) -> bool {
-        match shard.take(reader.into()) {
-            reader::Next::Frame(frame) => panic!("a frame waits: {:?}", frame.range(0)),
-            reader::Next::Behind => true,
-            reader::Next::Empty => false,
-        }
+    /// If `reader` gets [`reader::Next::Behind`].
+    #[track_caller]
+    fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
+        let (frames, end) = drain(shard, reader);
+        let ranges = ranges(&frames, group);
+        assert!(
+            matches!(end, reader::Next::Empty),
+            "behind after {ranges:?}"
+        );
+        ranges
+    }
+
+    /// The seq of the index group `group` of each frame that `reader` takes before
+    /// [`reader::Next::Behind`].
+    ///
+    /// # Panics
+    ///
+    /// If `reader` gets [`reader::Next::Empty`].
+    #[track_caller]
+    fn missed(
+        shard: &mut Shard,
+        reader: impl Into<reader::Key>,
+        group: u32,
+    ) -> Vec<Range> {
+        let (frames, end) = drain(shard, reader);
+        let ranges = ranges(&frames, group);
+        assert!(
+            matches!(end, reader::Next::Behind),
+            "not behind after {ranges:?}"
+        );
+        ranges
+    }
+
+    fn ranges(frames: &[Frame], group: u32) -> Vec<Range> {
+        frames
+            .iter()
+            .map(|frame| frame.range(group).expect("the index is present"))
+            .collect()
     }
 
     fn seq(seq: u64, count: u32) -> Range {
@@ -3036,16 +3077,15 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
-                assert!(!behind(&mut shard, session));
+                assert_eq!(taken(&mut shard, session.into(), 0), []);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                assert!(behind(&mut shard, session));
+                assert_eq!(missed(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.grant(session, CREDIT);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert!(behind(&mut shard, session));
+                assert_eq!(missed(&mut shard, session, 0), []);
             });
         }
 
@@ -3061,7 +3101,9 @@ mod tests {
                 write(&test, &mut shard, a, &stamps(0));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe]);
-                let probed = reader::held(shard.take(probe)).expect("a frame");
+                let reader::Next::Frame(probed) = shard.take(probe) else {
+                    panic!("a frame waits");
+                };
                 let (_, index) = probed.ends().next().expect("the index is present");
                 let index = types::frame::charge(1, index);
                 assert!(probed.charge() > index + 1);
@@ -3075,16 +3117,12 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe, reader, data.into()]);
-                assert_eq!(
-                    iter::from_fn(|| reader::held(shard.take(reader))).count(),
-                    2
-                );
-                assert!(behind(&mut shard, session));
-                assert_eq!(
-                    iter::from_fn(|| reader::held(shard.take(data.into()))).count(),
-                    2
-                );
-                assert!(behind(&mut shard, data));
+                let (frames, end) = drain(&mut shard, reader);
+                assert_eq!(frames.len(), 2);
+                assert!(matches!(end, reader::Next::Behind));
+                let (frames, end) = drain(&mut shard, data);
+                assert_eq!(frames.len(), 2);
+                assert!(matches!(end, reader::Next::Behind));
             });
         }
 
@@ -3102,11 +3140,11 @@ mod tests {
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert!(behind(&mut shard, reader));
+                assert_eq!(missed(&mut shard, reader, 0), []);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert!(behind(&mut shard, reader));
+                assert_eq!(missed(&mut shard, reader, 0), []);
             });
         }
 
@@ -3123,7 +3161,7 @@ mod tests {
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(missed(&mut shard, reader, 0), [seq(0, 1)]);
                 assert_eq!(woken(&mut shard), []);
             });
         }

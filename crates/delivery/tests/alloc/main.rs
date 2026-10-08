@@ -237,10 +237,7 @@ fn flow(
     set: &Arc<KeySet>,
     seq: &mut u64,
 ) -> usize {
-    let taken: usize = keys
-        .iter()
-        .map(|&key| std::iter::from_fn(|| held(readers.take(key.into()))).count())
-        .sum();
+    let taken: usize = keys.iter().map(|&key| taken(readers, key)).sum();
     for _ in 0..2 {
         readers.queue(&frame(), set, *seq..*seq + 1);
         *seq += 1;
@@ -248,11 +245,20 @@ fn flow(
     taken + readers.release(*seq).len()
 }
 
-/// The frame that `next` holds, if any.
-fn held(next: Next) -> Option<Frame> {
-    match next {
-        Next::Frame(frame) => Some(frame),
-        Next::Empty | Next::Behind => None,
+/// The number of frames that the complete session `key` takes before
+/// [`Next::Empty`].
+///
+/// # Panics
+///
+/// If the session gets [`Next::Behind`].
+fn taken(readers: &mut Readers, key: complete::Key) -> usize {
+    let mut count = 0;
+    loop {
+        match readers.take(key.into()) {
+            Next::Frame(_) => count += 1,
+            Next::Empty => return count,
+            Next::Behind => panic!("the session is behind"),
+        }
     }
 }
 
@@ -313,8 +319,7 @@ fn alternating() {
         readers.queue(&fb, &b, *seq + 1..*seq + 2);
         *seq += 2;
         let woken = readers.release(*seq).len();
-        let taken = std::iter::from_fn(|| held(readers.take(key.into()))).count();
-        woken + taken
+        woken + taken(readers, key)
     };
     for _ in 0..2 {
         step(&mut readers, &mut seq);

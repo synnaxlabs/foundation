@@ -150,8 +150,8 @@ mod tests {
 
     use super::*;
     use crate::complete::Charge;
-    use crate::readers::tests::{Frames, behind, dropped, held, number};
-    use crate::{Position, Reader, Record, Start, complete};
+    use crate::readers::tests::{Frames, dropped, missed, number};
+    use crate::{Next, Position, Reader, Record, Start, complete};
 
     fn at(nanos: i64) -> Stamp {
         Stamp::from_nanos(nanos)
@@ -187,7 +187,11 @@ mod tests {
     }
 
     fn taken(readers: &mut Readers, key: Key) -> Option<u64> {
-        held(readers.take(key.into())).as_ref().map(number)
+        match readers.take(key.into()) {
+            Next::Frame(frame) => Some(number(&frame)),
+            Next::Empty => None,
+            Next::Behind => panic!("a latest session is behind"),
+        }
     }
 
     fn put(readers: &mut Readers, frame: Frame) -> Vec<Key> {
@@ -343,8 +347,7 @@ mod tests {
             assert_eq!(readers.records().count(), 0);
             assert_eq!(readers.release(2), [new]);
             dropped(&mut readers, old.into());
-            assert_eq!(held(readers.take(new.into())).as_ref().map(number), Some(1));
-            assert!(behind(&mut readers, new));
+            assert_eq!(missed(&mut readers, new), [1]);
         }
 
         #[test]
@@ -379,22 +382,16 @@ mod tests {
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(readers.release(3), []);
-            for n in [1, 2] {
-                assert_eq!(
-                    held(readers.take(new.into())).as_ref().map(number),
-                    Some(n)
-                );
-            }
-            assert!(behind(&mut readers, new));
+            assert_eq!(missed(&mut readers, new), [1, 2]);
             dropped(&mut readers, old.into());
             assert_eq!(readers.open_latest().key, Key(1));
             let next = complete(&mut readers, "c", live(3));
             assert_eq!(next, complete::Key(2));
-            assert!(!behind(&mut readers, next));
-            let missed = readers
+            assert!(matches!(readers.take(next.into()), Next::Empty));
+            let below = readers
                 .open(Reader::Unnamed, Start::At(live(2)), 0, Charge::Whole)
                 .key;
-            assert!(behind(&mut readers, missed));
+            assert_eq!(missed(&mut readers, below), []);
             let reader = Reader::Named {
                 name: name("b"),
                 hold: Span::from_nanos(10),
@@ -489,7 +486,9 @@ mod tests {
             let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
-            let sending = held(readers.take(key.into())).expect("frame 1 waits");
+            let Next::Frame(sending) = readers.take(key.into()) else {
+                panic!("frame 1 waits");
+            };
             assert_eq!(put(&mut readers, frames.frame(2)), [key]);
             assert!(matches!(
                 frames.make(3),

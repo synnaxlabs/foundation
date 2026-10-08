@@ -217,15 +217,6 @@ impl Set {
     }
 }
 
-/// The frame that `next` holds, if any.
-#[cfg(test)]
-pub(crate) fn held(next: Next) -> Option<Frame> {
-    match next {
-        Next::Frame(frame) => Some(frame),
-        Next::Empty | Next::Behind => None,
-    }
-}
-
 /// Adds the `sessions` of the index at `slot` to `keys`.
 fn wake<K: Copy + Into<delivery::Key>>(
     keys: &mut Vec<Key>,
@@ -244,8 +235,6 @@ fn wake<K: Copy + Into<delivery::Key>>(
 
 #[cfg(test)]
 mod tests {
-    use std::iter;
-
     use delivery::complete;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{self, Draft, Form};
@@ -303,16 +292,29 @@ mod tests {
         set.entries[place].readers.release(durable).to_vec()
     }
 
-    /// The range of each frame the reader `session` of the index at `place` takes now.
+    /// The range of each frame that the reader `session` of the index at `place` takes
+    /// before [`Next::Empty`].
+    ///
+    /// # Panics
+    ///
+    /// If the reader gets [`Next::Behind`].
+    #[track_caller]
     fn taken(
         set: &mut Set,
         place: usize,
         session: impl Into<delivery::Key>,
     ) -> Vec<frame::Range> {
         let session = session.into();
-        iter::from_fn(|| held(set.take(place, session)))
-            .map(|frame| frame.range(0).expect("the index is present"))
-            .collect()
+        let mut ranges = Vec::new();
+        loop {
+            match set.take(place, session) {
+                Next::Frame(frame) => {
+                    ranges.push(frame.range(0).expect("the index is present"));
+                }
+                Next::Empty => return ranges,
+                Next::Behind => panic!("behind after {ranges:?}"),
+            }
+        }
     }
 
     fn reader(place: u32, session: impl Into<delivery::Key>) -> Key {

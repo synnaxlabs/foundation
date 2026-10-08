@@ -715,25 +715,44 @@ pub(super) mod tests {
         u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
     }
 
-    /// The frame that `next` holds, if any.
-    pub(super) fn held(next: Next) -> Option<Frame> {
-        match next {
-            Next::Frame(frame) => Some(frame),
-            Next::Empty | Next::Behind => None,
+    /// Each frame that the session `key` takes now, then the [`Next`] after them.
+    fn drain(readers: &mut Readers, key: impl Into<Key>) -> (Vec<Frame>, Next) {
+        let key = key.into();
+        let mut frames = Vec::new();
+        loop {
+            match readers.take(key) {
+                Next::Frame(frame) => frames.push(frame),
+                end @ (Next::Empty | Next::Behind) => return (frames, end),
+            }
         }
     }
 
-    /// Whether `take` gives the session `key` [`Next::Behind`], not [`Next::Empty`].
+    /// The number of each frame that the session `key` takes before
+    /// [`Next::Empty`].
     ///
     /// # Panics
     ///
-    /// If a frame waits for the session.
-    pub(super) fn behind(readers: &mut Readers, key: impl Into<Key>) -> bool {
-        match readers.take(key.into()) {
-            Next::Frame(frame) => panic!("frame {} waits", number(&frame)),
-            Next::Behind => true,
-            Next::Empty => false,
-        }
+    /// If the session gets [`Next::Behind`].
+    #[track_caller]
+    pub(super) fn taken(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
+        let (frames, end) = drain(readers, key);
+        let numbers = frames.iter().map(number).collect();
+        assert!(matches!(end, Next::Empty), "behind after {numbers:?}");
+        numbers
+    }
+
+    /// The number of each frame that the session `key` takes before
+    /// [`Next::Behind`].
+    ///
+    /// # Panics
+    ///
+    /// If the session gets [`Next::Empty`].
+    #[track_caller]
+    pub(super) fn missed(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
+        let (frames, end) = drain(readers, key);
+        let numbers = frames.iter().map(number).collect();
+        assert!(matches!(end, Next::Behind), "not behind after {numbers:?}");
+        numbers
     }
 
     fn at(nanos: i64) -> Stamp {
@@ -1139,7 +1158,7 @@ pub(super) mod tests {
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.release(1), [new]);
-            assert_eq!(held(readers.take(new.into())).as_ref().map(number), Some(1));
+            assert_eq!(taken(&mut readers, new), [1]);
             assert_eq!(readers.ack(new, live(1)), Ok(()));
         }
 
@@ -1156,7 +1175,7 @@ pub(super) mod tests {
             drained(&mut readers);
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
-            assert_eq!(held(readers.take(new.into())).as_ref().map(number), Some(1));
+            assert_eq!(taken(&mut readers, new), [1]);
         }
 
         /// Queues frame 1 of `frames` at seq 0..2 to a named and an unnamed session,
@@ -1599,13 +1618,6 @@ pub(super) mod tests {
             readers.release(durable).to_vec()
         }
 
-        fn taken(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
-            let key = key.into();
-            iter::from_fn(|| held(readers.take(key)))
-                .map(|frame| number(&frame))
-                .collect()
-        }
-
         #[test]
         fn pends_only_while_a_frame_for_a_complete_session_waits_for_the_disk() {
             let frames = Frames::new(4);
@@ -1706,10 +1718,8 @@ pub(super) mod tests {
             let current = opened(&mut readers, 4, 10);
             readers.queue(&frames.frame(2), &frames.set, 4..6);
             assert_eq!(released(&mut readers, 6), [current]);
-            assert_eq!(taken(&mut readers, below), []);
+            assert_eq!(missed(&mut readers, below), []);
             assert_eq!(taken(&mut readers, current), [2]);
-            assert!(behind(&mut readers, below));
-            assert!(!behind(&mut readers, current));
         }
 
         #[test]
@@ -1722,7 +1732,7 @@ pub(super) mod tests {
             let behind = opened(&mut readers, 3, 10);
             readers.queue(&frames.frame(2), &frames.set, 4..6);
             assert_eq!(released(&mut readers, 6), []);
-            assert_eq!(taken(&mut readers, behind), []);
+            assert_eq!(missed(&mut readers, behind), []);
             assert_eq!(taken(&mut readers, first), [1, 2]);
         }
 
@@ -1733,7 +1743,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 5, 10);
             readers.queue(&frames.frame(1), &frames.set, 10..12);
             assert_eq!(released(&mut readers, 12), []);
-            assert_eq!(taken(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
@@ -1743,7 +1753,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 5, 10);
             readers.queue(&frames.frame(1), &frames.set, 10..12);
             assert_eq!(released(&mut readers, 12), []);
-            assert_eq!(taken(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
@@ -1762,7 +1772,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2]);
+            assert_eq!(missed(&mut readers, key), [1, 2]);
         }
 
         #[test]
@@ -1781,7 +1791,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2]);
+            assert_eq!(missed(&mut readers, key), [1, 2]);
         }
 
         #[test]
@@ -1796,7 +1806,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
+            assert_eq!(missed(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
@@ -1816,7 +1826,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(taken(&mut readers, key), [1, 2, 3]);
+            assert_eq!(missed(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
@@ -1830,7 +1840,7 @@ pub(super) mod tests {
             readers.grant(key, 10 * CHARGE);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(released(&mut readers, 3), []);
-            assert_eq!(taken(&mut readers, key), [1]);
+            assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
@@ -1843,7 +1853,7 @@ pub(super) mod tests {
                 readers.queue(&frames.frame(n + 1), &frames.set, n..n + 1);
             }
             assert_eq!(released(&mut readers, 3), [short, long]);
-            assert_eq!(taken(&mut readers, short), [1]);
+            assert_eq!(missed(&mut readers, short), [1]);
             assert_eq!(taken(&mut readers, long), [1, 2, 3]);
         }
 
@@ -1862,8 +1872,7 @@ pub(super) mod tests {
                 .key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [new]);
-            assert_eq!(taken(&mut readers, new), []);
-            assert!(behind(&mut readers, new));
+            assert_eq!(missed(&mut readers, new), []);
         }
 
         #[test]
@@ -1902,7 +1911,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [open]);
-            assert_eq!(taken(&mut readers, open), [1]);
+            assert_eq!(missed(&mut readers, open), [1]);
         }
 
         #[test]
@@ -1918,8 +1927,7 @@ pub(super) mod tests {
             readers.grant(old, 10 * CHARGE);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [new]);
-            assert_eq!(taken(&mut readers, new), []);
-            assert!(behind(&mut readers, new));
+            assert_eq!(missed(&mut readers, new), []);
         }
 
         #[test]
@@ -1958,13 +1966,13 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
             assert_eq!(taken(&mut readers, key), [1]);
-            assert!(!behind(&mut readers, key));
+            assert_eq!(taken(&mut readers, key), []);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [key]);
-            assert!(behind(&mut readers, key));
+            assert_eq!(missed(&mut readers, key), []);
             readers.queue(&frames.frame(3), &frames.set, 2..3);
             assert_eq!(released(&mut readers, 3), []);
-            assert!(behind(&mut readers, key));
+            assert_eq!(missed(&mut readers, key), []);
         }
 
         #[test]
@@ -1975,8 +1983,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), [key]);
-            assert_eq!(taken(&mut readers, key), [1]);
-            assert!(behind(&mut readers, key));
+            assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
@@ -1988,8 +1995,7 @@ pub(super) mod tests {
             assert_eq!(released(&mut readers, 1), [key]);
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), []);
-            assert_eq!(taken(&mut readers, key), [1]);
-            assert!(behind(&mut readers, key));
+            assert_eq!(missed(&mut readers, key), [1]);
         }
 
         #[test]
@@ -1999,10 +2005,10 @@ pub(super) mod tests {
             let key = opened(&mut readers, 0, 0);
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
-            assert!(behind(&mut readers, key));
-            assert!(behind(&mut readers, key));
+            assert_eq!(missed(&mut readers, key), []);
+            assert_eq!(missed(&mut readers, key), []);
             readers.close(key.into());
-            assert!(!behind(&mut readers, key));
+            assert_eq!(taken(&mut readers, key), []);
         }
 
         #[test]
@@ -2046,7 +2052,7 @@ pub(super) mod tests {
             let latest = readers.open_latest().key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert!(frames.spare());
-            assert_eq!(held(readers.take(latest.into())).as_ref().map(number), None);
+            assert_eq!(taken(&mut readers, latest), []);
         }
 
         #[test]
@@ -2070,7 +2076,7 @@ pub(super) mod tests {
             assert!(frames.spare());
             let later = opened(&mut readers, 0, 10);
             assert_eq!(released(&mut readers, 1), []);
-            assert_eq!(taken(&mut readers, later), []);
+            assert_eq!(missed(&mut readers, later), []);
         }
 
         #[test]
@@ -2100,7 +2106,7 @@ pub(super) mod tests {
                 .key;
             readers.queue(&frames.frame(2), &frames.set, 1..2);
             assert_eq!(released(&mut readers, 2), []);
-            assert_eq!(taken(&mut readers, later), []);
+            assert_eq!(missed(&mut readers, later), []);
         }
 
         #[test]
@@ -2290,9 +2296,10 @@ pub(super) mod tests {
                     readers.queue(frame, set, seq.clone());
                 }
                 assert_eq!(readers.release(seq.end), [key]);
-                let taken = iter::from_fn(|| held(readers.take(key.into()))).count();
-                assert_eq!(taken, frames.len() + usize::from(passes), "credit {limit}");
-                assert_eq!(behind(&mut readers, key), !passes, "credit {limit}");
+                let (taken, end) = drain(&mut readers, key);
+                let count = frames.len() + usize::from(passes);
+                assert_eq!(taken.len(), count, "credit {limit}");
+                assert_eq!(matches!(end, Next::Behind), !passes, "credit {limit}");
             }
         }
 
@@ -2308,8 +2315,9 @@ pub(super) mod tests {
                 readers.queue(&sets.full(), &sets.wide, n..n + 1);
             }
             assert_eq!(readers.release(11), [key]);
-            assert_eq!(iter::from_fn(|| held(readers.take(key.into()))).count(), 10);
-            assert!(behind(&mut readers, key));
+            let (taken, end) = drain(&mut readers, key);
+            assert_eq!(taken.len(), 10);
+            assert!(matches!(end, Next::Behind));
         }
 
         #[test]
@@ -2902,14 +2910,15 @@ pub(super) mod tests {
                     .collect()
             }
 
-            /// What a take gives `key`: its next frame, then `Err` when it is behind.
-            fn take(&mut self, key: complete::Key) -> Option<Result<u64, ()>> {
+            /// What a take gives `key`.
+            fn take(&mut self, key: complete::Key) -> Told {
                 let got = self.got(key);
                 let n = got.frames.get(got.taken).copied();
                 got.taken += usize::from(n.is_some());
                 match n {
-                    Some(n) => Some(Ok(n)),
-                    None => got.behind.then_some(Err(())),
+                    Some(n) => Told::Frame(n),
+                    None if got.behind => Told::Behind,
+                    None => Told::Empty,
                 }
             }
         }
@@ -3020,20 +3029,26 @@ pub(super) mod tests {
                 loop {
                     let taken = told(readers.take(key.into()));
                     assert_eq!(taken, model.take(key), "session {key:?}");
-                    if !matches!(taken, Some(Ok(_))) {
+                    if !matches!(taken, Told::Frame(_)) {
                         break;
                     }
                 }
             }
         }
 
-        /// What `next` tells, as the model states it: a frame by number, or whether
-        /// the session is behind.
-        fn told(next: Next) -> Option<Result<u64, ()>> {
+        /// A [`Next`] as the model states it, with a frame by its number.
+        #[derive(Debug, PartialEq)]
+        enum Told {
+            Frame(u64),
+            Empty,
+            Behind,
+        }
+
+        fn told(next: Next) -> Told {
             match next {
-                Next::Frame(frame) => Some(Ok(number(&frame))),
-                Next::Behind => Some(Err(())),
-                Next::Empty => None,
+                Next::Frame(frame) => Told::Frame(number(&frame)),
+                Next::Empty => Told::Empty,
+                Next::Behind => Told::Behind,
             }
         }
 
