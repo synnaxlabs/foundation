@@ -613,6 +613,57 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
     });
 }
 
+/// Two entries of one path in one record keep their own `stored_at`.
+#[test]
+fn a_read_gives_each_entry_its_own_stored_at() {
+    run(1, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let stamped = |first, stored_at| Entry {
+            stored_at: Stamp::from_nanos(stored_at),
+            ..entry(1, a, Path::Live, first, 1, None, shard.block(8).into())
+        };
+        buffer
+            .append([stamped(0, 7), stamped(1, 8)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let stamps: Vec<i64> = read
+            .entries
+            .iter()
+            .map(|entry| entry.stored_at.nanos())
+            .collect();
+        assert_eq!(stamps, [7, 8]);
+    });
+}
+
+/// An open takes a ring that holds a record of the caller, with no samples.
+#[test]
+fn an_open_takes_a_ring_with_a_caller_record() {
+    run(1, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 0, None, shard.block(8).into())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let reopened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(reopened.err(), None);
+    });
+}
+
 #[test]
 fn durable_moves_only_at_a_commit() {
     run(3, Memory::default(), |shard| async move {

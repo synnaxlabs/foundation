@@ -31,7 +31,7 @@ pub(crate) struct Floor(u64);
 /// pair while no try is open, and it grows only by the terms that the node applies
 /// while a try is open. It holds the refusal of each refused entry above the lowest
 /// open floor, so it holds none while no try is open.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Applied {
     // The index of the last applied entry, or 0.
     index: u64,

@@ -337,7 +337,8 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, [`Error::Mesh`] for a mesh that did not open, or
+    /// whose buffer did not open, [`Error::Blob`] for a chunk store or
+    /// [`Error::Mesh`] for a mesh that did not open, or
     /// [`Error::Transport`] for a transport that stopped, else [`Error::Panicked`] for
     /// the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
@@ -626,14 +627,15 @@ struct Endpoint {
 
 impl Endpoint {
     /// Opens the node's transport on `pool` and `tasks`, then, when the node has a
-    /// region, the mesh of that region over it, in directory [`directory::mesh`] of
-    /// `files`. Gives the error of a mesh that did not open.
+    /// region, the chunk store in directory [`directory::blob`] of `files`, and the
+    /// mesh of that region over both, in directory [`directory::mesh`]. Gives the
+    /// error of a store or a mesh that did not open.
     async fn open(
         self,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
-    ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), mesh::Error> {
+    ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), Error> {
         let message = NonZeroUsize::new(MESSAGE.min(pool.largest()));
         let config = transport::Config {
             private_key: self.private_key.clone(),
@@ -652,6 +654,13 @@ impl Endpoint {
         let Some(region) = self.region else {
             return Ok((transport, None));
         };
+        let store = blob::Store::open(blob::Config {
+            files: files.clone(),
+            dir: directory::blob(),
+            pool: Rc::clone(&pool),
+        })
+        .await
+        .map_err(Error::Blob)?;
         let config = mesh::Config {
             key: self.key,
             private_key: self.private_key,
@@ -667,8 +676,9 @@ impl Endpoint {
             tasks,
             pool,
             transport: Rc::clone(&transport),
+            store: Rc::new(store),
         };
-        let mesh = mesh::Mesh::open(config).await?;
+        let mesh = mesh::Mesh::open(config).await.map_err(Error::Mesh)?;
         Ok((transport, Some(mesh)))
     }
 }
@@ -701,7 +711,7 @@ impl Serve {
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
                 Ok(opened) => opened,
-                Err(error) => return fail(Error::Mesh(error)),
+                Err(error) => return fail(error),
             };
         let hub = hub::Hub::new(hub::Config {
             home,
@@ -779,6 +789,8 @@ pub enum Error {
     Transport(transport::Error),
     /// The mesh did not open. The node took no session.
     Mesh(mesh::Error),
+    /// The chunk store did not open. The node took no session.
+    Blob(blob::Error),
     /// The node's port did not bind. No shard started.
     Port {
         /// The address of the bind.
@@ -816,6 +828,9 @@ impl fmt::Display for Error {
                 write!(f, "the node's transport stopped: {error}")
             }
             Self::Mesh(error) => write!(f, "the node's mesh did not open: {error}"),
+            Self::Blob(error) => {
+                write!(f, "cannot open the node's chunk store: {error}")
+            }
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }
