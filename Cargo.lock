@@ -1060,6 +1060,7 @@ dependencies = [
  "connector",
  "connector-influx",
  "counting",
+ "crc32c",
  "divan",
  "env",
  "estimate",
