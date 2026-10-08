@@ -63,10 +63,10 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
-/// Clones `tag` of `url` into `target/open62541/<tag>/`, builds it with [`OPTIONS`],
-/// and replaces `patches/open62541/` with its compiled sources, their headers,
-/// `LICENSE`, `sources.txt` (each `.c` file), and `VERSION` (tag and commit). Needs
-/// `git`, `cmake`, Python 3, a C compiler, and GNU `objdump`.
+/// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
+/// replaces `patches/open62541/` with its compiled sources, their headers, `LICENSE`,
+/// `sources.txt` (each `.c` file), and `VERSION` (tag and commit). Needs Linux,
+/// `git`, `cmake`, Python 3, GCC, and GNU `objdump`.
 ///
 /// # Errors
 ///
@@ -74,15 +74,19 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
 /// clock function that [`CLOCK_CALLS`] does not list, or an entry it lists that no
 /// call matches. On an error, `patches/open62541/` does not change.
 pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
-    let work = root.join("target/open62541").join(tag);
+    let work = root.join("target/open62541");
     let (src, build) = (work.join("src"), work.join("build"));
     let trees = Trees {
         src: &src,
         build: &build,
     };
     let commit = compile(&work, &trees, url, tag).map_err(|e| vec![e])?;
-    let copy = collect(&trees)?;
-    write(root, &src, &copy, &format!("{tag}\n{commit}")).map_err(|e| vec![e])
+    let (copy, mut problems) = collect(&trees).map_err(|e| vec![e])?;
+    problems.extend(unlisted(&copy.calls));
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    write(root, &src, &copy.files, &format!("{tag}\n{commit}")).map_err(|e| vec![e])
 }
 
 /// Clones and builds `tag` of `url` in `work`, and gives its commit.
@@ -109,40 +113,46 @@ fn compile(
     )
 }
 
-/// Each (from, to) to copy from a built clone: each source of the library and each
-/// header that it includes, other than a system header.
-fn collect(trees: &Trees<'_>) -> Result<BTreeSet<(PathBuf, PathBuf)>, Vec<String>> {
+/// What a built clone holds.
+struct Copy {
+    /// Each (from, to): each source of the library and each header that it includes,
+    /// other than a system header.
+    files: BTreeSet<(PathBuf, PathBuf)>,
+    /// Each (file, function) that calls a function of [`CLOCKS`].
+    calls: BTreeSet<(String, String)>,
+}
+
+/// The [`Copy`] of a built clone, and an error for each header outside the clone.
+fn collect(trees: &Trees<'_>) -> Result<(Copy, Vec<String>), String> {
     let commands = std::fs::read_to_string(trees.build.join("compile_commands.json"))
-        .map_err(|e| vec![format!("compile_commands.json: {e}")])?;
-    let mut found = BTreeSet::new();
-    let mut copy = BTreeSet::new();
-    let mut problems = Vec::new();
-    for (source, object) in objects(&commands, trees.build).map_err(|e| vec![e])? {
-        let file = trees.relative(&source).map_err(|e| vec![e])?;
-        let mut objdump = Command::new("objdump");
-        let text = exec(objdump.arg("-dr").arg(&object)).map_err(|e| vec![e])?;
+        .map_err(|e| format!("compile_commands.json: {e}"))?;
+    let mut copy = Copy {
+        files: BTreeSet::new(),
+        calls: BTreeSet::new(),
+    };
+    let mut outside = Vec::new();
+    for (source, object) in objects(&commands, trees.build)? {
+        let file = trees.relative(&source)?;
+        let text = exec(Command::new("objdump").arg("-dr").arg(&object))?;
         for function in clock_calls(&text) {
-            found.insert((file.display().to_string(), function));
+            copy.calls.insert((file.display().to_string(), function));
         }
         let depfile = std::fs::read_to_string(object.with_extension("o.d"))
-            .map_err(|e| vec![format!("{}.d: {e}", object.display())])?;
+            .map_err(|e| format!("{}.d: {e}", object.display()))?;
         for header in headers(&depfile) {
+            if header.starts_with("/usr") {
+                continue;
+            }
             match trees.relative(&header) {
                 Ok(path) => {
-                    copy.insert((header, path));
+                    copy.files.insert((header, path));
                 }
-                Err(e) if header.starts_with("/usr") => drop(e),
-                Err(e) => problems.push(e),
+                Err(e) => outside.push(e),
             }
         }
-        copy.insert((source, file));
+        copy.files.insert((source, file));
     }
-    problems.extend(unlisted(&found));
-    if problems.is_empty() {
-        Ok(copy)
-    } else {
-        Err(problems)
-    }
+    Ok((copy, outside))
 }
 
 /// The source and build trees of one clone.
@@ -484,6 +494,7 @@ Disassembly of section .text.setDefaultConfig:
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
     fn run_copies_each_compiled_source_and_its_headers() {
         let (root, repo) = (temp("copies-root"), temp("copies-repo"));
         create_project(&repo);
@@ -528,6 +539,7 @@ Disassembly of section .text.setDefaultConfig:
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
     fn run_refuses_a_new_clock_call_and_a_header_outside_the_clone() {
         let (root, repo) = (temp("refuses-root"), temp("refuses-repo"));
         create_project(&repo);
@@ -542,7 +554,7 @@ Disassembly of section .text.setDefaultConfig:
         tag(&repo, "v2");
         create_files(&root, &[("patches/open62541/kept.c", "")]);
         let url = format!("file://{}", repo.display());
-        let build = root.join("target/open62541/v2/build");
+        let build = root.join("target/open62541/build");
         assert_eq!(
             run(&root, &url, "v2"),
             Err(vec![
