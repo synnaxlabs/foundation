@@ -293,6 +293,13 @@ impl Agent {
     /// Sends a request of `length` bytes, signed over `body`, and `body` in messages
     /// of at most 64 KiB, on a new stream. Finishes the stream.
     async fn request(&self, length: u64, body: &[u8]) -> Stream {
+        let mut stream = self.unfinished(length, body).await;
+        stream.sender.finish().expect("finishes");
+        stream
+    }
+
+    /// As [`Agent::request`], but leaves the stream open.
+    async fn unfinished(&self, length: u64, body: &[u8]) -> Stream {
         let mut stream = self.open().await;
         let signed = access::proof::request(CONNECTION, body);
         let request = Request {
@@ -305,7 +312,6 @@ impl Agent {
         for chunk in body.chunks(1 << 16) {
             stream.send(chunk).await;
         }
-        stream.sender.finish().expect("finishes");
         stream
     }
 
@@ -353,6 +359,21 @@ fn answers_a_request_of_an_admitted_hello() {
         ]
     );
     assert_eq!(home.closed, transport::Error::Closed { code: Code(0) });
+}
+
+/// The node takes a request once its body is whole, before the program finishes the
+/// stream.
+#[test]
+fn answers_a_request_whose_stream_stays_open() {
+    let home = session(101, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.unfinished(2, b"ab").await;
+        assert_eq!(stream.response().await, b"ba");
+    });
+    assert_eq!(
+        home.served[0],
+        Ok(Got::Request(name(SUBJECT), b"ab".to_vec()))
+    );
 }
 
 #[test]
