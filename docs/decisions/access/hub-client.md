@@ -11,7 +11,7 @@
   stream, and gives the body of the response. Requests of one client go one at a time,
   in the order they ask, by a turn in the client, as a link holds one open request (HUB
   LINK). A request dropped before its response began keeps the turn until the next
-  message or the end of its stream, since the node holds it open until its response
+  message or the end of its stream, because the node holds it open until its response
   begins. `Config` holds its own `pool`, which a program may share with the transport.
   `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
   client closes the session with `Code(0)`. A node's stop and close with a code are one

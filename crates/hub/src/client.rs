@@ -140,9 +140,9 @@ impl Client {
     }
 
     /// Sends `body` as a request signed with the subject's key, and gives the body of
-    /// the response. Requests of one client go one at a time, in the order they began. A
-    /// request dropped before its response began keeps the turn until the response
-    /// begins or the stream ends, since the node holds it open until then.
+    /// the response. Requests of one client go one at a time, in the order they
+    /// began. A request dropped before its response began keeps the turn until the
+    /// response begins or the stream ends, because the node holds it open until then.
     ///
     /// # Errors
     ///
