@@ -1,11 +1,11 @@
 use proptest::prelude::*;
 
 use super::*;
-use crate::region::common::{data, index, map, name, record, subject};
+use crate::region::common::{create_definitions, data, index, name, record, subject};
 
 #[test]
 fn equals_each_definition_set_on_the_empty_tree() {
-    let definitions = map(&[
+    let definitions = create_definitions(&[
         ("plant.@region", record()),
         ("plant.@subject", subject()),
         ("plant.pressure", data(2, 1)),
@@ -32,7 +32,7 @@ fn gives_the_empty_tree_and_no_chunk_for_no_definitions() {
 
 #[test]
 fn builds_definitions_with_a_problem() {
-    let definitions = map(&[("plant.pressure", data(2, 9))]);
+    let definitions = create_definitions(&[("plant.pressure", data(2, 9))]);
     let mut chunks = Chunks::default();
     let update = tree(&mut chunks, &definitions);
     assert_eq!(

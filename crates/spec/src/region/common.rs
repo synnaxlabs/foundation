@@ -53,7 +53,9 @@ pub(super) fn data(key: u128, index: u128) -> Definition {
     })
 }
 
-pub(super) fn map(definitions: &[(&str, Definition)]) -> BTreeMap<Name, Definition> {
+pub(super) fn create_definitions(
+    definitions: &[(&str, Definition)],
+) -> BTreeMap<Name, Definition> {
     definitions
         .iter()
         .map(|(key, definition)| (name(key), definition.clone()))

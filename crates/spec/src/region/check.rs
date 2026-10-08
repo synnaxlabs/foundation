@@ -32,10 +32,6 @@ pub fn check(
         .filter_map(|(key, _)| Kind::Region.label(key))
         .filter(|label| inside(prefix, label))
         .collect();
-    let children: Vec<&Name> = records
-        .iter()
-        .filter(|label| !records.iter().any(|other| below(label, other)))
-        .collect();
     let mut problems: Vec<(Name, Problem)> = Vec::new();
     let mut channels = BTreeMap::new();
     for (key, definition) in definitions {
@@ -49,7 +45,7 @@ pub fn check(
                 },
             ));
         }
-        if !governs(prefix, &children, key, kind) {
+        if !governs(prefix, &records, key, kind) {
             problems.push((
                 key.clone(),
                 Problem::Ungoverned {
@@ -68,15 +64,18 @@ pub fn check(
     problems.into_iter().map(|(_, problem)| problem).collect()
 }
 
-// Whether the region at `prefix`, with the child regions `children`, governs a
+// Whether the region at `prefix`, with the records `records` inside it, governs a
 // definition of `kind` at `key`. A record `<p>.@region` is in the region above `<p>`.
-fn governs(prefix: &Prefix, children: &[&Name], key: &Name, kind: Kind) -> bool {
+// A record under another record is under a child, so `records` need not be children.
+fn governs(prefix: &Prefix, records: &[Name], key: &Name, kind: Kind) -> bool {
     match kind.label(key).filter(|_| kind == Kind::Region) {
         Some(label) => {
-            inside(prefix, &label) && !children.iter().any(|child| below(&label, child))
+            inside(prefix, &label)
+                && !records.iter().any(|record| below(&label, record))
         }
         None => {
-            prefix.contains(key) && !children.iter().any(|child| key.starts_with(child))
+            prefix.contains(key)
+                && !records.iter().any(|record| key.starts_with(record))
         }
     }
 }

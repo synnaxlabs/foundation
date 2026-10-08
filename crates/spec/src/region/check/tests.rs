@@ -3,7 +3,9 @@ use types::channel::Key;
 
 use super::*;
 use crate::channel::Edge;
-use crate::region::common::{data, index, map, name, prefix, record, subject};
+use crate::region::common::{
+    create_definitions, data, index, name, prefix, record, subject,
+};
 
 fn ungoverned(key: &str, region: &str) -> Problem {
     Problem::Ungoverned {
@@ -14,7 +16,7 @@ fn ungoverned(key: &str, region: &str) -> Problem {
 
 #[test]
 fn finds_no_problem_in_a_region_with_a_child() {
-    let definitions = map(&[
+    let definitions = create_definitions(&[
         ("plant.app.@subject", subject()),
         ("plant.child.@region", record()),
         ("plant.time", index(1)),
@@ -25,7 +27,7 @@ fn finds_no_problem_in_a_region_with_a_child() {
 
 #[test]
 fn finds_each_problem_in_tree_key_order() {
-    let definitions = map(&[
+    let definitions = create_definitions(&[
         ("plant.@region", record()),
         ("plant.app.@access", subject()),
         ("plant.child.@region", record()),
@@ -61,7 +63,7 @@ fn finds_each_problem_in_tree_key_order() {
 
 #[test]
 fn finds_an_edge_to_a_channel_of_another_region_dangling() {
-    let definitions = map(&[
+    let definitions = create_definitions(&[
         ("plant.child.@region", record()),
         ("plant.child.time", index(1)),
         ("plant.pressure", data(2, 1)),
@@ -82,7 +84,8 @@ fn finds_an_edge_to_a_channel_of_another_region_dangling() {
 
 #[test]
 fn finds_two_channels_with_one_key() {
-    let definitions = map(&[("plant.a", index(1)), ("plant.b", index(1))]);
+    let definitions =
+        create_definitions(&[("plant.a", index(1)), ("plant.b", index(1))]);
     let duplicate = channel::Problem::Duplicate {
         first: name("plant.a"),
         second: name("plant.b"),
@@ -96,7 +99,7 @@ fn finds_two_channels_with_one_key() {
 
 #[test]
 fn the_root_region_governs_each_name_under_no_child() {
-    let definitions = map(&[
+    let definitions = create_definitions(&[
         ("plant.@region", record()),
         ("plant.x.@subject", subject()),
         ("site.x.@subject", subject()),
@@ -109,7 +112,7 @@ fn the_root_region_governs_each_name_under_no_child() {
 
 #[test]
 fn gives_misplaced_before_ungoverned_at_one_key() {
-    let definitions = map(&[("site.@x.y", index(1))]);
+    let definitions = create_definitions(&[("site.@x.y", index(1))]);
     assert_eq!(
         check(&prefix("plant"), &definitions),
         [
@@ -124,7 +127,7 @@ fn gives_misplaced_before_ungoverned_at_one_key() {
 
 #[test]
 fn does_not_govern_a_name_above_the_prefix() {
-    let definitions = map(&[("plant.@subject", subject())]);
+    let definitions = create_definitions(&[("plant.@subject", subject())]);
     assert_eq!(
         check(&prefix("plant.line"), &definitions),
         [ungoverned("plant.@subject", "plant.line")]
@@ -132,19 +135,66 @@ fn does_not_govern_a_name_above_the_prefix() {
 }
 
 #[test]
-fn governs_a_policy_at_its_own_label_and_not_its_own_record() {
-    let definitions =
-        map(&[("plant.@region", record()), ("plant.@subject", subject())]);
+fn governs_a_policy_by_its_key_and_a_record_by_its_label() {
+    let definitions = create_definitions(&[
+        ("plant.@region", record()),
+        ("plant.@subject", subject()),
+        ("plant.child.@region", record()),
+        ("plant.child.@subject", subject()),
+    ]);
     assert_eq!(
         check(&prefix("plant"), &definitions),
-        [ungoverned("plant.@region", "plant")]
+        [
+            ungoverned("plant.@region", "plant"),
+            ungoverned("plant.child.@subject", "plant"),
+        ]
+    );
+}
+
+#[test]
+fn makes_no_child_of_a_misplaced_definition_at_a_record_key() {
+    let definitions = create_definitions(&[
+        ("plant.child.@region", subject()),
+        ("plant.child.x.@subject", subject()),
+    ]);
+    assert_eq!(
+        check(&prefix("plant"), &definitions),
+        [Problem::Misplaced {
+            name: name("plant.child.@region"),
+            kind: Kind::Subject,
+        }]
+    );
+}
+
+#[test]
+fn files_a_duplicate_at_the_second_channel() {
+    let definitions = create_definitions(&[
+        ("plant.a", index(1)),
+        ("plant.b", data(2, 9)),
+        ("plant.c", index(1)),
+    ]);
+    let dangling = channel::Problem::Dangling {
+        from: name("plant.b"),
+        edge: Edge::Index,
+        to: Key::from_u128(9),
+    };
+    let duplicate = channel::Problem::Duplicate {
+        first: name("plant.a"),
+        second: name("plant.c"),
+        key: Key::from_u128(1),
+    };
+    assert_eq!(
+        check(&prefix("plant"), &definitions),
+        [Problem::Channel(dangling), Problem::Channel(duplicate)]
     );
 }
 
 #[test]
 fn does_not_govern_a_channel_at_the_name_of_a_child() {
-    let definitions =
-        map(&[("plant.child", index(1)), ("plant.child.@region", record())]);
+    let definitions = create_definitions(&[
+        ("plant.child", index(1)),
+        ("plant.child.@region", record()),
+    ]);
     assert_eq!(
         check(&prefix("plant"), &definitions),
         [ungoverned("plant.child", "plant")]
