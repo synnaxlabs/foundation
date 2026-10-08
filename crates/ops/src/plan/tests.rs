@@ -580,9 +580,9 @@ fn reads_a_name_that_is_not_utf8_by_its_extension() {
 }
 
 #[test]
-fn places_each_sequence_that_is_not_utf8_as_one_replacement() {
+fn places_a_path_that_is_not_utf8_as_display_writes_it() {
     let error = plan(
-        &bytes(&[b"a\xe2\x82.hcl"], "{"),
+        &bytes(&[b"a\xe2\x82.hcl", b"a\xff\xfe.hcl"], "{"),
         empty(),
         &BTreeMap::new(),
         &BTreeSet::new(),
@@ -593,6 +593,9 @@ fn places_each_sequence_that_is_not_utf8_as_one_replacement() {
     let Error::Config(problems) = error else {
         panic!("a config error");
     };
-    let place = problems[0].place.as_ref().expect("a place");
-    assert_eq!(place.file, "a\u{fffd}.hcl");
+    let files: Vec<&str> = problems
+        .iter()
+        .map(|problem| problem.place.as_ref().expect("a place").file.as_str())
+        .collect();
+    assert_eq!(files, ["a\u{fffd}.hcl", "a\u{fffd}\u{fffd}.hcl"]);
 }
