@@ -4115,9 +4115,9 @@ How to read this record:
   directory at 2026-10-07T19:22:31Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692 and
   https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531.
-  Amended (2026-10-07, #1551): the disk keeps one log, in call order, of the creates,
-  removes, and renames that no `sync_dir` of their directory covered. A rename is one
-  change. A `Power` crash keeps a prefix of the log. It draws the prefix from the files
+  Amended (2026-10-07, #1551): the disk keeps one log, in the order that the calls
+  ended, of the creates, removes, and renames that no `sync_dir` of their directory
+  covered. A rename is one change. A `Power` crash keeps a prefix of the log. It draws the prefix from the files
   stream only when the log is not empty, and the digest holds its length. Each file call
   in flight takes effect as for `Process`, and the prefix decides whether its change
   stays, except a `sync` or `sync_dir` in flight, which has no effect. A `sync_dir`
@@ -4128,7 +4128,9 @@ How to read this record:
   `Power` crash undoes each rename since the last `sync_dir`, a rename in flight too.
   Supersedes
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692: the
-  commit of a create in flight. A create that a `Power` crash cuts is whole or has no
+  commit of a create in flight. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1553#issuecomment-6045160531: a commit
+  makes the entries of the directory durable. A create that a `Power` crash cuts is whole or has no
   bytes, and the prefix decides whether its entry stays. A cut gives a state that a
   journaled file system can reach, or a state that only a missing `sync_dir` reaches.
   Lost: a log for each directory, which gives states that need no missing `sync_dir`.

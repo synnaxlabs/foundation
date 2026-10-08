@@ -578,8 +578,8 @@ pub enum Crash {
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   with the changes of one prefix, for the whole disk, of the creates,
     ///   removes, and renames that no `sync_dir` of their directory covered, in the
-    ///   order of their calls. A rename is one change. What those entries no longer
-    ///   reach is gone.
+    ///   order that their calls ended. A rename is one change. What those entries no
+    ///   longer reach is gone.
     /// - A `sync_dir` makes durable only the changes of its directory. A journaled
     ///   file system can commit more; `sim` does not, so a missing `sync_dir`
     ///   shows.

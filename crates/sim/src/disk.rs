@@ -53,7 +53,8 @@ pub(crate) struct Disk {
     /// or a hold keeps.
     used: u64,
     inodes: BTreeMap<u64, Inode>,
-    /// The changes of entries that no `sync_dir` covered, in the order of their calls.
+    /// The changes of entries that no `sync_dir` covered, in the order that their calls
+    /// ended.
     log: Vec<Change>,
 }
 

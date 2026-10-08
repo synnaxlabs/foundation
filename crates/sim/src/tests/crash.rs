@@ -1534,3 +1534,22 @@ fn a_power_cut_with_each_change_durable_keeps_the_digest_of_later_draws() {
     });
     assert_eq!(sim.digest(), 2_162_013_485_531_046_164);
 }
+
+#[test]
+fn a_power_cut_keeps_a_prefix_in_the_order_that_the_calls_end() {
+    let outcomes = listed_after_power(0..64, |node| async move {
+        let files = node.files();
+        let mut x = pin!(files.create_dir(Path::new("x")));
+        let mut y = pin!(files.create_dir(Path::new("y")));
+        poll_fn(|cx| {
+            assert!(x.as_mut().poll(cx).is_pending());
+            assert!(y.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        x.await.unwrap();
+        y.await.unwrap();
+    });
+    let prefixes = [names(&[]), names(&["x"]), names(&["y"]), names(&["x", "y"])];
+    assert_eq!(outcomes, BTreeSet::from(prefixes));
+}
