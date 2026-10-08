@@ -3755,6 +3755,26 @@ How to read this record:
   one point of 255 fields among points of one field, and 32 for 255 sparse keys, for
   257 and 255 sparse keys with writes that split chunks, and for 1000 series of 200
   points.
+  `Fields` is read only through `iter`: `Fields::get` went, as no caller reads one
+  field by key (#1579). It supersedes the `Fields::get` item of
+  https://github.com/synnaxlabs/foundation/issues/1419#issuecomment-6040009661.
+  Writes of a backlog newest first are 2.9 to 3.2 times slower, and `Fields::iter`
+  with 63 sparse keys 10.5 to 12 times slower, than at `ae0fd3fc` (box2, Xeon 8488C,
+  busy host). The architect accepts this for about 19 B a point in place of 700 to
+  1388 B, as the store is in no node binary. `benches/sim.rs` times the store.
+  `cargo bench -p connector-influx` turns on `sim` through a dev-dependency of the
+  crate on itself, since the bench host runs no features. Until its baseline on a
+  quiet Linux host is a comment on #1501, a PR that changes the store gives the
+  numbers of `benches/sim.rs` at its base and at its head, on one machine. The fixes
+  (a cursor for each column in the series iterator, and a gap at the front of a chunk)
+  wait for a test or acceptance run whose time is spent in the store (#1501). Decided
+  by `laptop.architect-2` (2026-10-07T19:40:18Z):
+  https://github.com/synnaxlabs/foundation/pull/1448#issuecomment-6045453368. Amended
+  by `laptop.architect-2` (2026-10-08T08:19:35Z):
+  https://github.com/synnaxlabs/foundation/pull/1837#issuecomment-6055768246, which
+  supersedes the paired run against `77e13735` of
+  https://github.com/synnaxlabs/foundation/pull/1448#issuecomment-6045453368, and
+  turns on `sim` for the bench.
   `connector_influx::sim::serve(listener, tasks, store, database)` is its HTTP front, on
   `connector::http::sim::serve` (HTTP SIM SERVER). `POST /write?db=` (InfluxDB 1) and
   `POST /api/v2/write?bucket=` (InfluxDB 2 and 3) give 204 when the store takes each
