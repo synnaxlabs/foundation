@@ -364,6 +364,24 @@ mod tests {
         assert_eq!(read, reset);
     }
 
+    /// Only `ENOTCONN` and `EINVAL` say the connection ended. Another code keeps
+    /// the pending error for the poll that reports it.
+    #[test]
+    fn only_not_connected_and_invalid_read_the_pending_error() {
+        let (client, server) = create_pair();
+        sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
+        drop(server);
+        let mut tries = 0;
+        while client.peer_addr().is_ok() {
+            tries += 1;
+            assert!(tries < 1 << 20, "the reset arrives");
+            std::thread::yield_now();
+        }
+        assert_eq!(Stream::ended(&client, Errno::BADF), None);
+        assert_eq!(Stream::ended(&client, Errno::AGAIN), None);
+        assert_eq!(Stream::ended(&client, Errno::INVAL), Some(Errno::CONNRESET));
+    }
+
     #[test]
     fn new_sets_linger_zero() {
         let (client, _server) = create_pair();
