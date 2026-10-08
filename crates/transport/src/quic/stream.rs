@@ -463,7 +463,8 @@ struct Left<'a> {
 enum Piece<'a> {
     /// A run over [`COPIED_MAX`] bytes, as a slice of the block.
     Slice(Bytes),
-    /// Shorter runs and zeros: one source, or the sources copied into one buffer.
+    /// Shorter runs and zeros: one part of the block, or the parts copied into one
+    /// buffer.
     Copied(&'a [u8]),
 }
 
@@ -549,64 +550,57 @@ impl<'a> Left<'a> {
 
     /// The next write of `block`, and what is left after it: a run over
     /// [`COPIED_MAX`] bytes, else each shorter run and zeros up to the next long run,
-    /// copied into `buffer` when there is more than one.
+    /// copied into `buffer` when there is more than one part.
     fn piece<'b>(
         &self,
         block: &'b Bytes,
         buffer: &'b mut Vec<u8>,
     ) -> (Piece<'b>, Self) {
+        if self.tail.is_empty() && self.head.zeros == 0 {
+            let (range, after) = self.run();
+            if range.len() > COPIED_MAX {
+                return (Piece::Slice(block.slice(range)), after);
+            }
+            return (Piece::Copied(&block[range]), after);
+        }
+        buffer.clear();
         let mut left = self.clone();
-        let mut stretch = Stretch {
-            first: &[],
-            buffer,
-            copied: false,
-        };
+        // Where the run in hand starts in `buffer`, what was left at its start, and
+        // where its last range ends in the block.
+        let mut run = (0, self.clone());
+        let mut end = None;
         loop {
-            if !left.head.range.is_empty() {
-                let (run, after) = left.run();
-                if run.len() > COPIED_MAX {
-                    if stretch.first.is_empty() {
-                        return (Piece::Slice(block.slice(run)), after);
+            let range = left.head.range.clone();
+            if !range.is_empty() {
+                if end != Some(range.start) {
+                    run = (buffer.len(), left.clone());
+                }
+                if buffer.len() - run.0 + range.len() > COPIED_MAX {
+                    if run.0 == 0 {
+                        let (range, after) = run.1.run();
+                        return (Piece::Slice(block.slice(range)), after);
                     }
+                    buffer.truncate(run.0);
+                    left = run.1;
                     break;
                 }
-                stretch.add(&block[run]);
-                left = after;
+                buffer.extend_from_slice(&block[range.clone()]);
+                end = Some(range.end);
             }
-            stretch.add(&ZEROS[..usize::from(left.head.zeros)]);
-            left.head.zeros = 0;
+            if left.head.zeros > 0 {
+                buffer.extend_from_slice(&ZEROS[..usize::from(left.head.zeros)]);
+                end = None;
+            }
             if !left.pop() {
+                left.head = Part {
+                    range: range.end..range.end,
+                    zeros: 0,
+                };
                 break;
             }
         }
-        (Piece::Copied(stretch.bytes()), left)
-    }
-}
-
-/// The bytes of one write of short runs and zeros: the first source while it has
-/// one, else each source copied into `buffer`.
-struct Stretch<'a> {
-    first: &'a [u8],
-    buffer: &'a mut Vec<u8>,
-    copied: bool,
-}
-
-impl<'a> Stretch<'a> {
-    fn add(&mut self, bytes: &'a [u8]) {
-        if self.first.is_empty() {
-            self.first = bytes;
-        } else if !bytes.is_empty() {
-            if !self.copied {
-                self.buffer.clear();
-                self.buffer.extend_from_slice(self.first);
-                self.copied = true;
-            }
-            self.buffer.extend_from_slice(bytes);
-        }
-    }
-
-    fn bytes(self) -> &'a [u8] {
-        if self.copied { self.buffer } else { self.first }
+        let buffer: &'b Vec<u8> = buffer;
+        (Piece::Copied(buffer), left)
     }
 }
 
@@ -4674,12 +4668,16 @@ mod tests {
             ("slice", body[..2000].to_vec()),
             ("copied", stretch),
             ("slice", body[2300..3753].to_vec()),
-            ("one", body[3800..3801].to_vec()),
+            ("copied", body[3800..3801].to_vec()),
             ("slice", body[3900..=3900 + COPIED_MAX].to_vec()),
             ("copied", last),
         ];
         assert_eq!(pieces(&block, &parts), sent);
-        assert_eq!(pieces(&block, &parts[10..]), [("one", vec![0; 3])]);
+        let one = |parts| pieces(&block, parts);
+        assert_eq!(one(&parts[7..8]), [("one", body[3800..3801].to_vec())]);
+        let long = body[3900..=3900 + COPIED_MAX].to_vec();
+        assert_eq!(one(&parts[8..9]), [("slice", long)]);
+        assert_eq!(one(&parts[10..]), [("copied", vec![0; 3])]);
         assert_eq!(pieces(&block, &[]), []);
     }
 
