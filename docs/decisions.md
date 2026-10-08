@@ -4673,10 +4673,12 @@ How to read this record:
   the `plan` of #1744 PR 1b and `export` will call it. Decided by `laptop.architect` at
   2026-10-08T11:00:08Z
   (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812).
-  `Rules::new` skips a subject definition at a key that gives no label
-  (`laptop.architect`, 2026-10-08T11:11:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907; built
-  for #1866). `Rules::new` takes only trees with no problem from
+  `Rules::new` panics at a subject definition at a key that gives no label, which its
+  precondition excludes (`laptop.architect`, 2026-10-08T13:40:56Z,
+  https://github.com/synnaxlabs/foundation/pull/1880#issuecomment-6061170874; built
+  for #1890; it changes the skip of 11:11:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907).
+  `Rules::new` takes only trees with no problem from
   `spec::region::check` at their prefix, and checks nothing itself: `Mesh::spec` gives
   only such trees (SPEC CHANGE, #1741), and `node` builds `Rules` only from it (#1744).
   Lost: a governs check in `Rules::new`, a second guard that puts the rule of
