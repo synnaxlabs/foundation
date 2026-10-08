@@ -3695,7 +3695,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1239#issuecomment-6033688614).
   Memory: each series keeps its points in chunks, one time column and one typed
   column for each field key, so the STORE AND FORWARD scenario holds about 6e7 points
-  on a CI runner (#1149). `Point::fields` is a `Fields` view of the chunk.
+  on a CI runner (#1149). `Point::fields` is a `Fields` view of the chunk, read only
+  through `iter`: `Fields::get` went, as no caller reads one field by key (#1579,
+  `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1448#issuecomment-6045453368).
   `tests/memory.rs` counts the heap bytes with `counting` and asserts at most 32 a
   point after 1e6 points of the lab's line. Lost: runs of points on a fixed time step,
   as mesh slew moves each time off any grid (MESH SLEW); and the resident set size
