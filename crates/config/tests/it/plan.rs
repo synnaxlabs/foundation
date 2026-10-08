@@ -53,8 +53,8 @@ impl Kind for Writer {
 
     fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
         Ok(Channels {
-            reads: writes.clone(),
-            writes: Vec::new(),
+            reads: Vec::new(),
+            writes: writes.clone(),
         })
     }
 
@@ -181,7 +181,8 @@ fn encode(name: &Name, entry: &Entry, keys: &BTreeMap<Name, Key>) -> Vec<u8> {
     }
 }
 
-/// A kind whose one attribute, `writes`, names the channels it writes to the device.
+/// A kind whose one attribute, `writes`, names the channels that it reads from the mesh
+/// and writes to its device.
 struct Commander;
 
 impl Kind for Commander {
@@ -193,8 +194,8 @@ impl Kind for Commander {
 
     fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
         Ok(Channels {
-            reads: Vec::new(),
-            writes: writes.clone(),
+            reads: writes.clone(),
+            writes: Vec::new(),
         })
     }
 

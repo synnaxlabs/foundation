@@ -4866,16 +4866,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An
   edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
   edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
-  index, with the node of its first writer: a connector whose `Channels::reads` (the
-  channels it writes to the mesh) holds the index or a channel on it (#1960,
-  `laptop.architect-2`, 2026-10-08T18:41:03Z,
-  https://github.com/synnaxlabs/foundation/issues/1960#issuecomment-6066649596).
-  Supersedes "The writer of an index" of
-  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and the
-  `Channels::writes` of U3 of
-  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187. Its
-  `Unplaced` is `config.unplaced` at the label of the index, with each placement by its
-  label.
+  index, with the node of its first writer: a connector whose `writes` holds the index
+  or a channel on it. Its `Unplaced` is `config.unplaced` at the label of the index,
+  with each placement by its label.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
   `config.writer-nodes` is at the `node` of the first connector on a second node that

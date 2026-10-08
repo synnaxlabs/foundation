@@ -21,8 +21,8 @@ use crate::front_end::{self, File, FrontEnd};
 const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
 const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
 
-/// A kind that reads from the device the channels that label its `read` blocks. It
-/// takes each attribute, so it stands in for each kind of the fixtures.
+/// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
+/// each attribute, so it stands in for each kind of the fixtures.
 struct Reader;
 
 impl kind::Kind for Reader {
@@ -38,10 +38,10 @@ impl kind::Kind for Reader {
             .collect())
     }
 
-    fn check(&self, reads: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
+    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
         Ok(Channels {
-            reads: reads.clone(),
-            writes: Vec::new(),
+            reads: Vec::new(),
+            writes: writes.clone(),
         })
     }
 

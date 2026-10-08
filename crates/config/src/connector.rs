@@ -40,7 +40,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     found.writers.push(Writer {
         node: node.clone(),
         at,
-        writes: channels.reads,
+        writes: channels.writes,
     });
     let connector = Connector::new(kind, node, config);
     Some(Definition::Spec(definition::Definition::Connector(
