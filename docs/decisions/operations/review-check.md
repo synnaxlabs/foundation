@@ -13,30 +13,26 @@
   backticks and one final comma, period, or semicolon removed, is the word that is
   checked. Decided by the director at 2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
-  hand rule for code fences, as REVIEW CHECK stated it at `48101724`, meets that
-  ruling. Decided by the director at 2026-10-08T04:01:43Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239). The
-  check ends a line at `\n`, `\r\n`, or a lone `\r`, as that ruling covers (decided by
-  the director at 2026-10-08T04:42:33Z,
-  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062), and
-  reads a code block so: a fence of three or more backticks or tildes, after at most
-  three spaces, opens it, and a like fence closes it, or it runs to the end of the
-  comment. It does not see an HTML block or HTML comment, or a fence after a list marker
-  or a quote mark. In an old round, it does not see a `Hot path:` line, or a
-  `Reviewers:` line of a round that does not parse, with four or more spaces of indent
-  or a tab in its indent, where GitHub shows the line as text: for example, a line
-  that continues a paragraph, or a paragraph in a list item or a footnote. Such a
-  `Hot path:` line does not ask for `performance`. On 2026-10-08, the 58 old rounds of
-  the 12 open PRs that had one (#1245, #1487, #1554, #1561, #1600, #1626, #1636, #1643,
-  #1650, #1691, #1739, #1752) hit none of these cases. Decided by the director at
-  2026-10-08T05:13:45Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147),
-  2026-10-08T05:31:31Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328), and
-  2026-10-08T05:43:00Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053208426).
-  https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
-  does. A round comment posted before the cutoff `CUTOFF` in
+  check reads the comment as GitHub does: as CommonMark with the GitHub extensions, by
+  `pulldown-cmark`, with the spaces and tabs at the end of each line removed. A line
+  ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at
+  2026-10-08T04:42:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
+  round heading is the first top-level `## Review round <n>` heading. The fields are
+  the first top-level block after it, and the end lines are the last one, each when it
+  is a paragraph. A code block, an HTML block or comment, a list, a quote, or a table
+  is not a paragraph, so a list after the `Hot path:` line fails. In an old round, a
+  `Hot path:` line, or a `Reviewers:` line of a round that does not parse, counts where
+  GitHub shows it as a line of text of a paragraph, at any depth and any indent. A
+  line of a code block or an HTML block does not count. Changed by
+  https://github.com/synnaxlabs/foundation/issues/1783, approved by the director at
+  DIRECTOR. Supersedes the code block and indent rules of
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147,
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328, and
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053208426. A round
+  comment posted before the cutoff `CUTOFF` in
   `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
   free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
   text that names a function still needs `performance`. Decided by the director at
@@ -47,8 +43,7 @@
   (2026-10-07T06:32:32Z). For this rule, an old round that parses names
   `performance` in its `Reviewers:` field, read as before. One that does not parse
   names it in any `Reviewers:` line of its text. A `Hot path:` line counts anywhere in
-  its text. Each `Reviewers:` line of a round that does not parse, and each `Hot path:`
-  line, has at most three spaces of indent and no tab. Decided by the director at
+  its text. Decided by the director at
   2026-10-08T04:42:33Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062).
   The last round finds none and ends at the head, or at a commit that reaches the head

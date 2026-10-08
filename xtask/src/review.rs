@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::Value;
 
 use crate::field;
@@ -21,9 +22,6 @@ const BOT: &str = "synnax-foundation-factory[bot]";
 /// The end of each problem that asks for the round comment format.
 const FORMAT: &str =
     "in the format of .claude/skills/review/SKILL.md, \"Round comment\".";
-
-/// The line that stands for each line of a code block, its fences too.
-const FENCE: &str = "```";
 
 /// The names of the lines that end each round comment, in order.
 const END: [&str; 3] = ["Deferred", "Public surface", "Hot path"];
@@ -271,13 +269,12 @@ fn approval(record: &Record, head: &str) -> Option<String> {
     })
 }
 
-/// Reports whether a `Reviewers:` line in `paragraphs`, [`unindented`], names
+/// Reports whether a `Reviewers:` line in `text` ([`Shown::text`]) names
 /// `performance`.
-fn performer(paragraphs: &[Vec<&str>]) -> bool {
-    paragraphs
-        .iter()
+fn performer(text: &[Vec<&str>]) -> bool {
+    text.iter()
         .flatten()
-        .filter_map(|l| unindented(l)?.strip_prefix("Reviewers: "))
+        .filter_map(|l| l.strip_prefix("Reviewers: "))
         .any(|r| listed(r).contains("performance"))
 }
 
@@ -289,30 +286,28 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
-/// The fields are the first paragraph after that line, so the findings text cannot
-/// set them. The last paragraph is the end lines ([`END`]), unless the comment is
+/// Parses `body` as a round comment. `None` when it has no `## Review round <n>`
+/// heading. The fields are the first block after the heading, so the findings text
+/// cannot set them. The last block is the end lines ([`END`]), unless the comment is
 /// `old`, posted before [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
+    let body = unpadded(body);
+    let Shown {
+        number,
+        blocks,
+        text,
+    } = Shown::read(&body)?;
     // Only the end lines keep their indent: an indented one is a quote, not a line.
-    // Only spaces and tabs may end a closing fence.
-    let mut lines = lines(body).map(|l| l.trim_end_matches([' ', '\t']));
-    let number = lines.find_map(|l| l.trim_start().strip_prefix("## Review round "))?;
-    let paragraphs = paragraphs(lines);
-    let lines = paragraphs
-        .first()
-        .into_iter()
-        .flatten()
-        .map(|l| l.trim_start());
+    let lines = blocks.first().into_iter().flatten().map(|l| l.trim_start());
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
     let findings = field("Findings: ");
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     let performance = |reviewers: Option<&BTreeSet<String>>| {
-        let performer = reviewers
-            .map_or_else(|| performer(&paragraphs), |r| r.contains("performance"));
-        (old && !performer && named(&paragraphs)).then(|| {
+        let performer =
+            reviewers.map_or_else(|| performer(&text), |r| r.contains("performance"));
+        (old && !performer && named(&text)).then(|| {
             format!(
                 "review round {number} names no performance, which this round requires."
             )
@@ -347,7 +342,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         let hot = if old {
             false
         } else {
-            let rest = paragraphs.get(1..).unwrap_or_default();
+            let rest = blocks.get(1..).unwrap_or_default();
             hot(rest.last().map_or(&[][..], Vec::as_slice), number)?
         };
         Ok(Round {
@@ -369,49 +364,6 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
 fn lines(text: &str) -> impl Iterator<Item = &str> + Clone {
     text.split('\n')
         .flat_map(|l| l.strip_suffix('\r').unwrap_or(l).split('\r'))
-}
-
-/// The paragraphs of `lines`, split at blank lines. Each line of a code block, blank
-/// ones too, becomes [`FENCE`], which is never a field or an end line.
-fn paragraphs<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<&'a str>> {
-    let mut open: Option<(char, usize)> = None;
-    lines
-        .map(|l| {
-            let quoted = match (open, fence(l)) {
-                (None, None) => false,
-                (None, Some((mark, length, _))) => {
-                    open = Some((mark, length));
-                    true
-                }
-                (Some((mark, length)), Some((m, n, "")))
-                    if m == mark && n >= length =>
-                {
-                    open = None;
-                    true
-                }
-                (Some(_), _) => true,
-            };
-            if quoted { FENCE } else { l }
-        })
-        .collect::<Vec<_>>()
-        .split(|l| l.is_empty())
-        .filter(|p| !p.is_empty())
-        .map(<[&str]>::to_vec)
-        .collect()
-}
-
-/// The mark, length, and info text of the code fence that `line` is, if any: three or
-/// more backticks or tildes after at most three spaces. A backtick fence has no
-/// backtick in its info text, so a line that starts with inline code is not one. A
-/// fence closes the block that a fence of its mark and no greater length opened, when
-/// it has no info.
-fn fence(line: &str) -> Option<(char, usize, &str)> {
-    let line = unindented(line)?;
-    let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let info = line.trim_start_matches(mark);
-    let length = line.len() - info.len();
-    (length >= 3 && !(mark == '`' && info.contains('`')))
-        .then_some((mark, length, info))
 }
 
 /// Whether the end lines `paragraph` of round `number` name a hot path ([`function`]).
@@ -438,31 +390,18 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
 }
 
 /// Whether a round posted before [`CUTOFF`] names a hot path: a `Hot path:` line in
-/// `paragraphs`, the round's text after its heading, [`unindented`], names a function
-/// ([`function`]).
-fn named(paragraphs: &[Vec<&str>]) -> bool {
+/// `text` ([`Shown::text`]) names a function ([`function`]).
+fn named(text: &[Vec<&str>]) -> bool {
     let start = format!("{}:", END[2]);
-    paragraphs.iter().any(|p| {
-        (0..p.len()).any(|i| {
-            unindented(p[i])
-                .filter(|l| l.starts_with(&start))
-                .is_some_and(|l| {
-                    function(&entries(&[&[l][..], &p[i + 1..]].concat()).0[0].1)
-                })
-        })
+    text.iter().any(|p| {
+        (0..p.len())
+            .any(|i| p[i].starts_with(&start) && function(&entries(&p[i..]).0[0].1))
     })
-}
-
-/// `line` with its indent removed, or `None` when the indent is more than three
-/// spaces.
-fn unindented(line: &str) -> Option<&str> {
-    let text = line.trim_start_matches(' ');
-    (line.len() - text.len() <= 3).then_some(text)
 }
 
 /// The [`END`] entries at the start of `lines`, each as its name and value, and the
 /// number of lines they take. An entry starts at the start of a line with its name,
-/// and may wrap onto the lines after it, but not onto a fence line.
+/// and may wrap onto the lines after it.
 fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
     let mut values: Vec<(&str, String)> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -471,13 +410,152 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
             .find(|name| line.starts_with(&format!("{name}:")));
         match (name, values.last_mut()) {
             (Some(name), _) => values.push((*name, line[name.len() + 1..].to_string())),
-            (None, Some((_, value))) if *line != FENCE => {
+            (None, Some((_, value))) => {
                 *value = format!("{value} {}", line.trim_start());
             }
             _ => return (values, i),
         }
     }
     (values, lines.len())
+}
+
+/// A comment from its round heading on, read as GitHub reads Markdown.
+#[derive(Debug)]
+struct Shown<'a> {
+    /// The text after `## Review round ` in the heading.
+    number: &'a str,
+    /// Each top-level block after the heading. A paragraph is its lines, each from the
+    /// start of its source line, so it keeps its indent. Any other block has no lines.
+    blocks: Vec<Vec<&'a str>>,
+    /// The lines of text of each paragraph after the heading, at any depth, as GitHub
+    /// shows them: without the indent or the marks of a list item or a quote.
+    text: Vec<Vec<&'a str>>,
+}
+
+impl<'a> Shown<'a> {
+    /// Reads `body` ([`unpadded`]) from its first top-level `## Review round `
+    /// heading on, or `None` when it has none.
+    fn read(body: &'a str) -> Option<Self> {
+        let options = Options::ENABLE_TABLES
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS;
+        let mut events = Parser::new_ext(body, options).into_offset_iter();
+        let mut depth = 0_usize;
+        let number = events.by_ref().find_map(|(event, range)| match event {
+            Event::Start(tag) if !inline(tag.to_end()) => {
+                depth += 1;
+                let heading = matches!(
+                    tag,
+                    Tag::Heading {
+                        level: HeadingLevel::H2,
+                        ..
+                    }
+                );
+                let line = &body[range.start..line_end(body, range.start)];
+                (depth == 1 && heading)
+                    .then(|| line.strip_prefix("## Review round "))
+                    .flatten()
+            }
+            Event::End(tag) if !inline(tag) => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        })?;
+        let mut shown = Self {
+            number,
+            blocks: Vec::new(),
+            text: Vec::new(),
+        };
+        // Each open block, the heading first, with the index in `text` of a paragraph.
+        // A tight list item holds the text of its paragraph with no paragraph event.
+        let mut open: Vec<Option<usize>> = vec![None];
+        let mut fresh = true;
+        for (event, range) in events {
+            match event {
+                Event::Start(tag) if !inline(tag.to_end()) => {
+                    if open.is_empty() {
+                        shown.blocks.push(Vec::new());
+                    }
+                    let paragraph = matches!(tag, Tag::Paragraph | Tag::Item);
+                    open.push(paragraph.then(|| {
+                        shown.text.push(Vec::new());
+                        shown.text.len() - 1
+                    }));
+                    fresh = true;
+                }
+                Event::End(tag) if !inline(tag) => {
+                    open.pop();
+                    fresh = true;
+                }
+                Event::Rule => {
+                    if open.is_empty() {
+                        shown.blocks.push(Vec::new());
+                    }
+                    fresh = true;
+                }
+                Event::SoftBreak | Event::HardBreak => fresh = true,
+                Event::End(_) | Event::TaskListMarker(_) => {}
+                _ => {
+                    if let (true, Some(Some(paragraph))) = (fresh, open.last()) {
+                        shown.line(body, *paragraph, range.start, open.len() == 1);
+                        fresh = false;
+                    }
+                }
+            }
+        }
+        Some(shown)
+    }
+
+    /// Adds the line of `body` at offset `start` to the text of paragraph
+    /// `paragraph`, and, for a `top` paragraph, to the last block with its indent.
+    fn line(&mut self, body: &'a str, paragraph: usize, start: usize, top: bool) {
+        let end = line_end(body, start);
+        self.text[paragraph].push(&body[start..end]);
+        if top {
+            let from = body[..start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+            let line = &body[from..end];
+            self.blocks.last_mut().expect("a block is open").push(line);
+        }
+    }
+}
+
+/// Whether the tag that `tag` ends is inline: it holds text within a line of a
+/// block.
+fn inline(tag: TagEnd) -> bool {
+    matches!(
+        tag,
+        TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Superscript
+            | TagEnd::Subscript
+            | TagEnd::Link
+            | TagEnd::Image
+    )
+}
+
+/// `text` with the spaces and tabs at the end of each line removed, which changes
+/// nothing that the check reads. pulldown-cmark 0.13.4 does not close a code block at
+/// a fence that a tab follows, as the Markdown spec and GitHub do.
+fn unpadded(text: &str) -> String {
+    let mut unpadded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(end) = rest.find(['\n', '\r']) {
+        unpadded.push_str(rest[..end].trim_end_matches([' ', '\t']));
+        unpadded.push_str(&rest[end..=end]);
+        rest = &rest[end + 1..];
+    }
+    unpadded.push_str(rest.trim_end_matches([' ', '\t']));
+    unpadded
+}
+
+/// The offset in `text` of the end of the line that holds offset `start`.
+fn line_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .find(['\n', '\r'])
+        .map_or(text.len(), |i| start + i)
 }
 
 /// Whether the `Hot path:` value `value` names a function: its first word, with

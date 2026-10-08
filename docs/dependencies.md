@@ -100,6 +100,7 @@ These never ship in the binary.
 | Crate | Used by | Why | License | Version | Approved |
 | --- | --- | --- | --- | --- | --- |
 | `serde_json` | `xtask` | Read `cargo metadata` output for the layer check | MIT or Apache-2.0 | | Bootstrap |
+| `pulldown-cmark` | `xtask` | Read a review round comment as GitHub shows it (CommonMark) for the review check. `default-features = false`; its tree: `bitflags`, `memchr`, `unicase` | MIT | 0.13.4 | 2026-10-08: the person said "approve" (https://github.com/synnaxlabs/foundation/issues/1783#issuecomment-6065347952) |
 | `proptest` | All crates (dev) | Property tests (testing layer 1) | MIT or Apache-2.0 | 1.11.0 | 2026-10-04 |
 | `loom` | `ring`, `block` (`cfg(loom)`) | Exhaustive checks of wake protocols and atomics | MIT | 0.7.2 | 2026-10-04 |
 | `shuttle` | `ring`, `block` (dev) | Randomized (PCT) checks of larger concurrent models | Apache-2.0 | 0.9.5 | 2026-10-04 |
