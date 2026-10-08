@@ -6,7 +6,7 @@
 use std::fmt;
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-use raft::{Claim, Message, Ready, Signature};
+use raft::{Claim, Message, Raft, Ready, Signature};
 use types::node::{self, PrivateKey, PublicKey};
 
 use crate::bytes::{put_grant, put_key, put_keys, put_position};
@@ -54,23 +54,24 @@ impl Signer {
     }
 }
 
-/// Checks each signature that `message` carries against the public keys of the
-/// region's members. `public_key` gives the key of a member, and `None` for a node
-/// that is not one.
+/// Checks each signature that `raft` reads from `message` against the public keys of
+/// the region's members. `public_key` gives the key of a member, and `None` for a
+/// node that is not one.
 ///
 /// # Errors
 ///
 /// [`Error`] names the signer of the first claim that fails, in the order of
-/// [`Message::claims`].
+/// [`Raft::claims`].
 ///
 /// # Panics
 ///
 /// When a claim has no signature. A decoded message gives each claim one.
 pub(crate) fn check(
+    raft: &Raft,
     message: &Message,
     public_key: impl Fn(node::Key) -> Option<PublicKey>,
 ) -> Result<(), Error> {
-    for (claim, signature) in message.claims() {
+    for (claim, signature) in raft.claims(message) {
         verify(&claim, signature, &public_key)?;
     }
     Ok(())
@@ -92,9 +93,9 @@ fn verify(
     Ok(())
 }
 
-/// Why [`check`] refused a message.
+/// Why a claim in a message does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The signer is not a member of the region.
     NotMember {
         /// The node whose signature the claim needs.
@@ -157,7 +158,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::sample::Index;
     use raft::{
-        Answer, Body, Change, Config, Data, Grant, Hard, Position, Raft, Start, Term,
+        Answer, Body, Change, Config, Data, Grant, Hard, Position, Proof, Start, Term,
         Voters,
     };
 
@@ -173,8 +174,136 @@ mod tests {
         move |voter| members.get(&voter).copied()
     }
 
+    // Node `key` of the voters 1, 2 and 3, in term 0 with an empty log.
+    fn node(key: node::Key) -> Raft {
+        let config = Config {
+            key,
+            election_ticks: 10,
+            heartbeat_ticks: 2,
+        };
+        let start = Start {
+            voters: Voters {
+                incoming: [1, 2, 3].map(self::key).into(),
+                outgoing: BTreeSet::new(),
+            },
+            ..Start::default()
+        };
+        Raft::new(config, start).unwrap()
+    }
+
+    // Checks `message` as its receiver, a node of the voters 1, 2 and 3 in term 0.
+    fn checked(
+        message: &Message,
+        public_key: impl Fn(node::Key) -> Option<PublicKey>,
+    ) -> Result<(), Error> {
+        check(&node(message.to), message, public_key)
+    }
+
     fn proven() -> Message {
         common::proven(1, 2, Body::Heartbeat { commit: 0 })
+    }
+
+    // A heartbeat of the term after `TERM` from node 1 to node 2, with the vote of
+    // node 1 alone, and a chain of one link: in `TERM`, leader 1 moved the voters
+    // from 1, 2 and 3 to 1 alone, elected by all three. The receiver reads the
+    // link, which makes the proof a quorum.
+    fn chained() -> Message {
+        let alone = Voters {
+            incoming: [key(1)].into(),
+            outgoing: BTreeSet::new(),
+        };
+        let link = raft::Link {
+            at: written(),
+            change: signed_change_to(alone),
+        };
+        let proof = Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: [(key(1), None)].into(),
+        };
+        let mut heartbeat = message(1, 2, Body::Heartbeat { commit: 0 });
+        heartbeat.term = Term(TERM.0 + 1);
+        heartbeat.proof = Some(proof);
+        heartbeat.chain = vec![link];
+        let mut ready = Ready {
+            messages: vec![heartbeat],
+            ..Ready::default()
+        };
+        signer(1).sign(&mut ready);
+        ready.messages.remove(0)
+    }
+
+    fn link_of(message: &mut Message) -> &mut Change {
+        &mut message.chain[0].change
+    }
+
+    #[test]
+    fn check_passes_a_chain_whose_votes_and_changes_are_signed() {
+        let chained = chained();
+        assert_eq!(chained.proof.as_ref().unwrap().voters.len(), 1);
+        assert_eq!(checked(&chained, members(&[1, 2, 3])), Ok(()));
+        assert_eq!(node(key(2)).step(chained), Ok(()));
+    }
+
+    #[test]
+    fn check_refuses_a_forged_vote_or_signature_of_a_link_the_receiver_reads() {
+        let members = members(&[1, 2, 3]);
+        let mut vote = chained();
+        let votes = &mut link_of(&mut vote).votes.voters;
+        *votes.get_mut(&key(2)).unwrap() = Some(Signature([0; 64]));
+        let forged = Err(Error::Forged { signer: key(2) });
+        assert_eq!(checked(&vote, &members), forged);
+        let mut change = chained();
+        link_of(&mut change).signature = Some(Signature([0; 64]));
+        let forged = Err(Error::Forged { signer: key(1) });
+        assert_eq!(checked(&change, &members), forged);
+        let mut both = chained();
+        *link_of(&mut both).votes.voters.get_mut(&key(3)).unwrap() =
+            Some(Signature([0; 64]));
+        link_of(&mut both).signature = Some(Signature([0; 64]));
+        let forged = Err(Error::Forged { signer: key(3) });
+        assert_eq!(checked(&both, &members), forged);
+    }
+
+    // Every proof is a quorum of no voters, so `step` must refuse such a link.
+    #[test]
+    fn a_link_with_no_voters_does_not_prove_a_leader_with_no_grants() {
+        let link = raft::Link {
+            at: written(),
+            change: signed_change_to(Voters::default()),
+        };
+        let mut heartbeat = message(1, 2, Body::Heartbeat { commit: 0 });
+        heartbeat.term = Term(u64::MAX);
+        heartbeat.proof = Some(Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: BTreeMap::new(),
+        });
+        heartbeat.chain = vec![link];
+        assert_eq!(checked(&heartbeat, members(&[1, 2, 3])), Ok(()));
+        let mut follower = node(key(2));
+        let unproven = raft::Error::Unproven {
+            term: Term(u64::MAX),
+            from: key(1),
+        };
+        assert_eq!(follower.step(heartbeat), Err(unproven));
+        assert_eq!(follower.term(), Term(0));
+    }
+
+    #[test]
+    fn check_reads_no_link_when_the_proof_is_a_quorum() {
+        let mut message = proven();
+        message.chain = chained().chain;
+        link_of(&mut message).signature = Some(Signature([0; 64]));
+        assert_eq!(checked(&message, members(&[1, 2, 3])), Ok(()));
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: decode gives each claim a signature")]
+    fn check_panics_on_an_unsigned_link_the_receiver_reads() {
+        let mut message = chained();
+        link_of(&mut message).signature = None;
+        checked(&message, members(&[1, 2, 3])).unwrap();
     }
 
     fn voter(message: &mut Message, id: u8) -> &mut Option<Signature> {
@@ -241,7 +370,12 @@ mod tests {
     }
 
     fn signed_change() -> Change {
-        let Data::Voters(change) = common::change(1, written(), joint()).data else {
+        signed_change_to(joint())
+    }
+
+    // The change to `voters` that leader 1 wrote at `written`, signed.
+    fn signed_change_to(voters: Voters) -> Change {
+        let Data::Voters(change) = common::change(1, written(), voters).data else {
             unreachable!()
         };
         change
@@ -308,7 +442,7 @@ mod tests {
     #[test]
     fn a_signed_grant_passes() {
         for grant in [Grant::PreVote, Grant::Vote] {
-            assert_eq!(check(&granted(2, grant, 1), members(&[1, 2, 3])), Ok(()));
+            assert_eq!(checked(&granted(2, grant, 1), members(&[1, 2, 3])), Ok(()));
         }
     }
 
@@ -323,7 +457,7 @@ mod tests {
             let message = common::proven(leader, to, body.clone());
             assert_eq!((message.from, message.to), (key(leader), key(to)));
             assert_eq!(message.body, body);
-            assert_eq!(check(&message, &members), Ok(()), "leader {leader}");
+            assert_eq!(checked(&message, &members), Ok(()), "leader {leader}");
         }
     }
 
@@ -336,7 +470,7 @@ mod tests {
         };
         signer(2).sign(&mut ready);
         assert_eq!(ready.messages, std::slice::from_ref(&refused));
-        assert_eq!(check(&refused, members(&[1, 2])), Ok(()));
+        assert_eq!(checked(&refused, members(&[1, 2])), Ok(()));
     }
 
     #[test]
@@ -382,13 +516,13 @@ mod tests {
     fn check_refuses_a_voter_that_is_not_a_member() {
         let unknown = Error::NotMember { signer: key(3) };
         let refused = Err(unknown);
-        assert_eq!(check(&proven(), members(&[1, 2])), refused);
+        assert_eq!(checked(&proven(), members(&[1, 2])), refused);
         assert_eq!(
             unknown.to_string(),
             format!("node {} is not a member of the region", key(3))
         );
         let reply = granted(3, Grant::Vote, 1);
-        assert_eq!(check(&reply, members(&[1, 2])), refused);
+        assert_eq!(checked(&reply, members(&[1, 2])), refused);
     }
 
     // An append of the change of leader 1 at index 2 of `TERM`, proven by 1.
@@ -417,16 +551,16 @@ mod tests {
     #[test]
     fn check_refuses_a_forged_vote_or_signature_of_a_change_an_append_carries() {
         let members = members(&[1, 2, 3]);
-        assert_eq!(check(&change_append(), &members), Ok(()));
+        assert_eq!(checked(&change_append(), &members), Ok(()));
         let mut zeroed = change_append();
         change_of(&mut zeroed).signature = Some(Signature([0; 64]));
         let forged = Err(Error::Forged { signer: key(1) });
-        assert_eq!(check(&zeroed, &members), forged);
+        assert_eq!(checked(&zeroed, &members), forged);
         let mut vote = change_append();
         let votes = &mut change_of(&mut vote).votes.voters;
         *votes.get_mut(&key(2)).unwrap() = Some(Signature([0; 64]));
         let forged = Err(Error::Forged { signer: key(2) });
-        assert_eq!(check(&vote, &members), forged);
+        assert_eq!(checked(&vote, &members), forged);
     }
 
     #[test]
@@ -434,7 +568,7 @@ mod tests {
     fn check_panics_on_an_unsigned_change_an_append_carries() {
         let mut message = change_append();
         change_of(&mut message).signature = None;
-        check(&message, members(&[1, 2, 3])).unwrap();
+        checked(&message, members(&[1, 2, 3])).unwrap();
     }
 
     #[test]
@@ -442,7 +576,7 @@ mod tests {
         let mut message = proven();
         voter(&mut message, 2).as_mut().unwrap().0[63] ^= 1;
         let forged = Error::Forged { signer: key(2) };
-        assert_eq!(check(&message, members(&[1, 2, 3])), Err(forged));
+        assert_eq!(checked(&message, members(&[1, 2, 3])), Err(forged));
         assert_eq!(
             forged.to_string(),
             format!("the claim of node {} is forged", key(2))
@@ -454,7 +588,7 @@ mod tests {
     fn check_panics_on_an_unsigned_entry() {
         let mut message = proven();
         *voter(&mut message, 3) = None;
-        check(&message, members(&[1, 2, 3])).unwrap();
+        checked(&message, members(&[1, 2, 3])).unwrap();
     }
 
     #[test]
@@ -470,7 +604,7 @@ mod tests {
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::Forged { signer: key(3) });
-        assert_eq!(check(&message, members), refused);
+        assert_eq!(checked(&message, members), refused);
     }
 
     #[test]
@@ -478,7 +612,7 @@ mod tests {
         let mut message = proven();
         *voter(&mut message, 3) = Some(signature(2, Grant::Vote, 1));
         let refused = Err(Error::NotMember { signer: key(2) });
-        assert_eq!(check(&message, members(&[1, 3])), refused);
+        assert_eq!(checked(&message, members(&[1, 3])), refused);
     }
 
     #[test]
@@ -487,13 +621,13 @@ mod tests {
         let forged = Err(Error::Forged { signer: key(1) });
         let mut later = proven();
         later.term = Term(TERM.0 + 1);
-        assert_eq!(check(&later, &members), forged);
+        assert_eq!(checked(&later, &members), forged);
         let mut other = proven();
         other.proof.as_mut().unwrap().candidate = key(4);
-        assert_eq!(check(&other, &members), forged);
+        assert_eq!(checked(&other, &members), forged);
         let mut pre_vote = proven();
         pre_vote.proof.as_mut().unwrap().grant = Grant::PreVote;
-        assert_eq!(check(&pre_vote, &members), forged);
+        assert_eq!(checked(&pre_vote, &members), forged);
     }
 
     #[test]
@@ -502,14 +636,14 @@ mod tests {
         let forged = Err(Error::Forged { signer: key(2) });
         let mut later = granted(2, Grant::Vote, 1);
         later.term = Term(TERM.0 + 1);
-        assert_eq!(check(&later, &members), forged);
+        assert_eq!(checked(&later, &members), forged);
         let mut other = granted(2, Grant::Vote, 1);
         other.to = key(3);
-        assert_eq!(check(&other, &members), forged);
+        assert_eq!(checked(&other, &members), forged);
         let mut pre_vote = granted(2, Grant::Vote, 1);
         let answer = Answer::Granted(Some(signature(2, Grant::Vote, 1)));
         pre_vote.body = reply_body(Grant::PreVote, answer);
-        assert_eq!(check(&pre_vote, &members), forged);
+        assert_eq!(checked(&pre_vote, &members), forged);
     }
 
     #[test]
@@ -517,7 +651,7 @@ mod tests {
         let mut moved = granted(2, Grant::Vote, 1);
         moved.from = key(3);
         let refused = Err(Error::Forged { signer: key(3) });
-        assert_eq!(check(&moved, members(&[1, 2, 3])), refused);
+        assert_eq!(checked(&moved, members(&[1, 2, 3])), refused);
     }
 
     // Three voters that sign each `Ready`, send its byte form, and check each
@@ -538,24 +672,8 @@ mod tests {
 
     impl Group {
         fn new() -> Self {
-            let voters = Voters {
-                incoming: [1, 2, 3].map(key).into(),
-                outgoing: BTreeSet::new(),
-            };
-            let node = |id| {
-                let config = Config {
-                    key: key(id),
-                    election_ticks: 10,
-                    heartbeat_ticks: 2,
-                };
-                let start = Start {
-                    voters: voters.clone(),
-                    ..Start::default()
-                };
-                (Raft::new(config, start).unwrap(), signer(id))
-            };
             Self {
-                nodes: [1, 2, 3].map(node).into(),
+                nodes: [1, 2, 3].map(|id| (node(key(id)), signer(id))).into(),
                 flight: Vec::new(),
                 committed: vec![Vec::new(); 3],
             }
@@ -594,12 +712,13 @@ mod tests {
             else {
                 panic!("{bytes:?} is not a raft message");
             };
-            assert_eq!(check(&message, members(&[1, 2, 3])), Ok(()), "{message:?}");
             let (node, _) = self
                 .nodes
                 .iter_mut()
                 .find(|(node, _)| node.key() == message.to)
                 .unwrap();
+            let members = members(&[1, 2, 3]);
+            assert_eq!(check(node, &message, members), Ok(()), "{message:?}");
             node.step(message).unwrap();
         }
 

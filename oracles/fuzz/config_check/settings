@@ -1,0 +1,5 @@
+node_settings "edge" {
+  select = "edge.*"
+  disk = "10GiB"
+  pool = "1GiB"
+}

@@ -3,12 +3,13 @@ use std::fmt;
 use raft::Position;
 use types::node::{self, PublicKey};
 
-use crate::region::{Unfit, Unknown};
-use crate::{claim, log, status};
+use crate::change::Unknown;
+use crate::region::Unfit;
+use crate::{claim, log};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The log did not open.
     Log(log::Error),
     /// `raft` refused the log, a message, or a proposal.
@@ -34,15 +35,13 @@ pub(crate) enum Error {
     Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// This node is not a voter of its configuration, and only a voter proposes a
+    /// change. Call it on a voter.
+    NoVote,
     /// The region cannot hold a member record of the config.
     Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
-    /// This node has no mesh time that can stamp a join: none yet, one with an unknown
-    /// error, or one whose later edge is before the Unix epoch.
-    Unsynced,
-    /// A join request names more than 64 status channels.
-    Status(status::Many),
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
     /// write of the log, the group takes no proposal and no message until the write
     /// ends. For the answer to a forwarded proposal, the peer gets no answer, and the
@@ -80,15 +79,13 @@ impl fmt::Display for Error {
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::NoVote => f.write_str(
+                "this node is not a voter, and only a voter proposes a change",
+            ),
             Self::Member(refused) => refused.fmt(f),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
-            Self::Unsynced => f.write_str(
-                "this node has no mesh time with a known error at or after the Unix \
-                 epoch, so it stamps no join",
-            ),
-            Self::Status(many) => many.fmt(f),
             Self::Pool(cause) => {
                 write!(f, "the pool has no block for the mesh now: {cause}")
             }
@@ -127,7 +124,7 @@ impl From<transport::Error> for Error {
 
 /// Why a group stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Stopped {
+pub enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
     /// The committed change at `at` has 0 bytes or a kind that this build does not
@@ -156,3 +153,5 @@ impl fmt::Display for Stopped {
         }
     }
 }
+
+impl std::error::Error for Stopped {}

@@ -1,6 +1,9 @@
 //! What a message from a voter that does not lead does to another node.
 
-use raft::{Body, Entry, Error, Message, Position, Raft, Role, Term, Voters};
+use raft::{
+    Body, Change, Claim, Entry, Error, Grant, Link, Message, Position, Proof, Raft,
+    Role, Term, Voters,
+};
 use types::node;
 
 use crate::change::{heartbeat, joining};
@@ -37,6 +40,7 @@ fn forged_append(
             commit: at.index,
         },
         proof: None,
+        chain: Vec::new(),
     };
     (append, entry)
 }
@@ -152,4 +156,76 @@ fn a_voter_cannot_move_a_new_node_that_holds_the_joint_configuration() {
         check_refused(&mut node, heartbeat(2, u64::MAX, &[]), unproven);
         check_refused(&mut node, heartbeat(2, u64::MAX, &[2]), unproven);
     }
+}
+
+// A link carries only its leader's signature and the votes of its term, so a voter
+// that led a term can sign a configuration entry it never wrote. This test pins the
+// gap: #882 gives a link the signed acks of a quorum, and turns the step into
+// `Error::Unproven`.
+#[test]
+fn a_voter_that_led_a_term_can_forge_a_link_to_itself_and_prove_any_term() {
+    let mut network = Network::new(&[Position::default(); 3], 0);
+    let (leader, term) = network.settle(&[]).unwrap();
+    let victim = (leader + 1) % 3;
+    let from = Network::key(leader);
+    let alone = Voters {
+        incoming: [from].into_iter().collect(),
+        ..Voters::default()
+    };
+    // The votes of the term, as the leader holds them.
+    let vote = |voter| {
+        let claim = Claim::Grant {
+            voter,
+            grant: Grant::Vote,
+            term,
+            candidate: from,
+        };
+        (voter, Some(Network::signature(&claim)))
+    };
+    let granted = (0..3).filter(|&node| network.nodes[node].hard().vote == Some(from));
+    let votes = Proof {
+        grant: Grant::Vote,
+        candidate: from,
+        voters: granted.map(|node| vote(Network::key(node))).collect(),
+    };
+    assert!(votes.voters.len() >= 2, "{votes:?}");
+    let at = Position {
+        term,
+        index: network.disks[victim].last().index + 1,
+    };
+    let signature = Network::signature(&Claim::Change {
+        leader: from,
+        at,
+        voters: &alone,
+    });
+    let link = Link {
+        at,
+        change: Change {
+            voters: alone,
+            votes,
+            signature: Some(signature),
+        },
+    };
+    let forged = Term(u64::MAX);
+    let grant = Claim::Grant {
+        voter: from,
+        grant: Grant::Vote,
+        term: forged,
+        candidate: from,
+    };
+    let heartbeat = Message {
+        from,
+        to: Network::key(victim),
+        term: forged,
+        body: Body::Heartbeat { commit: 0 },
+        proof: Some(Proof {
+            grant: Grant::Vote,
+            candidate: from,
+            voters: [(from, Some(Network::signature(&grant)))].into(),
+        }),
+        chain: vec![link],
+    };
+    let node = &mut network.nodes[victim];
+    assert_eq!(node.step(heartbeat), Ok(()));
+    assert_eq!((node.term(), node.leader()), (forged, Some(from)));
 }

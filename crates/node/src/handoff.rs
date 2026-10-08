@@ -20,6 +20,30 @@ pub(crate) fn pair<T>() -> (Give<T>, Take<T>) {
     (Give(Arc::clone(&state)), Take(state))
 }
 
+/// The ends of `len` handoffs in a line, each to the next.
+pub(crate) struct Chain<T> {
+    /// The give of the first handoff.
+    pub(crate) first: Give<T>,
+    /// The take of the last handoff.
+    pub(crate) last: Take<T>,
+    /// For each of `len` links in order, the take that gets the value and the give
+    /// that passes it on. A link that drops its give ends each later take with `None`.
+    pub(crate) links: Vec<(Take<T>, Give<T>)>,
+}
+
+/// A line of `len + 1` handoffs, through `len` links.
+pub(crate) fn chain<T>(len: usize) -> Chain<T> {
+    let (gives, takes): (Vec<_>, Vec<_>) = (0..=len).map(|_| pair()).unzip();
+    let (mut gives, mut takes) = (gives.into_iter(), takes.into_iter());
+    let first = gives.next().expect("invariant: a chain has a handoff");
+    let last = takes.next_back().expect("invariant: a chain has a handoff");
+    Chain {
+        first,
+        last,
+        links: takes.zip(gives).collect(),
+    }
+}
+
 struct State<T> {
     value: Option<T>,
     ended: bool,
