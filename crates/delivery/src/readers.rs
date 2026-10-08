@@ -365,7 +365,7 @@ impl Readers {
         if releases.is_none_or(|(_, seq)| seq.end > durable) {
             return &self.woken_complete;
         }
-        if self.owing > 0 {
+        if self.owing != 0 {
             self.miss_owed();
         }
         while let Some((frame, seq)) =
@@ -2630,6 +2630,26 @@ pub(super) mod tests {
             readers.grant(key, 3 * CHARGE);
             let (taken, end) = drain(&mut readers, key);
             assert_eq!(taken.len(), 2, "each frame that waits costs one series");
+            assert!(matches!(end, Next::Empty));
+        }
+
+        #[test]
+        fn gives_the_frames_that_wait_for_credit_across_a_change_of_key_set() {
+            let sets = Sets::new();
+            let mut readers = Readers::new(0);
+            let key = readers
+                .open(Reader::Unnamed, Start::At(live(0)), 1, Charge::Whole)
+                .key;
+            let narrow = sets.frame(&sets.narrow, &[(0, 8), (1, 8), (2, 8)]);
+            readers.queue(&sets.full(), &sets.wide, 0..1);
+            readers.queue(&sets.full(), &sets.wide, 1..2);
+            readers.queue(&narrow, &sets.narrow, 2..3);
+            assert_eq!(readers.release(3), [key]);
+            assert_eq!(drain(&mut readers, key).0.len(), 1);
+            readers.grant(key, u64::MAX);
+            let (taken, end) = drain(&mut readers, key);
+            let keys: Vec<_> = taken.iter().map(Frame::key_set).collect();
+            assert_eq!(keys, [sets.wide.key(), sets.narrow.key()]);
             assert!(matches!(end, Next::Empty));
         }
 
