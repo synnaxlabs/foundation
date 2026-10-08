@@ -42,10 +42,11 @@ Check, with file and line at the merge commit:
    the background, under `lockf -k ~/.cache/foundation-heavy.lock`, because it waits
    for the lock (`docs/coordination.md`, "Heavy runs on the laptop"). A bench starts
    only when `uptime` shows a load under 8, and the verdict names the load. Tests
-   check behavior through public calls, not a private field or the `Debug` string of
-   the type under test, unless a written reason holds and the assertion is not the
-   only kill of a mutant (`docs/claude/testing.md`). They cover the failure paths, and
-   each error is asserted by variant and message.
+   check behavior through public calls, not a private field or the `Debug` string of the
+   type under test (the test of a hand-written `Debug` impl itself excepted), unless a
+   written reason holds and the assertion is not the only kill of a mutant
+   (`docs/claude/testing.md`). They cover the failure paths, and each error is asserted
+   by variant and message.
 2. **Review trail.** List each round: its reviewers, its range, and its end time. Each
    round ended before the merge. The trail meets "Done" in
    `.claude/skills/review/SKILL.md`. Each finding was fixed, or answered or deferred
