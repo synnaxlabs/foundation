@@ -186,14 +186,14 @@ impl Log {
         self.voters_through(self.committed)
     }
 
-    // Whether a committed configuration removed `key`: the configuration before the
-    // entries or a configuration entry at or below `committed` held it, and the last
-    // of those lacks it.
+    // Whether a committed configuration removed `key`: `base` or a configuration
+    // entry at or below `committed` held it, and the last of those lacks it. A
+    // founding set shows only through its first entry, which the walk covers.
     pub(crate) fn removed(&self, key: node::Key) -> bool {
         let through = self
             .configs
             .partition_point(|&config| config <= self.committed);
-        let mut held = self.before_entries().contains(key);
+        let mut held = self.base.contains(key);
         let mut present = held;
         for &index in &self.configs[..through] {
             present = self.config(index).1.voters.contains(key);
@@ -723,10 +723,23 @@ mod tests {
         assert!(log.removed(node::Key::from_u128(2)));
     }
 
-    // With no voters at the start, the founding set of the first configuration entry
-    // is the configuration before the entries.
+    // An entry past the commit that adds a removed node back makes it a voter of the
+    // configuration in force, and it stays removed until that entry commits.
     #[test]
-    fn with_no_voters_removed_counts_the_founding_set_as_held() {
+    fn removed_holds_for_a_voter_that_an_uncommitted_entry_added_back() {
+        let entries = [config(1, 1, 2), config(1, 2, 1)];
+        let one = node::Key::from_u128(1);
+        let mut log = Log::new(voters(1), entries.to_vec(), 1).unwrap();
+        assert!(log.voters().1.contains(one));
+        assert!(log.removed(one));
+        log.commit_to(2);
+        assert!(!log.removed(one));
+    }
+
+    // With no voters at the start, a node that only the configuration entries held
+    // is removed once a committed entry lacks it.
+    #[test]
+    fn with_no_voters_removed_counts_the_configuration_entries() {
         let set =
             |ids: &[u128]| ids.iter().map(|&id| node::Key::from_u128(id)).collect();
         let join = Voters {

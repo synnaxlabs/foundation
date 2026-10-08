@@ -2116,10 +2116,16 @@ How to read this record:
   caller must keep and that shows only at a restart. The person decided on 2026-10-05
   ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
   configuration removed a node: the configuration before the entries or a committed
-  `Voters` entry held it, and the last committed configuration lacks it. `mesh` asks
-  it at a refusal and keeps no copy of the configurations (#1774). `Voters::contains`
-  and `Voters::nodes` are public. Decided by `laptop.architect`, 2026-10-08T03:04:33Z:
+  `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
+  ask it at a refusal (#1105, #1762). `Voters::contains` and `Voters::nodes` are
+  public. After compaction, a snapshot also carries the nodes that the configurations
+  it replaces held or removed, so the answer survives a trim (#253). Decided by
+  `laptop.architect`, 2026-10-08T03:04:33Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777.
+  Supersedes the place of `held` in `mesh` in part 2 of
+  https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747 and
+  finding 2 of
+  https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
