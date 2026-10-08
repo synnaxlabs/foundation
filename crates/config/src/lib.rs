@@ -116,12 +116,11 @@ fn checked<'a>(
         writers: Vec::new(),
         nodes: Vec::new(),
     };
-    for (name, label) in names(documents, Kind::Connector) {
+    let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
+    connectors.sort_by_key(|(_, label)| order(label.span));
+    for (name, label) in connectors {
         let lower = name.as_str().to_ascii_lowercase().into();
-        let first = found.connectors.entry(lower).or_insert(label);
-        if order(label.span) < order(first.span) {
-            *first = label;
-        }
+        found.connectors.entry(lower).or_insert(label);
     }
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
@@ -699,6 +698,26 @@ mod tests {
             span: at(0, 1).unwrap(),
             text: "the earlier name".into(),
         });
+        assert_eq!(check(&documents), Err(vec![repeat]));
+    }
+
+    #[test]
+    fn refuses_the_later_name_in_the_documents_when_neither_has_a_span() {
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
+        let mut documents = [
+            document(vec![settings(0, 0, "site_a.budget", &policy)]),
+            document(vec![settings(1, 0, "Site_A.budget", &policy)]),
+        ];
+        for document in &mut documents {
+            document.blocks[0].labels[0].span = None;
+        }
+        let repeat = refused(
+            "config.duplicate-name",
+            None,
+            "the name \"Site_A.budget\" repeats the earlier `node_settings` name \
+             \"site_a.budget\"",
+            "Give each `node_settings` block a name that differs by more than case",
+        );
         assert_eq!(check(&documents), Err(vec![repeat]));
     }
 
