@@ -179,7 +179,8 @@ impl Log {
     /// durable when the call returns. A torn record at the end, which a crash leaves,
     /// is dropped.
     ///
-    /// One log at a time holds `dir`, from its open until it drops and its calls end.
+    /// One log at a time holds `dir`, from its open until it drops. A file call of a
+    /// write that was dropped can end after that.
     ///
     /// # Errors
     ///

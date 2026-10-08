@@ -2193,7 +2193,8 @@ How to read this record:
   stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory. A log also holds the file `lock`
-  of that directory open for writing, from its open until it drops and its calls end.
+  of that directory open for writing, from its open until it drops. A file call of a
+  dropped write can end after the drop, and the lock does not cover it (#1375).
   The file has no bytes, and one with bytes fails the open (`Files(Length)`). So a
   second open of the directory gives `Error::Log` with `Busy` on the lock, at each
   time, whatever log file the first log holds (#1360, decided by `laptop.architect`,
