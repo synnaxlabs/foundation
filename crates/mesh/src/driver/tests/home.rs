@@ -425,37 +425,25 @@ fn a_dropped_call_that_waits_for_its_entry_leaves_no_waker_and_no_floor() {
     });
 }
 
-// The spawned call waits for the outcome of its entry when the other call drops.
+// Each call waits for the outcome of its entry when the second one drops. A count of
+// 3 means that the group holds a clone of that waker.
 #[test]
-fn a_dropped_call_leaves_the_waker_of_another_call_that_waits_for_its_entry() {
+fn a_dropped_call_leaves_the_waker_of_each_other_call_that_waits_for_its_entry() {
     solo(|node, tasks| async move {
-        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-        let first = elect(&mesh).await;
-        let mut dropped = Box::pin(mesh.set_home(INDEX, key(2)));
-        assert_eq!(now(dropped.as_mut()).await, Poll::Pending);
-        let result = Rc::new(RefCell::new(None));
-        let (calling, returned) = (mesh.clone(), Rc::clone(&result));
-        tasks.spawn(async move {
-            let set = calling.set_home(INDEX, key(3)).await;
-            *returned.borrow_mut() = Some(set);
-        });
-        let clock = node.clock();
-        clock.sleep(TICK).await;
-        assert_eq!(now(dropped.as_mut()).await, Poll::Pending);
-        drop(dropped);
-        let reply = raft::Message {
-            term: first.term,
-            ..message(
-                2,
-                1,
-                Body::AppendReply {
-                    last: after(first, 2).index,
-                },
-            )
-        };
-        assert_eq!(mesh.receive(public(2), reply), Ok(()));
-        clock.sleep(Span::MILLISECOND).await;
-        assert_eq!(*result.borrow(), Some(Ok(())));
+        let mesh = create_leader(&node, &tasks).await;
+        let held = [(); 3].map(|()| Arc::new(Idle));
+        let wakers = held.clone().map(Waker::from);
+        let mut calls = [1, 2, 3].map(|id| Box::pin(mesh.set_home(INDEX, key(id))));
+        for _ in 0..2 {
+            for (call, waker) in calls.iter_mut().zip(&wakers) {
+                let mut cx = Context::from_waker(waker);
+                assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+            }
+            node.clock().sleep(TICK).await;
+        }
+        let [_first, second, _third] = calls;
+        drop(second);
+        assert_eq!(held.each_ref().map(Arc::strong_count), [3, 2, 3]);
     });
 }
 
@@ -807,6 +795,38 @@ fn one_poll_that_sees_the_answer_and_a_later_term_keeps_the_answer() {
     assert_eq!(more, None);
     assert_eq!(end, Ok(()));
     assert_eq!(set, Some((Ok(()), Some(key(1)))));
+}
+
+// The leader has the proposal and gives no answer, so the call waits for it. A count
+// of 4 means that the group and the stream of the answer each hold a clone of that
+// waker.
+#[test]
+fn a_call_that_waits_for_the_answer_keeps_the_waker_of_its_last_poll() {
+    let asked = Arc::new(Mutex::new(false));
+    let got = Arc::clone(&asked);
+    let call = move |node: sim::node::Node, mesh: Mesh| async move {
+        let (old, new) = (Arc::new(Idle), Arc::new(Idle));
+        let old_waker = Waker::from(Arc::clone(&old));
+        let new_waker = Waker::from(Arc::clone(&new));
+        let mut call = Box::pin(mesh.set_home(INDEX, key(1)));
+        let mut cx = Context::from_waker(&old_waker);
+        while !*asked.lock().unwrap() {
+            assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+            node.clock().sleep(Span::MILLISECOND).await;
+        }
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        let first = Arc::strong_count(&old);
+        let mut cx = Context::from_waker(&new_waker);
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        [first, Arc::strong_count(&old), Arc::strong_count(&new)]
+    };
+    let (counts, ()) = run(call, |mut leader| async move {
+        let (_, _asked) = leader.proposal().await;
+        leader.silent.set(true);
+        *got.lock().unwrap() = true;
+        leader.rest(seconds(3)).await;
+    });
+    assert_eq!(counts, [4, 2, 4]);
 }
 
 /// The next value of `watch`, which comes while `call` waits.
