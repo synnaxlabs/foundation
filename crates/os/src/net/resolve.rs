@@ -71,32 +71,41 @@ fn getaddrinfo(name: &CStr, port: u16) -> Result<Vec<SocketAddr>, Failure> {
         let errno = super::errno(&io::Error::last_os_error());
         return Err(Failure { code, errno });
     }
-    let addresses = addresses(list, port);
-    // SAFETY: `list` came from a `getaddrinfo` that succeeded, and is freed once.
-    unsafe { libc::freeaddrinfo(list) };
-    Ok(addresses)
+    Ok(List(list).addresses(port))
 }
 
-/// Each address in `list`, a list that `getaddrinfo` gave, with `port`.
-fn addresses(list: *const libc::addrinfo, port: u16) -> Vec<SocketAddr> {
-    let mut addresses = Vec::new();
-    let mut entry = list;
-    // SAFETY: each link of the list is null or valid until `freeaddrinfo`.
-    while let Some(info) = unsafe { entry.as_ref() } {
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "`SocketAddrAny::read` copies `ai_addrlen` bytes, at any alignment"
-        )]
-        let storage = info.ai_addr.cast::<SocketAddrStorage>().cast_const();
-        // SAFETY: `ai_addr` points at `ai_addrlen` bytes of one socket address.
-        let any = unsafe { SocketAddrAny::read(storage, info.ai_addrlen) };
-        let mut address = SocketAddr::try_from(any)
-            .expect("invariant: getaddrinfo of AF_UNSPEC gives only IP addresses");
-        address.set_port(port);
-        addresses.push(address);
-        entry = info.ai_next;
+/// A list that a `getaddrinfo` that succeeded gave. Its drop frees it.
+struct List(*mut libc::addrinfo);
+
+impl List {
+    /// Each address in the list, with `port`.
+    fn addresses(&self, port: u16) -> Vec<SocketAddr> {
+        let mut addresses = Vec::new();
+        let mut entry = self.0.cast_const();
+        // SAFETY: each link of the list is null or valid until the drop.
+        while let Some(info) = unsafe { entry.as_ref() } {
+            #[expect(
+                clippy::cast_ptr_alignment,
+                reason = "`SocketAddrAny::read` copies `ai_addrlen` bytes, at any alignment"
+            )]
+            let storage = info.ai_addr.cast::<SocketAddrStorage>().cast_const();
+            // SAFETY: `ai_addr` points at `ai_addrlen` bytes of one socket address.
+            let any = unsafe { SocketAddrAny::read(storage, info.ai_addrlen) };
+            let mut address = SocketAddr::try_from(any)
+                .expect("invariant: getaddrinfo of AF_UNSPEC gives only IP addresses");
+            address.set_port(port);
+            addresses.push(address);
+            entry = info.ai_next;
+        }
+        addresses
     }
-    addresses
+}
+
+impl Drop for List {
+    fn drop(&mut self) {
+        // SAFETY: a list that `getaddrinfo` gave, freed only here.
+        unsafe { libc::freeaddrinfo(self.0) };
+    }
 }
 
 /// The error of a lookup of `host` that failed with `code` and `errno`. The code of
