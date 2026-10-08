@@ -4476,8 +4476,7 @@ How to read this record:
   completes the handshake until the mesh states its rule. At the stop, each session and
   stream future drops, then the transport. The bound on the wait for a header is #1628.
   A transport that stops with an error stops the node, and `Node::join` gives
-  `Error::Transport`, by `laptop.architect-2` on #1647 (2026-10-08):
-  https://github.com/synnaxlabs/foundation/issues/1647#issuecomment-6049354544. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  `Error::Transport`. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
   datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
@@ -4487,6 +4486,9 @@ How to read this record:
   over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
   bandwidth-delay product. The number of sessions has no bound until #1628.
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
+  Amended (2026-10-08, #1647, by `laptop.architect-2`, 00:05 UTC): a transport that
+  stops stops the node:
+  https://github.com/synnaxlabs/foundation/issues/1647#issuecomment-6049354544.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
