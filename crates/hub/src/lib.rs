@@ -186,7 +186,7 @@ impl Hub {
     }
 
     /// Sets the access rules that each later hello and request is checked against.
-    /// Until the first call, no subject is known: each hello gets
+    /// Until the first call, the rules know no subject, so they refuse each hello with
     /// `access::proof::Error::Unknown`.
     pub fn rules(&self, rules: access::Rules) {
         self.0.borrow_mut().rules = rules;

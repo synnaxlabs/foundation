@@ -5259,8 +5259,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
   `Hub::rules` sets the `access::Rules` that each later hello and request is checked
   against, and `node` calls it with the rules of each spec (#1951). Until then, a hub
-  has `access::Rules::default()`, which knows no subject, so each hello gets
-  `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, because the
+  has `access::Rules::default()`, which knows no subject, so it refuses each hello
+  with `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, because the
   rules change at run time through `Mesh::apply`. Decided by `laptop.architect`
   (2026-10-08T18:05:25Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140).

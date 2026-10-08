@@ -68,11 +68,6 @@ impl Link {
     /// The [`serve::Error`] that ended the stream. The stream stops with its code,
     /// except after [`serve::Error::Stream`]. A refusal on the hello stream also
     /// closes the session with that code.
-    ///
-    /// # Panics
-    ///
-    /// When a reader session sends a frame: `transport` cannot yet send a message in
-    /// parts (#68).
     pub fn serve(
         &self,
         incoming: Incoming,
