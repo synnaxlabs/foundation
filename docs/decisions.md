@@ -1199,7 +1199,10 @@ How to read this record:
   (`hub::Config::mesh`, `None` for a node with no region), and `hub::Config::node` stays
   the one source of this node's key. `define` never carries an index. A writer, a
   reader, or an open that `Link::serve` gives waits until the mesh names a home for each
-  of its indexes. At this node, the first such session carries the index, once; with no
+  of its indexes. At this node, the first such session carries the index, once: a later
+  carry does nothing (`home::Shard::carry`), so the hub keeps no set of carried indexes
+  (`laptop.architect`, 2026-10-08T19:30:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067505377). With no
   mesh, this node is the home of each index. No frame comes before a session, so nothing
   waits on the carry. When the home is another node, `writer::Error::Remote` and
   `reader::Error::Remote` give it, and `serve` stops the stream with `NOT_HOME`. A

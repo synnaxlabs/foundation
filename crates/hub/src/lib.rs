@@ -93,8 +93,6 @@ struct State {
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
     mesh: Option<::mesh::Mesh>,
-    /// The indexes that the home carries.
-    carried: hash::Set<types::channel::Key>,
 }
 
 impl Hub {
@@ -130,7 +128,6 @@ impl Hub {
             entropy,
             rules: access::Rules::default(),
             mesh,
-            carried: hash::Set::default(),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -239,12 +236,10 @@ impl State {
         self.channels.insert(name.clone(), channel);
     }
 
-    /// Carries `index` at the home, once.
+    /// Carries `index` at the home. A later carry does nothing.
     fn carry(&mut self, index: types::channel::Key) {
-        if self.carried.insert(index) {
-            let slot = self.interner.slots().assign(index);
-            self.home.carry(slot);
-        }
+        let slot = self.interner.slots().assign(index);
+        self.home.carry(slot);
     }
 
     /// Wakes each reader that the home names as having a frame to take or a miss to
@@ -278,8 +273,8 @@ enum Away {
     Mesh(::mesh::Stopped),
 }
 
-/// Waits until the mesh names a home for `index`, then carries `index` at the home,
-/// once, when the home is this node. With no mesh, this node is the home.
+/// Waits until the mesh names a home for `index`, then carries `index` at the home
+/// when the home is this node. With no mesh, this node is the home.
 async fn carry(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
