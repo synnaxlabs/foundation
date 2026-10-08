@@ -3415,11 +3415,11 @@ How to read this record:
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
   stays its one check, of the members and voters. It checks no definition or home. The
-  node that founds the region checks the definitions (SPEC APPLY). Nothing checks the
+  node that founds the region checks the definitions (SPEC CHANGE). Nothing checks the
   homes (`laptop.architect`, 2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). `Start`
-  lost, because `driver.rs` holds `raft::Start`,
-  which changes at each open (`laptop.architect`, 2026-10-08T10:34:37Z:
+  lost, because `driver.rs` holds `raft::Start`, which changes at each open
+  (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
   `Founding::definitions` adds
   `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
