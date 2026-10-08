@@ -2046,7 +2046,15 @@ How to read this record:
   and `access::admit` will (#1747). Lost: a `bool`, which a caller can invert or drop
   with no word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the
   length; and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
-  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858).
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858). The
+  TLS CertificateVerify is the exception: rustls checks it with the Ed25519 of
+  `aws-lc-rs`, as a step of the TLS 1.3 handshake, and `transport` takes the
+  certificate's key only as a `PublicKey`, so a key of small order ends the handshake.
+  If `PublicKey::verify` gets a check that `aws-lc-rs` does not make, both TLS verifiers
+  call it. Lost: a call of `PublicKey::verify` in each TLS verifier, which moves the
+  checks of TLS 1.3 out of rustls and adds none. Decided by `laptop.architect` at
+  2026-10-08T08:04:32Z
+  (https://github.com/synnaxlabs/foundation/pull/1812#issuecomment-6055539099).
 
 ### 1.8 Consensus, regions, and the spec
 
