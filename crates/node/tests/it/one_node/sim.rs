@@ -36,7 +36,8 @@ pub(super) struct Influx {
     store: Arc<Mutex<Store>>,
     /// The address of the first [`Influx::serve`].
     address: Option<SocketAddr>,
-    /// The token that stops the shard that serves, and that shard.
+    /// The token that stops the shard that serves, and that shard. The panic tests put
+    /// a shard that panics here, since no input to [`Influx::serve`] makes it panic.
     serving: Option<(Token, Handle)>,
 }
 
@@ -100,7 +101,7 @@ impl Influx {
     /// port before the next [`Influx::serve`] makes that serve panic.
     pub(super) fn stop(&mut self) {
         let joined = self.halt().expect("it serves");
-        joined.expect("the simulated InfluxDB serves with no panic");
+        joined.expect("the simulated InfluxDB stops with no panic");
     }
 
     /// Cancels the server and joins its shard, or gives `None` when it does not serve.
@@ -200,10 +201,19 @@ fn a_dropped_influx_panics_when_its_server_panicked() {
 }
 
 #[test]
-#[should_panic(expected = "the simulated InfluxDB serves with no panic")]
+#[should_panic(expected = "the simulated InfluxDB stops with no panic")]
 fn a_stopped_influx_panics_when_its_server_panicked() {
     let mut influx = Influx::default();
     let shard = start("influx", |_| async { panic!("the server broke") });
     influx.serving = Some((Token::new(), shard));
     influx.stop();
+}
+
+#[test]
+#[should_panic(expected = "the test broke")]
+fn a_dropped_influx_does_not_panic_again_when_the_test_panics() {
+    let mut influx = Influx::default();
+    let shard = start("influx", |_| async { panic!("the server broke") });
+    influx.serving = Some((Token::new(), shard));
+    panic!("the test broke");
 }
