@@ -227,6 +227,36 @@ fn a_leader_that_loses_its_lead_applies_through_the_next_leader() {
     assert_eq!(cluster.board().applied, [(old, moved, Ok(moved))]);
 }
 
+// The leader commits the entry of the follower, and the cut drops the answer, so the
+// call proposes again and its second entry is refused as stale.
+#[test]
+fn a_call_whose_answer_is_cut_off_gives_the_pointer_of_its_own_change() {
+    for run in 0..4 {
+        let (mut cluster, _, follower, _) = Cluster::led(run);
+        let config = link::Config {
+            delay: Span::from_nanos(6 * TICK.nanos()),
+            ..link::Config::default()
+        };
+        for other in IDS.into_iter().filter(|&id| id != follower) {
+            let (a, b) = (cluster.node(follower).clone(), cluster.node(other).clone());
+            cluster.sim.link(&a, &b, config);
+            cluster.sim.link(&b, &a, config);
+        }
+        cluster.run(seconds(5));
+        let definitions = create_subjects(&["plant.a"], 1);
+        let moved = pointer(1, &definitions);
+        cluster.apply(follower, base(), definitions);
+        cluster.run(Span::from_nanos(3 * TICK.nanos()));
+        cluster.link_each(follower, 1.0);
+        cluster.run(seconds(5));
+        assert_eq!(cluster.board().applied, [], "run {run}");
+        cluster.link_each(follower, 0.0);
+        cluster.run(seconds(10));
+        let applied = [(follower, moved, Ok(moved))];
+        assert_eq!(cluster.board().applied, applied, "run {run}");
+    }
+}
+
 fn name(text: &str) -> Name {
     text.parse().unwrap()
 }

@@ -17,7 +17,9 @@ impl Mesh {
     /// `base`. A follower forwards the change to the leader. Returns the new pointer
     /// once its entry has committed and this node applied it. It tries again when a
     /// new leader replaces the entry, and after each tick while no leader takes it, as
-    /// [`Mesh::set_home`] does.
+    /// [`Mesh::set_home`] does. A retry that finds the pointer it makes, from an entry
+    /// whose answer was lost, also returns it. A retry that finds a later pointer gives
+    /// `Stale`, even when an entry of this call applied before it.
     ///
     /// # Errors
     ///
@@ -25,7 +27,8 @@ impl Mesh {
     ///
     /// - [`Error::Problems`] when the spec has problems.
     /// - [`Error::Large`] when its tree has more chunks than one change lists.
-    /// - [`Error::Stale`] when the pointer is not `base` at the apply.
+    /// - [`Error::Stale`] when the pointer is not `base`, or the pointer this call
+    ///   makes, at the apply.
     /// - [`Error::NoVote`] and [`Error::Stopped`] as for [`Mesh::set_home`].
     ///
     /// # Panics
@@ -50,6 +53,7 @@ impl Mesh {
             });
         }
         let root = update.root;
+        let moved = base.next(root);
         let change = Change::Spec {
             base,
             root,
@@ -57,7 +61,10 @@ impl Mesh {
         };
         loop {
             match self.attempt()?.settle(change.clone()).await? {
-                Some(Ok(())) => return Ok(base.next(root)),
+                Some(Ok(())) => return Ok(moved),
+                Some(Err(Refused::Stale { pointer, .. })) if pointer == moved => {
+                    return Ok(moved);
+                }
                 Some(Err(Refused::Stale { base, pointer })) => {
                     return Err(Error::Stale { base, pointer });
                 }
