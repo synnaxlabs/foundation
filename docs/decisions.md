@@ -1580,12 +1580,15 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359). The
   byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
-  is kind 1 (opened) or 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
-  `u32`, series `u32`); a key is a `u128`; an end is place and end, each `u32`. Amended
-  (2026-10-07, #1196): the message order, the runs, and the head bound move from `hub`
-  to two stateful decoders in `wire`, `hub::Home` at the home and `hub::Reader` at the
-  reader's node, each with an exact error for each broken rule, so `hub` checks no wire
-  rule. Decided by the architect
+  is kind 1 (opened), 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
+  `u32`, series `u32`), or 3 (behind, no fields, by the Behind rule: the architect,
+  2026-10-07T21:07:50Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6046877541); a key is
+  a `u128`; an end is place and end, each `u32`. Amended (2026-10-07, #1196): the
+  message order, the runs, and the head bound move from `hub` to two stateful decoders
+  in `wire`, `hub::Home` at the home and `hub::Reader` at the reader's node, each with
+  an exact error for each broken rule, so `hub` checks no wire rule. Decided by the
+  architect
   (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
   Amended (2026-10-07T14:56:48Z, #1455): `Reader::decode` checks a message in three
   steps and gives the error of the first that fails: the bytes (its decode error), the
@@ -1594,6 +1597,11 @@ How to read this record:
   of this session yet, so its series count has no session to break. Lost: `Places`
   first. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1455#issuecomment-6040654132).
+  Amended (#1631): after `Behind`, each message gives `Ended`, before the three steps
+  and whatever its bytes, since the home sends nothing after `Behind`. Step 3 also
+  gives `Latest` for a `Behind` in a latest session, since only a complete session
+  falls behind. Decided by the architect (2026-10-08T01:04:51Z):
+  https://github.com/synnaxlabs/foundation/issues/1689#issuecomment-6050026992.
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
