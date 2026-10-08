@@ -304,7 +304,8 @@ state on `main`.
 
 - `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
   and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
-  Fuzzed: `codec_series`, `codec_encoder`, `codec_string`.
+  Fuzzed: `codec_series`, `codec_encoder`, `codec_string`, `codec_shape`, and
+  `codec_shape_encoder`.
 
 ## Secrets
 
@@ -376,6 +377,8 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
+| `codec_shape` | `codec::validate`, `codec::decode` on an array, matrix, list, `String`, or `Bytes` series | Both give one result; an array or a matrix gives the result of the series of its elements; a `String` series gives the result of a `Bytes` series or the first sample that `str::from_utf8` refuses; a valid series decodes with zeros for the padding, and encodes and decodes unchanged |
+| `codec_shape_encoder` | `codec::Encoder` on an array, matrix, list, `String`, or `Bytes` series | Gives the refusal that a second reader of the raw form gives, or a valid series that decodes unchanged with zeros for the padding; an array or a matrix encodes as the series of its elements |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
 | `spec_tree` | `spec::tree::get`, `apply`, `diff`, and `spec::region::definitions` on chunks from a peer | `get` agrees with a whole `diff`; `apply` gives the entries with the changes; `definitions` gives the decode of the entries only when `spec::region::tree` of them has the same root |
@@ -383,6 +386,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `config_plan` | `config::plan::Plan::decode` | Encodes to the same bytes |
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
@@ -400,13 +404,12 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private, not built, not reached from a file, or
-not reached from the corpus:
-`transport::message` (#55), the QUIC hello
+not reached from the corpus: `transport::message` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
 `mesh::log::sequence`, #1746), each connector's protocol parser, the OPC UA binary
 decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
-`connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
-reaches only from an input with a `connector` block of kind `influx`, and no input holds
-one yet (#1817).
+`node::identity::decode` (#1994), `connector::http::uri`, and
+`connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
+`connector` block of kind `influx`, and no input holds one yet (#1817).

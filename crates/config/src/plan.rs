@@ -1,3 +1,7 @@
+//! The change from a mesh's spec to its config files, and the plan file that holds it.
+
+mod codec;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
@@ -5,12 +9,14 @@ use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Span};
 use spec::channel::{Channel, Problem};
 use spec::definition;
-use spec::placement::{Placed, Policy, Unplaced, place};
+use spec::placement::{Placed, Policy, Tie, place};
 use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
 use crate::{Definition, Entry, Found, KINDS, channel, checked, sort, span};
+
+pub use codec::Error;
 
 const CONNECTOR_HOME: Code = Code::new("config.connector-home");
 const SPLIT_PLACEMENT: Code = Code::new("config.split-placement");
@@ -37,7 +43,7 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///
 /// - `config.wrong-channel` at each edge to a channel that is not what the edge needs.
 /// - `config.unplaced` at the label of each index and each connector that
-///   [`spec::placement::place`] cannot place.
+///   [`spec::placement::place`] gives a `Tie` for, or a `Homeless` `home`.
 /// - `config.connector-home` at the `home` of a placement that wins for a connector and
 ///   names a node other than the connector's `node`.
 /// - `config.split-placement` at each index when the placement that wins for it is not
@@ -58,7 +64,9 @@ pub fn plan(
     kinds: &Table,
 ) -> Result<Plan, Vec<Diagnostic>> {
     let found = checked(documents, kinds)?;
-    let channels = channels(&found.entries, applied);
+    let entries = found.entries.iter();
+    let kinds = entries.filter_map(|(name, entry)| Some((name, kind(entry)?)));
+    let channels = channels(kinds, BTreeMap::new(), applied, unheld(applied));
     let mut diagnostics = wrong(&found, &channels);
     let placements = placements(&found);
     let indexes = indexes(&found, &placements, &mut diagnostics);
@@ -83,19 +91,91 @@ pub struct Plan {
     /// The pointer of the applied spec. An apply refuses the plan when the region's
     /// pointer is another one.
     pub base: spec::Pointer,
-    /// Each change, in tree key order. Empty when the files match the spec.
-    pub changes: Vec<Change>,
+    /// Each change, by tree key. Empty when the files match the spec.
+    pub changes: BTreeMap<Name, Change>,
     /// The home node of each index that has none before the apply, by index name: a
     /// new index, or a data channel that becomes one.
     pub homes: BTreeMap<Name, Name>,
+}
+
+impl Plan {
+    /// The definitions of the spec after the plan, by tree key: `applied` with each
+    /// change. A channel keeps the key of the stored channel at its name, and a new
+    /// name gets a key from `key`, in name order. An edge to a name that is no channel
+    /// after the plan gets a key from `key` too, which [`spec::region::check`] refuses
+    /// as dangling. Each call of `key` must give a key that no channel holds and that
+    /// no earlier call gave.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Mismatch`] at the first change in one of these cases, which [`plan`]
+    /// never makes from `applied`, so only a hand-made file holds:
+    ///
+    /// - `old` is not the digest of the encoded definition at its name in `applied`:
+    ///   `None` at a stored name, `Some` at a name with no stored definition, or
+    ///   another digest.
+    /// - The stored or the new definition is of a kind that no block of a file
+    ///   defines, or its name is not the tree key of an unreserved label of its kind.
+    ///
+    /// A change with no old and no new definition, which [`Plan::decode`] refuses,
+    /// gets it at a stored name and changes nothing at another name.
+    pub fn definitions(
+        &self,
+        applied: &BTreeMap<Name, definition::Definition>,
+        key: impl FnMut() -> Key,
+    ) -> Result<BTreeMap<Name, definition::Definition>, Error> {
+        let mut definitions = applied.clone();
+        for (name, change) in &self.changes {
+            let stored = definitions.remove(name);
+            let new = change.new.as_ref().map(|entry| match &entry.definition {
+                Definition::Spec(definition) => definition.kind(),
+                Definition::Channel(_) => definition::Kind::Channel,
+            });
+            let kinds = stored
+                .as_ref()
+                .map(definition::Definition::kind)
+                .into_iter();
+            if change.old != stored.map(|stored| Digest::of(&stored.encode()))
+                || !kinds.chain(new).all(|kind| planned(name, kind))
+            {
+                return Err(Error::Mismatch { name: name.clone() });
+            }
+        }
+        let kept = definitions
+            .iter()
+            .filter_map(|(name, definition)| match definition {
+                definition::Definition::Channel(channel) => Some((name, channel.key)),
+                _ => None,
+            })
+            .collect();
+        let kinds = self
+            .changes
+            .iter()
+            .filter_map(|(name, change)| Some((name, kind(change.new.as_ref()?)?)));
+        let channels = channels(kinds, kept, applied, key);
+        for (name, change) in &self.changes {
+            if let Some(Entry {
+                definition: Definition::Spec(definition),
+                ..
+            }) = &change.new
+            {
+                definitions.insert(name.clone(), definition.clone());
+            }
+        }
+        let channels = channels.into_iter();
+        definitions.extend(
+            channels.map(|(name, channel)| {
+                (name, definition::Definition::Channel(channel))
+            }),
+        );
+        Ok(definitions)
+    }
 }
 
 /// One definition that the plan adds, changes, or removes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Change {
-    /// The tree key.
-    pub name: Name,
     /// The digest of the stored definition, or `None` when the plan adds it.
     pub old: Option<Digest>,
     /// The definition in the files, with the span of its label, or `None` when the
@@ -103,13 +183,16 @@ pub struct Change {
     pub new: Option<Entry>,
 }
 
-/// The channel of each `channel` entry. It keeps the key of the stored channel at its
-/// name. Else it gets `Key::from_u128(n)` for the least `n` that no stored channel or
-/// earlier entry holds.
-fn channels(
-    entries: &BTreeMap<Name, Entry>,
-    applied: &BTreeMap<Name, definition::Definition>,
-) -> BTreeMap<Name, Channel> {
+fn kind(entry: &Entry) -> Option<&spec::channel::Kind<Name>> {
+    match &entry.definition {
+        Definition::Channel(kind) => Some(kind),
+        Definition::Spec(_) => None,
+    }
+}
+
+/// Gives `Key::from_u128(n)` for each `n` from 1 up that no channel of `applied`
+/// holds.
+fn unheld(applied: &BTreeMap<Name, definition::Definition>) -> impl FnMut() -> Key {
     let held: BTreeSet<Key> = applied
         .values()
         .filter_map(|definition| match definition {
@@ -117,40 +200,45 @@ fn channels(
             _ => None,
         })
         .collect();
-    let mut made = (1..).map(Key::from_u128).filter(|key| !held.contains(key));
-    let keys: BTreeMap<&Name, Key> = entries
-        .iter()
-        .filter(|(_, entry)| matches!(entry.definition, Definition::Channel(_)))
-        .map(|(name, _)| match applied.get(name) {
-            Some(definition::Definition::Channel(channel)) => (name, channel.key),
-            _ => (
-                name,
-                made.next().expect("invariant: fewer than 2^128 channels"),
-            ),
-        })
-        .collect();
-    let mut channels = BTreeMap::new();
-    for (name, entry) in entries {
-        let Definition::Channel(kind) = &entry.definition else {
-            continue;
+    let mut made = (1..)
+        .map(Key::from_u128)
+        .filter(move |key| !held.contains(key));
+    move || made.next().expect("invariant: fewer than 2^128 channels")
+}
+
+/// The channel of each of `kinds`, which come in name order, by name. A channel
+/// keeps the key of the channel that `applied` stores at its name, and else gets one
+/// from `key`. An edge points at the channel at its name in `kinds` or `kept`, or else
+/// at a key from `key`.
+fn channels<'n>(
+    kinds: impl Iterator<Item = (&'n Name, &'n spec::channel::Kind<Name>)>,
+    mut kept: BTreeMap<&'n Name, Key>,
+    applied: &BTreeMap<Name, definition::Definition>,
+    mut key: impl FnMut() -> Key,
+) -> BTreeMap<Name, Channel> {
+    let kinds: Vec<_> = kinds.collect();
+    for &(name, _) in &kinds {
+        let stored = match applied.get(name) {
+            Some(definition::Definition::Channel(channel)) => channel.key,
+            _ => key(),
         };
-        let kind = kind.clone().map(|to| {
-            *keys.get(&to).unwrap_or_else(|| {
-                panic!(
-                    "invariant: `check` refuses the edge to `{to}`, which no block \
-                     defines"
-                )
-            })
-        });
-        channels.insert(
-            name.clone(),
-            Channel {
-                key: keys[name],
-                kind,
-            },
-        );
+        kept.insert(name, stored);
     }
-    channels
+    kinds
+        .into_iter()
+        .map(|(name, kind)| {
+            let kind = kind
+                .clone()
+                .map(|to| kept.get(&to).copied().unwrap_or_else(&mut key));
+            (
+                name.clone(),
+                Channel {
+                    key: kept[name],
+                    kind,
+                },
+            )
+        })
+        .collect()
 }
 
 /// A `config.wrong-channel` diagnostic for each edge to a channel that is not what the
@@ -191,7 +279,7 @@ fn placements<'f>(found: &'f Found<'_>) -> Vec<(&'f Name, &'f Policy)> {
 }
 
 /// The node of an index's first writer, and where [`place`] puts the index.
-type Index<'f> = (Option<&'f Name>, Result<Placed<'f>, Unplaced>);
+type Index<'f> = (Option<&'f Name>, Result<Placed<'f>, Tie>);
 
 /// Places each index, with the node of its first writer. Reports each index that two
 /// writer nodes or [`place`] leave with no home.
@@ -208,9 +296,7 @@ fn indexes<'f>(
         };
         let writer = writer(found, index, diagnostics);
         let placed = place(index, placements.iter().copied(), writer);
-        if let Err(problem) = &placed {
-            diagnostics.push(unplaced(entry.label_span, problem));
-        }
+        diagnostics.extend(unplaced(entry.label_span, &placed));
         indexes.insert(index, (writer, placed));
     }
     indexes
@@ -234,26 +320,26 @@ fn homes(
         .into_iter()
         .filter(|(index, _)| !stored(index))
         .filter_map(|(index, (_, placed))| {
-            Some((index.clone(), placed.ok()?.home.clone()))
+            Some((index.clone(), placed.ok()?.home.ok()?.clone()))
         })
         .collect()
 }
 
 /// A connector's key, entry, and node, and where [`place`] puts it.
-type Connector<'f> = (&'f Name, &'f Entry, &'f Name, Result<Placed<'f>, Unplaced>);
+type Connector<'f> = (&'f Name, &'f Entry, &'f Name, Result<Placed<'f>, Tie>);
 
 /// An index, the node of its first writer, where [`place`] puts it, and its nearest
 /// connector.
 type Nearest<'f, 'c> = (
     &'f Name,
     Option<&'f Name>,
-    &'f Result<Placed<'f>, Unplaced>,
+    &'f Result<Placed<'f>, Tie>,
     &'c Connector<'f>,
 );
 
 /// Places each connector, with its `node` as the writer. Reports
 /// `config.connector-home` at the `home` of a winner that names another node,
-/// `config.unplaced` at each connector that [`place`] cannot place, and
+/// `config.unplaced` at each connector that [`place`] gives a tie or no home for, and
 /// `config.split-placement` at each index whose nearest connector above its name has
 /// another winner.
 fn connectors<'f>(
@@ -286,24 +372,23 @@ fn connectors<'f>(
         .collect();
     let moves = moves(&connectors, &nearest, placements);
     for (name, entry, node, placed) in &connectors {
-        match placed {
-            Ok(Placed {
-                placement: Some(placement),
-                home,
-                ..
-            }) if home != node => {
-                let fix = moves.get(name).map(String::as_str);
-                diagnostics
-                    .push(connector_home(found, placement, home, name, node, fix));
-            }
-            Ok(_) => {}
-            Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
+        if let Ok(Placed {
+            placement: Some(placement),
+            home: Ok(home),
+            ..
+        }) = placed
+            && home != node
+        {
+            diagnostics
+                .push(connector_home(found, placement, home, name, node, &moves));
+        } else {
+            diagnostics.extend(unplaced(entry.label_span, placed));
         }
     }
     for (index, _, own, (connector, _, _, theirs)) in nearest {
-        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
-            let fix = moves.get(connector).map(String::as_str);
-            diagnostics.extend(split(found, index, own, connector, theirs, fix));
+        if let (Ok(own), Ok(theirs)) = (own, theirs) {
+            let (own, theirs) = (own.placement, theirs.placement);
+            diagnostics.extend(split(found, index, own, connector, theirs, &moves));
         }
     }
 }
@@ -313,21 +398,23 @@ fn connectors<'f>(
 /// `home` while an index of the connector has no writer, by connector. `nearest` holds
 /// the nearest connector of each index. The fix names each winner, the connector's
 /// first.
-fn moves<'c>(
-    connectors: &'c [Connector<'_>],
-    nearest: &[Nearest<'_, 'c>],
-    placements: &[(&Name, &Policy)],
-) -> BTreeMap<&'c Name, String> {
+fn moves<'f, 'c>(
+    connectors: &'c [Connector<'f>],
+    nearest: &[Nearest<'f, 'c>],
+    placements: &[(&'f Name, &'f Policy)],
+) -> BTreeMap<&'c Name, Fix<'f>> {
     let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
     for (_, _, node, placed) in connectors {
-        if let Ok(Some(placement)) = winner(placed) {
+        if let Some(placement) =
+            placed.as_ref().ok().and_then(|placed| placed.placement)
+        {
             nodes.entry(placement).or_default().insert(*node);
         }
     }
     let mut owners = BTreeMap::<_, BTreeSet<_>>::new();
     let mut unwritten = BTreeSet::new();
     for (_, writer, own, (connector, _, node, _)) in nearest {
-        if let Ok(Some(own)) = winner(own) {
+        if let Some(own) = own.as_ref().ok().and_then(|own| own.placement) {
             owners.entry(*connector).or_default().insert(own);
             nodes.entry(own).or_default().insert(*node);
         }
@@ -346,7 +433,7 @@ fn moves<'c>(
     };
     let mut moves = BTreeMap::new();
     for (name, _, node, placed) in connectors {
-        let Ok(placement) = winner(placed) else {
+        let Ok(Placed { placement, .. }) = *placed else {
             continue;
         };
         let owners: Vec<_> = owners
@@ -359,28 +446,16 @@ fn moves<'c>(
         let fix = match (placement, owners.as_slice()) {
             (Some(p), _) if (elsewhere(p, node) || unhoused(p)) && spread(p) => {
                 let others = owners.iter().copied().filter(|owner| *owner != p);
-                format!(
-                    "Exclude the connector `{name}` and its indexes from the \
-                     `select` of {}, and select them with another placement whose \
-                     `home` is `{node}`",
-                    each(&[p].into_iter().chain(others).collect::<Vec<_>>())
-                )
+                Fix::Exclude {
+                    placements: [p].into_iter().chain(others).collect(),
+                    node,
+                }
             }
             (Some(p), _) | (None, &[p]) if unhoused(p) && !spread(p) => {
-                let p = label(p);
-                format!(
-                    "Name `{node}` as the `home` of `{p}`, keep `{node}` out of its \
-                     `standby` and `copies`, and make `{p}` win for the connector \
-                     `{name}` and its indexes"
-                )
+                Fix::House { placement: p, node }
             }
             (None, &[p]) if !elsewhere(p, node) && !unhoused(p) => continue,
-            (None, [_, ..]) => format!(
-                "Exclude the indexes of the connector `{name}` from the `select` of \
-                 {}, and select the connector and its indexes with another placement \
-                 whose `home` is `{node}`",
-                each(&owners)
-            ),
+            (None, [_, ..]) => Fix::Regroup { owners, node },
             _ => continue,
         };
         moves.insert(*name, fix);
@@ -400,28 +475,82 @@ fn each(keys: &[&Name]) -> String {
     }
 }
 
+/// The fix of a diagnostic of a connector. [`moves`] gives the first three, which move
+/// the connector or its indexes to another placement.
+enum Fix<'a> {
+    /// Take the connector and its indexes out of `placements`, the connector's winner
+    /// first, into a placement whose `home` is `node`.
+    Exclude {
+        placements: Vec<&'a Name>,
+        node: &'a Name,
+    },
+    /// Make `node` the home of `placement`, keep `node` out of its `standby` and
+    /// `copies`, and make `placement` win for the connector and its indexes.
+    House { placement: &'a Name, node: &'a Name },
+    /// Take the indexes of the connector out of `owners`, the placements that win for
+    /// them, into a placement for the connector whose `home` is `node`.
+    Regroup {
+        owners: Vec<&'a Name>,
+        node: &'a Name,
+    },
+    /// Name `node` as the `home` of the placement that wins, and keep `node` out of its
+    /// `standby` and `copies`.
+    Home { node: &'a Name },
+    /// Make `placement` win for the connector and its indexes.
+    Win { placement: &'a Name },
+}
+
+/// The text of the fix of a diagnostic of `connector`: the fix that [`moves`] gives
+/// `connector`, or else `otherwise`.
+fn fix(
+    moves: &BTreeMap<&Name, Fix<'_>>,
+    connector: &Name,
+    otherwise: &Fix<'_>,
+) -> String {
+    match moves.get(connector).unwrap_or(otherwise) {
+        Fix::Exclude { placements, node } => format!(
+            "Exclude the connector `{connector}` and its indexes from the `select` of \
+             {}, and select them with another placement whose `home` is `{node}`",
+            each(placements)
+        ),
+        Fix::House { placement, node } => {
+            let p = label(placement);
+            format!(
+                "Name `{node}` as the `home` of `{p}`, keep `{node}` out of its \
+                 `standby` and `copies`, and make `{p}` win for the connector \
+                 `{connector}` and its indexes"
+            )
+        }
+        Fix::Regroup { owners, node } => format!(
+            "Exclude the indexes of the connector `{connector}` from the `select` of \
+             {}, and select the connector and its indexes with another placement \
+             whose `home` is `{node}`",
+            each(owners)
+        ),
+        Fix::Home { node } => format!(
+            "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
+             `copies`"
+        ),
+        Fix::Win { placement } => format!(
+            "Make the placement `{}` win for the connector `{connector}` and its \
+             indexes",
+            label(placement)
+        ),
+    }
+}
+
 /// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
-/// `placement` names `home`. `moved` is the fix of each diagnostic of `connector` when
-/// `placement` also wins for a connector, or an index of one, on another node, which a
-/// new `home` would move the problem to.
+/// `placement` names `home`, with the fix that [`fix`] gives from `moves`.
 fn connector_home(
     found: &Found<'_>,
     placement: &Name,
     home: &Name,
     connector: &Name,
     node: &Name,
-    moved: Option<&str>,
+    moves: &BTreeMap<&Name, Fix<'_>>,
 ) -> Diagnostic {
     let p = label(placement);
-    let fix = moved.map_or_else(
-        || {
-            format!(
-                "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
-                 `copies`"
-            )
-        },
-        str::to_owned,
-    );
+    let fix = fix(moves, connector, &Fix::Home { node });
     Diagnostic::new(
         CONNECTOR_HOME,
         span(found.blocks[placement], "home"),
@@ -434,15 +563,15 @@ fn connector_home(
 }
 
 /// A `config.split-placement` diagnostic when `own`, the placement that wins for
-/// `index`, is not `theirs`, the one that wins for the connector `connector`. `moved`
-/// is the fix that [`moves`] gives `connector`, if any.
+/// `index`, is not `theirs`, the one that wins for the connector `connector`, with the
+/// fix that [`fix`] gives from `moves`.
 fn split(
     found: &Found<'_>,
     index: &Name,
     own: Option<&Name>,
     connector: &Name,
     theirs: Option<&Name>,
-    moved: Option<&str>,
+    moves: &BTreeMap<&Name, Fix<'_>>,
 ) -> Option<Diagnostic> {
     let (at, message) = match (own, theirs) {
         (Some(own), Some(theirs)) if own != theirs => (
@@ -472,16 +601,8 @@ fn split(
         ),
         _ => return None,
     };
-    let fix = moved.map_or_else(
-        || {
-            format!(
-                "Make the placement `{}` win for the connector `{connector}` and its \
-                 indexes",
-                label(theirs.unwrap_or(at))
-            )
-        },
-        str::to_owned,
-    );
+    let placement = theirs.unwrap_or(at);
+    let fix = fix(moves, connector, &Fix::Win { placement });
     Some(Diagnostic::new(
         SPLIT_PLACEMENT,
         found.entries[at].label_span,
@@ -490,22 +611,18 @@ fn split(
     ))
 }
 
-/// The tree key of the placement that wins for the name that `placed` places, or
-/// `None` when no placement selects it. Gives the tie when two placements tie.
-fn winner<'p>(
-    placed: &'p Result<Placed<'_>, Unplaced>,
-) -> Result<Option<&'p Name>, &'p Unplaced> {
-    match placed {
-        Ok(placed) => Ok(placed.placement),
-        Err(Unplaced::NoHome { placement }) => Ok(placement.as_ref()),
-        Err(Unplaced::Overlap { placement, .. }) => Ok(Some(placement)),
-        Err(tie @ Unplaced::Tie { .. }) => Err(tie),
-    }
-}
-
-/// A `config.unplaced` diagnostic at `at`, the label of the name that `problem` names.
-fn unplaced(at: Option<Span>, problem: &Unplaced) -> Diagnostic {
-    Diagnostic::new(UNPLACED, at, problem.to_string(), problem.fix().into())
+/// The `config.unplaced` diagnostic at `at`, the label of the name that `placed`
+/// places, when it has a tie or no home.
+fn unplaced(at: Option<Span>, placed: &Result<Placed<'_>, Tie>) -> Option<Diagnostic> {
+    let (message, fix) = match placed {
+        Ok(Placed { home: Ok(_), .. }) => return None,
+        Ok(Placed {
+            home: Err(homeless),
+            ..
+        }) => (homeless.to_string(), homeless.fix()),
+        Err(tie) => (tie.to_string(), tie.fix()),
+    };
+    Some(Diagnostic::new(UNPLACED, at, message, fix.into()))
 }
 
 /// The label of the placement at the tree key `key`.
@@ -577,23 +694,25 @@ fn unknown(
     }
 }
 
-/// The change of each definition whose bytes differ from the stored bytes, in tree key
-/// order. A stored definition whose label is reserved, or whose kind no block defines,
-/// is never removed.
+/// Reports whether a plan holds a definition of `kind` at `name`: a kind that a block
+/// of a file defines, at the tree key of an unreserved label.
+fn planned(name: &Name, kind: definition::Kind) -> bool {
+    KINDS.iter().any(|(block, _)| *block == kind)
+        && kind.label(name).is_some_and(|label| !label.reserved())
+}
+
+/// The change of each definition whose bytes differ from the stored bytes, by tree
+/// key. A stored definition that is not [`planned`] is never removed.
 fn changes(
     entries: BTreeMap<Name, Entry>,
     mut channels: BTreeMap<Name, Channel>,
     applied: &BTreeMap<Name, definition::Definition>,
-) -> Vec<Change> {
+) -> BTreeMap<Name, Change> {
     let mut stored: BTreeMap<&Name, &definition::Definition> = applied
         .iter()
-        .filter(|(name, definition)| {
-            let kind = definition.kind();
-            KINDS.iter().any(|(block, _)| *block == kind)
-                && !kind.label(name).is_some_and(|label| label.reserved())
-        })
+        .filter(|(name, definition)| planned(name, definition.kind()))
         .collect();
-    let mut changes = Vec::new();
+    let mut changes = BTreeMap::new();
     for (name, entry) in entries {
         let bytes = match &entry.definition {
             Definition::Spec(definition) => definition.encode(),
@@ -606,18 +725,19 @@ fn changes(
         };
         let old = stored.remove(&name).map(definition::Definition::encode);
         if old.as_ref() != Some(&bytes) {
-            changes.push(Change {
+            let old = old.as_deref().map(Digest::of);
+            changes.insert(
                 name,
-                old: old.as_deref().map(Digest::of),
-                new: Some(entry),
-            });
+                Change {
+                    old,
+                    new: Some(entry),
+                },
+            );
         }
     }
-    changes.extend(stored.into_iter().map(|(name, old)| Change {
-        name: name.clone(),
-        old: Some(Digest::of(&old.encode())),
-        new: None,
+    changes.extend(stored.into_iter().map(|(name, old)| {
+        let old = Some(Digest::of(&old.encode()));
+        (name.clone(), Change { old, new: None })
     }));
-    changes.sort_by(|a, b| a.name.cmp(&b.name));
     changes
 }

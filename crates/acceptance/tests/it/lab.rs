@@ -137,7 +137,6 @@ impl Lab {
     /// Starts a node named `name` on a new simulated host.
     pub(crate) fn start(&mut self, name: &str) -> Node {
         let host = self.sim.node(sim::node::Config::default());
-        let key = u8::try_from(self.members.len() + 1).expect("at most 255 nodes");
         let node = node::Node::start(node::Config {
             shards: host.shards(),
             clock: host.clock(),
@@ -155,8 +154,6 @@ impl Lab {
             disk: types::byte::Size::GIBIBYTE,
             net: host.net(),
             listen: SocketAddr::new(host.addresses()[0], PORT),
-            private_key: types::ed25519::PrivateKey([key; 32]),
-            key: types::node::Key::from_u128(u128::from(key)),
             region: None,
         });
         self.members.push(Member {

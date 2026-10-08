@@ -15,3 +15,38 @@
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064364728). The
   place and notes details: `laptop.architect-2` (2026-10-08T16:40:27Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064603605).
+  A subject change has `fingerprints`: the `SHA256:` fingerprint of each key, as
+  `ssh-keygen -l` writes it, sorted by the bytes of the key, after the apply, or before
+  it for a removal. The key is absent for each other kind. The text gives one line
+  `    key SHA256:...` for each, under its change. Lost: a diff of the keys of a change;
+  a reviewer must trust the end state, and the full list shows each key it grants.
+  Trigger: `fingerprints` is the only field of `Change` for one kind. When a second
+  kind adds a field of its own, those fields become one tagged `detail` enum. Decided
+  by `laptop.architect-2` (2026-10-08T17:21:06Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343).
+  `config` owns the OpenSSH form, so `config::openssh::fingerprint(PublicKey) ->
+  String` makes it, and `ops` has no `ssh-key`. Lost: `ssh-key` in `ops`, a second
+  owner of the form. Decided by `laptop.architect-2` (2026-10-08T17:56:21Z,
+  https://github.com/synnaxlabs/foundation/pull/1943#issuecomment-6065898724).
+  Supersedes the `ops` dependency on `ssh-key` in item 3 of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343.
+  `plan` refuses a path that is not UTF-8 with `ops.path-not-utf8`, before its
+  extension, so `Place::file` is the exact path. `ops.path-not-utf8` has no span,
+  since a place cannot hold the path, and writes it with `{path:?}` until #941.
+  `ops.unknown-extension` gets a place and names no path in its message (FRONT ENDS),
+  so its path is exact too (`laptop.architect-2`, 2026-10-08T18:11:55Z,
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732).
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872.
+  Supersedes item 4 of
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681.
+  Lost: the lossy text, with which two files give one place; the `Debug` form in
+  `Place::file`, which each JSON reader must decode; and the escaped path in the
+  message of `ops.unknown-extension`, which an agent must decode. The `Place::file` doc
+  names the code, not the function that refuses the path (`laptop.architect-2`,
+  2026-10-08T18:12:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066177474).
+  Supersedes items 2 and 3 of
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681.
+  Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
+  https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).

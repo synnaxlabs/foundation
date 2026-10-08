@@ -7,6 +7,7 @@ use hub::home::Outcome;
 use hub::writer::Writer;
 use spec::channel::{Channel, Data, Kind};
 use spec::data_type::DataType;
+use spec::definition::Definition;
 use types::channel;
 use types::frame::{Draft, Form, Label, Path};
 use types::sample::{Scalar, Type};
@@ -19,11 +20,14 @@ pub(crate) const SETTLE: Span = Span::from_nanos(20_000_000);
 
 /// A hub on a new shard, with `time` and `value` defined, and the node's mesh time now.
 pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (home, interner, now) = shard(node, tasks.clone()).await;
+    let (home, interner, now, time) = shard(node, tasks.clone()).await;
     let hub = Hub::new(hub::Config {
         home,
         interner,
         tasks,
+        node: types::node::Key::from_u128(1),
+        time,
+        entropy: node.entropy(),
     });
     let time = Channel {
         key: channel::Key::from_u128(1),
@@ -38,6 +42,7 @@ pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         key: channel::Key::from_u128(2),
         kind: Kind::Data(data),
     };
+    let (time, value) = (Definition::Channel(time), Definition::Channel(value));
     hub.define([(&name("time"), &time), (&name("value"), &value)]);
     (hub, now)
 }

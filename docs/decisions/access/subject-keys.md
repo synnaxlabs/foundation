@@ -12,10 +12,16 @@
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217). In a
   file, a `subject` block has one attribute, `keys`: the line of an OpenSSH `.pub` file,
   or a list of them, as `allow` takes one action or a list. `config` keeps the key, not
-  the comment. It reads the base64 with `base64ct`, which refuses text that is not
-  canonical, so one key has one text form. A string that holds `PRIVATE KEY` (the
-  OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a `.ppk` file) gives
-  `config.private-key`, whose message quotes none of the value. A `.pub` line whose
+  the comment. It reads the line with `ssh-key` (`laptop.architect-2`,
+  2026-10-08T17:21:06Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343), and
+  refuses a base64 word that differs from the one that `ssh-key` writes for the key,
+  since `from_openssh` accepts a key length field over 32 when 32 bytes follow. So one
+  key has one base64 form (#1943 round 1, 2026-10-08T18:00:44Z,
+  https://github.com/synnaxlabs/foundation/pull/1943#issuecomment-6065971637). A
+  string that holds `PRIVATE KEY` (the OpenSSH, PEM, and RFC 4716 forms) or
+  `PuTTY-User-Key-File` (a `.ppk` file) gives `config.private-key`, whose message
+  quotes none of the value. A `.pub` line whose
   comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
   more. A base64 body with no header lines gets it too: `b3BlbnNzaC1rZXktdjEA` starts
   each OpenSSH body, and `BQYDK2VwBCIE`, `MAUGAytlcAQi`, and `BgMrZXAEIgQg` are the
@@ -61,11 +67,15 @@
   https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054362063), in any
   ASCII case (`laptop.architect-2`, 2026-10-08T07:02:08Z,
   https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054428920). The read
-  moves to `ssh-key` if the person approves it
-  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
-  PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
-  2026-10-08T06:42:17Z
-  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085).
+  moves to `ssh-key` in the PR of #337 that first prints a key's fingerprint. Decided
+  by `laptop.architect-2` at 2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085). The
+  person approved `ssh-key` 0.6.7 at 2026-10-08T16:58Z
+  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6064910986).
+  `config::openssh` keeps its own checks and messages: the first-word table and one
+  line before `ssh-key`, and small order after it (`laptop.architect-2`,
+  2026-10-08T17:21:06Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343).
   `access::Rules` keeps each subject by its label, which
   `spec::definition::Kind::label` gives for its tree key. `admit` and `verify` look up
   the hello's subject and build no key, so only `spec` holds the key form, and

@@ -21,16 +21,7 @@ impl Key {
     /// When `time` is before the Unix epoch.
     #[must_use]
     pub fn v7(time: crate::time::Stamp, random: u128) -> Self {
-        let nanos = time.nanos();
-        let millis =
-            u128::try_from(nanos.div_euclid(1_000_000)).unwrap_or_else(|_before| {
-                panic!(
-                    "invariant: a key is made after the Unix epoch, not at {nanos} ns"
-                )
-            });
-        let rand_a = (random >> 62) & 0xfff;
-        let rand_b = random & ((1 << 62) - 1);
-        Self(millis << 80 | 0x7 << 76 | rand_a << 64 | 0b10 << 62 | rand_b)
+        Self(crate::uuid::v7(time, random))
     }
 
     /// Wraps a key's 128 bits.
