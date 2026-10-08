@@ -326,10 +326,10 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
     });
 }
 
-/// A write of no parts waits for the stream to be ready, as a write of bytes does.
+/// A write of no parts gives 0 at once, also when the send buffer is full.
 #[test]
-fn a_write_of_no_parts_waits_at_the_unsent_bound() {
-    on_thread("net-none-wait", || async {
+fn a_write_of_no_parts_gives_0_at_a_full_send_buffer() {
+    on_thread("net-none-full", || async {
         let net = net();
         let mut listener = listen(&net);
         let mut config = connect_config(listener.local());
@@ -340,13 +340,14 @@ fn a_write_of_no_parts_waits_at_the_unsent_bound() {
         let bytes = vec![7; 1 << 22];
         while write_once(&mut client, &bytes).is_ready() {}
         let mut cx = Context::from_waker(Waker::noop());
-        assert_eq!(client.poll_write(&mut cx, &[]), Poll::Pending, "no parts");
-        let empty = [IoSlice::new(&[]); 3];
         assert_eq!(
-            client.poll_write(&mut cx, &empty),
-            Poll::Pending,
-            "empty parts"
+            client.poll_write(&mut cx, &[]),
+            Poll::Ready(Ok(0)),
+            "no parts"
         );
+        let empty = [IoSlice::new(&[]); 3];
+        let none = client.poll_write(&mut cx, &empty);
+        assert_eq!(none, Poll::Ready(Ok(0)), "empty parts");
     });
 }
 
@@ -366,16 +367,16 @@ fn a_write_of_many_parts_below_the_bound_waits_for_no_event() {
     });
 }
 
-/// A write of no parts reports a reset that no poll has reported, as a write of
-/// bytes does.
+/// A write of no parts gives 0 after a reset, and leaves the reset to the next call.
 #[test]
-fn a_write_of_no_parts_after_an_unseen_reset_is_reset() {
+fn a_write_of_no_parts_after_an_unseen_reset_gives_0() {
     on_thread("net-none-reset", || async {
         let net = net();
         let (_listener, client, mut server) = create_pair(&net).await;
         let remote = reset_unseen(client, &mut server).await;
-        assert_eq!(write(&mut server, &[]).await, Err(Error::Reset { remote }));
+        assert_eq!(write(&mut server, &[]).await, Ok(0));
         assert_eq!(close(&mut server).await, Err(Error::Reset { remote }));
+        assert_eq!(write(&mut server, &[]).await, Ok(0));
         let read = read(&mut server, &mut [0; 8]).await;
         assert_eq!(read, Err(Error::Reset { remote }));
     });
@@ -632,6 +633,7 @@ fn a_write_after_the_close_is_a_broken_pipe() {
         let net = net();
         let (_listener, mut client, _server) = create_pair(&net).await;
         assert_eq!(close(&mut client).await, Ok(()));
+        assert_eq!(write(&mut client, &[]).await, Ok(0), "no parts");
         let pipe = Err(Error::Io { code: 32 });
         assert_eq!(write(&mut client, &[b"late"]).await, pipe);
         assert_eq!(

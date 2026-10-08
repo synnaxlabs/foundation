@@ -32,7 +32,7 @@ pub(super) struct Stream {
     /// `poll_close` ran: the FIN is queued.
     closed: bool,
     /// The error that ended the stream. The kernel reports a reset once and then an
-    /// end of stream, so each later write, close, and read of no bytes gives this.
+    /// end of stream, so each later write of bytes, close, and read gives this.
     failed: Option<Error>,
 }
 
@@ -141,6 +141,16 @@ impl tcp::Driver for Stream {
         cx: &mut Context<'_>,
         buffers: &[IoSlice<'_>],
     ) -> Poll<Result<usize, Error>> {
+        // The kernel takes at most 1024 parts, and a write of only empty parts gives 0
+        // with the stream still ready, so a caller's loop would spin.
+        let skip = buffers
+            .iter()
+            .take_while(|buffer| buffer.is_empty())
+            .count();
+        let buffers = &buffers[skip..];
+        if buffers.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let peer = self.peer;
         let stream = Self::live(&mut self.socket)?;
         if let Some(failed) = &self.failed {
@@ -153,23 +163,6 @@ impl tcp::Driver for Stream {
                 Some(code) => self.fail(stream_error(code, peer)),
                 None => io_error(Errno::PIPE),
             }));
-        }
-        // The kernel takes at most 1024 parts, and a write of only empty parts gives 0
-        // with the stream still ready, so a caller's loop would spin.
-        let skip = buffers
-            .iter()
-            .take_while(|buffer| buffer.is_empty())
-            .count();
-        let buffers = &buffers[skip..];
-        if buffers.is_empty() {
-            // macOS refuses a `writev` of no parts, and none reports a reset.
-            let ready = ready!(stream.poll_write_ready(cx)).map_err(|e| errno(&e));
-            return Poll::Ready(
-                match ready.err().or_else(|| Self::pending(&*stream)) {
-                    Some(code) => Err(self.fail(stream_error(code, peer))),
-                    None => Ok(0),
-                },
-            );
         }
         #[cfg(not(target_os = "macos"))]
         let sent =
