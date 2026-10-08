@@ -1,6 +1,6 @@
 use std::fmt;
 
-use base64ct::{Base64, Encoding};
+use ssh_key::public::Ed25519PublicKey;
 use types::ed25519::PublicKey;
 
 const ALGORITHM: &str = "ssh-ed25519";
@@ -28,11 +28,6 @@ const OTHER_ALGORITHMS: [&str; 17] = [
 /// Each Unicode line break.
 const LINE_BREAKS: [char; 7] =
     ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
-/// The decoded key of an Ed25519 line starts with the length and the name of its
-/// algorithm, then the length of the key.
-const BLOB_START: &[u8; 19] = b"\0\0\0\x0bssh-ed25519\0\0\0\x20";
-/// The length of the decoded key of an Ed25519 line: [`BLOB_START`] and the key.
-const BLOB_BYTES: usize = 51;
 
 /// Why a text is not the line of an OpenSSH `.pub` file of an Ed25519 key. Its message
 /// quotes no part of the text after the first word, since that part can be a secret.
@@ -84,11 +79,13 @@ pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
     if text.trim().contains(LINE_BREAKS) {
         return Err(Error::Lines);
     }
-    let mut blob = [0; BLOB_BYTES];
-    let bytes = Base64::decode(encoded, &mut blob)
+    let bytes = ssh_key::PublicKey::from_openssh(&format!("{ALGORITHM} {encoded}"))
         .ok()
-        .and_then(|blob| blob.strip_prefix(BLOB_START))
-        .and_then(|key| <[u8; 32]>::try_from(key).ok())
+        .and_then(|key| {
+            key.key_data()
+                .ed25519()
+                .map(|&Ed25519PublicKey(bytes)| bytes)
+        })
         .ok_or(Error::NotEd25519)?;
     PublicKey::new(bytes).map_err(Error::SmallOrder)
 }
