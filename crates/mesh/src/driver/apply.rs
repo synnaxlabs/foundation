@@ -1,0 +1,82 @@
+//! Applies a spec through the leader of the group.
+
+use std::collections::BTreeMap;
+
+use spec::definition::Definition;
+use spec::tree::Chunks;
+use types::name::Name;
+
+use super::Mesh;
+use crate::change::{CHUNKS_MAX, Change};
+use crate::error::Error;
+use crate::pointer::Pointer;
+use crate::region::Refused;
+
+impl Mesh {
+    /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
+    /// `base`. A follower forwards the change to the leader. Returns the new pointer
+    /// once its entry has committed and this node applied it. It tries again when a
+    /// new leader replaces the entry, and after each tick while no leader takes it, as
+    /// [`Mesh::set_home`] does. A retry that finds the pointer it makes, from an entry
+    /// whose answer was lost, also returns it. A retry that finds a later pointer gives
+    /// `Stale`, even when an entry of this call applied before it.
+    ///
+    /// # Errors
+    ///
+    /// `Problems` and `Large` propose nothing, and come before the others.
+    ///
+    /// - [`Error::Problems`] when the spec has problems.
+    /// - [`Error::Large`] when its tree has more chunks than one change lists.
+    /// - [`Error::Stale`] when the pointer is not `base`, or the pointer this call
+    ///   makes, at the apply.
+    /// - [`Error::NoVote`] and [`Error::Stopped`] as for [`Mesh::set_home`].
+    ///
+    /// # Panics
+    ///
+    /// On a broken invariant of the region state: a refusal of the change that is not
+    /// `Stale`, or a version past `u64::MAX`.
+    pub async fn apply(
+        &self,
+        base: Pointer,
+        definitions: BTreeMap<Name, Definition>,
+    ) -> Result<Pointer, Error> {
+        let problems =
+            spec::region::check(self.group.borrow().state.prefix(), &definitions);
+        if !problems.is_empty() {
+            return Err(Error::Problems(problems));
+        }
+        let update = spec::region::tree(&mut Chunks::default(), &definitions);
+        if update.chunks.len() > CHUNKS_MAX {
+            return Err(Error::Large {
+                chunks: update.chunks.len(),
+                most: CHUNKS_MAX,
+            });
+        }
+        let root = update.root;
+        let change = Change::Spec {
+            base,
+            root,
+            chunks: update.chunks.into_iter().collect(),
+        };
+        loop {
+            match self.attempt()?.settle(change.clone()).await? {
+                Some(Ok(())) => return Ok(base.next(root)),
+                Some(Err(Refused::Stale { pointer, .. }))
+                    if pointer.root == root
+                        && pointer.version.checked_sub(1) == Some(base.version) =>
+                {
+                    return Ok(pointer);
+                }
+                Some(Err(Refused::Stale { base, pointer })) => {
+                    return Err(Error::Stale { base, pointer });
+                }
+                Some(Err(refused)) => {
+                    panic!(
+                        "invariant: a spec change is refused only as stale: {refused}"
+                    )
+                }
+                None => {}
+            }
+        }
+    }
+}

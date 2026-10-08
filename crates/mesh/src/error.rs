@@ -5,6 +5,7 @@ use types::ed25519::PublicKey;
 use types::node;
 
 use crate::change::Unknown;
+use crate::pointer::Pointer;
 use crate::region::Unfit;
 use crate::{claim, log};
 
@@ -65,6 +66,24 @@ pub enum Error {
     Stream(transport::Error),
     /// The group stopped.
     Stopped(Stopped),
+    /// The spec pointer is not the base of a spec change, so another change applied
+    /// first. Read the spec again and apply on top of it.
+    Stale {
+        /// The base of the change.
+        base: Pointer,
+        /// The pointer when the change applied.
+        pointer: Pointer,
+    },
+    /// The tree of a spec has more chunks than one change lists. Apply a smaller spec.
+    Large {
+        /// The count of chunks of the tree.
+        chunks: usize,
+        /// The most chunks that one change lists.
+        most: usize,
+    },
+    /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
+    /// each problem as [`spec::region::Problem::fix`] says.
+    Problems(Vec<spec::region::Problem>),
 }
 
 impl fmt::Display for Error {
@@ -106,6 +125,24 @@ impl fmt::Display for Error {
             Self::Malformed => f.write_str("a message on a mesh stream is not valid"),
             Self::Stream(cause) => write!(f, "a mesh stream failed: {cause}"),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
+            Self::Stale { base, pointer } => write!(
+                f,
+                "the spec changed: the pointer is {pointer}, not the base {base}"
+            ),
+            Self::Large { chunks, most } => write!(
+                f,
+                "the spec has {chunks} chunks, more than the {most} that one change \
+                 lists"
+            ),
+            Self::Problems(problems) => {
+                f.write_str("the spec has problems")?;
+                let mut separator = ": ";
+                for problem in problems {
+                    write!(f, "{separator}{problem}")?;
+                    separator = "; ";
+                }
+                Ok(())
+            }
         }
     }
 }

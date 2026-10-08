@@ -63,8 +63,12 @@ mod tests {
     };
 
     use super::*;
+    use types::digest::Digest;
+
     use crate::bytes::{put_change, put_position};
+    use crate::change::{CHUNKS_MAX, Malformed};
     use crate::common::key;
+    use crate::pointer::Pointer;
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {
@@ -94,6 +98,41 @@ mod tests {
         std::fs::read_dir(format!("{root}{target}"))
             .unwrap()
             .count()
+    }
+
+    #[test]
+    fn each_spec_change_input_is_what_its_name_says() {
+        let inputs =
+            inputs!("mesh_change": "spec", "spec_chunks_1024", "spec_chunks_1025");
+        let digest = |at: usize| {
+            let mut bytes = [0; 32];
+            bytes[30..].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
+            Digest(bytes)
+        };
+        let spec = |chunks| Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks,
+        };
+        for (name, chunks) in [
+            ("spec", [Digest([4; 32]), Digest([5; 32])].into()),
+            ("spec_chunks_1024", (0..CHUNKS_MAX).map(digest).collect()),
+        ] {
+            assert_eq!(Change::decode(inputs[name]), Ok(spec(chunks)), "{name}");
+            let round_trip = round_trip_change(inputs[name]);
+            assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
+        }
+        // The chunk count is after the kind, the base, and the root.
+        let mut over = inputs["spec_chunks_1024"].to_vec();
+        over[73..75].copy_from_slice(&1025_u16.to_le_bytes());
+        over.extend(digest(CHUNKS_MAX).0);
+        assert_eq!(inputs["spec_chunks_1025"], over);
+        let length = over.len();
+        let body = Malformed::Body { kind: 4, length };
+        assert_eq!(Change::decode(&over), Err(body));
     }
 
     fn at(term: u64, index: u64) -> Position {
