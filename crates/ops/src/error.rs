@@ -96,6 +96,20 @@ impl fmt::Display for Error {
     }
 }
 
+/// `text` with each control character escaped as `char::escape_debug` does, so it
+/// stays one line. For a message or a fix whose producer quoted the text of a file.
+pub(crate) fn escape_controls(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_debug().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// `text` escaped as `char::escape_debug` does, with quotes kept, so it stays one line.
 pub(crate) fn escape(text: &str) -> String {
     text.chars()

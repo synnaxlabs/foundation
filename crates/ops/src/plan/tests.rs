@@ -330,3 +330,116 @@ fn refuses_a_front_end_error_with_no_problem() {
         &Table::new(),
     ));
 }
+
+#[test]
+fn keeps_the_quote_of_a_producer_as_it_is() {
+    let text = "\
+channel \"a.time\" { kind = \"index\" }
+channel \"a.v\" {
+  index     = \"a.time\"
+  data_type = \"f\\t64\"
+}
+";
+    let message = "cannot read the data type \"f\\t64\": expected a data type such as \
+                   f64, f32[3], list<u8, 16>, string, bytes, or quality";
+    let fix = "Use one of the forms that the message names, with exact case and a \
+               space only after the comma of a list";
+    let problems = problems(&[("a.hcl", text)]);
+    assert_eq!(
+        problems.to_string(),
+        format!(
+            "error[config.bad-data-type]: {message}\n  --> a.hcl:4:15\nfix: {fix}\n"
+        )
+    );
+    assert_eq!(
+        problems.json(),
+        serde_json::json!({ "errors": [{
+            "code": "config.bad-data-type",
+            "message": message,
+            "fix": fix,
+            "file": "a.hcl",
+            "line": 4,
+            "column": 15,
+            "notes": [],
+        }]})
+    );
+}
+
+#[test]
+fn gives_the_problems_of_a_front_end_and_of_each_extension_in_file_order() {
+    let time = "channel \"a.time\" { kind = \"index\" }\n";
+    let problems = problems(&[
+        ("good.hcl", time),
+        ("bad.hcl", "channel {\n"),
+        ("x.yaml", ""),
+    ]);
+    assert_eq!(
+        problems.to_string(),
+        "\
+error[hcl.syntax]: the file needs a key, a block, or the end of the body here
+  --> bad.hcl:2:1
+fix: Write it here, or correct the text here or before it
+
+error[ops.unknown-extension]: no config syntax reads `x.yaml`
+fix: Use a file that ends in `.hcl`
+"
+    );
+}
+
+#[test]
+fn gives_the_json_of_a_change_and_a_removal() {
+    let i64 = Data::new(
+        Key::from_u128(1),
+        None,
+        DataType::Sample(sample::Type::Scalar(sample::Scalar::I64)),
+        None,
+    )
+    .expect("a data channel");
+    let applied = BTreeMap::from([
+        (name("site.time"), channel(1, INDEX)),
+        (name("site.temp"), channel(2, channel::Kind::Data(i64))),
+        (name("gone.time"), channel(3, INDEX)),
+        (name("old.time"), channel(4, INDEX)),
+    ]);
+    let planned = run(&[("site.hcl", &placed_site())], &applied).expect("a plan");
+    let changes = &planned.json()["changes"];
+    assert_eq!(
+        *changes,
+        serde_json::json!([
+            {
+                "action": "change",
+                "kind": "channel",
+                "name": "site.temp",
+                "file": "site.hcl",
+                "line": 2,
+                "column": 9,
+            },
+            {
+                "action": "add",
+                "kind": "placement",
+                "name": "p",
+                "file": "site.hcl",
+                "line": 6,
+                "column": 11,
+            },
+            { "action": "remove", "kind": "channel", "name": "gone.time" },
+            { "action": "remove", "kind": "channel", "name": "old.time" },
+        ])
+    );
+    let json = planned.json();
+    let counts = ["added", "changed", "removed"].map(|count| json[count].clone());
+    assert_eq!(counts, [1, 1, 2].map(serde_json::Value::from));
+}
+
+#[test]
+#[should_panic(expected = "invariant: `node` gives a front end")]
+fn refuses_an_empty_table_of_front_ends() {
+    drop(plan(
+        &[],
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+        &Table::new(),
+    ));
+}

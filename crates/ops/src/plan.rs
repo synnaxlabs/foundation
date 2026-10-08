@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use spec::definition::{Definition, Kind};
 use types::name::Name;
 
-use crate::error::escape;
+use crate::error::{escape, escape_controls};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
@@ -255,14 +255,14 @@ impl fmt::Display for Problems {
                 f,
                 "error[{}]: {}",
                 diagnostic.code,
-                escape(&diagnostic.message)
+                escape_controls(&diagnostic.message)
             )?;
             if let Some(span) = diagnostic.span {
                 write!(f, "{}", Place::of(span, &self.paths))?;
             }
-            writeln!(f, "fix: {}", escape(&diagnostic.fix))?;
+            writeln!(f, "fix: {}", escape_controls(&diagnostic.fix))?;
             for note in &diagnostic.notes {
-                writeln!(f, "note: {}", escape(&note.text))?;
+                writeln!(f, "note: {}", escape_controls(&note.text))?;
                 write!(f, "{}", Place::of(note.span, &self.paths))?;
             }
         }

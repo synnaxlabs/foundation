@@ -4686,7 +4686,8 @@ How to read this record:
   holds at least one problem. The table is a `BTreeMap<&'static str, FrontEnd>`, keyed
   by the extension with no dot (`"hcl"`). The text after the last `.` of a file name
   picks the front end. A file with no front end gives `ops.unknown-extension` with no
-  span: the message names the path, and the fix names each extension of the table. A
+  span, as no Document of the file exists (an exception to the span rule of
+  DIAGNOSTICS): the message names the path, and the fix names each extension. A
   directory gives each file in it that the table reads, in path order. `Source(i)` is
   the index of the file in the order `ops` reads it, and `ops` keeps the paths to
   print spans. `node` fills the table (#1756) with `config_hcl::read`, its errors
@@ -4694,7 +4695,7 @@ How to read this record:
   `FrontEnd` with the first operation that writes a file. Lost: `ops` calls
   `config_hcl::read` (breaks K1), a `FrontEnd` trait (one implementation, no state),
   and `Box<dyn Fn>` (no front end needs state). Decided by `laptop.architect-2`
-  (2026-10-08,
+  (2026-10-08T06:38:41Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444).
 
 ### 1.12 Access, identity, and secrets
@@ -6845,7 +6846,7 @@ Rules:
    with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
    https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152), and
    `ops` may take `config-hcl`, so its plan tests read a real file
-   (`laptop.architect-2`, #337:
+   (`laptop.architect-2`, 2026-10-08T16:00:18Z:
    https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
