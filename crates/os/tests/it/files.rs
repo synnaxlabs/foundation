@@ -10,15 +10,7 @@ use std::task::Poll;
 use block::{Block, Pool};
 use env::files::{Error, File, Files, Mode, Operation};
 
-use crate::disk::{self, Scratch, opened};
-
-const KIB: u64 = 1 << 10;
-
-/// The files of `dir`, on an I/O thread named `name`, and the handle of the thread.
-fn files(dir: &Path, name: &str) -> (Files, env::thread::Handle) {
-    let (disk, thread) = os::files(dir, &os::threads().unwrap(), name).unwrap();
-    (Files::new(disk), thread)
-}
+use crate::disk::{KIB, Scratch, files, opened};
 
 /// Runs `body` with the files of a scratch directory of its own and the path of
 /// their data directory.
@@ -786,7 +778,7 @@ fn a_file_or_directory_that_is_there_keeps_its_mode() {
     let scratch = Scratch::new();
     let data = scratch.0.join("data");
     std::fs::create_dir_all(data.join("d")).unwrap();
-    let len = usize::try_from(disk::LEN).unwrap();
+    let len = usize::try_from(KIB).unwrap();
     std::fs::write(data.join("f"), vec![0; len]).unwrap();
     for (path, mode) in [("", 0o755), ("f", 0o644), ("d", 0o755)] {
         let mode = std::fs::Permissions::from_mode(mode);

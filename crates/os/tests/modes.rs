@@ -7,10 +7,9 @@
 #![cfg(test)]
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-#[path = "common/disk.rs"]
-mod disk;
+mod common;
 
-use disk::{Scratch, opened};
+use common::{Scratch, opened};
 
 #[test]
 fn each_new_file_is_0600_and_each_new_directory_0700_under_the_umasks_022_and_0() {

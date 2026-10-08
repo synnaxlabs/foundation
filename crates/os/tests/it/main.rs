@@ -7,7 +7,7 @@
 mod clock;
 mod common;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[path = "../common/disk.rs"]
+#[path = "../common/mod.rs"]
 mod disk;
 mod entropy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

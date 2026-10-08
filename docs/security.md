@@ -31,8 +31,8 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
-| Local user that runs the node, or root | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
-| Other local user | Read a file that a node made before `os` made each file `0600` in a `0700` directory | Read a file that `os` makes |
+| Local user that runs the node | Read and write the node's files and memory, and so hold its keys and cached secrets and become that member node | |
+| Other local user | Read a file or list a directory of the node that is there with a wider mode, which `os` does not change | Read or list what `os` makes; read memory of the process |
 | Agent host | Use the key of the agent's subject, which the MCP process holds | Go past that subject's allows |
 | Dependency | Ship hostile or defective code in a crate we build | |
 
@@ -40,7 +40,7 @@ The reach of each node role is from BQ12. Placement is the trust decision: the h
 of an index is the authority for it.
 
 Accepted in v1 (BQ12): no end-to-end integrity of frames, so a member node can change
-what it forwards, commands included. Out of scope: a hostile operating system or
+what it forwards, commands included. Out of scope: a hostile operating system, root, or
 hardware.
 
 ## Trust boundaries and their state
