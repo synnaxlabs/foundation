@@ -1717,6 +1717,42 @@ placement \"p\" {{
     }
 }
 
+#[test]
+fn plans_after_the_overlap_fixes_that_empty_a_placement_and_its_empty_fix() {
+    let text = |nodes: &str| {
+        format!(
+            "\
+connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+connector \"b\" {{
+  kind = \"writer\"
+  node = \"k\"
+  writes = []
+}}
+placement \"p\" {{
+  select = [\"a\", \"b\"]
+{nodes}}}
+"
+        )
+    };
+    let overlaps = [
+        ("config.unplaced", OVERLAP.to_owned()),
+        ("config.unplaced", OVERLAP.to_owned()),
+    ];
+    let refused = text("  standby = \"n\"\n  copies = [\"k\"]\n");
+    let named = text("  standby = \"m\"\n");
+    plans_after(&refused, &overlaps, &named);
+    // Each node of `p` holds a connector of `p`, so the two removals leave no node.
+    let empty = [(
+        "config.empty-placement",
+        "Name a `home`, a `standby`, or a node in `copies`".to_owned(),
+    )];
+    plans_after(&text(""), &empty, &named);
+}
+
 /// The fix of each diagnostic of `connector` on `node` when its placement to win,
 /// `winner`, names no `home` and an index of `connector` has no writer.
 fn homed(winner: &str, connector: &str, node: &str) -> String {
