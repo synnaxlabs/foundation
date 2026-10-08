@@ -18,9 +18,9 @@ lessons. Never copy Synnax code into this repo.
 
 Read only the section you need, when you need it.
 
-- `docs/decisions.md` -> every locked decision, where each data structure lives, and
-  the crate map. It is the source of truth for the design. Read the section for your
-  crate before you write code.
+- `docs/decisions/` -> every locked decision, one file per record in the folder of its
+  topic, where each data structure lives, and the crate map. It is the source of
+  truth for the design. Read the records for your crate before you write code.
 - `docs/factory.md` -> the sessions, the machines, the two lanes, and the merge path.
 - `docs/coordination.md` -> issues, PRs, messages between sessions, and how an interface
   changes.
@@ -34,7 +34,7 @@ Read only the section you need, when you need it.
 - `docs/research/` -> the studies behind the decisions (r1 to r17). Cite them. Do not
   re-run a study without a reason.
 - `docs/history/interview-log.md` -> the design interview in order, with the person's
-  words. Read it to learn why; `docs/decisions.md` wins where they differ.
+  words. Read it to learn why; `docs/decisions/` wins where they differ.
 - `docs/security.md` -> the threat model: assets, attackers, trust boundaries, and fuzz
   targets.
 - `docs/rfc/` -> RFCs.
@@ -43,7 +43,7 @@ Read only the section you need, when you need it.
 
 Several Claude sessions work here at once, and any one can compact, crash, or be
 replaced. Nothing that matters may live only in a session's context or in its private
-Claude memory. A decision goes into `docs/decisions.md`. A protocol goes into
+Claude memory. A decision goes into `docs/decisions/`. A protocol goes into
 `docs/coordination.md`. A lesson goes into `docs/claude/lessons.md`. A task goes into a
 GitHub issue.
 
@@ -51,7 +51,7 @@ GitHub issue.
 
 1. **Layers.** A crate depends only on crates in lower layers. Inside layer 2, a crate
    depends only on crates earlier in the fixed order. `cargo xtask layers` checks this
-   on every PR. The crate map is in `docs/decisions.md`.
+   on every PR. The crate map is in `docs/decisions/crate-map.md`.
 2. **Layer 1 decides. Layer 2 does.** Layer 1 is pure logic: no I/O, no clock, no
    threads, no async runtime. Layer 2 drives I/O. It gets clock, network, disk, and
    randomness as inputs (`env`), never from the OS directly. Wall time comes only from
@@ -96,7 +96,8 @@ Dependencies are explicit, injected inputs, never reached for from the environme
 - 🚨 **No mutable globals, ever.** No `static mut`, no global `OnceLock` or
   `lazy_static` holding state, no singletons. A registry is an injected, explicitly
   built value. Constants are fine. One exception: a counting `#[global_allocator]` in
-  a test or benchmark binary (COUNTING ALLOCATOR in `docs/decisions.md`).
+  a test or benchmark binary (COUNTING ALLOCATOR in
+  `docs/decisions/testing/counting-allocator.md`).
 - **No load-time self-wiring.** No `ctor`, no `inventory`, no link-time registration.
   Wire at the call site.
 - **Pluggable dispatch** (handlers keyed by kind) is built at one explicit wiring site:
