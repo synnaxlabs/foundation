@@ -4111,6 +4111,18 @@ How to read this record:
   subject at its plain name, which takes that name from a channel or a connector and
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
+  In a file, a `subject` block has one attribute, `keys`: the line of an OpenSSH
+  `.pub` file, or a list of them. `config` keeps the key, not the comment. It reads
+  the base64 with `base64ct`, which refuses text that is not canonical, so one key has
+  one text form. A value that holds `PRIVATE KEY-----` gives `config.private-key`,
+  whose message quotes none of the value. A PEM or RFC 4716 public key gives
+  `config.bad-public-key`, not that alarm. A message quotes at most the first word of
+  a value. The private-key and PEM rules are from `laptop.architect-2` at
+  2026-10-08T05:49:53Z
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142),
+  which also decided that `config.subject-is-connector` and its test go in the PR that
+  merges second: this `config` part of #1755, or the #1153 PR that adds `connector`
+  blocks to `config::check`.
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies and connectors itself. A policy reaches a name when
