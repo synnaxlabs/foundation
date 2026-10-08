@@ -69,6 +69,22 @@ const SHAPES: [Shape; 3] = [
     },
 ];
 
+impl Shape {
+    fn parts(&self) -> Vec<Part> {
+        (0..self.ranges)
+            .map(|at| Part {
+                range: at * self.stride..at * self.stride + self.len,
+                zeros: 0,
+            })
+            .collect()
+    }
+
+    /// The bytes of the block that the parts are ranges of.
+    fn large(&self) -> usize {
+        self.ranges * self.stride
+    }
+}
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
@@ -97,6 +113,17 @@ fn main() {
             measure(&mut sender, &pool, &clock, shape).await;
         }
         sender.finish().expect("finished");
+        let mut first = [0; 2];
+        for (count, parts) in first.iter_mut().zip([&[][..], &SHAPES[0].parts()]) {
+            clock.sleep(PAUSE).await;
+            let opened = session.open_sender(Class::Complete).await;
+            let mut sender = opened.expect("a stream");
+            let block = filled(&pool, SHAPES[0].large());
+            *count = ALLOCATOR.count(|| poll(&mut sender, block, parts)).1;
+            sender.finish().expect("finished");
+        }
+        let [sent, parted] = first;
+        assert_eq!(parted, sent, "the first message of a stream keeps no parts");
         clock.sleep(PAUSE).await;
         session.close(Code(0));
         clock.sleep(Span::MILLISECOND).await;
@@ -116,14 +143,9 @@ async fn measure(
     clock: &env::clock::Clock,
     shape: &Shape,
 ) {
-    let parts: Vec<Part> = (0..shape.ranges)
-        .map(|at| Part {
-            range: at * shape.stride..at * shape.stride + shape.len,
-            zeros: 0,
-        })
-        .collect();
+    let parts = shape.parts();
     let bytes = shape.ranges * shape.len;
-    let large = shape.ranges * shape.stride;
+    let large = shape.large();
     for round in 0..WARMUP + ROUNDS {
         clock.sleep(PAUSE).await;
         let block = filled(pool, bytes);
