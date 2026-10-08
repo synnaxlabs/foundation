@@ -20,18 +20,20 @@
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. This changes "A
-  panic in any task ends its shard" (2026-10-08, #871): on `os`, a panic in the poll or
-  the drop of a task that code spawns with `tokio::spawn` or `tokio::task::spawn_local`,
-  not through `Tasks`, on a shard or a dedicated thread, does not end it: Tokio catches
-  the panic. A panic in a drop that such a panic starts, of the task or of the panic's
-  payload, can end it or abort the process. On `sim`, no Tokio runtime runs, so such a
-  spawn panics. A release build aborts at any panic. Of the crates that `node` links,
-  only `os` depends on Tokio, so only vendor code can spawn such a task. Lost: Tokio's
+  panic in any task ends its shard" (2026-10-08, #871), and supersedes that sentence of
+  https://github.com/synnaxlabs/foundation/pull/18 for these cases. As anywhere in Rust,
+  a panic in a drop during the unwind of a panic aborts the process. On `os`, a panic in
+  the poll or the drop of a task that code spawns with `tokio::spawn` or
+  `tokio::task::spawn_local`, not through `Tasks`, on a shard or a dedicated thread,
+  does not end it: Tokio catches the panic. Tokio drops such a task during the unwind of
+  a panic in its poll, so a panic in that drop aborts the process. A panic in the drop
+  of the payload of a panic can escape Tokio's catches and end the shard or the thread.
+  A release build aborts at any panic. Of the Foundation crates that `node` links, only
+  `os` depends on Tokio, so only vendor code can spawn such a task. Lost: Tokio's
   `unhandled_panic` setting. It needs `--cfg tokio_unstable` in every build, and a
   `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` value, as the loom job and the cfg runs of
   `cargo xtask` set, replaces the flags of `.cargo/config.toml`. Decided by
-  `laptop.architect-2`, approved by `laptop.architect` (2026-10-08 23:20 UTC, #2033,
-  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6070978251).
+  `laptop.architect-2` (#2033).
   `env::files` (#37) gives files under one data directory, with owned blocks and a
   sync that poisons the file on failure (S4). One handle at a time holds a file open
   to write, until it drops and its calls end; another write open fails with `Busy`
