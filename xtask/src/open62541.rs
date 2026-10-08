@@ -118,13 +118,13 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 ///
 /// # Errors
 ///
-/// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag, a build that fails,
-/// an `#include` or `#import` of a header outside the copy other than one of
-/// [`SYSTEM_HEADERS`] in a system directory, a call of a clock function from a
-/// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any other
-/// reference to a clock function, such as its address in code or data, through
-/// which any code can call it, each inlined function, an `#include_next`, and a
-/// `#line` directive or line marker in a `.c` or `.h` file of the copy.
+/// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value, a
+/// build that fails, an `#include` or `#import` of a header outside the copy other
+/// than one of [`SYSTEM_HEADERS`] in a system directory, a call of a clock function
+/// from a pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any
+/// other reference to a clock function, such as its address in code or data,
+/// through which any code can call it, each inlined function, an `#include_next`,
+/// and a `#line` directive or line marker in a `.c` or `.h` file of the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     inspect(&root.join(DEST), &root.join("target/open62541/check"))
 }
@@ -306,8 +306,17 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
     let (sources, flags) = (read("sources.txt")?, read("flags.txt")?);
     let other: Vec<String> = flags
         .lines()
-        .filter(|flag| !["-D", "-I", "-std="].iter().any(|p| flag.starts_with(p)))
-        .map(|flag| format!("flags.txt: `{flag}` is not a -D, -I, or -std flag"))
+        // A value that starts with `-` makes a flag such as `-I-`, which changes how
+        // `cc` finds a header.
+        .filter(|flag| {
+            !["-D", "-I", "-std="].iter().any(|p| {
+                flag.strip_prefix(p)
+                    .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+            })
+        })
+        .map(|flag| {
+            format!("flags.txt: `{flag}` is not a -D, -I, or -std flag with its value")
+        })
         .collect();
     if !other.is_empty() {
         return Err(other);
@@ -378,6 +387,8 @@ fn line_directives(copy: &Path, dir: &Path) -> Result<Vec<String>, String> {
         }
         let text =
             std::fs::read_to_string(copy.join(&path)).map_err(|e| error(&path, e))?;
+        // `cc` skips a byte order mark at the start of a file.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
         for (index, line) in text.lines().enumerate() {
             let Some(rest) = line.trim_start().strip_prefix('#').map(str::trim_start)
             else {
@@ -472,7 +483,8 @@ fn includes(
         {
             Some((_, true)) if SYSTEM_HEADERS.contains(&name) => continue,
             Some((_, true)) => format!(
-                "includes the system header `{name}`, which SYSTEM_HEADERS does not list"
+                "includes the system header `{name}`, which SYSTEM_HEADERS does not \
+                 list"
             ),
             Some((path, false)) if inside(&path) => continue,
             Some((path, false)) => {
@@ -868,12 +880,14 @@ Disassembly of section .text.log:
                     "#line 5 \"x.y\"\n  #  12 \"b\"\n#lines\n// #line 1\n",
                 ),
                 ("src/b.txt", "#line 1\n"),
+                ("src/d.h", "\u{feff}#line 2\n"),
                 ("include/c.h", "#define line 1\n# 1 \"c.y\" 1\n#line\n"),
             ],
         );
         let held = |at: &str| {
             format!(
-                "{at}: holds a line directive, which moves the file that the include check reads"
+                "{at}: holds a line directive, which moves the file that the include \
+                 check reads"
             )
         };
         assert_eq!(
@@ -882,7 +896,8 @@ Disassembly of section .text.log:
                 held("include/c.h:2"),
                 held("include/c.h:3"),
                 held("src/a.c:1"),
-                held("src/a.c:2")
+                held("src/a.c:2"),
+                held("src/d.h:1")
             ])
         );
         let missing = copy.join("missing");
@@ -1407,14 +1422,15 @@ End of search list.
             std::fs::write(copy.join(path), old + text).unwrap();
         };
         let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
-        append("flags.txt", "-O2\n-include\nsys/stat.h\n");
+        append("flags.txt", "-O2\n-include\nsys/stat.h\n-I-\n-D\n");
+        let refused = |flag: &str| {
+            format!("flags.txt: `{flag}` is not a -D, -I, or -std flag with its value")
+        };
         assert_eq!(
             check(&root),
-            Err(vec![
-                "flags.txt: `-O2` is not a -D, -I, or -std flag".to_owned(),
-                "flags.txt: `-include` is not a -D, -I, or -std flag".to_owned(),
-                "flags.txt: `sys/stat.h` is not a -D, -I, or -std flag".to_owned(),
-            ])
+            Err(["-O2", "-include", "sys/stat.h", "-I-", "-D"]
+                .map(refused)
+                .to_vec())
         );
         std::fs::write(copy.join("flags.txt"), flags).unwrap();
         append(
