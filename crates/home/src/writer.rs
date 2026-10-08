@@ -6,10 +6,8 @@ use std::sync::Arc;
 
 use control::lease::Lease;
 use types::authority::Authority;
-use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::name::Name;
-use types::sample::Type;
 use types::time::Span;
 
 /// What a writer opens with.
@@ -63,13 +61,6 @@ pub enum Error {
         /// The span that was asked for.
         span: Span,
     },
-    /// The key set has a series of a type the home does not write yet.
-    Type {
-        /// The slot of the series' channel.
-        slot: Slot,
-        /// The type of the series.
-        data_type: Type,
-    },
 }
 
 impl Error {
@@ -79,7 +70,6 @@ impl Error {
         match self {
             Self::Unsynced => "Open the writer again later",
             Self::Lease { .. } => "Give a lease longer than zero, or none",
-            Self::Type { .. } => "Give the channel a type the home writes (a scalar)",
         }
     }
 }
@@ -89,9 +79,6 @@ impl fmt::Display for Error {
         match *self {
             Self::Unsynced => f.write_str("the node has no mesh time yet"),
             Self::Lease { span } => control::lease::Error { span }.fmt(f),
-            Self::Type { data_type, .. } => {
-                write!(f, "the home does not write a series of {data_type} yet")
-            }
         }
     }
 }
@@ -109,18 +96,12 @@ pub(crate) fn lease(span: Span) -> Result<Lease, Error> {
 
 #[cfg(test)]
 mod tests {
-    use types::sample::Scalar;
-
     use super::*;
 
     #[test]
     fn says_what_is_wrong_and_what_to_do_for_each_error() {
         let lease = Error::Lease {
             span: Span::from_nanos(-3),
-        };
-        let series = Error::Type {
-            slot: Slot::new(3),
-            data_type: Type::String,
         };
 
         assert_eq!(Error::Unsynced.to_string(), "the node has no mesh time yet");
@@ -130,30 +111,6 @@ mod tests {
             "control lease must be longer than zero, got -3ns"
         );
         assert_eq!(lease.fix(), "Give a lease longer than zero, or none");
-        assert_eq!(
-            series.to_string(),
-            "the home does not write a series of string yet"
-        );
-        assert_eq!(
-            series.fix(),
-            "Give the channel a type the home writes (a scalar)"
-        );
-    }
-
-    #[test]
-    fn says_each_field_of_a_type_the_home_does_not_write() {
-        let series = Error::Type {
-            slot: Slot::new(3),
-            data_type: Type::Array {
-                element: Scalar::F32,
-                len: 3,
-            },
-        };
-
-        assert_eq!(
-            series.to_string(),
-            "the home does not write a series of f32[3] yet"
-        );
     }
 
     #[test]

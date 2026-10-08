@@ -334,10 +334,9 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// In this order: [`writer::Error::Unsynced`] before the node first has mesh
-    /// time, [`writer::Error::Lease`] for a lease that is not longer than zero, and
-    /// [`writer::Error::Type`] for the first series of the key set with a type the
-    /// home does not write yet. None changes the shard.
+    /// [`writer::Error::Unsynced`] before the node first has mesh time, else
+    /// [`writer::Error::Lease`] for a lease that is not longer than zero. Neither
+    /// changes the shard.
     ///
     /// # Panics
     ///
@@ -354,12 +353,6 @@ impl Shard {
         } = writer;
         let (now, mesh) = self.now().ok_or(writer::Error::Unsynced)?;
         let lease = lease.map(writer::lease).transpose()?;
-        if let Some(&key_set::Entry {
-            slot, data_type, ..
-        }) = split::unwritten(&set)
-        {
-            return Err(writer::Error::Type { slot, data_type });
-        }
         let control = control::Writer { subject, authority };
         let entries = set.entries();
         let mut claims = Vec::with_capacity(set.groups().len());
@@ -3961,48 +3954,105 @@ mod tests {
         );
     }
 
-    /// A key set of the index at slot 2 with a `String` series.
-    fn string_series() -> Arc<KeySet> {
-        create_interner().intern(&[Group {
-            index: key(Slot::new(2)),
-            data: &[(key(Slot::new(3)), Type::String)],
-        }])
+    /// The raw values of 3 samples of each type at the slot after the index at slot
+    /// 2: a variable series is its ends, zeros to the start of the elements, then the
+    /// elements.
+    fn every_type() -> [(Type, Vec<u8>); 7] {
+        let le = |values: &[u32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let element = Scalar::U64;
+        let sides = types::sample::Sides {
+            rows: 2,
+            columns: 2,
+        };
+        [
+            (
+                Type::Scalar(Scalar::Stamp),
+                [10_i64, 20, 30].map(i64::to_le_bytes).concat(),
+            ),
+            (Type::String, [le(&[2, 2, 5]), b"abcde".to_vec()].concat()),
+            (Type::Bytes, [le(&[1, 3, 4]), vec![9, 8, 7, 6]].concat()),
+            (
+                Type::List { element, max: 2 },
+                [
+                    le(&[1, 1, 3, 0]),
+                    [4_u64, 5, 6].map(u64::to_le_bytes).concat(),
+                ]
+                .concat(),
+            ),
+            (
+                Type::Array {
+                    element: Scalar::F32,
+                    len: 2,
+                },
+                [0.5_f32, 1.5, 2.5, 3.5, 4.5, 5.5]
+                    .map(f32::to_le_bytes)
+                    .concat(),
+            ),
+            (
+                Type::Matrix {
+                    element: Scalar::I8,
+                    sides,
+                },
+                (1..=12).collect(),
+            ),
+            (Type::Scalar(Scalar::Bool), vec![1, 0, 1]),
+        ]
     }
 
     #[test]
-    fn refuses_a_key_set_with_a_series_of_a_type_the_home_does_not_write() {
+    fn writes_and_reads_a_series_of_each_type() {
         run(87, |test| async move {
-            let mut shard = test.shard(AREA).await;
-            let refused = shard.open_writer(writer("a", 2, &string_series()));
-            assert_eq!(
-                refused,
-                Err(writer::Error::Type {
-                    slot: Slot::new(3),
-                    data_type: Type::String,
-                })
-            );
-            let set = two_indexes();
-            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
-            let write = frame(&test.pool, &set, &[(2, &[10])]);
-            assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
-        });
-    }
-
-    #[test]
-    fn refuses_the_type_of_a_series_before_the_panic_of_an_index_not_carried() {
-        run(102, |test| async move {
-            let mut shard = test.shard(AREA).await;
+            let series = every_type();
+            let data: Vec<(channel::Key, Type)> = (3..)
+                .zip(&series[1..])
+                .map(|(slot, &(data_type, _))| (key(Slot::new(slot)), data_type))
+                .collect();
             let set = create_interner().intern(&[Group {
-                index: key(Slot::new(3)),
-                data: &[(key(Slot::new(1)), Type::Bytes)],
+                index: key(Slot::new(2)),
+                data: &data,
             }]);
-            assert_eq!(
-                shard.open_writer(writer("a", 1, &set)),
-                Err(writer::Error::Type {
-                    slot: Slot::new(1),
-                    data_type: Type::Bytes,
-                })
-            );
+            let mut shard = test.shard(AREA).await;
+            let latest = shard.open_latest(Slot::new(2));
+            let marked = test.now();
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let lens: Vec<_> =
+                (0..).zip(&series).map(|(e, (_, v))| (e, v.len())).collect();
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Raw, &lens).expect("room");
+            for (entry, bytes) in write.iter_mut() {
+                bytes.copy_from_slice(&series[entry].1);
+            }
+            write.set_count(0, 3);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(2, 0, 3)][..]));
+            shard.committed().await.expect("the commit ends");
+            let decoded = |data_type: Type, bytes: &[u8]| -> (Type, Vec<u8>) {
+                let len = codec::validate(data_type, 3, bytes).expect("valid");
+                let mut out = vec![0; len];
+                codec::decode(data_type, 3, bytes, &mut out).expect("decodes");
+                (data_type, out)
+            };
+            let reader::Next::Frame(frame) = shard.take(latest) else {
+                panic!("a frame");
+            };
+            let read: Vec<_> = frame
+                .iter()
+                .map(|(entry, bytes)| decoded(set.entries()[entry].data_type, bytes))
+                .collect();
+            assert_eq!(read, series);
+            let ring = test.ring().await;
+            let data: Vec<_> = bodies(&ring, marked)
+                .into_iter()
+                .filter(|(tag, _)| *tag == 0)
+                .collect();
+            let stored: Vec<_> = stored::read(&data[0].1)
+                .map(|series| decoded(series.data_type, series.bytes))
+                .collect();
+            assert_eq!(stored, series);
         });
     }
 
@@ -4011,31 +4061,6 @@ mod tests {
         run(103, |test| async move {
             let shard = test.shard(AREA).await;
             assert!(std::ptr::eq(shard.pool(), &raw const *test.pool));
-        });
-    }
-
-    #[test]
-    fn refuses_a_lease_of_zero_before_the_type_of_a_series() {
-        run(88, |test| async move {
-            let mut shard = test.shard(AREA).await;
-            let zero = Writer {
-                lease: Some(Span::ZERO),
-                ..writer("a", 1, &string_series())
-            };
-            assert_eq!(
-                shard.open_writer(zero),
-                Err(writer::Error::Lease { span: Span::ZERO })
-            );
-        });
-    }
-
-    #[test]
-    fn refuses_the_type_of_a_series_as_unsynced_before_the_node_has_mesh_time() {
-        run(101, |test| async move {
-            let mut shard = test.unsynced().await;
-            shard.carry(Slot::new(2));
-            let a = shard.open_writer(writer("a", 1, &string_series()));
-            assert_eq!(a, Err(writer::Error::Unsynced));
         });
     }
 
