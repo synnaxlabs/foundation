@@ -3462,9 +3462,7 @@ mod port {
         }
 
         /// A task that panics one yield after the instant of the write that fails,
-        /// before the group stops: `join` gives the panic. No input reaches a panic
-        /// between the group's stop and the node's poll, because the sim picks each
-        /// next task at random (#2016).
+        /// before the group stops: `join` gives the panic.
         #[test]
         fn a_panic_before_the_group_stops_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -3495,6 +3493,44 @@ mod port {
                     thread: "shard-0".into(),
                     message: "a task panics".into(),
                     seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(
+                node.join(),
+                Err(Error::Panicked(thread::Panicked {
+                    name: "shard-0".into()
+                }))
+            );
+        }
+
+        /// A task that panics after the group stops, before the node sees the stop:
+        /// `join` gives the panic. The seed and the instant are ones where the sim
+        /// runs the group's stop first.
+        #[test]
+        fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed: 22,
+                ..sim::Config::default()
+            });
+            let host = keyed(&mut sim, 2);
+            let node = start_alone(&host);
+            let at = sim::node::Config::default().monotonic
+                + OPEN
+                + Span::from_nanos(1_592_294_695);
+            let own = host.clone();
+            node.spawn(move |_| async move {
+                own.clock().sleep_until(at).await;
+                panic!("a task panics");
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: "a task panics".into(),
+                    seed: 22,
                 })
             );
             assert_eq!(sim.run(), Ok(()));
