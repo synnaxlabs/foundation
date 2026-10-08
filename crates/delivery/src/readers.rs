@@ -561,23 +561,25 @@ impl Readers {
                 let Some(i) = self.find(key) else {
                     return;
                 };
-                if self.complete[i].named.is_none() {
-                    self.end(i);
-                    return;
+                match now {
+                    Some(now) => self.end_at(i, now),
+                    None if self.complete[i].named.is_some() => {
+                        panic!("named complete session {key} closed with no mesh time")
+                    }
+                    None => drop(self.end(i)),
                 }
-                let Some(now) = now else {
-                    panic!("named complete session {key} closed with no mesh time");
-                };
-                self.end_named(i, now);
             }
             Key::Latest(key) => self.close_latest(key),
         }
     }
 
-    /// Ends the named complete session at `i` at `now`. Its reader holds from `now`.
-    fn end_named(&mut self, i: usize, now: Stamp) {
+    /// Removes the complete session at `i` at `now`, as [`Readers::end`] does. A named
+    /// one holds its position from `now`.
+    fn end_at(&mut self, i: usize, now: Stamp) {
         let session = self.end(i);
-        let reader = session.named.expect("invariant: the session is named");
+        let Some(reader) = session.named else {
+            return;
+        };
         let closed = Closed {
             reader: *reader,
             hold: session.hold,
@@ -662,7 +664,7 @@ impl Readers {
             return self.remove_latest(reader).map(Key::from);
         };
         let key = self.complete[i].key;
-        self.end_named(i, now);
+        self.end_at(i, now);
         Some(key.into())
     }
 
@@ -762,8 +764,12 @@ impl Credit {
 
 impl Session {
     fn record(&self) -> Option<Record> {
-        let reader = self.named.as_deref()?;
-        Some(record(reader, self.position, self.hold, None))
+        Some(Record {
+            reader: self.named.as_deref()?.clone(),
+            position: self.position,
+            hold: self.hold,
+            closed: None,
+        })
     }
 }
 
@@ -776,21 +782,12 @@ impl Closed {
     }
 
     fn record(&self) -> Record {
-        record(&self.reader, self.position, self.hold, Some(self.at))
-    }
-}
-
-fn record(
-    reader: &named::Key,
-    position: Position,
-    hold: Span,
-    closed: Option<Stamp>,
-) -> Record {
-    Record {
-        reader: reader.clone(),
-        position,
-        hold,
-        closed,
+        Record {
+            reader: self.reader.clone(),
+            position: self.position,
+            hold: self.hold,
+            closed: Some(self.at),
+        }
     }
 }
 
@@ -2993,7 +2990,10 @@ pub(super) mod tests {
                 backfill: i64,
                 flipped: bool,
             },
-            Close(usize),
+            Close {
+                session: usize,
+                synced: bool,
+            },
             Flush,
             Advance,
         }
@@ -3136,7 +3136,8 @@ pub(super) mod tests {
                             flipped,
                         }
                     }),
-                any::<usize>().prop_map(Input::Close),
+                (any::<usize>(), any::<bool>())
+                    .prop_map(|(session, synced)| Input::Close { session, synced }),
                 Just(Input::Flush),
                 Just(Input::Advance),
             ]
@@ -3182,12 +3183,18 @@ pub(super) mod tests {
             }
         }
 
-        /// Closes the open session `key` at `now` with the call for its kind.
-        fn close(readers: &mut Readers, model: &Model, key: complete::Key, now: i64) {
-            match model.open[&key].0 {
-                Some(_) => readers.close(key.into(), Some(at(now))),
-                None => readers.close(key.into(), None),
-            }
+        /// Closes the open session `key` at `now`. A named session always gets `now`,
+        /// as the home has mesh time when one opens. An unnamed one gets it when
+        /// `synced`.
+        fn close(
+            readers: &mut Readers,
+            model: &Model,
+            key: complete::Key,
+            now: i64,
+            synced: bool,
+        ) {
+            let named = model.open[&key].0.is_some();
+            readers.close(key.into(), (named || synced).then(|| at(now)));
         }
 
         /// Applies one input to the readers and the model, and checks that they agree.
@@ -3230,17 +3237,17 @@ pub(super) mod tests {
                     let (key, to) = (*key, moved(*from, live, backfill, flipped));
                     assert_eq!(readers.ack(key, to), model.ack(key, to));
                 }
-                Input::Close(session) if !model.open.is_empty() => {
+                Input::Close { session, synced } if !model.open.is_empty() => {
                     let key = *model
                         .open
                         .keys()
                         .nth(session % model.open.len())
                         .expect("in range");
-                    close(readers, model, key, now);
+                    close(readers, model, key, now, synced);
                     model.close(key, now);
                 }
                 Input::Flush => readers.flush(),
-                Input::Ack { .. } | Input::Close(_) | Input::Advance => {}
+                Input::Ack { .. } | Input::Close { .. } | Input::Advance => {}
             }
             assert_eq!(readers.floor(), model.floor());
             assert_eq!(readers.deadline(), model.deadline());
@@ -3266,7 +3273,7 @@ pub(super) mod tests {
             }
             let mut restored = Readers::restore(records, at(now), 0);
             for key in model.open.keys() {
-                close(&mut readers, &model, *key, now);
+                close(&mut readers, &model, *key, now, true);
             }
             for later in [0, 1, 5, 10, 20, 40] {
                 restored.advance(at(now + later));
@@ -3553,7 +3560,7 @@ pub(super) mod tests {
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        close(&mut readers, &model.readers, key, 0);
+                        close(&mut readers, &model.readers, key, 0, i % 2 == 0);
                         model.close(key, 0);
                     }
                     Live::Ack(i, ahead) => {

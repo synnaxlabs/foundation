@@ -437,14 +437,17 @@ How to read this record:
   no other open does, so the home opens unnamed readers before the first estimate. A
   named complete session has a `complete::Key` (#1024). One close replaces
   `Readers::close_named`, so the caller never picks a close by the mode of the session
-  (`laptop.architect`,
-  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
-  One `delivery::named::Key { subject, name }` keys a named reader in `Reader::Named`,
+  (`laptop.architect`, 2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367). One
+  `delivery::named::Key { subject, name }` keys a named reader in `Reader::Named`,
   `Record`, and `Readers::open_named_latest`, in place of two `Name` values (the
-  director's question,
-  [#1856](https://github.com/synnaxlabs/foundation/pull/1856#issuecomment-6058445903);
-  `laptop.architect`, the same #1863 comment). Supersedes the B3 single position.
-  Basis: A6, A8, B2, B3, S10, X14, #41.
+  director's question, 2026-10-08T11:03:04Z:
+  https://github.com/synnaxlabs/foundation/pull/1856#issuecomment-6058445903;
+  `laptop.architect`, the same #1863 comment). Supersedes the B3 single position, the
+  `close` and `close_named` pair and its wrong-close panics of
+  https://github.com/synnaxlabs/foundation/issues/1024#issuecomment-6029883335, and
+  https://github.com/synnaxlabs/foundation/issues/1024#issuecomment-6030162160. Basis:
+  A6, A8, B2, B3, S10, X14, #41.
 - **STORE TRIM (2026-10-06)** Under disk pressure, `buffer` frees its oldest records
   itself, in the commit task, whatever the floors: a ring frees space only at its tail,
   so a floor never changes which record goes (B1). The commit writes the new tail in the
