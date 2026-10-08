@@ -47,10 +47,35 @@
   approved by `laptop.architect` at 15:26:10Z
   (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600).
   Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
-  of #336. A mesh that stops does not stop the node until #1780, before PR 4 gives the
-  mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second open
-  path and a node that runs with no region before it; the key in `node::Region`,
-  because a node's identity is not region data, and PR 4 needs it with no region.
-  Decided by `laptop.architect-2` (2026-10-08 03:37 UTC):
+  of #336. Lost: `Node::found(region)` at run time, which needs a second open path and
+  a node that runs with no region before it; the key in `node::Region`, because a
+  node's identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
-  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943. A
+  mesh whose group stops stops the node, and `Node::join` gives `Error::Group` with
+  the cause. Of a transport that stops and a group that stops, `join` gives the one
+  that the node sees first; of two that stop at one instant, either can be first
+  (#1780). Supersedes the deferral of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452. Lost:
+  `Mesh::stopped()`, because `Watch::next` gives the stop as its contract and one
+  caller does not justify a new `mesh` item; add `Mesh::stopped` when a second caller
+  needs the stop of the group and reads no home, and ask `laptop.architect` for it.
+  Decided by `laptop.architect-2` at 2026-10-08T17:27:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1780#issuecomment-6065408760), and
+  changed by `laptop.architect-2` at 17:32:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136): the
+  stop has its own variant. Lost: `Error::Mesh` with `mesh::Error::Stopped`, which
+  gives one variant two meanings. The rank by what the node sees first supersedes item
+  2 of https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136, and
+  the private rank of shard 0's stop is a fixed tie-break with no contract. Decided by
+  `laptop.architect-2` at 17:49:13Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217), and
+  for `Node::spawn` at 17:58:35Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065936160): a
+  panic gives `Error::Panicked` unless the node saw the transport or the group stop
+  first. Lost: "the transport's when both stop at once", because the node sees each
+  stop only at its next poll, so of two stops at one instant either can come first
+  (the breaker,
+  https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065770160 and
+  https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065929818).
