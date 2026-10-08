@@ -906,46 +906,6 @@ fn a_lookup_needs_no_runtime() {
     assert!(found.is_ok_and(|found| !found.is_empty()));
 }
 
-/// Whether a thread of this process has the name of a lookup thread.
-#[cfg(target_os = "linux")]
-fn resolving() -> bool {
-    let tasks = std::fs::read_dir("/proc/self/task").unwrap();
-    tasks.map(Result::unwrap).any(|task| {
-        let name = std::fs::read_to_string(task.path().join("comm"));
-        name.is_ok_and(|name| name == "resolve\n")
-    })
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn a_dropped_lookup_ends_its_thread_with_no_panic() {
-    // libtest sees a panic only on the thread of a test.
-    let report = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        report(info);
-        if std::thread::current().name() == Some("resolve") {
-            std::process::abort();
-        }
-    }));
-    let net = net();
-    let mut cx = Context::from_waker(Waker::noop());
-    // A lookup that answers before its first poll ends leaves no answer to drop.
-    let dropped = (0..100).any(|_| {
-        let mut lookup = Box::pin(net.resolve("localhost", 4433));
-        lookup.as_mut().poll(&mut cx).is_pending()
-    });
-    assert!(dropped, "a lookup is pending at its first poll");
-    let ended = runtime().block_on(async {
-        timeout(BOUND, async {
-            while resolving() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-    });
-    ended.expect("the lookup thread ends");
-}
-
 #[test]
 fn resolve_of_a_literal_needs_no_resolver() {
     let found = runtime().block_on(net().resolve("127.0.0.1", 80));

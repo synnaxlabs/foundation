@@ -9,6 +9,7 @@
 use env::net::Error;
 use rustix::fs::{Mode, OFlags, open};
 use rustix::io::Errno;
+use rustix::process::{self, Resource};
 use tokio::runtime::Runtime;
 
 /// Looks up `localhost` while each descriptor of the process is taken.
@@ -22,6 +23,10 @@ fn starved(runtime: &Runtime) -> Result<Vec<std::net::SocketAddr>, Error> {
 
 #[test]
 fn a_lookup_with_no_free_descriptor_is_io() {
+    // A small limit runs out before the table of the host does, which gives `ENFILE`.
+    let mut limit = process::getrlimit(Resource::Nofile);
+    limit.current = Some(128);
+    process::setrlimit(Resource::Nofile, limit).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a current-thread runtime builds");
