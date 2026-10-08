@@ -441,18 +441,19 @@ mod tests {
             let pool = Rc::new(Pool::new(budget, memory));
             let largest = pool.largest();
             assert!(largest < 1000, "{largest} bytes");
-            for (window, message, error) in [
-                (1 << 16, 1000, POOL),
-                (1 << 16, 1472, POOL),
-                (0, 1472, POOL),
-                (1 << 16, largest, FLOOR),
+            for (idle, window, message, error) in [
+                (Span::SECOND, 1 << 16, 1000, POOL),
+                (Span::SECOND, 1 << 16, 1472, POOL),
+                (Span::SECOND, 0, 1472, POOL),
+                (Span::SECOND, 1 << 16, largest, FLOOR),
+                (Span::ZERO, 1 << 16, 1472, IDLE),
             ] {
-                let mut config = config(shard, Span::SECOND, window, message);
+                let mut config = config(shard, idle, window, message);
                 config.pool = Rc::clone(&pool);
                 assert_eq!(
                     Transport::new(config, shard.part()).err(),
                     Some(error),
-                    "window {window}, message {message}"
+                    "idle {idle:?}, window {window}, message {message}"
                 );
             }
         });
