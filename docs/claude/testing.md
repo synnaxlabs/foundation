@@ -57,12 +57,13 @@ not touched pages (#803,
 https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6009258555,
 2026-10-06T04:20:13Z). CI keeps it until each runner host has the cgroup cap (#899). An
 assertion through a private field or call, or a compare of the `Debug` string of the
-type under test, is never the only kill. `.cargo/mutants.toml` lists the few functions
-it skips. Each entry is as narrow as one function. Its comment says why no caller or
-peer can see the mutant, or names the test that kills it in a job that the mutants run
-does not see (Miri, loom, another OS). A mutant that a test could kill but none does
-links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
-`rust-toolchain-nightly`, that only those gates use.
+type under test, other than in the test of a hand-written `Debug` impl itself, is never
+the only kill. `.cargo/mutants.toml` lists the few functions it skips. Each entry is as
+narrow as one function. Its comment says why no caller or peer can see the mutant, or
+names the test that kills it in a job that the mutants run does not see (Miri, loom,
+another OS). A mutant that a test could kill but none does links its open issue. Miri
+and cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
+those gates use.
 
 ## Process tests
 
@@ -147,14 +148,14 @@ again once to prove that the failure replays (r16 59).
 - **No tautological tests.** Never repeat the implementation's formula or assert that
   a constant equals itself. Assert properties: order, round trip, bounds (r16 56).
 - **No `#[ignore]`.** A known bug is a test that asserts today's wrong result, with a
-  comment and an issue link (r16 53). Two exceptions. A test of an acceptance scenario
-  of an open milestone, as its plan issue names it, in `acceptance` or in
-  `crates/node/tests/it/` when it runs the `foundation` binary, is
-  `#[ignore = "waits on #<n>"]`, with each open issue that it waits on. The PR that
-  closes such an issue removes it from each reason, and removes the `#[ignore]` when no
-  issue is left. A test that needs a tool of one OS, and that CI runs on that OS, is
-  `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`, never
-  `#[cfg(target_os = ...)]`, which hides it on another OS with no reason.
+  comment and an issue link (r16 53). Two exceptions. A scenario in `acceptance` that
+  cannot run yet, and a test in `crates/node/tests/it/` that runs the `foundation`
+  binary as the acceptance scenario of an open milestone, as its plan issue names it,
+  and cannot run yet, is `#[ignore = "waits on #<n>"]`, with each open issue that it
+  waits on. The PR that closes such an issue removes it from each reason, and removes
+  the `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
+  runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
+  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
