@@ -4075,12 +4075,15 @@ How to read this record:
   and inode with no follow of a link, as FILE RENAME does: `NotFound { path }` when the
   path no longer names it, and nothing is removed. Until the remove ends, also after a
   drop of its future, a write open of the path gives `Busy`; on `os` the descriptor
-  closes after the unlink, so the lock holds across processes until then. The removal
-  is not durable until `sync_dir` on its directory ends. A read handle panics. The
-  caller is `mesh::log`, which removes a sealed file and makes one at its path. Lost:
-  a spare name in `mesh` only, which adds a second kind of file to the directory of a
-  log and a sweep of it in `Log::open`. Supersedes the "Lost: `File::remove`" sentence
-  of https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245.
+  closes after the unlink, so the lock holds across processes until then. The race
+  sentence of FILE RENAME holds for it too. The removal is not durable until
+  `sync_dir` on its directory ends. A poisoned handle gives `Poisoned` and closes: a
+  dropped rename can still move the file, so the path of the handle may be stale. A
+  read handle panics. The caller is `mesh::log`, which removes a sealed file and
+  makes one at its path. Lost: a spare name in `mesh` only, which adds a second kind
+  of file to the directory of a log, a sweep of it in `Log::open`, and a change to
+  the `Stray` rule of MESH LOG. Supersedes the "Lost: `File::remove`" sentence of
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245.
   Decided by `laptop.architect-2`, #1604, 2026-10-07T20:24:12Z
   (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin

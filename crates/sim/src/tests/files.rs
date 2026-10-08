@@ -1552,3 +1552,27 @@ fn a_remove_through_the_handle_frees_a_durable_file_only_after_sync_dir() {
     });
     assert_eq!(frees, (MIB - 64 * KIB, MIB));
 }
+
+#[test]
+fn a_remove_after_a_dropped_rename_gives_poisoned_and_the_file_stays() {
+    for value in 0..8 {
+        let (removed, names) = run(value, MIB, move |node, _| async move {
+            let files = node.files();
+            let mut file = create(&node, "a", KIB).await;
+            let mut rename = Box::pin(file.rename(Path::new("b")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+            drop(rename);
+            node.clock().sleep(Span::MILLISECOND).await;
+            let removed = file.remove().await;
+            (removed, files.list(Path::new("")).await.unwrap())
+        });
+        let poisoned = Err(Error::Poisoned { path: "a".into() });
+        assert_eq!(
+            (removed, names),
+            (poisoned, vec!["b".into()]),
+            "value {value}"
+        );
+    }
+}

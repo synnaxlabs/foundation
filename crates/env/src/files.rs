@@ -488,6 +488,9 @@ impl File {
     ///
     /// # Errors
     ///
+    /// - [`Error::Poisoned`] when a call of the handle was dropped or a sync of it
+    ///   failed: a dropped rename can still move the file, so the path of the handle
+    ///   may be stale. Nothing is removed.
     /// - [`Error::NotFound`] when the path of the handle no longer names its file:
     ///   another call removed the path. Nothing is removed.
     /// - [`Error::Io`] when the OS cannot remove the file.
@@ -514,6 +517,10 @@ impl File {
             "remove {}, which was opened to read",
             self.path.display()
         );
+        if let Err(poisoned) = self.check_poison() {
+            self.close().await;
+            return Err(poisoned);
+        }
         self.descriptor.remove(self.path).await
     }
 
@@ -1559,12 +1566,15 @@ mod tests {
         }
 
         #[test]
-        fn removes_a_poisoned_file() {
+        fn a_poisoned_file_closes_and_does_not_remove() {
             let (files, calls) = Fixed::with_sync(8, Err(io(Operation::Sync)));
             let file = open(&files, Mode::Write);
             assert_eq!(ready(file.sync()), Err(io(Operation::Sync)));
-            assert_eq!(ready(file.remove()), Ok(()));
-            assert_eq!(calls.borrow()[1..], ["sync", "remove ring/0"]);
+            let poisoned = Err(Error::Poisoned {
+                path: "ring/0".into(),
+            });
+            assert_eq!(ready(file.remove()), poisoned);
+            assert_eq!(calls.borrow()[1..], ["sync", "close"]);
         }
 
         #[test]

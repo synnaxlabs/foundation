@@ -274,15 +274,11 @@ impl Disk {
 
     /// Unlinks file `inode` at `path`. `NotFound` when `path` no longer names it.
     pub(crate) fn unlink(&mut self, inode: u64, path: &Path) -> Result<(), Cause> {
-        let segments = segments(path);
-        let (name, parent) = segments
-            .split_last()
-            .expect("invariant: an unlink is of a file");
-        let dir = self.dir_mut(self.dir(parent)?);
-        if dir.entries.get(*name) != Some(&inode) {
-            return Err(Cause::NotFound);
-        }
-        self.remove(path)
+        let (dir, name) = self.entry(inode, path)?;
+        self.dir_mut(dir).entries.remove(name);
+        self.file(inode).linked = false;
+        self.collect(inode);
+        Ok(())
     }
 
     /// Moves the entry of file `inode` from `from` to `to`, both in one directory.
@@ -293,22 +289,33 @@ impl Disk {
         from: &Path,
         to: &Path,
     ) -> Result<(), Cause> {
-        let from = segments(from);
-        let (old, parent) =
-            from.split_last().expect("invariant: a rename is of a file");
+        let (dir, old) = self.entry(inode, from)?;
         let new = segments(to)
             .pop()
             .expect("invariant: a rename is to a name");
-        let dir = self.dir_mut(self.dir(parent)?);
-        if dir.entries.get(*old) != Some(&inode) {
-            return Err(Cause::NotFound);
-        }
+        let dir = self.dir_mut(dir);
         if dir.entries.contains_key(new) {
             return Err(Cause::Exists(to.to_path_buf()));
         }
-        dir.entries.remove(*old);
+        dir.entries.remove(old);
         dir.entries.insert(new.to_owned(), inode);
         Ok(())
+    }
+
+    /// The directory and the name of the entry at `path`, a path of a handle of file
+    /// `inode`. `NotFound` when the entry no longer names it.
+    fn entry<'a>(&self, inode: u64, path: &'a Path) -> Result<(u64, &'a OsStr), Cause> {
+        let segments = segments(path);
+        let (name, parent) = segments
+            .split_last()
+            .expect("invariant: a handle names a file");
+        let dir = self.dir(parent)?;
+        match &self.inodes[&dir] {
+            Inode::Dir(entries) if entries.entries.get(*name) == Some(&inode) => {
+                Ok((dir, name))
+            }
+            _ => Err(Cause::NotFound),
+        }
     }
 
     /// Adds one hold of the file of `handle`.

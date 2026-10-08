@@ -398,7 +398,7 @@ fn sync_all(fd: &OwnedFd) -> io::Result<()> {
 /// directory, so nothing changes `from` between the check and the rename.
 fn rename(fd: &OwnedFd, data: &OwnedFd, from: &Path, to: &Path) -> Result<(), Error> {
     let failed = fail(from, Operation::Rename);
-    names(fd, data, from, &failed)?;
+    check_named(fd, data, from, &failed)?;
     match fs::renameat_with(data, from, data, to, RenameFlags::NOREPLACE) {
         Err(Errno::EXIST) => Err(Error::Exists {
             path: to.to_path_buf(),
@@ -410,13 +410,13 @@ fn rename(fd: &OwnedFd, data: &OwnedFd, from: &Path, to: &Path) -> Result<(), Er
 /// Unlinks `path` when it names the file `fd`, as [`rename`] checks it.
 fn remove(fd: &OwnedFd, data: &OwnedFd, path: &Path) -> Result<(), Error> {
     let failed = fail(path, Operation::Remove);
-    names(fd, data, path, &failed)?;
+    check_named(fd, data, path, &failed)?;
     fs::unlinkat(data, path, AtFlags::empty()).map_err(&failed)
 }
 
 /// `NotFound` from `failed` unless `path`, a link itself and not what it points at,
 /// names the file `fd`.
-fn names(
+fn check_named(
     fd: &OwnedFd,
     data: &OwnedFd,
     path: &Path,
