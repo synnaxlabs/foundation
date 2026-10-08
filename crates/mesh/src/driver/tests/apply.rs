@@ -854,6 +854,8 @@ fn an_equal_change_gives_ok_when_a_later_home_applies_in_its_batch() {
         let applied = mesh.apply(base(), definitions.clone(), first).await;
         assert_eq!(applied, Ok(moved));
         let both = create_homes(2, "plant.node1");
+        // No public call shows a queued proposal, so this reads `proposals`, whose
+        // order is the order of the log.
         assert!(mesh.group.borrow().proposals.is_empty());
         let mut call = pin!(mesh.apply(base(), definitions, both));
         while mesh.group.borrow().proposals.is_empty() {

@@ -2403,9 +2403,8 @@ How to read this record:
   of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A call
   whose entry finds the pointer that the call makes, after a lost answer or an equal
-  change of another call, returns that pointer when each listed index has a home
-  (below); a later pointer gives `Stale`. Decided by `laptop.architect`,
-  2026-10-08T10:19:54Z
+  change of another call, returns that pointer, under the home rule below; a later
+  pointer gives `Stale`. Decided by `laptop.architect`, 2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
   equal change of another call, 2026-10-08T11:46:44Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A listed
@@ -2430,9 +2429,12 @@ How to read this record:
   reading when the call settles, the invariant, and its trigger, decided by
   `laptop.architect` at 2026-10-08T18:00:15Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065963448), which
-  supersedes the `Stale` text of 17:52:34Z. The build with `spec::region::tree`, and the
-  build of the root of `Config::founding` with it in `Mesh::open`, decided by
-  `laptop.architect`, 2026-10-08T08:41:43Z
+  supersedes the `Stale` text of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065835401 and the
+  `Ok` text of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915. The build
+  with `spec::region::tree`, and the build of the root of `Config::founding` with it in
+  `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771). The
