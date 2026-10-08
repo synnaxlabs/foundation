@@ -21,7 +21,7 @@ const RANGE: usize = 16;
 /// Bytes of one descriptor: entry and the end of its series in the series bytes (each
 /// `u32`).
 const DESCRIPTOR: usize = 8;
-/// Each series starts at a multiple of this.
+/// Each series starts at a multiple of this. A power of two.
 const SERIES_ALIGN: usize = 8;
 
 /// Offsets of the header's fields: the key set key and the counts of ranges and
