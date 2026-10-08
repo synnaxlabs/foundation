@@ -16,29 +16,119 @@ pub(crate) fn raw(ends: &[u8], elements: &[u8]) -> Result<(), Error> {
     };
     let from = vector.strict_mul(VECTOR_LEN);
     let piece = elements.split_at(from).1;
-    check(Pieces::raw(ends), from, piece, Pieces::Raw(None))
+    if valid(Pieces::Raw(Some(ends)), from, piece, Pieces::Raw(None)) {
+        return Ok(());
+    }
+    check(Pieces::Raw(Some(ends)), from, piece, Pieces::Raw(None))
 }
 
-/// Checks that each sample of an encoded `String` series is UTF-8, given its `ends`,
-/// which are valid, and the encoded `vectors` of its `elements`, which are valid. It
-/// decodes each vector once, and reads the ends only when a vector is not ASCII.
-#[expect(clippy::unwrap_in_result, reason = "the caller checked the vectors")]
+/// The valid ends of a series.
+#[derive(Clone, Copy)]
+pub(crate) enum Ends<'a> {
+    /// Raw ends.
+    Raw(&'a [u8]),
+    /// The encoded ends of `count` samples.
+    Encoded { count: usize, bytes: &'a [u8] },
+}
+
+impl<'a> Ends<'a> {
+    fn pieces(self) -> Pieces<'a> {
+        match self {
+            Self::Raw(ends) => Pieces::Raw(Some(ends)),
+            Self::Encoded { count, bytes } => {
+                Pieces::Encoded(Decoder::new(Scalar::U32, count, bytes))
+            }
+        }
+    }
+}
+
+/// Checks that each sample of an encoded `String` series is UTF-8, given its `ends`
+/// and the encoded `vectors` of its `elements`, which are valid. It decodes each vector
+/// once, and reads the ends only when a vector is not ASCII.
 pub(crate) fn encoded(
-    ends: Pieces<'_>,
+    ends: Ends<'_>,
     elements: usize,
     vectors: &[u8],
 ) -> Result<(), Error> {
-    let mut vectors = Decoder::new(Scalar::U8, elements, vectors);
     let mut out = [0; VECTOR_LEN];
+    let Some((from, len, rest)) = skip(elements, vectors, &mut out) else {
+        return Ok(());
+    };
+    let piece = out.split_at(len).0;
+    if valid(ends.pieces(), from, piece, Pieces::Encoded(rest)) {
+        return Ok(());
+    }
+    let (from, len, rest) =
+        skip(elements, vectors, &mut out).expect("invariant: a vector is not ASCII");
+    check(
+        ends.pieces(),
+        from,
+        out.split_at(len).0,
+        Pieces::Encoded(rest),
+    )
+}
+
+/// Decodes the encoded `vectors` of `elements` into `out` until one is not ASCII.
+/// Returns the elements before it, its length, and the decoder of the vectors after
+/// it, or `None` when each vector is ASCII.
+fn skip<'a>(
+    elements: usize,
+    vectors: &'a [u8],
+    out: &mut [u8],
+) -> Option<(usize, usize, Decoder<'a>)> {
+    let mut vectors = Decoder::new(Scalar::U8, elements, vectors);
     let mut from = 0;
-    while let Some(vector) = vectors.next(&mut out) {
+    while let Some(vector) = vectors.next(out) {
         let vector = vector.expect("invariant: the vectors were checked");
         if !vector.is_ascii() {
-            return check(ends, from, vector, Pieces::Encoded(vectors));
+            return Some((from, vector.len(), vectors));
         }
         from = from.strict_add(vector.len());
     }
-    Ok(())
+    None
+}
+
+/// Whether each sample is UTF-8, by one check of the elements from `from` on and a
+/// check that no end falls inside a char. When not, [`check`] names the sample. Its
+/// arguments are those of [`check`].
+fn valid(
+    mut ends: Pieces<'_>,
+    from: usize,
+    piece: &[u8],
+    mut rest: Pieces<'_>,
+) -> bool {
+    let mut ends_out = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
+    let mut rest_out = [0; VECTOR_LEN];
+    let mut text = Text::default();
+    let mut piece = piece;
+    let mut start = from;
+    if text.elements(piece).is_err() {
+        return false;
+    }
+    while let Some(decoded) = ends.next(&mut ends_out) {
+        for end in decoded.as_chunks::<4>().0 {
+            let end = usize::try_from(u32::from_le_bytes(*end))
+                .expect("invariant: a usize holds a u32");
+            while let Some(at) = end.checked_sub(start) {
+                if let Some(byte) = piece.get(at) {
+                    if byte & 0xc0 == 0x80 {
+                        return false;
+                    }
+                    break;
+                }
+                start = start.strict_add(piece.len());
+                let Some(next) = rest.next(&mut rest_out) else {
+                    piece = &[];
+                    break;
+                };
+                piece = next;
+                if text.elements(piece).is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+    text.end().is_ok()
 }
 
 /// Checks each sample that the `ends` cut from the elements, given that each element
@@ -84,23 +174,13 @@ fn check(
 }
 
 /// Raw bytes, or encoded vectors of them, a piece at a time.
-pub(crate) enum Pieces<'a> {
+enum Pieces<'a> {
     /// The bytes, until taken.
     Raw(Option<&'a [u8]>),
     Encoded(Decoder<'a>),
 }
 
 impl<'a> Pieces<'a> {
-    /// The raw ends of a series.
-    pub(crate) const fn raw(ends: &'a [u8]) -> Self {
-        Self::Raw(Some(ends))
-    }
-
-    /// The encoded ends of a series of `count` samples.
-    pub(crate) fn ends(count: usize, ends: &'a [u8]) -> Self {
-        Self::Encoded(Decoder::new(Scalar::U32, count, ends))
-    }
-
     /// The next piece, decoded into `out` when encoded.
     fn next<'o>(&mut self, out: &'o mut [u8]) -> Option<&'o [u8]>
     where

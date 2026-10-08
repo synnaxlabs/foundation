@@ -152,12 +152,10 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
             let after = element.check(elements, rest, vectors(count))?;
             if utf8 {
                 let ends = if decoded {
-                    text::Pieces::raw(first)
+                    text::Ends::Raw(first)
                 } else {
-                    text::Pieces::ends(
-                        count,
-                        bytes.split_at(bytes.len().strict_sub(rest.len())).0,
-                    )
+                    let bytes = bytes.split_at(bytes.len().strict_sub(rest.len())).0;
+                    text::Ends::Encoded { count, bytes }
                 };
                 let vectors = rest.split_at(rest.len().strict_sub(after.len())).0;
                 text::encoded(ends, elements, vectors)?;
@@ -2164,6 +2162,16 @@ mod tests {
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 2 });
             let ends = [1_000, 2_049, 2_051];
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 1 });
+        }
+
+        #[test]
+        fn refuses_an_end_inside_a_char_of_utf8_elements() {
+            let elements = format!("{}\u{e9}\u{20ac}", "a".repeat(1_023));
+            let elements = elements.as_bytes();
+            let ends: [&[u32]; 2] = [&[1_024, 1_028], &[1_025, 1_026, 1_028]];
+            for (ends, sample) in ends.into_iter().zip([0, 1]) {
+                refuses(Type::String, ends, elements, &Error::Utf8 { sample });
+            }
         }
 
         #[test]
