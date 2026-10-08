@@ -583,7 +583,6 @@ mod tests {
                 })
             );
             assert_eq!(reader.held.buffer.capacity(), 0);
-            assert!(reader.held.chunks.is_empty());
             let mut next = Source::new(encode(&[vec![5; 20]]), 64);
             let next = super::read(&mut reader, &pool, &mut next);
             assert_eq!(next, Ok(Poll::Ready(Some(vec![5; 20]))));

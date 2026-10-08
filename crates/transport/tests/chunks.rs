@@ -46,9 +46,10 @@ const SHORT: usize = 1000;
 /// between 1000 and 1472 bytes of a message, so the pattern lies past its first 64
 /// packets and inside its first 128: only a second copy of a full list holds it.
 const SECOND: usize = 110_000;
-/// Where the pattern starts in a message of 1 << 18 bytes: past its first 128
-/// packets, and in fewer than 64 after them, so no copy of a full list holds it.
-const LAST: usize = 190_000;
+/// Where the pattern starts in a message of 220 000 bytes: past 128 packets of 1472
+/// bytes, so no second copy holds it. A third copy needs 193 chunks, so packets of
+/// fewer than 1140 bytes.
+const LAST: usize = 200_000;
 /// When the server reads after it accepts the stream, once both messages are in.
 const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its sends: past the server's reads.
@@ -67,7 +68,7 @@ fn main() {
         (FULL, 0, 0),
         (PAST, 0, 1),
         (240_000, SECOND, 1),
-        (1 << 18, LAST, 0),
+        (220_000, LAST, 0),
     ];
     let mut allocations = Vec::new();
     for (len, at, copies) in cases {
