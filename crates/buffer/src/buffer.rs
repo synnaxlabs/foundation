@@ -284,8 +284,11 @@ struct State {
     commits: u64,
     /// The waiting [`Commit`]s, which the end of each commit and of the task wakes.
     wakers: Vec<Waker>,
-    /// The waiting [`End`]s, which only the end of the task wakes.
-    ending: Vec<Waker>,
+    /// The waker of each waiting [`End`] by its key. Only the end of the task wakes
+    /// them, and the drop of an `End` takes its waker out.
+    ending: Vec<(u64, Waker)>,
+    /// The key of the next [`End`].
+    next_end: u64,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
@@ -317,7 +320,7 @@ impl State {
     fn end(&mut self, woken: &mut Vec<Waker>) {
         self.ended = true;
         woken.append(&mut self.wakers);
-        woken.append(&mut self.ending);
+        woken.extend(self.ending.drain(..).map(|(_, waker)| waker));
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -408,6 +411,7 @@ impl Buffer {
                 commits: 0,
                 wakers: Vec::new(),
                 ending: Vec::new(),
+                next_end: 0,
                 parked: None,
                 closed: false,
                 ended: false,
@@ -597,8 +601,12 @@ impl Buffer {
     /// each entry appended before the drop is durable.
     #[must_use]
     pub fn ended(&self) -> End {
+        let mut state = self.shared.state.borrow_mut();
+        let key = state.next_end;
+        state.next_end += 1;
         End {
             shared: Rc::clone(&self.shared),
+            key,
         }
     }
 }
@@ -937,7 +945,9 @@ impl Future for Commit {
         if let Some(error) = &state.failed {
             return Poll::Ready(Err(error.clone()));
         }
-        wait(&mut state.wakers, cx.waker());
+        if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+            state.wakers.push(cx.waker().clone());
+        }
         Poll::Pending
     }
 }
@@ -947,6 +957,8 @@ impl Future for Commit {
 #[derive(Debug)]
 pub struct End {
     shared: Rc<Shared>,
+    /// Its key in `ending`.
+    key: u64,
 }
 
 impl Future for End {
@@ -957,15 +969,19 @@ impl Future for End {
         if state.ended {
             return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
         }
-        wait(&mut state.ending, cx.waker());
+        let key = self.key;
+        match state.ending.iter_mut().find(|(held, _)| *held == key) {
+            Some((_, waker)) => waker.clone_from(cx.waker()),
+            None => state.ending.push((key, cx.waker().clone())),
+        }
         Poll::Pending
     }
 }
 
-/// Puts `waker` in `wakers` unless one there wakes the same task.
-fn wait(wakers: &mut Vec<Waker>, waker: &Waker) {
-    if !wakers.iter().any(|held| held.will_wake(waker)) {
-        wakers.push(waker.clone());
+impl Drop for End {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.borrow_mut();
+        state.ending.retain(|(key, _)| *key != self.key);
     }
 }
 

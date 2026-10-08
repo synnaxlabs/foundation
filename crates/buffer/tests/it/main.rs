@@ -3490,7 +3490,7 @@ impl Wake for Flag {
 }
 
 /// An `End` polled while the buffer is held stays pending across a commit that
-/// syncs, which does not wake it, and gives `Ok` after the drop, which does.
+/// syncs, which does not wake it, and gives `Ok` after the drop.
 #[test]
 fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     let (mut sim, node) = create_node(118);
@@ -3513,10 +3513,38 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
         assert_eq!(polled, Poll::Pending);
         drop(buffer);
         assert_eq!(end.await, Ok(()));
-        assert!(
-            flag.0.load(Ordering::Relaxed),
-            "the end of the task wakes it"
-        );
+    })
+    .expect("the buffer ends");
+}
+
+/// `End`s polled from other tasks and dropped while the buffer is held keep no
+/// waker.
+#[test]
+fn a_dropped_end_keeps_no_waker_while_the_buffer_is_held() {
+    let (mut sim, node) = create_node(130);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let flags: Vec<Arc<Flag>> = (0..64)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        for flag in &flags {
+            let mut end = pin!(buffer.ended());
+            let waker = Waker::from(Arc::clone(flag));
+            let polled = end.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        let held = flags
+            .iter()
+            .filter(|flag| Arc::strong_count(flag) > 1)
+            .count();
+        assert_eq!(held, 0, "the drop of each End takes its waker out");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        assert_eq!(buffer.committed().await, Ok(()));
     })
     .expect("the buffer ends");
 }

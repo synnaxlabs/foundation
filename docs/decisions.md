@@ -894,10 +894,10 @@ How to read this record:
   `Buffer::ended` gives an `End`, which resolves once the commit task ended: with the
   error of the file call that ended it, else `Ok`, which means that each entry appended
   before the drop is durable. Like a `Commit`, it holds the ring open until it drops.
-  Only the end of the task wakes it, so an `End` held while the node runs costs no
-  wake per commit. `node::keep` is to await it in place of its commit (#1329, which
-  amends HUB END). Lost: the error of the task to a `Commit` held past the drop (#1234
-  refused it), and no future (a failed write at a stop reaches no caller). Decided by `laptop.architect` (#1329, 2026-10-08T02:39:34Z):
+  `node::keep` is to await it in place of its commit (#1329, which amends HUB END).
+  Lost: the error of the task to a `Commit` held past the drop (#1234 refused it), and
+  no future (a failed write at a stop reaches no caller). Decided by `laptop.architect`
+  (#1329, 2026-10-08T02:39:34Z):
   https://github.com/synnaxlabs/foundation/issues/1329#issuecomment-6051054623.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group with
   samples of a write: the writer's key set with only that group present, its range,
