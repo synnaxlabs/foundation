@@ -47,19 +47,22 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         let running = mem::take(&mut *self.running.borrow_mut());
-        // A task that a future's drop below polls finds its scope gone and ends.
-        self.running = Rc::default();
-        // The slot of a future that drops this scope in its own poll is borrowed. Its
-        // task ends when that poll returns.
-        let wakers: Vec<Waker> = running
-            .values()
-            .filter_map(|slot| {
-                let mut running = slot.try_borrow_mut().ok()?;
-                Some(mem::replace(&mut running.waker, Waker::noop().clone()))
-            })
+        // Each slot drops before any future does, so a task that a future's drop polls
+        // finds its slot gone and ends with no poll of its future. A future that drops
+        // this scope in its own poll holds its slot, and its task ends when that poll
+        // returns.
+        let taken: Vec<Running> = running
+            .into_values()
+            .filter_map(|slot| Some(Rc::try_unwrap(slot).ok()?.into_inner()))
             .collect();
         // A future's drop may do anything, so it runs with no borrow held.
-        drop(running);
+        let wakers: Vec<Waker> = taken
+            .into_iter()
+            .map(|Running { future, waker }| {
+                drop(future);
+                waker
+            })
+            .collect();
         for waker in wakers {
             waker.wake();
         }
@@ -95,7 +98,8 @@ impl Spawned {
             running.future.as_mut().poll(cx)
         };
         if self.running.strong_count() == 0 {
-            // The scope dropped, before or in this poll, so the slot drops with it.
+            // The future dropped the scope in this poll, so this holds its last
+            // reference.
             drop(slot);
             return Poll::Ready(());
         }
@@ -103,9 +107,7 @@ impl Spawned {
             drop(slot);
             let running = self.running.upgrade().expect("invariant: a live scope");
             let done = running.borrow_mut().remove(&self.key);
-            // A future's drop may do anything, so it runs with no borrow held. It may
-            // drop the scope, whose tasks then must find the map gone.
-            drop(running);
+            // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
         }
         polled
@@ -115,7 +117,7 @@ impl Spawned {
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::future::{pending, poll_fn};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -276,10 +278,13 @@ mod tests {
         assert_eq!(Rc::strong_count(&owner), 1);
     }
 
+    /// What each poll of a task gave.
+    type Polled = Rc<RefCell<Vec<Poll<()>>>>;
+
     /// Polls the task in `task`, if any, when it drops, and keeps what the poll gave.
     struct PollsOnDrop {
         task: Rc<RefCell<Option<Task>>>,
-        polled: Rc<RefCell<Vec<Poll<()>>>>,
+        polled: Polled,
     }
 
     impl Drop for PollsOnDrop {
@@ -293,13 +298,14 @@ mod tests {
     }
 
     /// Spawns on `scope` 16 futures that each poll the task in `other` when they drop,
-    /// so that some drop before its slot, then a pending future whose task goes into
-    /// `other`. Gives what each poll gave.
+    /// so that some drop before its slot, then a pending future that counts its polls,
+    /// whose task polls once and goes into `other`. Gives what each poll of the task
+    /// gave, and the count.
     fn polled_on_drop(
         scope: &mut Scope,
         queued: &RefCell<Vec<Task>>,
         other: &Rc<RefCell<Option<Task>>>,
-    ) -> Rc<RefCell<Vec<Poll<()>>>> {
+    ) -> (Polled, Rc<Cell<u32>>) {
         let polled = Rc::default();
         for _ in 0..16 {
             let guard = PollsOnDrop {
@@ -312,25 +318,37 @@ mod tests {
             }));
             drop(take(queued));
         }
-        scope.spawn(Box::pin(pending()));
-        *other.borrow_mut() = Some(take(queued));
-        polled
+        let runs = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&runs);
+        scope.spawn(Box::pin(poll_fn(move |_| {
+            counted.set(counted.get() + 1);
+            Poll::<()>::Pending
+        })));
+        let mut task = take(queued);
+        let (waker, _) = waker();
+        assert_eq!(
+            task.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+        *other.borrow_mut() = Some(task);
+        (polled, runs)
     }
 
     #[test]
     fn a_task_polled_in_a_drop_while_its_scope_drops_ends() {
         let (mut scope, queued) = scope();
         let other = Rc::default();
-        let polled = polled_on_drop(&mut scope, &queued, &other);
+        let (polled, runs) = polled_on_drop(&mut scope, &queued, &other);
         drop(scope);
         assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
+        assert_eq!(runs.get(), 1, "a future runs no more once its scope drops");
     }
 
     #[test]
     fn a_task_polled_in_a_drop_while_a_completed_future_drops_its_scope_ends() {
         let (mut scope, queued) = scope();
         let other = Rc::default();
-        let polled = polled_on_drop(&mut scope, &queued, &other);
+        let (polled, runs) = polled_on_drop(&mut scope, &queued, &other);
         let owner = Rc::new(RefCell::new(Some(scope)));
         let guard = DropsScope(Rc::clone(&owner));
         let future: Task = Box::pin(poll_fn(move |_| {
@@ -343,5 +361,6 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
         assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
+        assert_eq!(runs.get(), 1, "a future runs no more once its scope drops");
     }
 }
