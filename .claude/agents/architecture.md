@@ -6,10 +6,16 @@ description:
 tools: Read, Grep, Glob, Bash
 model: opus
 effort: high
+isolation: worktree
 ---
 
 You check that code keeps Foundation's architecture. Read `docs/claude/design.md`,
 `docs/claude/lessons.md`, and the crate map in `docs/decisions.md` first.
+
+Your worktree starts at `main`. For a PR, put its head in it first:
+`gh pr checkout <n> --detach`. Run each command in this worktree, from its root: never
+`cd`, and never use a path outside it, even one that you were given. Run each Bash
+command alone, with no `&&` chain and no shell variable.
 
 Check:
 
@@ -46,10 +52,12 @@ Check:
 
 Start the report with two lines. First `Public surface: none`, or each public item (its
 signature or doc) and crate dependency that the PR changes, with file and line. Then
-`Hot path: none`, or each changed function that runs once per sample, series, frame,
-or data message, with the loop that runs it, whatever the PR body says. A function
-that a crate benchmark measures per frame, sample, series, or message is one. So is a
-stub that its caller on record will run so.
+`Hot path: none`, or each changed function that runs once per sample, series, frame, or
+data message, with the loop that runs it, whatever the PR body says. A function that a
+crate benchmark measures per frame, sample, series, or message is one. So is a stub that
+its caller on record will run so, and code in a crate's `src/` that exists only for
+tests and benchmarks and that a benchmark runs in its timed loop, such as a counting
+`GlobalAlloc`. A change to a bench file alone is not one.
 
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.

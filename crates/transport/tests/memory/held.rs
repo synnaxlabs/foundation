@@ -2,34 +2,25 @@
 //! pool, in one buffer made at its length. When its stream resets or its session
 //! closes, the read that gives the error frees it, though the caller keeps the
 //! receiver. The receiver then keeps a list of at most 64 chunks, not one sized by the
-//! message. The count covers each thread, so this binary has no test harness. The
-//! sim runs on one thread, so the count is exact.
-
-#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+//! message.
 
 use std::cell::OnceCell;
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-use block::{Block, Heap, Pool, Unique};
+use block::{Pool, Unique};
 use sim::Sim;
 use sim::node::Node;
-use transport::{Address, Class, Code, Config, Error, Port, Transport};
-use types::node::{PrivateKey, PublicKey};
+use transport::{Address, Class, Code, Error, Transport};
 use types::time::Span;
 
-#[global_allocator]
-static ALLOCATOR: counting::Bytes = counting::Bytes::new();
+use crate::ALLOCATOR;
+use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
 
-const CLIENT: PrivateKey = PrivateKey([1; 32]);
-const SERVER: PrivateKey = PrivateKey([2; 32]);
-const PORT: u16 = 4433;
 /// A message that the read takes over many polls.
 const LEN: usize = 60_000;
 /// A message longer than 64 packets of 1472 bytes, so that a read of it in one poll
@@ -38,7 +29,6 @@ const LONG: usize = 100_000;
 /// A message longer than 128 packets of 1472 bytes, so that the read copies a full
 /// list twice before it holds the rest.
 const LONGER: usize = 250_000;
-const MESSAGE_BYTES_MAX: usize = 1 << 18;
 /// The heap of a list of 64 chunks, since each slot is 32 bytes.
 const LIST: usize = 2 << 10;
 /// The heap of the cell that holds a closed session's error, which the drop of its
@@ -64,7 +54,7 @@ enum End {
     Close,
 }
 
-fn main() {
+pub(crate) fn main() {
     let reset = Error::Reset { code: Code(0) };
     for (end, len, first, error) in [
         (End::Reset, LEN, Span::ZERO, reset.clone()),
@@ -191,38 +181,4 @@ fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
         }
     }
     full
-}
-
-fn filled(pool: &Pool, bytes: usize) -> Block {
-    let mut block = pool.alloc(bytes).expect("the pool has room");
-    block.fill(0x5a);
-    block.freeze()
-}
-
-fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
-    let pool = block::Config { budget: 1 << 20 };
-    let memory = Heap::new(pool.reservation());
-    Config {
-        private_key: key,
-        message_bytes_max: NonZeroUsize::new(MESSAGE_BYTES_MAX).expect("not zero"),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(16).expect("not zero"),
-        idle: Span::from_nanos(10 * Span::SECOND.nanos()),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks,
-        pool: Rc::new(Pool::new(pool, memory)),
-    }
-}
-
-fn part(node: &Node, port: u16) -> transport::port::Part {
-    let at = SocketAddr::new(node.addresses()[0], port);
-    let port = Port::bind(&node.net(), at).expect("a port");
-    port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }

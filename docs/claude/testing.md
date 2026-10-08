@@ -13,7 +13,14 @@ clock, the network, the disk, or a random source directly. Clippy's
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
-behavior. Never print a pointer. No `thread_local!` state.
+behavior. Never print a pointer. No `thread_local!` state. Three exceptions: TLS draws
+its own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions.md`). `sim::Sim::new`
+reads `Instant::now` once as the epoch of the run, and only differences from it are
+read. The `hyper` server of HTTP SIM SERVER reads OS time into a `thread_local!` on each
+poll, only for the `date` header, which is off. It gets no `timer`, so no read changes
+what it does (the person,
+https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
+2026-10-07T17:04:29Z).
 
 ## Layers
 
@@ -29,13 +36,27 @@ behavior. Never print a pointer. No `thread_local!` state.
 | 8 | Hardware in the loop with real devices | Nightly and release |
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
-checks on each PR that agent-written tests catch real changes. A missed mutant fails
-CI. A mutant that makes a test hang (a timeout) counts as caught. An assertion on a
-private field is never the only kill. `.cargo/mutants.toml` lists the few functions it
-skips. Each entry is as narrow as one function. Its comment says why no caller or peer
-can see the mutant, or names the test that kills it in a job that the mutants run does
-not see (Miri, loom, another OS). A mutant that a test could kill but none does links
-its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
+checks on each PR that agent-written tests catch real changes. A missed mutant fails CI.
+A mutant that makes a test hang (a timeout) counts as caught. Each run on a box runs in
+a cgroup with a memory cap: `systemd-run --user --scope -p MemoryMax=<share> -p
+OOMPolicy=continue cargo mutants --jobs 4 ...`. A test run on a box of a mutant made by
+hand (`.claude/agents/reviewer.md`) runs in the same cap, with `cargo test` in place of
+`cargo mutants`. The share is 20G on box1 and 10G on box2, and a session runs one
+mutants run at a time (`laptop.monitor`,
+https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6043431001,
+2026-10-07T17:40:51Z). A mutant that allocates in a loop then dies alone, its test
+fails, and the run counts it as caught. With no cap, the mutant fills the box and the
+run stalls. Set `OOMPolicy=continue`, because the default of the user manager stops the
+whole scope. Never cap a run on a box with `prlimit --data`: it counts reserved memory,
+not touched pages (#803,
+https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6009258555,
+2026-10-06T04:20:13Z). CI keeps it until each runner host has the cgroup cap (#899). An
+assertion through a private field or call, or a compare of the `Debug` string of the
+type under test, is never the only kill. `.cargo/mutants.toml` lists the few functions
+it skips. Each entry is as narrow as one function. Its comment says why no caller or
+peer can see the mutant, or names the test that kills it in a job that the mutants run
+does not see (Miri, loom, another OS). A mutant that a test could kill but none does
+links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
 `rust-toolchain-nightly`, that only those gates use.
 
 ## Fuzzing
@@ -54,7 +75,10 @@ again once to prove that the failure replays (r16 59).
 ## Rules
 
 - **A bug fix starts with a failing regression test.** Show it fails for the reason you
-  diagnosed, then fix the code.
+  diagnosed, then fix the code. A fix of a test that fails only sometimes is a bug fix
+  too: a regression test that the PR commits makes the cause happen on each run. A
+  failure that a session makes only outside the committed tests, such as in the
+  breaker's worktree, does not count as its regression test.
 - **Test what the change is for.** When a change exists to remove work (a clock read, a
   copy, an allocation, a round trip), a test counts that work and fails when the change
   is reverted.
@@ -68,11 +92,17 @@ again once to prove that the failure replays (r16 59).
 - **Test through the production path.** A component that passes its unit tests but
   fails when composed in `node` is broken. Production code never checks `cfg(test)`
   (r16 47).
+- **A test may check what another test checks.** "No defense in depth" in `CLAUDE.md`
+  is about guards in production code. It is no reason to refuse an assertion in a test
+  or a benchmark because another test catches the same change.
 - **Assert through the public calls of the type.** A read of a private field, or a
   compare of the `Debug` string of the type under test, checks private state: a new
   field breaks the test while the behavior stays. Use one only with a written reason.
-- **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
-  second test feature (r16 57).
+- **Test-only constructors and hooks sit behind the `sim` feature**, also a hook that
+  only a bench or a fuzz target uses. A crate has no second test feature (r16 57), so
+  one check can find a `default` feature that turns on a hook (#1570, `laptop.director`,
+  https://github.com/synnaxlabs/foundation/issues/1570#issuecomment-6049919776,
+  2026-10-08T00:55:11Z).
 - **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
   frames, bad offsets, stale fences) (r16 54). A check against a bound has a test at
   the bound and one on each side. `cargo mutants` turns `>=` only into `<`, so it
@@ -101,7 +131,8 @@ again once to prove that the failure replays (r16 59).
   compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask
   shuttle` does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each
   crate whose source names `unsafe_code`, and fails when such a crate runs no tests.
-- **Hot paths** run under a counting allocator that fails on any allocation.
+- **Hot paths** of product code (`docs/claude/performance.md`) run under a counting
+  allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
   and condition with nested modules. Name each test as the behavior it checks, with
   no `test_` prefix (r16 48):
@@ -109,6 +140,10 @@ again once to prove that the failure replays (r16 59).
 - **Production-path tests across crates** that use only public APIs go in one
   integration binary per crate: `tests/it/main.rs` with modules, never many
   `tests/*.rs` files (r16 49).
+  A counting allocator is global, so each type of it gets one more binary with no
+  harness, named for what it counts: `tests/alloc` (`counting::Allocator`) or
+  `tests/memory` (`counting::Bytes`). Helpers that binaries share go in
+  `tests/common/mod.rs`.
 
 ## Oracles
 
@@ -116,8 +151,24 @@ Oracles live in `oracles/`: simulation invariants, P1 targets and benchmark base
 conformance suites, and fuzz inputs. Committed proptest failure files
 (`proptest-regressions/` in each crate) are oracles too (r16 58). People own them.
 Agents add to them freely and never weaken them. Weakening means a removed test or
-assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
-or proptest failure file.
+assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input or
+proptest failure file. A change to the bytes of a fuzz input deletes the old input: keep
+the old file and add the new bytes as a new file. Each target's corpus,
+`oracles/fuzz/<target>/`, is its own oracle, and only a byte string that `main` held
+counts. When a PR renames or splits a target, an input of its corpus may move to the
+corpus of each target that replaces it. Such a move, or a move inside one corpus, keeps
+the bytes and is not a deletion. A byte string that only a PR branch held, such as the
+old bytes of an input that a PR adds and then changes before it merges, was never an
+oracle. A PR deletes an input when a byte string that `oracles/fuzz/<target>/` holds at
+its merge base with `main` (`git merge-base origin/main HEAD`) is in no file of
+`oracles/fuzz/<target>/` at its head, unless a target replaces it and the corpus of each
+such target holds it. An audit of `main` takes each state that
+`git log --first-parent origin/main -- oracles/fuzz/<target>` lists: a byte string that
+`oracles/fuzz/<target>/` holds in one state, and that no file of it holds on
+`origin/main`, was deleted, unless a target replaces it and the corpus of each such
+target holds it on `origin/main`
+(https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500,
+2026-10-07T19:46:25Z).
 
 An oracle test target is a `[[test]]` target whose root is under `oracles/`.
 `cargo xtask oracles` fails when no oracle test target compiles a `.rs` file under

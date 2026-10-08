@@ -137,10 +137,9 @@ fn code(error: &Error) -> Option<Code> {
         | Error::PeerNotVoter { .. }
         | Error::Claim(_)
         | Error::NotMember(_)
+        | Error::NoVote
         | Error::Member(_)
         | Error::WrongKey
-        | Error::Unsynced
-        | Error::Status(_)
         | Error::Pool(_)
         | Error::Stopped(_) => Some(REFUSED),
     }
