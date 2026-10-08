@@ -3859,9 +3859,12 @@ How to read this record:
   `hub` and `home` enforce the rules. `connector` is a library of components plus
   ready-made compositions built only from public parts. Supersedes: r8 Q5 actor with
   device hooks. `kind::Context` gives a run its name, config, cancel, clock,
-  randomness, network (`net`), and tasks. It is not `Send`: a kind's own thread takes
-  clones of the parts it needs (`laptop.architect-2`, 2026-10-08T02:21:15Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677).
+  randomness, network (`net`), and tasks, and `writer`, `reader`, and `status` come
+  with #1731 (`laptop.architect-2`, 2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677). It is
+  not `Send`: a kind's own thread takes clones of the parts it needs
+  (`laptop.architect-2`, 2026-10-08T18:07:05Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6066078510).
 - **C5 + KINDS OWN THEIR CONFIG** Each kind owns parse, check, discover, and run, built
   on shared components. `config` never knows a kind's fields. A kind returns diagnostics
   with positions plus the channels it reads and writes. Calculations are a kind. The
@@ -3873,8 +3876,9 @@ How to read this record:
   check in `config`. The channels of a kind's `check` are from the mesh's side:
   `reads` are the channels it reads from the mesh (commands for the device, or samples
   it sends out), and `writes` the channels it writes to the mesh (samples from the
-  device) (`laptop.architect-2`, 2026-10-08T06:24:16Z:
-  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688,
+  device) (`laptop.architect-2`, 2026-10-07T15:17:11Z:
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688; item on
+  #1731, 2026-10-08T06:24:16Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6053789750).
 - **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
   methods. `kind::Table` erases it inside `connector` with a private trait that takes
@@ -3947,8 +3951,11 @@ How to read this record:
   (`laptop.architect-2`, 2026-10-08T17:58:15Z:
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
-  entropy, network, and tasks) (`laptop.architect-2`, 2026-10-08T03:05:58Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). After
+  entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
+  2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
+  `hub` field waits on #1941 (`laptop.architect`, 2026-10-08T17:50:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
   `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
