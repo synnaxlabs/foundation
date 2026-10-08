@@ -4,11 +4,11 @@
 
 use std::cell::OnceCell;
 use std::collections::VecDeque;
+use std::mem;
 use std::ops::Range;
 use std::rc::Rc;
 use std::slice;
 use std::task::Poll;
-use std::{iter, mem};
 
 use block::{Block, Unique};
 use bytes::Bytes;
@@ -583,9 +583,9 @@ impl<'a> Left<'a> {
 
     /// The next write of `block`, and what is left after it: a run over
     /// [`COPIED_MAX`] bytes, else the stretch of shorter runs and zeros up to the
-    /// next long run. A stretch of at most [`COPIED_MAX`] bytes is one range of
-    /// `block` when it is one part with no zeros, else a copy in `buffer`. A longer
-    /// one is a copy in a new buffer of its length.
+    /// next long run, copied into `buffer`. A stretch of at most [`COPIED_MAX`]
+    /// bytes is one range of `block` when it is one part with no zeros, else
+    /// `buffer`. A longer one is a copy of `buffer` of its length.
     fn piece<'b>(
         &self,
         block: &'b Bytes,
@@ -600,67 +600,51 @@ impl<'a> Left<'a> {
             }
             return (Piece::Copied(&block[range]), after);
         }
-        let (bytes, after) = self.stretch();
-        if bytes == 0 {
+        buffer.clear();
+        let after = self.stretch(block, buffer);
+        if buffer.is_empty() {
             let (range, after) = self.run();
             return (Piece::Chunk(block.slice(range)), after);
         }
-        if bytes <= COPIED_MAX {
-            buffer.clear();
-            self.copy(block, bytes, buffer);
-            let buffer: &'b Vec<u8> = buffer;
-            return (Piece::Copied(buffer), after);
+        if buffer.len() > COPIED_MAX {
+            return (Piece::Chunk(Bytes::copy_from_slice(buffer)), after);
         }
-        let mut stretch = Vec::with_capacity(bytes);
-        self.copy(block, bytes, &mut stretch);
-        (Piece::Chunk(Bytes::from(stretch)), after)
+        (Piece::Copied(buffer), after)
     }
 
-    /// The bytes of the stretch at the head, its shorter runs and zeros up to the
-    /// next run over [`COPIED_MAX`] bytes, and what is left after it. No bytes when
-    /// the head starts a long run.
-    fn stretch(&self) -> (usize, Self) {
-        // Where the run in hand starts in the stretch, the index of its first part,
-        // and where its last range ends in the block.
-        let (mut bytes, mut run, mut end) = (0, (0, 0_usize), None);
+    /// Appends to `into` the ranges of `block` and the zeros of the stretch at the
+    /// head, its shorter runs and zeros up to the next run over [`COPIED_MAX`]
+    /// bytes, and gives what is left after it. Appends nothing when the head starts
+    /// a long run.
+    fn stretch(&self, block: &[u8], into: &mut Vec<u8>) -> Self {
+        // Where the run in hand starts in `into`, the index of its first part, and
+        // where its last range ends in the block.
+        let (mut run, mut end) = ((into.len(), 0_usize), None);
         let (mut part, mut index) = (&self.head, 0);
         loop {
             let range = &part.range;
             if !range.is_empty() {
                 if end != Some(range.start) {
-                    run = (bytes, index);
+                    run = (into.len(), index);
                 }
-                if bytes - run.0 + range.len() > COPIED_MAX {
-                    let after = match run.1.checked_sub(1) {
+                if into.len() - run.0 + range.len() > COPIED_MAX {
+                    into.truncate(run.0);
+                    return match run.1.checked_sub(1) {
                         Some(at) => Self::new(&self.tail[at..]),
                         None => self.clone(),
                     };
-                    return (run.0, after);
                 }
-                bytes += range.len();
+                into.extend_from_slice(&block[range.clone()]);
                 end = Some(range.end);
             }
             if part.zeros > 0 {
-                bytes += usize::from(part.zeros);
+                into.extend_from_slice(&ZEROS[..usize::from(part.zeros)]);
                 end = None;
             }
             let Some(next) = self.tail.get(index) else {
-                return (bytes, Self::new(&[]));
+                return Self::new(&[]);
             };
             (part, index) = (next, index + 1);
-        }
-    }
-
-    /// Appends to `into` the ranges of `block` and the zeros of the parts from the
-    /// head that hold the first `bytes` bytes, which must end on a part.
-    fn copy(&self, block: &[u8], mut bytes: usize, into: &mut Vec<u8>) {
-        for part in iter::once(&self.head).chain(self.tail) {
-            if bytes == 0 {
-                return;
-            }
-            into.extend_from_slice(&block[part.range.clone()]);
-            into.extend_from_slice(&ZEROS[..usize::from(part.zeros)]);
-            bytes -= part.range.len() + usize::from(part.zeros);
         }
     }
 }

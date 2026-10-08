@@ -1,6 +1,6 @@
 //! A `send_parts` allocates as a `send` of one block of the same bytes, plus one
-//! allocation for the buffer of each stretch over 1452 bytes, one when noq-proto first
-//! takes such a buffer in part, and one for each growth of the segment queue of
+//! allocation for the copy of each stretch over 1452 bytes, one when noq-proto first
+//! takes such a copy in part, and one for each growth of the segment queue of
 //! noq-proto. This binary has no test harness: the count covers each thread, and a
 //! harness allocates on its own thread at any time.
 
@@ -67,7 +67,7 @@ const SHAPES: [Shape; 3] = [
         len: 8,
         stride: 16,
         over: 1,
-        cause: "the buffer of the stretch",
+        cause: "the copy of the stretch",
     },
 ];
 
@@ -241,7 +241,7 @@ async fn cut(sender: &mut Sender, pool: &Pool, clock: &Clock) {
             assert_eq!(
                 parted,
                 [sent[0] + 2, sent[1]],
-                "a stretch that the window takes in parts, over send: the buffer of \
+                "a stretch that the window takes in parts, over send: the copy of \
                  the stretch and the shared count of bytes at the first cut, then no \
                  copy of the rest"
             );
