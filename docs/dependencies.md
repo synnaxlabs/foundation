@@ -93,7 +93,7 @@ so the `Advisories of each patched release` step of the `deny` job in
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
 | `noq-udp` | 1.3.0 | None yet | One send that gets `EIO` or `EINVAL` turns off GSO for the life of the socket, and one that gets `EINVAL` also turns off the IPv4 ECN mark, also when the cause is a bad source or port 0 of that one transmit (#1972) |
-| `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`), and a draw on a thread with no start value aborts | With one state per process, the values of a test server depend on the draws of other threads; a thread with no start value draws the same values as each other such thread (#435) |
+| `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`), and a draw on a thread with no start value aborts. `src_generated/open62541/config.h` defines `UA_THREAD_LOCAL` at each level of `UA_MULTITHREADING`, and sets `UA_FLOAT_LITTLE_ENDIAN` on little-endian 64-bit Arm | With one state per process, the values of a test server depend on the draws of other threads; a thread with no start value draws the same values as each other such thread. The copy builds at level 0, which alone makes `UA_THREAD_LOCAL` empty (#435). Clang defines no `__FLOAT_WORD_ORDER__`, so a Clang build for 64-bit Arm encoded each float with the `long double` helpers; the test `the_copy_copies_floats_as_they_lie_in_memory_on_little_endian_targets` checks the branch (#1995) |
 
 ## Tests, benchmarks, and tools
 
