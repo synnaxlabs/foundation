@@ -9,7 +9,7 @@ use document::{Attribute, Document, Map, Source};
 use spec::connector::Connector;
 use types::name::Name;
 
-const FIXTURE: &str = include_str!("../../acceptance/tests/it/fixtures/influx.hcl");
+const FIXTURE: &str = include_str!("../../../acceptance/tests/it/fixtures/influx.hcl");
 
 fn read(text: &str) -> Document {
     config_hcl::read(Source(0), text).expect("the text is HCL")
