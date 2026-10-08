@@ -361,11 +361,11 @@ impl Readers {
     #[must_use]
     pub fn release(&mut self, durable: u64) -> &[complete::Key] {
         self.woken_complete.clear();
-        let releases = self.queue.get(self.held);
-        if releases.is_none_or(|(_, seq)| seq.end > durable) {
-            return &self.woken_complete;
-        }
         if self.owing != 0 {
+            let releases = self.queue.get(self.held);
+            if releases.is_none_or(|(_, seq)| seq.end > durable) {
+                return &self.woken_complete;
+            }
             self.miss_owed();
         }
         while let Some((frame, seq)) =
@@ -472,37 +472,46 @@ impl Readers {
                     return Next::Empty;
                 };
                 let flow = &mut self.flows[i];
-                if let Some(frame) = flow.waiting.pop_front() {
-                    return Next::Frame(frame);
+                match flow.waiting.pop_front() {
+                    Some(frame) => Next::Frame(frame),
+                    None => self.take_owed(i),
                 }
-                let Some(owed) = &mut flow.owed else {
-                    return if flow.behind {
-                        Next::Behind
-                    } else {
-                        Next::Empty
-                    };
-                };
-                let (frame, _) = &self.queue[owed.frame];
-                while self.sets[owed.set].key() != frame.key_set() {
-                    owed.set += 1;
-                }
-                let set = &self.sets[owed.set];
-                if !flow
-                    .credit
-                    .spend(flow.cost.charge(frame, set, frame.charge()))
-                {
-                    return Next::Empty;
-                }
-                let frame = frame.clone();
-                owed.frame += 1;
-                if owed.frame == self.held {
-                    flow.owed = None;
-                    self.paid();
-                }
-                Next::Frame(frame)
             }
             Key::Latest(key) => self.take_latest(key).map_or(Next::Empty, Next::Frame),
         }
+    }
+
+    /// Takes the next frame of the complete session at `i`, which has no frame
+    /// waiting: the frame that waits for a grant, if its credit covers it.
+    // Out of line, so that `take` stays small: inline, it made each take slower.
+    #[inline(never)]
+    fn take_owed(&mut self, i: usize) -> Next {
+        let flow = &mut self.flows[i];
+        let Some(owed) = &mut flow.owed else {
+            return if flow.behind {
+                Next::Behind
+            } else {
+                Next::Empty
+            };
+        };
+        let (frame, _) = &self.queue[owed.frame];
+        while self.sets[owed.set].key() != frame.key_set() {
+            owed.set += 1;
+        }
+        let set = &self.sets[owed.set];
+        if !flow
+            .credit
+            .spend(flow.cost.charge(frame, set, frame.charge()))
+        {
+            return Next::Empty;
+        }
+        let frame = frame.clone();
+        owed.frame += 1;
+        if owed.frame == self.held {
+            flow.owed = None;
+            self.paid();
+        }
+        Next::Frame(frame)
     }
 
     /// Counts that a session no longer waits for a grant. The last drops the held
