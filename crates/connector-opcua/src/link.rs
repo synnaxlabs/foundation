@@ -296,9 +296,9 @@ fn the_copy_links_the_timer() {
 }
 
 /// Each symbol outside the copy and `shim.c` that they may name, in glibc on x86-64
-/// and 64-bit Arm, at each optimization level. None gives or takes a heap block, so no
-/// block crosses between the allocator of libc and `src/alloc.rs`.
-const OUTSIDE: [&str; 41] = [
+/// and 64-bit Arm, with GCC or Clang, at each optimization level. None gives or takes a
+/// heap block, so no block crosses between the allocator of libc and `src/alloc.rs`.
+const OUTSIDE: [&str; 42] = [
     "_GLOBAL_OFFSET_TABLE_",
     "__ctype_b_loc",
     "__errno_location",
@@ -313,6 +313,7 @@ const OUTSIDE: [&str; 41] = [
     "__tls_get_addr",
     "abort",
     "access",
+    "bcmp",
     "connector_opcua_calloc",
     "connector_opcua_free",
     "connector_opcua_malloc",
