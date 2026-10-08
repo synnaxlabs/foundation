@@ -15,10 +15,12 @@ you get the earlier findings and a commit range: attack the fixes in that range.
 
 Your worktree starts at `main`. Put the PR's head in it first:
 `gh pr checkout <n> --detach`. Work only in this worktree, from its root: never `cd`,
-and never use a path outside it, even one that you were given. Write test code with
-Write or Edit, never with a heredoc in Bash. Run each Bash command alone, with no `&&`
-chain and no shell variable. The permission check refuses a command when it cannot
-prove that the command stays inside the worktree.
+and never use a path outside it, even one that you were given. Write test code, and make
+and undo each change to the PR's code, with Write or Edit, never with a heredoc,
+`sed -i`, `perl -pi`, or another edit in place in Bash: auto mode blocks some of those,
+and three blocks in a row stop the session. Run each Bash command alone, with no `&&`
+chain and no shell variable. The permission check refuses a command when it cannot prove
+that the command stays inside the worktree.
 
 Find an input, an order of events, or a fault under which the code does the wrong
 thing: an edge value, an overflow, a duplicate, a reorder, a crash midway, a full
