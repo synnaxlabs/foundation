@@ -554,14 +554,15 @@ How to read this record:
   Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
   on a 4096-byte boundary so a commit never rewrites a synced block, except the
   restart record of an open and the records after it, which may go over a restart or
-  wrap record that no data record follows (#649). The CRC covers `len`, `kind`, and
+  wrap record that no data or carry record follows (#649). The CRC covers `len`, `kind`, and
   the body. It continues from the record before (a chain), so bytes of an earlier
   chain never read as the next record.
   Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
   not used and the next record is at its start; restart (3), written at each open
-  right after the last data record the walk reads, or at the tail when it reads none,
-  its body is a random `u32` and the chain continues from that value. A record never
-  crosses the end of the area. Kind 0 is never valid.
+  right after the last data or carry record the walk reads, or at the tail when it
+  reads none, its body is a random `u32` and the chain continues from that value;
+  carry (4), the tails of paths whose newest data record a later trim passes (#160). A
+  record never crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
   is the offset modulo the area length. The area is at least four times the largest
   record (#1276), so a ring that holds only its restart record takes any record (#637),
@@ -580,6 +581,18 @@ How to read this record:
   entries, so that write stays within `IOV_MAX`. A body that ends early, a count
   over 1023, an unknown path or presence byte, or bytes after the last entry is a
   wrong shape.
+  Carry body: `[count: u32][count tails]`. A tail is `index: u128, path: u8, seq: u64,
+  given: u64, last: u8 + i64`, 42 bytes, little-endian, fixed width; `given` counts
+  the entries with no samples at `seq`, and `last` is as in an entry header. A body
+  holds at most 1023 tails, so the walk holds it whole in the window of its first
+  table. A carry record longer than that window, a body that ends early, a count over
+  1023, an unknown path or presence byte, or bytes after the last tail is a wrong
+  shape. The walk gives a path that it has not met the carried tail and end, with no
+  run. A path that it met keeps its end and runs, and takes the carried stamp when it
+  has none (a trim passed the entry with the stamp). A carried end that is not that
+  end, or a carried stamp that is not its stamp, is a wrong shape. The form on disk
+  for the ruling of #160
+  (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
   For each path, memory holds one run per data record with an entry of it: the
   mark before the path's first entry in the record and the record's offset, oldest
   first, 24 bytes per record and path in a deque that doubles, so at most 48/51
