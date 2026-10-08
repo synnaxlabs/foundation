@@ -4855,7 +4855,9 @@ How to read this record:
   empty span at the start of the file, as DIAGNOSTICS says for a problem with a whole
   file: the message is "no config syntax reads this file", and the fix names each
   extension (`laptop.architect-2`, 2026-10-08T18:11:55Z,
-  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732). A
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732).
+  Supersedes the clause "with no span, as no Document of the file exists" of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444. A
   directory gives each file in it that the table reads, in path order. `Source(i)` is
   the index of the file in the order `ops` reads it, and `ops` keeps the paths to
   print spans. `node` fills the table (#1756) with `config_hcl::read`, its errors
@@ -4887,8 +4889,9 @@ How to read this record:
   since a place cannot hold the path, and writes it with `{path:?}` until #941.
   `ops.unknown-extension` gets a place and names no path in its message (FRONT ENDS),
   so its path is exact too (`laptop.architect-2`, 2026-10-08T18:11:55Z,
-  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732, which
-  replaces https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872).
+  https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732).
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872.
   Lost: the lossy text, with which two files give one place; the `Debug` form in
   `Place::file`, which each JSON reader must decode; and the escaped path in the
   message of `ops.unknown-extension`, which an agent must decode. The `Place::file` doc
