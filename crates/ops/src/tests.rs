@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 
+use document::Source;
 use serde_json::{Map, Value, json};
 
 use crate::FrontEnd;
@@ -466,8 +467,11 @@ fn error_codes_and_fixes_match_the_golden_file() {
             read: |_, _| Err(Vec::new()),
         },
     )]);
-    let unknown = front_end::unknown(Path::new("plant.yaml"), &front_ends);
-    lines.push(format!("{}\t{}\n", unknown.code, unknown.fix));
+    let unknown = front_end::unknown(Source(0), &front_ends);
+    let not_utf8 = front_end::not_utf8(Path::new("plant.yaml"));
+    for diagnostic in [unknown, not_utf8] {
+        lines.push(format!("{}\t{}\n", diagnostic.code, diagnostic.fix));
+    }
     assert_eq!(lines.concat(), include_str!("codes.golden"));
 }
 
