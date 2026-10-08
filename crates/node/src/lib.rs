@@ -789,7 +789,7 @@ pub enum Error {
     Transport(transport::Error),
     /// The mesh did not open. The node took no session.
     Mesh(mesh::Error),
-    /// The chunk store of the node's region did not open. The node took no session.
+    /// The chunk store did not open. The node took no session.
     Blob(blob::Error),
     /// The node's port did not bind. No shard started.
     Port {
@@ -829,7 +829,7 @@ impl fmt::Display for Error {
             }
             Self::Mesh(error) => write!(f, "the node's mesh did not open: {error}"),
             Self::Blob(error) => {
-                write!(f, "the node's chunk store did not open: {error}")
+                write!(f, "cannot open the node's chunk store: {error}")
             }
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")

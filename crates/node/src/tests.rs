@@ -2919,7 +2919,7 @@ mod port {
             assert_eq!(node.join(), Err(Error::Blob(error.clone())));
             assert_eq!(
                 Error::Blob(error.clone()).to_string(),
-                format!("the node's chunk store did not open: {error}")
+                format!("cannot open the node's chunk store: {error}")
             );
         }
 
