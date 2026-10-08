@@ -307,7 +307,7 @@ fn an_apply_that_finds_a_later_pointer_of_its_own_root_is_stale() {
     });
 }
 
-// A base past the pointer is stale, also at the last version.
+// A base past the pointer is stale, also at the last version and the pointer's root.
 #[test]
 fn an_apply_on_a_base_at_the_last_version_gives_stale() {
     solo(|node, tasks| async move {
@@ -316,12 +316,13 @@ fn an_apply_on_a_base_at_the_last_version_gives_stale() {
             version: u64::MAX,
             root: tree::empty(),
         };
-        let definitions = create_subjects(&["plant.a"], 1);
         let stale = Error::Stale {
             base: last,
             pointer: base(),
         };
-        assert_eq!(mesh.apply(last, definitions).await, Err(stale));
+        for definitions in [create_subjects(&["plant.a"], 1), BTreeMap::new()] {
+            assert_eq!(mesh.apply(last, definitions).await, Err(stale.clone()));
+        }
         assert_eq!(mesh.pointer(), base());
     });
 }
