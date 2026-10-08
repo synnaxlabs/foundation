@@ -1,8 +1,9 @@
 //! After a read that gives a whole message of many packets, in one poll or over
 //! many, also one that waits for a block, the receiver keeps a list of at most 64
 //! chunks, not one sized by the message, both before and after it reads the end of
-//! the stream. The count covers each thread, so this binary has no test harness. The
-//! sim runs on one thread, so the count is exact.
+//! the stream. A short message comes first, so a read over many also waits for the
+//! prefix of the long one. The count covers each thread, so this binary has no test
+//! harness. The sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -33,6 +34,10 @@ const PORT: u16 = 4433;
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
 const KEPT_MAX: usize = 2 << 10;
+/// The bytes of the message before the long one.
+const SHORT: usize = 1000;
+/// When the client sends the long message after the short one.
+const GAP: Span = Span::from_nanos(250_000_000);
 /// When the server reads after it accepts the stream, once the message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
 /// When the client resets the stream after its send: past the server's read.
@@ -48,7 +53,7 @@ const LIVE: Span = Span::from_nanos(3_000_000_000);
 enum Reading {
     /// In one poll, once the message is in.
     Whole,
-    /// Each millisecond from when the stream comes, until the message is in.
+    /// Each millisecond from the read of the short message, until the long one is in.
     Parts,
     /// Each millisecond once the message is in, with a full pool. Once the transport's
     /// status says that a read waited for a block, the server drops the blocks that it
@@ -70,6 +75,8 @@ enum End {
 /// What the server's reads give.
 #[derive(Clone, Copy, Debug, Default)]
 struct Out {
+    /// The length of the short message that the first read gives.
+    short: Option<usize>,
     /// The length of the message that the read gives.
     len: Option<usize>,
     /// The polls of the read that give `Pending`.
@@ -89,6 +96,11 @@ fn main() {
             .flat_map(|len| [(len, End::Finish), (len, End::Reset)])
         {
             let out = run(reading, len, end);
+            assert_eq!(
+                out.short,
+                Some(SHORT),
+                "{reading:?}, {len} bytes: the first read"
+            );
             assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
             assert_eq!(
                 out.pending > 0,
@@ -116,8 +128,8 @@ fn main() {
     }
 }
 
-/// The [`Out`] of the server's read of a message of `len` bytes in the way of
-/// `reading`, on a stream that the client ends in the way of `end`.
+/// The [`Out`] of the server's read of a short message, then of one of `len` bytes in
+/// the way of `reading`, on a stream that the client ends in the way of `end`.
 fn run(reading: Reading, len: usize, end: End) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
@@ -137,6 +149,8 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
             .open_sender(Class::Complete)
             .await
             .expect("a stream");
+        sender.send(filled(&pool, SHORT)).await.expect("sent");
+        node.clock().sleep(GAP).await;
         sender.send(filled(&pool, len)).await.expect("sent");
         match end {
             End::Finish => sender.finish().expect("finished"),
@@ -151,9 +165,9 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
     *out.lock().expect("not poisoned")
 }
 
-/// Starts the server on `node`. It reads the message of `len` bytes in the way of
-/// `reading`, then, as `end` says, the end once it comes or nothing until the reset.
-/// It then drops the receiver and puts the [`Out`] in `out`.
+/// Starts the server on `node`. It reads the short message, then the message of `len`
+/// bytes in the way of `reading`, then, as `end` says, the end once it comes or
+/// nothing until the reset. It then drops the receiver and puts the [`Out`] in `out`.
 fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
@@ -170,6 +184,8 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         let clock = own.clock();
+        let short = next(&mut receiver, &clock, || ()).await.0;
+        let short = short.ok().flatten().map(|block| block.len());
         if !matches!(reading, Reading::Parts) {
             clock.sleep(READ).await;
         }
@@ -194,6 +210,7 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         drop(receiver);
         let kept = before.saturating_sub(ALLOCATOR.held());
         *out.lock().expect("not poisoned") = Out {
+            short,
             len,
             pending,
             waited,
