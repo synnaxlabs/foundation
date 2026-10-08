@@ -140,7 +140,10 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::ManuallyDrop;
     use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
+    use std::pin::pin;
 
     use block::{Heap, Pool};
     use sim::node::Node;
@@ -300,8 +303,84 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    /// Reads the setup: each field reaches the endpoint by the path of a node, which
-    /// the tests of `Transport` pin.
+    #[test]
+    fn a_node_may_fill_the_window_of_a_program_and_open_one_stream_of_each_kind() {
+        const MESSAGE: usize = 1 << 14;
+        const WINDOW: usize = 1 << 17;
+        let (mut sim, program, node) = nodes(0);
+        testing::shard(&node, SERVER, move |mut config, node| async move {
+            (config.message_bytes_max, config.window_bytes) =
+                (NonZeroUsize::new(MESSAGE).expect("not zero"), WINDOW);
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), address(&node));
+            let transport = crate::Transport::new(config, part).expect("a transport");
+            let session = transport.accept().await.expect("a session");
+            let (mut sender, receiver) =
+                session.open(Class::Command).await.expect("a stream");
+            let one_way = session.open_sender(Class::Command).await.expect("a stream");
+            let two_way = testing::poll_once(pin!(session.open(Class::Command))).await;
+            let second = session.open_sender(Class::Command);
+            let second = testing::poll_once(pin!(second)).await;
+            assert!(two_way.is_none() && second.is_none());
+            // The program never reads, so the node can send only the program's window.
+            let (mut sent, mut stalled) = (0, false);
+            loop {
+                let message = testing::block(&pool, &[0; MESSAGE]);
+                match sender.try_send(message).expect("a live stream") {
+                    None => (sent, stalled) = (sent + MESSAGE, false),
+                    Some(_) if stalled => break,
+                    Some(_) => {
+                        stalled = true;
+                        node.clock().sleep(IDLE).await;
+                    }
+                }
+            }
+            assert_eq!(sent, 1 << 20);
+            drop((session, sender, receiver, one_way));
+            node.clock().sleep(IDLE).await;
+        });
+        let at = [Address::Udp(address(&node))];
+        testing::start(&program, move |shard, node| async move {
+            let budget = block::Config { budget: 1 << 16 };
+            let memory = Heap::new(budget.reservation());
+            let config = Config {
+                pool: Rc::new(Pool::new(budget, memory)),
+                ..shard.client()
+            };
+            let part = testing::part(shard.net(), address(&node));
+            let client = Client::new(config, part).expect("a client");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_program_ends_a_session_whose_node_is_silent_for_30_s() {
+        let (mut sim, program, node) = nodes(0);
+        testing::shard(&node, SERVER, move |mut config, node| async move {
+            config.idle = Span::MINUTE;
+            let part = testing::part(&node.net(), address(&node));
+            let transport = crate::Transport::new(config, part).expect("a transport");
+            // The session never drops, so no close goes out. The shard then ends and
+            // drops its tasks, so the node goes silent.
+            let session = transport.accept().await.expect("a session");
+            let _session = ManuallyDrop::new(session);
+        });
+        let at = [Address::Udp(address(&node))];
+        testing::start(&program, move |shard, node| async move {
+            let client = bind(&shard, address(&node));
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
+            let start = node.clock().now();
+            assert_eq!(session.closed().await, Error::TimedOut);
+            let took = node.clock().now() - start;
+            let late = took.nanos() - spans(Span::SECOND, 30).nanos();
+            assert!((0..Span::MILLISECOND.nanos()).contains(&late), "{took:?}");
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
     #[test]
     fn a_program_has_the_fixed_limits() {
         testing::run(0, |shard| {
