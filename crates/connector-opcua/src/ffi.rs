@@ -11,10 +11,6 @@ pub(crate) struct Status(pub(crate) u32);
 
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
-    pub(crate) const BAD_INTERNAL_ERROR: Self = Self(0x8002_0000);
-    pub(crate) const BAD_NOT_FOUND: Self = Self(0x803E_0000);
-    pub(crate) const BAD_CONNECTION_REJECTED: Self = Self(0x80AC_0000);
-    pub(crate) const BAD_CONNECTION_CLOSED: Self = Self(0x80AE_0000);
 
     /// Gives the name of the code, such as `BadNodeIdUnknown`.
     pub(crate) fn name(self) -> &'static str {

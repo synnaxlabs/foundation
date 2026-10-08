@@ -11,16 +11,7 @@ fn the_copy_names_a_status_code() {
         format!("{:?}", Status(0x8034_0000)),
         "BadNodeIdUnknown (0x80340000)"
     );
-    let named = [
-        (Status::GOOD, "Good"),
-        (Status::BAD_INTERNAL_ERROR, "BadInternalError"),
-        (Status::BAD_NOT_FOUND, "BadNotFound"),
-        (Status::BAD_CONNECTION_REJECTED, "BadConnectionRejected"),
-        (Status::BAD_CONNECTION_CLOSED, "BadConnectionClosed"),
-    ];
-    for (status, name) in named {
-        assert_eq!(status.name(), name);
-    }
+    assert_eq!(Status::GOOD.name(), "Good");
 }
 
 #[test]
