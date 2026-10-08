@@ -6067,11 +6067,12 @@ How to read this record:
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943. A
   mesh whose group stops stops the node, and `Node::join` gives `Error::Group` with
   the cause. Of a transport that stops and a group that stops, `join` gives the first,
-  and the transport's when both stop at once (#1780). Lost: `Mesh::stopped()`, because
-  `Watch::next` gives the stop as its contract and one caller does not justify a new
-  `mesh` item; add `Mesh::stopped` when a second caller needs the stop of the group
-  and reads no home, and ask `laptop.architect` for it. Decided by
-  `laptop.architect-2` at 2026-10-08T17:27:20Z
+  and the transport's when both stop at once (#1780). Supersedes the deferral of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452. Lost:
+  `Mesh::stopped()`, because `Watch::next` gives the stop as its contract and one
+  caller does not justify a new `mesh` item; add `Mesh::stopped` when a second caller
+  needs the stop of the group and reads no home, and ask `laptop.architect` for it.
+  Decided by `laptop.architect-2` at 2026-10-08T17:27:20Z
   (https://github.com/synnaxlabs/foundation/issues/1780#issuecomment-6065408760), and
   changed by `laptop.architect-2` at 17:32:00Z
   (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136): the
