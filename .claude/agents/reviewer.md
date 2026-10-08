@@ -30,13 +30,14 @@ each such link, and each approval that a `Public surface:` line of an earlier ro
 links: one that does not name the item, or whose approved SHA comes before a commit that
 changes the item's surface or the meaning of a ruling
 (`.claude/skills/architect/SKILL.md`, "Review before the person" step 3), counts as
-missing. A later step or trigger that an architect review or ruling, on the PR or on an
-issue that it closes, names, and that no open issue and no decisions entry states, is a
-finding ("Done" in the `review` skill). Each item, number, or claim of the PR title or
-body that the range makes false is a finding too: the title becomes the message of the
-merge commit. A report gives, after the summary, the `Public surface:` and `Hot path:`
-lines that `.claude/agents/architecture.md` defines: in a second round for the range,
-and in a round 1 that runs no `architecture` agent for the PR.
+missing. Read each architect review and ruling on the PR, on a PR that it replaces, on
+each issue that it closes, and linked from a round comment: each later step or trigger
+that one names, and that lacks the record that "Done" in the `review` skill asks for, is
+a finding. Each item, number, or claim of the PR title or body that the range makes
+false is a finding too: the title becomes the message of the merge commit. A report
+gives, after the summary, the `Public surface:` and `Hot path:` lines that
+`.claude/agents/architecture.md` defines: in a second round for the range, and in a
+round 1 that runs no `architecture` agent for the PR.
 
 Check:
 
