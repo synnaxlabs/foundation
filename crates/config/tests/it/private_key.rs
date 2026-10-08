@@ -69,11 +69,13 @@ fn alarms_alone_at_a_map_key() {
 fn alarms_alone_at_each_string_in_source_order() {
     let text = format!(
         "subject \"PuTTY-User-Key-File\" {{\n  keys = [{PEM}]\n}}\n\
-         zone = PuTTY-User-Key-File({PEM})\nPuTTY-User-Key-File {{}}\n"
+         zone = PuTTY-User-Key-File({PEM})\nPuTTY-User-Key-File {{}}\n\
+         site = PuTTY-User-Key-File\n"
     );
     let putty = "PuTTY-User-Key-File";
     let quoted = format!("{putty:?}");
-    let expected = [&quoted, PEM, putty, PEM, putty].map(|text| (0, text.to_owned()));
+    let expected =
+        [&quoted, PEM, putty, PEM, putty, putty].map(|text| (0, text.to_owned()));
     assert_eq!(alarms(&[&text]), expected);
 }
 
@@ -83,4 +85,13 @@ fn alarms_alone_over_two_files() {
     let unknown = "subject \"bob\" {\n  colour = \"blue\"\n}\n";
     assert_eq!(alarms(&[unknown, &key]), [(1, PEM.to_owned())]);
     assert_eq!(alarms(&[&key, unknown]), [(0, PEM.to_owned())]);
+}
+
+#[test]
+fn alarms_in_the_order_of_the_files_then_of_the_source() {
+    let late = format!("subject \"alice\" {{\n  keys = [\"a\", \"b\", {PEM}]\n}}\n");
+    let early = format!("subject \"bob\" {{\n  keys = {PEM}\n}}\n");
+    let expected = [(0, PEM.to_owned()), (1, PEM.to_owned())];
+    assert_eq!(alarms(&[&late, &early]), expected);
+    assert_eq!(alarms(&[&early, &late]), expected);
 }
