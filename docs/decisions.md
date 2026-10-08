@@ -5474,12 +5474,12 @@ How to read this record:
   retry may fix, and a caller matches the variant, not the code. On `os`,
   `getaddrinfo` maps `EAI_NONAME` and `EAI_NODATA` to `NotFound`, `EAI_SYSTEM` to
   `Io` with `errno`, `EAI_AGAIN` to `Io` with `EAGAIN`, `EAI_MEMORY` to `Io` with
-  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Each lookup runs
-  `getaddrinfo` on an OS thread of its own, which ends with the lookup, also after
-  its future drops; Tokio's blocking pool lost, because a runtime drop waits for each
-  of its tasks. A host with a NUL byte is `NotFound`. Decided by the
+  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Decided by the
   architect, #995
-  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608). A
+  host with a NUL byte is `NotFound`, with no lookup. Decided by `laptop.architect-2`
+  (#1095,
+  https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287).
   From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
   mean to a caller. Amended (2026-10-07, #1117): `Mode::Create` makes a missing file
   with `len` zeroed bytes. It treats an empty file that is there as missing and
