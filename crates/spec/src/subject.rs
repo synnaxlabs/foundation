@@ -104,13 +104,13 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_first_copy_of_a_key_before_it() {
-        let keys = vec![key(9), key(3), key(7), key(3), key(9)];
+    fn refuses_the_second_copy_that_comes_first() {
+        let keys = vec![key(3), key(9), key(9), key(3)];
         assert_eq!(
             Subject::new(keys),
             Err(Error::Duplicate {
-                index: 3,
-                key: key(3)
+                index: 2,
+                key: key(9)
             })
         );
         let error = Error::Duplicate {
