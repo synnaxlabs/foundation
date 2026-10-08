@@ -238,6 +238,37 @@ fn a_power_cut_keeps_a_prefix_of_the_creates_and_removes_that_no_sync_dir_covers
     }
 }
 
+/// The names in the data directory and the free bytes after a power cut, when a
+/// synced file `old` of 64 KiB is removed through its handle and a file `new` of
+/// 128 KiB is made, with no `sync_dir` after them.
+fn removed_through_handle(seed: u64) -> (Vec<PathBuf>, u64) {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        let files = node.files();
+        let old = create(&node, "old", 64 * KIB).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        old.remove().await.unwrap();
+        drop(create(&node, "new", 128 * KIB).await);
+    });
+    sim.run_on(&node, |node, _| async move {
+        let files = node.files();
+        let names = files.list(Path::new("")).await.unwrap();
+        (names, files.free().await.unwrap())
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_power_cut_keeps_a_prefix_that_holds_a_remove_through_a_handle() {
+    let kept: BTreeSet<_> = (0..32).map(removed_through_handle).collect();
+    let prefixes = BTreeSet::from([
+        (names(&["old"]), MIB - 64 * KIB),
+        (names(&[]), MIB),
+        (names(&["new"]), MIB - 128 * KIB),
+    ]);
+    assert_eq!(kept, prefixes);
+}
+
 /// The names in the data directory, the free bytes, and the result of an open of
 /// `d/f` after a power cut, when `d` and `d/f` are made and only `d` is synced.
 fn unsynced_parent(seed: u64) -> (Vec<PathBuf>, u64, Result<(), Error>) {

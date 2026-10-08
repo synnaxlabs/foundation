@@ -1434,6 +1434,7 @@ fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
         let found = files.open(path, Mode::Write).await.err();
         assert_eq!(found, Some(Error::NotFound { path: "a".into() }));
+        files.sync_dir(Path::new("")).await.unwrap();
         assert_eq!(files.free().await.unwrap(), MIB, "the handle closed");
         let made = create(&node, "a", KIB).await;
         assert_eq!(read(&made, &pool, 0, 512).await, [0; 512]);
@@ -1489,6 +1490,7 @@ fn a_remove_of_a_removed_path_gives_not_found() {
         let found = file.remove().await;
         assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
+        files.sync_dir(Path::new("")).await.unwrap();
         assert_eq!(files.free().await.unwrap(), MIB, "the handle closed");
     });
 }

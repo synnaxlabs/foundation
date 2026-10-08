@@ -289,7 +289,7 @@ impl Disk {
     /// Unlinks file `inode` at `path`. `NotFound` when `path` no longer names it.
     pub(crate) fn unlink(&mut self, inode: u64, path: &Path) -> Result<(), Cause> {
         let (dir, name) = self.entry(inode, path)?;
-        self.dir_mut(dir).entries.remove(name);
+        self.edit(dir, vec![(name.into(), None)]);
         self.file(inode).linked = false;
         self.collect(inode);
         Ok(())
