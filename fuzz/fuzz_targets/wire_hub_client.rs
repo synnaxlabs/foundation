@@ -18,7 +18,7 @@ use types::node;
 use types::time::{Interval, Stamp};
 use wire::hub::Error;
 use wire::hub::client::{
-    BODY_BYTES_MAX, Challenge, FromNode, FromProgram, Gateway, Program, Request,
+    BODY_BYTES_MAX, Challenge, FromGateway, FromProgram, Gateway, Program, Request,
     Response, Signed,
 };
 
@@ -68,7 +68,7 @@ fn gateway<'m>(gateway: &mut Gateway, message: &'m [u8]) -> Result<Event<'m>, Er
 
 fn program<'m>(program: &mut Program, message: &'m [u8]) -> Result<Event<'m>, Error> {
     program.decode(message).map(|event| match event {
-        FromNode::Challenge(challenge) => {
+        FromGateway::Challenge(challenge) => {
             let mut encoded = vec![0; Challenge::LEN];
             challenge.encode(&mut encoded);
             Event::Fixed {
@@ -76,7 +76,7 @@ fn program<'m>(program: &mut Program, message: &'m [u8]) -> Result<Event<'m>, Er
                 length: None,
             }
         }
-        FromNode::Response(response) => {
+        FromGateway::Response(response) => {
             let mut encoded = vec![0; Response::LEN];
             response.encode(&mut encoded);
             Event::Fixed {
@@ -84,7 +84,7 @@ fn program<'m>(program: &mut Program, message: &'m [u8]) -> Result<Event<'m>, Er
                 length: Some(response.length),
             }
         }
-        FromNode::Body { bytes, last } => Event::Body { bytes, last },
+        FromGateway::Body { bytes, last } => Event::Body { bytes, last },
     })
 }
 
@@ -222,7 +222,7 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     let mut out = [0; Challenge::LEN];
     challenge.encode(&mut out);
     match Program::default().decode(&out) {
-        Ok(FromNode::Challenge(decoded)) => {
+        Ok(FromGateway::Challenge(decoded)) => {
             assert_eq!(decoded, challenge, "the challenge changed")
         }
         other => panic!("a challenge did not read back: {other:?}"),
@@ -234,7 +234,7 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     let mut out = [0; Response::LEN];
     response.encode(&mut out);
     match Program::default().decode(&out) {
-        Ok(FromNode::Response(decoded)) => {
+        Ok(FromGateway::Response(decoded)) => {
             assert_eq!(decoded, response, "the response changed")
         }
         other => panic!("a response did not read back: {other:?}"),

@@ -327,7 +327,7 @@ mod program {
         for _ in 0..3 {
             assert_eq!(
                 program.decode(&encode_challenge(challenge())),
-                Ok(FromNode::Challenge(challenge()))
+                Ok(FromGateway::Challenge(challenge()))
             );
         }
     }
@@ -338,11 +338,11 @@ mod program {
         let response = Response { length: 2 };
         assert_eq!(
             program.decode(&encode_response(response)),
-            Ok(FromNode::Response(response))
+            Ok(FromGateway::Response(response))
         );
         assert_eq!(
             program.decode(b"ok"),
-            Ok(FromNode::Body {
+            Ok(FromGateway::Body {
                 bytes: b"ok",
                 last: true
             })
@@ -458,7 +458,7 @@ proptest! {
         let bytes = encode_challenge(challenge);
         prop_assert_eq!(
             Program::default().decode(&bytes),
-            Ok(FromNode::Challenge(challenge))
+            Ok(FromGateway::Challenge(challenge))
         );
     }
 
@@ -475,7 +475,7 @@ proptest! {
         let mut program = Program::default();
         let (sent, answered) = (encode_request(request), encode_response(response));
         prop_assert_eq!(gateway.decode(&sent), Ok(FromProgram::Request(request)));
-        prop_assert_eq!(program.decode(&answered), Ok(FromNode::Response(response)));
+        prop_assert_eq!(program.decode(&answered), Ok(FromGateway::Response(response)));
         let mut sizes = sizes.into_iter().cycle();
         let mut rest = body.as_slice();
         while !rest.is_empty() {
@@ -485,7 +485,8 @@ proptest! {
             let last = rest.is_empty();
             let body = FromProgram::Body { bytes, last };
             prop_assert_eq!(gateway.decode(bytes), Ok(body));
-            prop_assert_eq!(program.decode(bytes), Ok(FromNode::Body { bytes, last }));
+            let body = FromGateway::Body { bytes, last };
+            prop_assert_eq!(program.decode(bytes), Ok(body));
         }
         prop_assert_eq!(gateway.decode(&[0]), Err(Error::Trailing));
         prop_assert_eq!(program.decode(&[0]), Err(Error::Trailing));

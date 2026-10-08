@@ -297,7 +297,7 @@ pub struct Program {
 
 /// A message from the node, decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FromNode<'m> {
+pub enum FromGateway<'m> {
     /// A challenge. The stream is the hello stream.
     Challenge(Challenge),
     /// A response. The stream is a request stream. Its body follows as `length` bytes
@@ -319,15 +319,15 @@ impl Program {
     ///
     /// As [`Gateway::decode`], for a challenge in place of a hello and a response in
     /// place of a request.
-    pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromNode<'m>, Error> {
+    pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromGateway<'m>, Error> {
         if let Some((bytes, last)) = self.order.body(message)? {
-            return Ok(FromNode::Body { bytes, last });
+            return Ok(FromGateway::Body { bytes, last });
         }
         let (decoded, length) = match kind(message)? {
-            HELLO => (FromNode::Challenge(Challenge::decode(message)?), None),
+            HELLO => (FromGateway::Challenge(Challenge::decode(message)?), None),
             REQUEST => {
                 let response = Response::decode(message)?;
-                (FromNode::Response(response), Some(response.length))
+                (FromGateway::Response(response), Some(response.length))
             }
             kind => return Err(Error::Kind { kind }),
         };
