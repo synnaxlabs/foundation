@@ -125,15 +125,8 @@ static UA_StatusCode el_start(UA_EventLoop *el) {
     return UA_STATUSCODE_GOOD;
 }
 
-/* Runs the due timers, then the delayed callbacks queued before the call or by those
- * timers. */
-static UA_StatusCode el_run(UA_EventLoop *el, UA_UInt32 timeout) {
-    (void)timeout;
-    struct shim_loop *loop = loop_of(el);
-    if(el->state != UA_EVENTLOOPSTATE_STARTED || loop->executing)
-        return UA_STATUSCODE_BADINTERNALERROR;
-    loop->executing = true;
-    UA_Timer_process(&loop->timer, now_of(el));
+/* Runs the queued delayed callbacks. Those that they queue wait for the next pass. */
+static void run_delayed(struct shim_loop *loop) {
     loop->running = loop->queued;
     loop->queued = NULL;
     loop->tail = &loop->queued;
@@ -144,6 +137,18 @@ static UA_StatusCode el_run(UA_EventLoop *el, UA_UInt32 timeout) {
         /* It may free `dc`. */
         dc->callback(dc->application, dc->context);
     }
+}
+
+/* Runs the due timers, then the delayed callbacks queued before the call or by those
+ * timers. */
+static UA_StatusCode el_run(UA_EventLoop *el, UA_UInt32 timeout) {
+    (void)timeout;
+    struct shim_loop *loop = loop_of(el);
+    if(el->state != UA_EVENTLOOPSTATE_STARTED || loop->executing)
+        return UA_STATUSCODE_BADINTERNALERROR;
+    loop->executing = true;
+    UA_Timer_process(&loop->timer, now_of(el));
+    run_delayed(loop);
     loop->executing = false;
     return UA_STATUSCODE_GOOD;
 }
@@ -266,18 +271,22 @@ UA_EventLoop *shim_loop_new(shim_now now, void *clock) {
     return el;
 }
 
-/* Runs the queued delayed callbacks, which free what they hold, removes each timer,
- * and frees `el`, a loop of `shim_loop_new`. */
+/* The most passes of delayed callbacks that a free runs. A callback that queues
+ * itself at each pass is a defect. */
+#define FREE_PASSES 64
+
+/* Runs the queued delayed callbacks, which free what they hold, and those that they
+ * queue, removes each timer, and frees `el`, a loop of `shim_loop_new`. Aborts when
+ * callbacks are still queued after `FREE_PASSES` passes. */
 void shim_loop_free(UA_EventLoop *el) {
     struct shim_loop *loop = loop_of(el);
-    while(loop->queued) {
-        UA_DelayedCallback *dc = loop->queued;
-        loop->queued = dc->next;
-        /* Before the call, since the callback may queue another. */
-        if(!loop->queued)
-            loop->tail = &loop->queued;
-        dc->next = NULL;
-        dc->callback(dc->application, dc->context);
+    for(int pass = 0; loop->queued; pass++) {
+        if(pass == FREE_PASSES) {
+            fprintf(stderr, "connector-opcua: open62541 queued delayed callbacks for "
+                            "%d passes of a loop free\n", FREE_PASSES);
+            abort();
+        }
+        run_delayed(loop);
     }
     UA_Timer_clear(&loop->timer);
     UA_free(loop);

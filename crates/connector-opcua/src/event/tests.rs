@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr;
 
@@ -24,6 +24,8 @@ struct Fixture {
 struct Probe {
     ran: RefCell<Vec<usize>>,
     raw: *mut EventLoop,
+    /// The times that `again` queues itself.
+    left: Cell<usize>,
 }
 
 impl Probe {
@@ -43,6 +45,7 @@ impl Fixture {
         let probe = Box::new(Probe {
             ran: RefCell::new(Vec::new()),
             raw: events.raw(),
+            left: Cell::new(0),
         });
         Self {
             sim,
@@ -148,6 +151,19 @@ unsafe extern "C" fn queue(application: *mut c_void, data: *mut c_void) {
     probe.ran.borrow_mut().push(0);
     // SAFETY: `data` is a delayed callback of the test, and the loop lives.
     unsafe { (probe.members().add_delayed)(probe.raw, data.cast()) };
+}
+
+/// Records the times left, and queues the delayed callback at `data`, itself, again
+/// while some are left.
+unsafe extern "C" fn again(application: *mut c_void, data: *mut c_void) {
+    let probe = probe(application);
+    let left = probe.left.get();
+    probe.ran.borrow_mut().push(left);
+    if left > 0 {
+        probe.left.set(left - 1);
+        // SAFETY: `data` is a delayed callback of the test, and the loop lives.
+        unsafe { (probe.members().add_delayed)(probe.raw, data.cast()) };
+    }
 }
 
 /// Removes the delayed callback at `data`.
@@ -368,6 +384,57 @@ fn the_drop_runs_a_callback_that_a_queued_callback_queues() {
     let Fixture { events, probe, .. } = f;
     drop(events);
     assert_eq!(probe.ran.take(), [0, 1]);
+}
+
+/// Drops a loop whose delayed callback queues itself `left` times, and gives what ran.
+fn drop_queuing(left: usize) -> Vec<usize> {
+    let f = Fixture::new();
+    f.probe.left.set(left);
+    let mut dc = f.delayed(again, ptr::null_mut());
+    dc.context = ptr::from_mut(&mut dc).cast();
+    f.queue(&mut dc);
+    let Fixture { events, probe, .. } = f;
+    drop(events);
+    probe.ran.take()
+}
+
+#[test]
+fn the_drop_runs_64_passes_of_delayed_callbacks() {
+    assert_eq!(drop_queuing(63), (0..=63).rev().collect::<Vec<_>>());
+}
+
+/// The variable that marks the child process of `the_drop_aborts_after_64_passes`.
+const CHILD: &str = "CONNECTOR_OPCUA_PASSES";
+
+/// Runs a 65th pass of a drop, when `CHILD` is set.
+#[test]
+fn drop_65_passes() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent test marks its child process"
+    )]
+    let child = std::env::var_os(CHILD).is_some();
+    if child {
+        drop_queuing(64);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn the_drop_aborts_after_64_passes() {
+    use std::os::unix::process::ExitStatusExt;
+    const SIGABRT: i32 = 6;
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "event::tests::drop_65_passes"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.signal(), Some(SIGABRT));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "connector-opcua: open62541 queued delayed callbacks for 64 passes of a loop \
+         free\n"
+    );
 }
 
 #[test]

@@ -61,8 +61,9 @@ impl Loop {
 }
 
 impl Drop for Loop {
-    /// Runs the queued delayed callbacks, which free what they hold, and frees the
-    /// loop.
+    /// Runs the queued delayed callbacks, which free what they hold, and those that
+    /// they queue, and frees the loop. Aborts the process when callbacks still wait
+    /// after 64 passes.
     fn drop(&mut self) {
         // SAFETY: the loop lives, and `raw` tells the caller to delete each client
         // and server on it first.
