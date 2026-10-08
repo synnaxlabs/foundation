@@ -56,6 +56,34 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
+/// The flags of the upstream compile, other than `-D`, `-I`, and `-std`, that change
+/// the code. `flags.txt` keeps them.
+const CODE_FLAGS: [&str; 8] = [
+    "-fno-strict-aliasing",
+    "-fexceptions",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-pthread",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-math-errno",
+];
+
+/// The flags of the upstream compile that `flags.txt` leaves out, each with its
+/// reason. A `-W` flag with no `,` is a warning, which `flags.txt` also leaves out.
+const LEFT_OUT: [(&str, &str); 4] = [
+    ("-pipe", "only the speed of the build"),
+    (
+        "-O3",
+        "the profile of `build.rs` gives the level, and the check needs -O0",
+    ),
+    (
+        "-flto=auto",
+        "objects of GCC's own form, which the Rust linker and objdump cannot read",
+    ),
+    ("-fno-fat-lto-objects", "a flag of -flto"),
+];
+
 /// The system headers that a file of the copy may include: the C standard library and
 /// the POSIX headers of the plugins. A header that one of them includes is not checked.
 const SYSTEM_HEADERS: [&str; 18] = [
@@ -82,13 +110,15 @@ const SYSTEM_HEADERS: [&str; 18] = [
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
 /// replaces `patches/open62541/` with its compiled sources, the headers in the clone
 /// that they include, `LICENSE`, `sources.txt` (each `.c` file), `flags.txt` (the
-/// `-D`, `-I`, and `-std` flags of each compile), and `VERSION` (tag and commit).
+/// `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each compile), and `VERSION`
+/// (tag and commit).
 /// Then it gives what [`check`] gives for the new copy. Needs Linux, `git`, `cmake`,
 /// Python 3, GCC as `cc`, and GNU `objdump`.
 ///
 /// # Errors
 ///
-/// A step that fails, and each error of [`check`]. On an error,
+/// A step that fails, a flag of a compile in neither [`CODE_FLAGS`] nor [`LEFT_OUT`],
+/// and each error of [`check`]. On an error,
 /// `patches/open62541/` does not change.
 pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
     let work = root.join("target/open62541");
@@ -118,7 +148,8 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 ///
 /// # Errors
 ///
-/// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value, a
+/// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value or one
+/// of [`CODE_FLAGS`], a
 /// build that fails, an `#include` or `#import` of a header outside the copy other
 /// than one of [`SYSTEM_HEADERS`] in a system directory, a call of a clock function
 /// from a pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any
@@ -164,8 +195,8 @@ struct Found {
     /// it includes. A header outside the clone is left out, and [`check`] fails on
     /// one that a source needs.
     files: BTreeSet<(PathBuf, PathBuf)>,
-    /// The `-D`, `-I`, and `-std` flags of each compile, with each `-I` relative to
-    /// the copy.
+    /// The `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each compile, with
+    /// each `-I` relative to the copy.
     flags: Vec<String>,
 }
 
@@ -177,7 +208,9 @@ fn collect(trees: &Trees<'_>) -> Result<Found, String> {
     let mut flags: Option<Vec<String>> = None;
     for entry in entries(&commands, trees.build)? {
         let file = trees.relative(&entry.source)?;
-        let these = trees.flags(&entry.arguments)?;
+        let these = trees
+            .flags(&entry.arguments)
+            .map_err(|e| format!("{}: {e}", file.display()))?;
         match &flags {
             Some(first) if *first != these => {
                 return Err(format!("{} compiles with other flags", file.display()));
@@ -220,12 +253,22 @@ impl Trees<'_> {
             .map_err(|_outside| format!("{} is outside the clone", path.display()))
     }
 
-    /// The `-D`, `-I`, and `-std` flags of a compile, with each `-I` relative to the
-    /// copy.
+    /// The `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of a compile, with each
+    /// `-I` relative to the copy. `arguments` starts with the compiler.
+    ///
+    /// # Errors
+    ///
+    /// An `-I` directory outside the clone, and a flag in neither [`CODE_FLAGS`] nor
+    /// [`LEFT_OUT`].
     fn flags(&self, arguments: &[String]) -> Result<Vec<String>, String> {
         let mut flags = Vec::new();
-        for argument in arguments {
-            if let Some(dir) = argument.strip_prefix("-I") {
+        let mut arguments = arguments.iter().skip(1);
+        while let Some(argument) = arguments.next() {
+            if ["-o", "-c"].contains(&argument.as_str()) {
+                // `cmake` writes `-o <object> -c <source>`; `build.rs` and the check
+                // give their own.
+                arguments.next();
+            } else if let Some(dir) = argument.strip_prefix("-I") {
                 let dir = self.relative(Path::new(dir))?;
                 // A bare `-I` takes the next flag as its directory; `-I-` is a flag.
                 let dir = if dir.as_os_str().is_empty()
@@ -236,8 +279,17 @@ impl Trees<'_> {
                     dir
                 };
                 flags.push(format!("-I{}", dir.display()));
-            } else if argument.starts_with("-D") || argument.starts_with("-std=") {
+            } else if argument.starts_with("-D")
+                || argument.starts_with("-std=")
+                || CODE_FLAGS.contains(&argument.as_str())
+            {
                 flags.push(argument.clone());
+            } else if !((argument.starts_with("-W") && !argument.contains(','))
+                || LEFT_OUT.iter().any(|&(flag, _)| flag == argument))
+            {
+                return Err(format!(
+                    "`{argument}` is in neither CODE_FLAGS nor LEFT_OUT"
+                ));
             }
         }
         Ok(flags)
@@ -319,13 +371,18 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
         // A value that starts with `-` makes a flag such as `-I-`, which changes how
         // `cc` finds a header.
         .filter(|flag| {
-            !["-D", "-I", "-std="].iter().any(|p| {
-                flag.strip_prefix(p)
-                    .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
-            })
+            !CODE_FLAGS.contains(flag)
+                && !["-D", "-I", "-std="].iter().any(|p| {
+                    flag.strip_prefix(p).is_some_and(|value| {
+                        !value.is_empty() && !value.starts_with('-')
+                    })
+                })
         })
         .map(|flag| {
-            format!("flags.txt: `{flag}` is not a -D, -I, or -std flag with its value")
+            format!(
+                "flags.txt: `{flag}` is not a -D, -I, or -std flag with its value, or \
+                 one of CODE_FLAGS"
+            )
         })
         .collect();
     if !other.is_empty() {
@@ -1167,9 +1224,15 @@ End of search list.
             "-I/w/src",
             "-I/w/src/-gen",
             "-std=c99",
+            "-fno-strict-aliasing",
             "-O3",
+            "-Wall",
+            "-Wno-cast-qual",
+            "-Wformat=2",
             "-o",
             "x.o",
+            "-c",
+            "/w/src/-x.c",
         ]
         .map(str::to_owned);
         assert_eq!(
@@ -1180,15 +1243,46 @@ End of search list.
                 "-Isrc_generated",
                 "-I./",
                 "-I./-gen",
-                "-std=c99"
+                "-std=c99",
+                "-fno-strict-aliasing"
             ]
             .map(str::to_owned)
             .to_vec())
         );
         assert_eq!(
-            trees.flags(&["-I/w/build".to_owned()]),
+            trees.flags(&["cc", "-I/w/build"].map(str::to_owned)),
             Err("/w/build is outside the clone".to_owned())
         );
+        for flag in ["-fplugin=x", "-Wl,-z", "x.c", "-include"] {
+            assert_eq!(
+                trees.flags(&["cc", flag].map(str::to_owned)),
+                Err(format!("`{flag}` is in neither CODE_FLAGS nor LEFT_OUT"))
+            );
+        }
+    }
+
+    #[test]
+    fn collect_refuses_a_flag_in_no_list() {
+        let dir = temp("collect");
+        let (src, build) = (dir.join("src"), dir.join("build"));
+        let commands = serde_json::json!([{
+            "file": src.join("src/ua_types.c"),
+            "output": "o/open62541-object.dir/ua_types.c.o",
+            "command": "cc -DA -fplugin=x -o o.o -c x.c",
+        }]);
+        create_files(&build, &[("compile_commands.json", &commands.to_string())]);
+        let trees = Trees {
+            src: &src,
+            build: &build,
+        };
+        assert_eq!(
+            collect(&trees).map(|found| found.flags),
+            Err(
+                "src/ua_types.c: `-fplugin=x` is in neither CODE_FLAGS nor LEFT_OUT"
+                    .to_owned()
+            )
+        );
+        remove(&dir).unwrap();
     }
 
     #[test]
@@ -1313,6 +1407,7 @@ End of search list.
                      file(WRITE ${CMAKE_BINARY_DIR}/other.h \"\")\n\
                      include_directories(include ${CMAKE_BINARY_DIR}/src_generated)\n\
                      add_compile_definitions(NAME=\"a b\")\n\
+                     add_compile_options(-fno-strict-aliasing -Wall -pipe)\n\
                      file(GLOB more src/more/*.c)\n\
                      add_library(open62541-object OBJECT src/util/ua_util.c \
                      src/util/ua_encryptedsecret.c ${more})\n\
@@ -1402,7 +1497,8 @@ End of search list.
         );
         assert_eq!(
             read("flags.txt"),
-            "-DNAME=\"a b\"\n-Iinclude\n-Isrc_generated\n-DNDEBUG\n-std=gnu99\n"
+            "-DNAME=\"a b\"\n-Iinclude\n-Isrc_generated\n-DNDEBUG\n-std=gnu99\n\
+             -fno-strict-aliasing\n"
         );
         let mut git = Command::new("git");
         let commit = exec(git.arg("-C").arg(&repo).args(["rev-parse", "v1"])).unwrap();
@@ -1601,7 +1697,10 @@ End of search list.
             "-O2\n-include\nsys/stat.h\n-I-\n-D\n-save-temps\n",
         );
         let refused = |flag: &str| {
-            format!("flags.txt: `{flag}` is not a -D, -I, or -std flag with its value")
+            format!(
+                "flags.txt: `{flag}` is not a -D, -I, or -std flag with its value, or \
+                 one of CODE_FLAGS"
+            )
         };
         assert_eq!(
             check(&root),
