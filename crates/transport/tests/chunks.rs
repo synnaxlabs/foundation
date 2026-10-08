@@ -5,8 +5,9 @@
 //! 32 KiB and 1.5 times the bytes it holds, which these messages do not reach. So
 //! the only heap block that holds all of a longer pattern is that buffer. A read of
 //! 65 chunks also makes one allocation more than a read of 64: the buffer, and no
-//! larger list. The counts cover each thread, so this binary has no test harness.
-//! The sim runs on one thread, so the counts are exact.
+//! larger list. A second copy makes none, and a read of a short message after it
+//! makes none: the reader keeps its list. The counts cover each thread, so this
+//! binary has no test harness. The sim runs on one thread, so the counts are exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -38,6 +39,8 @@ const PATTERN: usize = 4096;
 const FULL: usize = 83_600;
 /// A message that comes in 65 chunks in this sim, one past a full list.
 const PAST: usize = 84_900;
+/// The bytes of the message after the long one on the stream.
+const SHORT: usize = 1000;
 /// Where the pattern starts in a long message. Each packet but the last carries
 /// between 1000 and 1472 bytes of a message, so the pattern lies past its first 64
 /// packets and inside its first 128: only a second copy of a full list holds it.
@@ -50,9 +53,12 @@ const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its send: past the server's read.
 const LIVE: Span = Span::from_nanos(2_000_000_000);
 
-/// The server's one poll of its read, the heap blocks that hold the pattern that the
+/// The server's one poll of a read, the heap blocks that hold the pattern that the
 /// poll frees, and the allocations the poll makes.
-type Out = (Poll<Result<Option<Vec<u8>>, Error>>, u64, u64);
+type Read = (Poll<Result<Option<Vec<u8>>, Error>>, u64, u64);
+
+/// The [`Read`] of the long message and of the short one after it.
+type Out = [Read; 2];
 
 fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
@@ -64,7 +70,8 @@ fn main() {
     ];
     let mut allocations = Vec::new();
     for (len, at, copies) in cases {
-        let (read, freed, allocated) = run(&pattern, len, at);
+        let [(read, freed, allocated), (next, _, next_allocated)] =
+            run(&pattern, len, at);
         allocations.push(allocated);
         let Poll::Ready(Ok(Some(read))) = read else {
             panic!("{len} bytes: the read gave {read:?}");
@@ -76,8 +83,16 @@ fn main() {
             freed, copies,
             "{len} bytes: the heap buffers that the read frees with the whole pattern"
         );
+        let Poll::Ready(Ok(Some(next))) = next else {
+            panic!("{len} bytes: the read of the short message gave {next:?}");
+        };
+        assert_eq!(next, [0x5a; SHORT], "{len} bytes: the short message");
+        assert_eq!(
+            next_allocated, 0,
+            "{len} bytes: the reader keeps its list for the short message"
+        );
     }
-    let [full, past, ..] = allocations[..] else {
+    let [full, past, second, _] = allocations[..] else {
         unreachable!("four cases")
     };
     assert_eq!(
@@ -85,16 +100,17 @@ fn main() {
         Some(1),
         "the copy of a full list allocates only its buffer"
     );
+    assert_eq!(second, past, "a second copy allocates nothing");
 }
 
-/// The [`Out`] of the server's read of a message of `len` bytes with `pattern` at
-/// `at`.
+/// The [`Out`] of the server's reads of a message of `len` bytes with `pattern` at
+/// `at`, then of a short message, on one stream.
 fn run(pattern: &[u8], len: usize, at: usize) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
-    let out = Arc::new(Mutex::new((Poll::Pending, 0, 0)));
+    let out = Arc::new(Mutex::new([(Poll::Pending, 0, 0), (Poll::Pending, 0, 0)]));
     serve(&server, pattern.to_vec(), Arc::clone(&out));
     let message = pattern.to_vec();
     sim.run_on(&client, move |node, tasks| async move {
@@ -109,19 +125,20 @@ fn run(pattern: &[u8], len: usize, at: usize) -> Out {
             .open_sender(Class::Complete)
             .await
             .expect("a stream");
-        sender
-            .send(filled(&pool, &message, len, at))
-            .await
-            .expect("sent");
+        for (pattern, len, at) in [(&message[..], len, at), (&[], SHORT, 0)] {
+            sender
+                .send(filled(&pool, pattern, len, at))
+                .await
+                .expect("sent");
+        }
         node.clock().sleep(LIVE).await;
     })
     .expect("the run ends");
-    let out = out.lock().expect("not poisoned");
-    (out.0.clone(), out.1, out.2)
+    out.lock().expect("not poisoned").clone()
 }
 
-/// Starts the server on `node`. Once the whole message is in, it reads it in one
-/// poll and puts the [`Out`] of that poll for `pattern` in `out`.
+/// Starts the server on `node`. Once both messages are in, it reads each in one poll
+/// and puts the [`Out`] of those polls for `pattern` in `out`.
 fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
@@ -134,16 +151,18 @@ fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         own.clock().sleep(READ).await;
-        let ((read, freed), allocated) = {
-            let mut recv = pin!(receiver.recv());
-            let mut cx = Context::from_waker(Waker::noop());
-            ALLOCATOR.count(|| {
-                ALLOCATOR.freed_holding(&pattern, || recv.as_mut().poll(&mut cx))
-            })
-        };
-        let message =
-            read.map(|read| read.map(|block| block.map(|block| block.to_vec())));
-        *out.lock().expect("not poisoned") = (message, freed, allocated);
+        for read in out.lock().expect("not poisoned").iter_mut() {
+            let ((poll, freed), allocated) = {
+                let mut recv = pin!(receiver.recv());
+                let mut cx = Context::from_waker(Waker::noop());
+                ALLOCATOR.count(|| {
+                    ALLOCATOR.freed_holding(&pattern, || recv.as_mut().poll(&mut cx))
+                })
+            };
+            let message =
+                poll.map(|poll| poll.map(|block| block.map(|block| block.to_vec())));
+            *read = (message, freed, allocated);
+        }
         drop(receiver);
     });
     drop(started.expect("a shard"));
