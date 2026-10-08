@@ -199,8 +199,8 @@ impl Hub {
         self.0.borrow_mut().rules = rules;
     }
 
-    /// The hub's part of `session`. Give each hub stream of the session that the
-    /// caller serves to [`Link::serve`].
+    /// The hub's part of `session`. Give to [`Link::serve`] each hub stream of the
+    /// session that the caller admits.
     #[must_use]
     pub fn link(&self, session: transport::Session) -> Link {
         Link::new(Rc::clone(&self.0), session)
