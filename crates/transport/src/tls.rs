@@ -77,7 +77,7 @@ impl Tls {
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let certificate = issue(pair.public_key().as_ref(), |tbs| {
+        let certificate = issue(&public(private_key).to_bytes(), |tbs| {
             pair.sign(tbs).as_ref().to_vec()
         });
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
@@ -328,12 +328,13 @@ impl TimeProvider for Epoch {
     }
 }
 
-/// The public key of `private_key`, derived apart from the certificate template.
-#[cfg(test)]
+/// The public key of `private_key`: the key that [`Tls::new`] certifies.
 pub(crate) fn public(private_key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
+    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
+        .expect("invariant: any 32 bytes are an Ed25519 private key");
+    let bytes = pair.public_key().as_ref().try_into();
+    PublicKey::new(bytes.expect("invariant: an Ed25519 public key is 32 bytes"))
+        .expect("invariant: aws-lc makes no key of small order")
 }
 
 /// A client like an SDK: it pins the server's key and has no certificate.
@@ -948,6 +949,17 @@ mod tests {
                 let private_key = PrivateKey(bytes);
                 let certificate = certificate(&Tls::new(&private_key));
                 prop_assert_eq!(key(&certificate, &[]), Ok(public(&private_key)));
+            }
+
+            #[test]
+            fn handshakes_with_any_key(bytes: [u8; 32]) {
+                let (a, b) = (PrivateKey(bytes), PrivateKey([2; 32]));
+                let peers =
+                    handshake(Tls::new(&a).client(public(&b)), Tls::new(&b).server());
+                prop_assert_eq!(
+                    peers,
+                    Ok((Peer::Node(public(&b)), Peer::Node(public(&a))))
+                );
             }
         }
 

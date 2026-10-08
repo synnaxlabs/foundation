@@ -173,29 +173,8 @@ fn create_allocates_an_empty_file_that_is_there() {
 #[cfg(target_os = "linux")]
 #[test]
 fn create_frees_the_blocks_past_the_end_of_an_empty_file_that_is_there() {
-    use rustix::fs::{self, FallocateFlags, OFlags};
-    const LEN: u64 = 4 << 20;
-    // ext4 counts the extent tree of the file in `st_blocks`.
-    const SLACK: u64 = 64 << 10;
     run(|files, data| async move {
-        // What a crash after an allocation that kept the length leaves.
-        let flags = OFlags::WRONLY.union(OFlags::CREATE);
-        let fd =
-            fs::open(data.join("a"), flags, fs::Mode::RUSR | fs::Mode::WUSR).unwrap();
-        fs::fallocate(&fd, FallocateFlags::KEEP_SIZE, 0, 4 * LEN).unwrap();
-        drop(fd);
-        create(&files, "a", LEN).await.close().await;
-        let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert!(
-            (LEN..=LEN + SLACK).contains(&allocated),
-            "{allocated} bytes allocated for {LEN}"
-        );
-        // A truncate to the length frees each block past the end and no other.
-        let fd = fs::open(data.join("a"), OFlags::WRONLY, fs::Mode::empty()).unwrap();
-        fs::ftruncate(&fd, LEN).unwrap();
-        drop(fd);
-        let truncated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
-        assert_eq!(truncated, allocated);
+        crate::kept::check(&files, &data).await;
     });
 }
 
@@ -568,6 +547,77 @@ fn remove_removes_a_file() {
         files.remove(Path::new("a")).await.unwrap();
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
         files.remove(Path::new("a")).await.unwrap();
+    });
+}
+
+#[test]
+fn a_remove_through_the_handle_removes_the_file_and_a_create_at_its_path_opens() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        file.write_at(0, &[block(&pool, b"old")]).await.unwrap();
+        assert_eq!(file.remove().await, Ok(()));
+        assert!(files.list(Path::new("")).await.unwrap().is_empty());
+        let found = files.open(Path::new("a"), Mode::Write).await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
+        let made = create(&files, "a", KIB).await;
+        assert_eq!(read(&made, &pool, 0, 3).await, [0; 3]);
+    });
+}
+
+#[test]
+fn a_remove_of_a_path_that_names_another_file_gives_not_found_and_keeps_it() {
+    run(|files, _| async move {
+        let pool = pool();
+        let file = create(&files, "a", 4 * KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let other = create(&files, "a", 4 * KIB).await;
+        other.write_at(0, &[block(&pool, b"new")]).await.unwrap();
+        let found = file.remove().await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
+        let kept = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        assert_eq!(read(&kept, &pool, 0, 3).await, b"new");
+    });
+}
+
+#[test]
+fn a_remove_of_a_path_that_is_a_link_to_the_file_gives_not_found() {
+    run(|files, data| async move {
+        std::fs::write(data.join("t"), [0; 4_096]).unwrap();
+        std::os::unix::fs::symlink("t", data.join("a")).unwrap();
+        let file = files.open(Path::new("a"), Mode::Write).await.unwrap();
+        let found = file.remove().await.unwrap_err();
+        assert_eq!(found, Error::NotFound { path: "a".into() });
+        assert!(data.join("t").is_file() && data.join("a").is_symlink());
+        files.open(Path::new("t"), Mode::Write).await.unwrap();
+    });
+}
+
+#[test]
+fn a_remove_through_the_handle_releases_the_lock_of_the_file() {
+    run(|files, data| async move {
+        let file = create(&files, "a", 4 * KIB).await;
+        std::fs::hard_link(data.join("a"), data.join("b")).unwrap();
+        let (other, thread) = self::files(data.parent().unwrap(), "other");
+        for files in [&files, &other] {
+            let found = files.open(Path::new("b"), Mode::Write).await.unwrap_err();
+            assert_eq!(found, Error::Busy { path: "b".into() });
+        }
+        file.remove().await.unwrap();
+        assert!(!data.join("a").exists() && data.join("b").is_file());
+        other.open(Path::new("b"), Mode::Write).await.unwrap();
+        drop(other);
+        thread.join().unwrap();
+    });
+}
+
+#[test]
+#[should_panic(expected = "remove a, which was opened to read")]
+fn a_remove_through_a_read_handle_panics() {
+    run(|files, _| async move {
+        create(&files, "a", KIB).await.close().await;
+        let file = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        drop(file.remove().await);
     });
 }
 

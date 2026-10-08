@@ -1,6 +1,6 @@
 //! The time to make the stored entry of an index frame and drop it, and to read each
 //! series of its body, for frames of 16, 1000, and 100,000 series of one sample: each
-//! an `f32`, or a mix of each kind of type.
+//! an `f32`, or a mix of scalars, an array, a matrix, a list, a string, and bytes.
 
 use std::fmt;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use divan::counter::ItemsCount;
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{Draft, Form, Frame, Path};
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 use types::time::Stamp;
 
 fn main() {
@@ -18,7 +18,7 @@ fn main() {
 }
 
 /// The data types that a mixed frame cycles through.
-const MIXED: [Type; 9] = [
+const MIXED: [Type; 10] = [
     Type::Scalar(Scalar::F32),
     Type::Scalar(Scalar::F64),
     Type::Scalar(Scalar::I16),
@@ -26,11 +26,18 @@ const MIXED: [Type; 9] = [
     Type::Scalar(Scalar::Stamp),
     Type::Array {
         element: Scalar::F32,
-        len: 6,
+        len: 3,
+    },
+    Type::Matrix {
+        element: Scalar::F32,
+        sides: Sides {
+            rows: 2,
+            columns: 3,
+        },
     },
     Type::List {
-        element: Scalar::U16,
-        max: 8,
+        element: Scalar::U8,
+        max: 16,
     },
     Type::String,
     Type::Bytes,

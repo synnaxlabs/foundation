@@ -40,6 +40,15 @@ pub struct Link {
     pub change: Change,
 }
 
+impl Link {
+    /// Each claim the link carries, with its signature: its votes in the term of
+    /// `at` in rising key order, then the leader's change at `at`, as
+    /// [`Entry::claims`] gives them for the entry.
+    pub fn claims(&self) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {
+        self.change.claims(self.at)
+    }
+}
+
 /// What a voter granted a candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
@@ -115,8 +124,10 @@ pub struct Proof {
 }
 
 impl Proof {
-    // Each entry's grant in `term`, in rising key order, with its signature.
-    pub(crate) fn claims(
+    /// Each voter's grant in `term`, in rising key order, with its signature. The
+    /// proof of a message grants in the term of the message, and the votes of a
+    /// change in the term of its entry.
+    pub fn claims(
         &self,
         term: Term,
     ) -> impl Iterator<Item = (Claim<'_>, Option<Signature>)> {

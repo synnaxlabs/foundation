@@ -1,6 +1,7 @@
-//! The byte form of a `raft` entry, which the log and the messages share.
+//! The byte form of `raft` entries one after another, which the log and an append
+//! share.
 //!
-//! An entry has one byte form: [`decode`] takes only what [`encode`] gives. A change
+//! Entries have one byte form: [`decode`] takes only what [`encode`] gives. A change
 //! is signed before it is encoded, so [`decode`] gives each change its signature.
 
 use raft::{Data, Entry};
@@ -11,12 +12,28 @@ const EMPTY: u8 = 0;
 const BYTES: u8 = 1;
 const VOTERS: u8 = 2;
 
-/// Adds the byte form of `entry` to `out`.
+/// Adds the byte form of `entries` to `out`.
 ///
 /// # Panics
 ///
 /// When a change has no signature, as [`put_change`].
-pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
+pub(crate) fn encode(entries: &[Entry], out: &mut Vec<u8>) {
+    for entry in entries {
+        put_one(entry, out);
+    }
+}
+
+/// The entries that `bytes` is the byte form of, up to its end. `None` when it is not
+/// the byte form of entries.
+pub(crate) fn decode(mut bytes: &[u8]) -> Option<Vec<Entry>> {
+    let mut entries = Vec::new();
+    while !bytes.is_empty() {
+        entries.push(take_one(&mut bytes)?);
+    }
+    Some(entries)
+}
+
+fn put_one(entry: &Entry, out: &mut Vec<u8>) {
     put_position(entry.at, out);
     match &entry.data {
         Data::Empty => out.push(EMPTY),
@@ -32,9 +49,8 @@ pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
     }
 }
 
-/// Takes one entry from the start of `bytes`. `None` when the bytes do not start
-/// with the byte form of an entry; `bytes` is then at no known place.
-pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Entry> {
+// `None` when `bytes` does not start with the byte form of an entry.
+fn take_one(bytes: &mut &[u8]) -> Option<Entry> {
     let at = take_position(bytes)?;
     let data = match u8::from_le_bytes(take(bytes)?) {
         EMPTY => Data::Empty,
@@ -98,27 +114,25 @@ mod tests {
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([7; 64]);
         expected.extend([9; 64]);
-        let entry = change(Some(Signature([9; 64])));
+        let entries = vec![change(Some(Signature([9; 64])))];
         let mut bytes = Vec::new();
-        encode(&entry, &mut bytes);
+        encode(&entries, &mut bytes);
         assert_eq!(bytes, expected);
-        let mut rest = &bytes[..];
-        assert_eq!(decode(&mut rest), Some(entry));
-        assert!(rest.is_empty());
+        assert_eq!(decode(&bytes), Some(entries));
     }
 
     #[test]
     fn decode_refuses_a_change_cut_before_its_signature() {
         let mut bytes = Vec::new();
-        encode(&change(Some(Signature([9; 64]))), &mut bytes);
+        encode(&[change(Some(Signature([9; 64])))], &mut bytes);
         for cut in [bytes.len() - 64, bytes.len() - 1] {
-            assert_eq!(decode(&mut &bytes[..cut]), None, "{cut}");
+            assert_eq!(decode(&bytes[..cut]), None, "{cut}");
         }
     }
 
     #[test]
     #[should_panic(expected = "invariant: a claim is signed before it is encoded")]
     fn encode_panics_on_an_unsigned_change() {
-        encode(&change(None), &mut Vec::new());
+        encode(&[change(None)], &mut Vec::new());
     }
 }
