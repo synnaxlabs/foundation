@@ -61,10 +61,9 @@ struct Half {
     unsent: Range<usize>,
     /// The block of the message in hand.
     block: Bytes,
-    /// The parts of the message in hand that the stream has not taken all of, the
-    /// first one cut at the first byte it has not taken. Empty during the write that
-    /// gives the message, which reads the caller's parts. It keeps its capacity.
-    parts: Vec<Part>,
+    /// The parts of the message in hand that the stream has not taken all of. Empty
+    /// during the write that gives the message, which reads the caller's parts.
+    parts: Kept,
     /// The bytes of the message in hand that the stream has not taken.
     body: usize,
     /// The send budget of the message in hand.
@@ -315,7 +314,7 @@ impl Half {
             header: [0; 1 + varint::BYTES_MAX],
             unsent: 0..0,
             block: Bytes::new(),
-            parts: Vec::new(),
+            parts: Kept::default(),
             body: 0,
             claim: Claim::new(class),
             rest: Rest::Caller,
@@ -378,13 +377,13 @@ impl Half {
         given: Option<&[Part]>,
     ) -> Result<(), WriteError> {
         let mut parts = mem::take(&mut self.parts);
-        let mut left = Left::new(given.unwrap_or(&parts));
+        let mut left = Left::new(given.unwrap_or(parts.left()));
         let written = self.write_from(send, buffer, &mut left);
         let (head, tail) = (left.head, left.tail.len());
         if self.body == 0 {
             parts.clear();
         } else {
-            keep(&mut parts, given, head, tail);
+            parts.keep(given, head, tail);
         }
         self.parts = parts;
         written
@@ -393,7 +392,7 @@ impl Half {
     /// Keeps `given`, when `Some`, as the parts that the stream did not take.
     fn hold(&mut self, given: Option<&[Part]>) {
         if let Some(given) = given {
-            self.parts.extend_from_slice(given);
+            self.parts.hold(given);
         }
     }
 
@@ -436,15 +435,43 @@ impl Half {
 /// `send_buffer` in 1.3.0. It keeps a longer chunk until the ACK.
 const COPIED_MAX: usize = 1452;
 
-/// Makes `kept` the parts from the one that `head` cuts on, with `tail` parts after
-/// it: of `given` when `Some`, which `kept` must then be empty for, else of `kept`.
-fn keep(kept: &mut Vec<Part>, given: Option<&[Part]>, head: Part, tail: usize) {
-    if let Some(given) = given {
-        kept.push(head);
-        kept.extend_from_slice(&given[given.len() - tail..]);
-    } else {
-        kept.drain(..kept.len() - tail - 1);
-        kept[0] = head;
+/// The parts of a message that the stream has not taken all of, the first one cut at
+/// the first byte not taken. The list keeps its capacity.
+#[derive(Debug, Default)]
+struct Kept {
+    parts: Vec<Part>,
+    /// The index in `parts` of the first part left.
+    first: usize,
+}
+
+impl Kept {
+    /// The parts left.
+    fn left(&self) -> &[Part] {
+        &self.parts[self.first..]
+    }
+
+    /// Keeps the parts from the one that `head` cuts on, with `tail` parts after it:
+    /// of `given` when `Some`, which the list must then be empty for, else of
+    /// [`Kept::left`].
+    fn keep(&mut self, given: Option<&[Part]>, head: Part, tail: usize) {
+        if let Some(given) = given {
+            self.parts.push(head);
+            self.parts.extend_from_slice(&given[given.len() - tail..]);
+        } else {
+            self.first = self.parts.len() - tail - 1;
+            self.parts[self.first] = head;
+        }
+    }
+
+    /// Keeps all of `given`, which the list must be empty for.
+    fn hold(&mut self, given: &[Part]) {
+        self.parts.extend_from_slice(given);
+    }
+
+    /// Keeps no part.
+    fn clear(&mut self) {
+        self.parts.clear();
+        self.first = 0;
     }
 }
 
@@ -4788,20 +4815,20 @@ mod tests {
                     .map(|(a, b, zeros)| Part { range: a.min(b)..a.max(b), zeros })
                     .collect();
                 let all = bytes(&block, &parts);
-                let mut kept = Vec::new();
+                let mut kept = Kept::default();
                 let mut taken = 0;
                 for (write, take) in takes.into_iter().enumerate() {
                     if taken == all.len() {
                         break;
                     }
                     let given = (write == 0).then_some(parts.as_slice());
-                    let mut left = Left::new(given.unwrap_or(&kept));
+                    let mut left = Left::new(given.unwrap_or(kept.left()));
                     let take = take.min(all.len() - taken);
                     left.advance(take);
                     let (head, tail) = (left.head, left.tail.len());
-                    keep(&mut kept, given, head, tail);
+                    kept.keep(given, head, tail);
                     taken += take;
-                    prop_assert_eq!(bytes(&block, &kept), &all[taken..]);
+                    prop_assert_eq!(bytes(&block, kept.left()), &all[taken..]);
                 }
             }
         }
