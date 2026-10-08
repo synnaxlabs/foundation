@@ -61,13 +61,13 @@ pub enum Ended {
     /// The home of another node stopped or reset the stream with this HUB WIRE code.
     Refused(wire::hub::Refusal),
     /// A message from the home of another node broke HUB WIRE. The reader stopped the
-    /// stream with `MALFORMED`.
+    /// stream with code `MALFORMED`.
     Message(wire::hub::Error),
     /// The ends of a frame from the home of another node break a rule of a frame. The
-    /// reader stopped the stream with `MALFORMED`.
+    /// reader stopped the stream with code `MALFORMED`.
     Frame(types::frame::Error),
     /// The shard's pool had no block for a frame or a credit. The reader stopped the
-    /// stream with `BUSY`.
+    /// stream with code `BUSY`.
     Pool(block::Error),
 }
 
@@ -115,10 +115,10 @@ pub enum Error {
     /// The home of another node stopped or reset the stream with this HUB WIRE code.
     Refused(wire::hub::Refusal),
     /// The reply of the home of another node broke HUB WIRE. The reader stopped the
-    /// stream with `MALFORMED`.
+    /// stream with code `MALFORMED`.
     Message(wire::hub::Error),
     /// The shard's pool had no block for a message to the home of another node. The
-    /// reader stopped the stream with `BUSY`.
+    /// reader stopped the stream with code `BUSY`.
     Pool(block::Error),
 }
 

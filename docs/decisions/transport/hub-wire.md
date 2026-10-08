@@ -184,6 +184,6 @@
   https://github.com/synnaxlabs/foundation/issues/1689#issuecomment-6050026992.
   At the reader's node (#340 PR 4d-b), a message that `wire::hub::Reader` refuses, or
   ends that `types` refuses, stops the stream with `MALFORMED`, and a pool with no
-  block for a frame or a `Credit` stops it with `BUSY`. Each later `next` gives the
-  same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
+  block for `Open`, its keys, a frame, or a `Credit` stops it with `BUSY`. Each later
+  `next` gives the same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
