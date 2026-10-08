@@ -348,6 +348,8 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
+| `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
+| `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -373,6 +375,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
-messages (#1470), `mesh::Member::decode` (the join answer of #336 adds its target), `spec`
-tree chunks (#64), `types::time::Rate`, and each connector's protocol parser.
+and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`),
+`mesh::Member::decode` (the join answer of #336 adds its target), `spec` tree chunks
+(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), and
+each connector's protocol parser.

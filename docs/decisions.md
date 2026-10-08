@@ -2389,7 +2389,11 @@ How to read this record:
   coordinator (#471). `mesh::testing::round_trip_change`, behind the `sim` feature,
   gives the fuzz target `mesh_change` the decode and encode of a change record; no
   change type is public (decided by the architect, 2026-10-07T11:17:12Z:
-  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855). The
+  https://github.com/synnaxlabs/foundation/issues/1339#issuecomment-6036785855).
+  `mesh::testing::round_trip_message` and `round_trip_entries` give the fuzz targets
+  `mesh_message` and `mesh_entries` the decode and encode of a message and of entries
+  one after another, in the same way (approved by the architect, 2026-10-08T01:06:45Z:
+  https://github.com/synnaxlabs/foundation/issues/1470#issuecomment-6050048371). The
   module `change` holds the change records and their byte forms (`Change`, `Join`,
   `Malformed`, `Unknown`). The module `region` holds the state that they move (`State`,
   `Request`, `Refused`, `Unfit`). One module for both lost: `region::Unknown`, a change
