@@ -2522,4 +2522,68 @@ mod port {
         };
         assert_eq!(node.join(), Err(Error::Transport(error)));
     }
+
+    /// A stream whose header is late delays no other stream of the same session. On a
+    /// slow link, stream A sends a first message of 60 KiB and stream B a header
+    /// only: B's reply half resets before A's.
+    #[test]
+    fn a_late_header_delays_no_other_stream() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let slow = sim::link::Config {
+            rate: Some(std::num::NonZeroU64::new(20_000).unwrap()),
+            ..sim::link::Config::default()
+        };
+        sim.link(&peer, &host, slow);
+        let listen = listen(&host);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&order);
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let node = transport(&own, tasks.clone(), KEY).0.public_key();
+            let (transport, pool) = transport(&own, tasks.clone(), CLIENT);
+            let session = transport
+                .dial(node, &[Address::Udp(listen)])
+                .await
+                .expect("a session");
+            let message = |bytes: &[u8]| {
+                let mut block = pool.alloc(bytes.len()).unwrap();
+                block.copy_from_slice(bytes);
+                block.freeze()
+            };
+            let header = wire::header::encode(wire::Protocol::Mesh);
+            let mut late = header.to_vec();
+            late.resize(60 << 10, 0);
+            let (mut a, a_reply) = session.open(Class::Complete).await.expect("a");
+            a.send(message(&late)).await.expect("a sends");
+            let (mut b, b_reply) = session.open(Class::Complete).await.expect("b");
+            b.send(message(&header)).await.expect("b sends");
+            for (name, mut reply) in [("a", a_reply), ("b", b_reply)] {
+                let seen = Arc::clone(&seen);
+                tasks.spawn(async move {
+                    let read = reply.recv().await.map(|m| m.map(|b| b.to_vec()));
+                    seen.lock().unwrap().push((name, read));
+                });
+            }
+            session.closed().await;
+            drop((a, b, transport));
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(
+            sim.run_for(Span::from_nanos(8 * Span::SECOND.nanos())),
+            Ok(())
+        );
+        let code = Code(wire::header::REJECTED);
+        let reset = Err(transport::Error::Reset { code });
+        assert_eq!(*order.lock().unwrap(), [("b", reset.clone()), ("a", reset)]);
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
 }
