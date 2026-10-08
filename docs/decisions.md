@@ -4535,7 +4535,15 @@ How to read this record:
   `Rules::new` skips a subject definition at a key that gives no label
   (`laptop.architect`, 2026-10-08T11:11:39Z,
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907; built
-  for #1866). The first ruling kept each subject by `<name>` (`laptop.architect`,
+  for #1866). `Rules::new` takes only trees with no problem from
+  `spec::region::check` at their prefix, and checks nothing itself: `Mesh::spec` gives
+  only such trees (SPEC CHANGE, #1741), and `node` builds `Rules` only from it (#1744).
+  Lost: a governs check in `Rules::new`, a second guard that puts the rule of
+  `spec::region` in a second crate; a checked tree type, which proves each tree but not
+  that the trees are the regions of one mesh (#1882; `laptop.architect`,
+  2026-10-08T12:59:50Z,
+  https://github.com/synnaxlabs/foundation/issues/1882#issuecomment-6060416943). The
+  first ruling kept each subject by `<name>` (`laptop.architect`,
   2026-10-08T06:56:19Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
   tree key, which `admit` built with `Kind::key`, was decided by `laptop.architect` at
