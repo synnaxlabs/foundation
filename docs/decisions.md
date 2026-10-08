@@ -5561,10 +5561,11 @@ How to read this record:
   written since its last wait. When the count reaches `unsent_bytes_max`, the next
   write waits for the write event, which honors the bound. So the unsent bytes stay
   below twice the bound, with one wait per `unsent_bytes_max` bytes. Decided by
-  `laptop.architect-2` (2026-10-08T17:20:09Z:
-  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346,
-  changed 2026-10-08T17:46:08Z:
+  `laptop.architect-2` (2026-10-08T17:46:08Z:
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469).
+  Supersedes the second item of
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346
+  (2026-10-08T17:20:09Z).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
