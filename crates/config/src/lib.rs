@@ -79,9 +79,9 @@ pub struct Entry {
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there. A block inside a block other than a
-/// `connector` does not stop that check: only a connector's kind reads blocks, so each
-/// block inside another block is a separate problem.
+/// and reads, and the ones it needs are there. A block directly inside a block other
+/// than a `connector` does not stop that check: only a connector's kind reads blocks,
+/// so each such block is one problem, and nothing inside it is checked.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
 /// channel knows. A `kind` of connector that is missing, is not a name, or is not in
 /// `kinds` hides each problem of the connector's config, and so does a config nested
