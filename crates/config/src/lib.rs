@@ -2834,6 +2834,16 @@ mod tests {
         }
 
         #[test]
+        fn reads_the_rest_of_the_line_as_the_comment() {
+            let bob = ed25519([9; 32]).replace("bob@site_a", "bob@desk");
+            let line = format!("{ALICE} {bob}");
+            assert_eq!(
+                check(&subject(&[("keys", string(&line))])),
+                Ok(keyed(&[ALICE_KEY]))
+            );
+        }
+
+        #[test]
         fn refuses_a_subject_without_keys() {
             assert_eq!(
                 check(&subject(&[])),

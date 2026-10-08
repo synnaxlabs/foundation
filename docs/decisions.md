@@ -4558,7 +4558,15 @@ How to read this record:
   OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a `.ppk` file) gives
   `config.private-key`, whose message quotes none of the value. A `.pub` line whose
   comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
-  more. `config::check` first looks at each string of each Document, in any block
+  more. A base64 body with no header lines gets it too: `b3BlbnNzaC1rZXktdjEA` starts
+  each OpenSSH body, and `MC4CAQAwBQYDK2VwBCIE` starts each Ed25519 PKCS #8 body. Each
+  is whole 3-byte groups, so the bytes after it do not change it. Lost: a mark for the
+  body of another algorithm, such as RSA (`MIIE...`), whose start is also the start of a
+  certificate. As OpenSSH reads a `.pub` line, the comment is the rest of the line, so a
+  line with a second key in its comment gives the first key. Decided by
+  `laptop.architect-2` at 2026-10-08T12:06:26Z
+  (https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219).
+  `config::check` first looks at each string of each Document, in any block
   (keywords, labels, keys, and values at any depth). When one holds a private key, it
   gives only these alarms, one for each such string, and runs no other check, so no
   other problem can quote the key. Lost: the alarm only in the `subject` block, which

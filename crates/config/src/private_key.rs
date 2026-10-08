@@ -3,9 +3,16 @@ use document::value::{Kind, Value};
 use document::{Document, Map, Span};
 
 const PRIVATE_KEY: Code = Code::new("config.private-key");
-/// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, and a
-/// `.ppk` file of `PuTTYgen`.
-const MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
+/// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, a `.ppk`
+/// file of `PuTTYgen`, and the base64 start of an OpenSSH or an Ed25519 PKCS #8 body
+/// with no header lines. Each base64 mark is whole 3-byte groups, so the bytes after
+/// it do not change it.
+const MARKS: [&str; 4] = [
+    "PRIVATE KEY",
+    "PuTTY-User-Key-File",
+    "b3BlbnNzaC1rZXktdjEA",
+    "MC4CAQAwBQYDK2VwBCIE",
+];
 
 /// `config.private-key` at each string of `documents` that holds a private key, in
 /// any block, label, key, or value at any depth. The alarms are in the order of

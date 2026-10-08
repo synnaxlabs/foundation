@@ -6,6 +6,13 @@ use document::{Document, Source};
 
 const PEM: &str = r#""-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n""#;
 
+/// The base64 body of a private key with no header lines: OpenSSH, then Ed25519
+/// PKCS #8.
+const BODIES: [&str; 2] = [
+    r#""b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMw""#,
+    r#""MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH""#,
+];
+
 fn read(source: u32, text: &str) -> Document {
     config_hcl::read(Source(source), text).expect("the text is HCL")
 }
@@ -57,6 +64,20 @@ fn alarms_alone_in_a_block_inside_a_connector() {
          auth {{\n    token = {PEM}\n  }}\n}}\n"
     );
     assert_eq!(alarms(&[&text]), [(0, PEM.to_owned())]);
+}
+
+#[test]
+fn alarms_alone_at_the_body_of_a_private_key_with_no_header_lines() {
+    for body in BODIES {
+        let subject = format!("subject \"alice\" {{\n  keys = {body}\n}}\n");
+        let connector = format!(
+            "connector \"plc\" {{\n  kind = \"influx\"\n  node = \"edge\"\n  \
+             address = \"http://influx:8086\"\n  select = \"edge.*\"\n  \
+             auth {{\n    token = {body}\n  }}\n}}\n"
+        );
+        assert_eq!(alarms(&[&subject]), [(0, body.to_owned())]);
+        assert_eq!(alarms(&[&connector]), [(0, body.to_owned())]);
+    }
 }
 
 #[test]
