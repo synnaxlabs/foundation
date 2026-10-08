@@ -1213,8 +1213,9 @@ mod tests {
             steps in prop::collection::vec(steps(), 0..16),
         ) {
             let members = create_members(&[1, 2]);
+            let voters = keys(&[1]);
             let mut state =
-                State::new(name("plant").into(), members, FOUNDING, keys(&[1])).unwrap();
+                State::new(name("plant").into(), members, FOUNDING, voters).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());
