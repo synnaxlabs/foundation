@@ -17,6 +17,7 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 
 1. The open milestone, its plan issue, and the acceptance scenarios it must pass.
 2. Run `.claude/skills/direct/merged.sh` with Monitor. Each line is a PR that merged.
+   A change to `merged.sh` passes `sh .claude/skills/direct/merged_test.sh` first.
 
 ## Each merged PR
 

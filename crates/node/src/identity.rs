@@ -143,8 +143,12 @@ mod tests {
 
     proptest! {
         #[test]
-        fn decodes_what_it_encodes(key in any::<u128>(), private_key in any::<[u8; 32]>()) {
-            let decoded = decode(&encode(&identity(key, private_key))).expect("decodes");
+        fn decodes_what_it_encodes(
+            key in any::<u128>(),
+            private_key in any::<[u8; 32]>(),
+        ) {
+            let bytes = encode(&identity(key, private_key));
+            let decoded = decode(&bytes).expect("decodes");
             prop_assert_eq!(decoded.key.as_u128(), key);
             prop_assert_eq!(decoded.private_key.0, private_key);
         }

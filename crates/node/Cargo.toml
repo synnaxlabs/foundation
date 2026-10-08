@@ -26,6 +26,7 @@ hub = { path = "../hub" }
 mesh = { path = "../mesh" }
 ops = { path = "../ops" }
 os = { path = "../os" }
+spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
 wire = { path = "../wire" }
@@ -38,7 +39,6 @@ divan = { workspace = true }
 node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
-spec = { path = "../spec" }
 
 [[bench]]
 name = "scope"

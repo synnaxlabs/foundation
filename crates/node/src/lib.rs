@@ -74,13 +74,17 @@ pub struct Config<M> {
     /// Where the node's one port binds: UDP, and TCP on the same port number once
     /// the port carries TCP (#77).
     pub listen: SocketAddr,
-    /// The region whose mesh the node opens, or `None` for no mesh. One founding
-    /// member has the node's key, and its card holds the public half of the node's
-    /// private key, both from the file `node.key` in the data directory. Give the same value at each start: the node keeps no
-    /// copy of it, and until the mesh stores it (#1209), a log opened with another
-    /// value checks proofs against the wrong voters and starts at another spec. A
-    /// patch until the node keeps its region in its data directory when it founds or
-    /// joins one, and reads it at each start (#1660, #1744).
+    /// The region whose mesh the node opens, or `None` for no mesh. One founding member
+    /// has the node's key, and its card holds the public half of the node's private
+    /// key, both from the file `node.key` in the data directory. Give the same value at
+    /// each start: the node keeps no copy of it, and until the mesh stores it (#1209),
+    /// a log opened with another value checks proofs against the wrong voters and
+    /// starts at another spec. A patch until the node keeps its region in its data
+    /// directory when it founds or joins one, and reads it at each start (#1744). The
+    /// hub of each task knows each channel of the founding's `definitions`. Give only a
+    /// founding that `spec::region::check` accepts. One with a data channel whose index
+    /// is not an index of it, or with two channels of one key, makes shard 0 panic, and
+    /// [`Node::join`] gives [`Error::Panicked`].
     pub region: Option<mesh::region::Founding>,
 }
 
@@ -145,19 +149,20 @@ impl Node {
     /// the disk budget; shard 0 also takes each remainder. Unless the node stops first,
     /// shard 0 locks the data directory with the file `lock`, which it holds until each
     /// shard has closed its ring and each task of the mesh has ended, then records the
-    /// shard count in the data directory, or checks the one there, and each shard
-    /// opens its buffer in directory `shard-<i>` of its files, and makes it there when
-    /// it is not there. The shards open their buffers one after another, in order of
-    /// core. Once each buffer has opened, shard 0 reads the node's key and private key
-    /// from the file `node.key` in the data directory, and makes the file at the first
-    /// start, then opens the mesh of [`Config::region`] when it has one, then serves the port and admits every peer that proves its
-    /// key, until its transport stops, which stops the node.
-    /// Returns once each shard runs or one has failed to start. When the disk budget
-    /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
-    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
-    /// start, a shard with no memory, a data directory that another node holds or that
-    /// was made for another shard count, a key file that is not valid, or a buffer or
-    /// a mesh that does not open stops the node, and [`Node::join`] returns its error.
+    /// shard count in the data directory, or checks the one there, and each shard opens
+    /// its buffer in directory `shard-<i>` of its files, and makes it there when it is
+    /// not there. The shards open their buffers one after another, in order of core.
+    /// Once each buffer has opened, shard 0 reads the node's key and private key from
+    /// the file `node.key` in the data directory, and makes the file at the first
+    /// start, then opens the mesh of [`Config::region`] when it has one, then serves
+    /// the port and admits every peer that proves its key, until its transport stops,
+    /// which stops the node. Returns once each shard runs or one has failed to start.
+    /// When the disk budget holds no ring on each shard, no shard starts, and
+    /// [`Node::join`] gives [`Error::Disk`] with the budget, the shard count, and the
+    /// least budget. A failed start, a shard with no memory, a data directory that
+    /// another node holds or that was made for another shard count, a key file that is
+    /// not valid, or a buffer or a mesh that does not open stops the node, and
+    /// [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -663,13 +668,14 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Opens the endpoint, then runs each task given with a hub over `home`, and
-    /// serves the node's port, until `guard` completes or the transport stops. A
-    /// transport that stops goes into `failed` before any task drops. Then drops the
-    /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
-    /// and waits for each task of the mesh to end, the last of which drops the
-    /// transport. Runs no task and takes no session when a shard did not open, or when
-    /// the mesh did not open, which goes into `failed`.
+    /// Opens the endpoint, then runs each task given with a hub over `home` that knows
+    /// each channel of the region's founding spec, and serves the node's port, until
+    /// `guard` completes or the transport stops. A transport that stops goes into
+    /// `failed` before any task drops. Then drops the tasks, the hub, `home`, `guard`,
+    /// each session and stream future, and the mesh, and waits for each task of the
+    /// mesh to end, the last of which drops the transport. Runs no task and takes no
+    /// session when a shard did not open, or when the mesh did not open, which goes
+    /// into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -687,16 +693,26 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let (transport, mesh) =
-            match self.endpoint.open(files, pool, tasks.clone()).await {
-                Ok(opened) => opened,
-                Err(error) => return fail(error),
-            };
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
             tasks: tasks.clone(),
         });
+        if let Some(region) = &self.endpoint.region {
+            hub.define(region.definitions.iter().filter_map(|(name, definition)| {
+                match definition {
+                    spec::definition::Definition::Channel(channel) => {
+                        Some((name, channel))
+                    }
+                    _ => None,
+                }
+            }));
+        }
+        let (transport, mesh) =
+            match self.endpoint.open(files, pool, tasks.clone()).await {
+                Ok(opened) => opened,
+                Err(error) => return fail(error),
+            };
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // The port's future holds the mesh, so it drops before the wait.
         {
@@ -749,9 +765,9 @@ pub enum Error {
         /// The shard count of this start.
         cores: usize,
     },
-    /// A file call that locks the data directory, reads or records its shard count,
-    /// or reads or writes the node's key, failed. [`env::files::Error::Busy`] on `lock` is another node that runs
-    /// on the data directory.
+    /// A file call that locks the data directory, reads or records its shard count, or
+    /// reads or writes the node's key, failed. [`env::files::Error::Busy`] on `lock` is
+    /// another node that runs on the data directory.
     Directory(env::files::Error),
     /// The disk budget holds no ring on each of `cores` shards.
     Disk {
