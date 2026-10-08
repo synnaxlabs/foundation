@@ -1,7 +1,8 @@
 //! A message that waits for a block from the pool is held on the heap, outside the
 //! pool, in one buffer made at its length. When its stream resets or its session
 //! closes, the read that gives the error frees it, though the caller keeps the
-//! receiver. The count covers each thread, so this binary has no test harness. The
+//! receiver. The receiver then keeps a list of at most 64 chunks, not one sized by the
+//! message. The count covers each thread, so this binary has no test harness. The
 //! sim runs on one thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -37,12 +38,19 @@ const LONG: usize = 100_000;
 /// list twice before it holds the rest.
 const LONGER: usize = 250_000;
 const MESSAGE_BYTES_MAX: usize = 1 << 18;
+/// The most heap that the receiver frees when it drops after the error. A list of 64
+/// chunks of 32 bytes is 2 KiB; one of 128 is 4 KiB.
+const KEPT_MAX: usize = 3 << 10;
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);
 /// When the client ends the stream or the session, after its send.
 const END: Span = Span::from_nanos(500_000_000);
 /// When the server reads the end, after the message waits for a block.
 const READ: Span = Span::from_nanos(1_000_000_000);
+
+/// The error of the server's read after the end, the heap bytes that read freed, and
+/// those that the drop of the receiver then frees.
+type Out = (Option<Error>, usize, usize);
 
 /// How the client ends the message that waits.
 #[derive(Clone, Copy, Debug)]
@@ -66,7 +74,7 @@ fn main() {
         (End::Reset, LONG, WHOLE, reset.clone()),
         (End::Reset, LONGER, WHOLE, reset),
     ] {
-        let (read, freed) = run(end, len, first);
+        let (read, freed, kept) = run(end, len, first);
         assert_eq!(
             read,
             Some(error),
@@ -77,18 +85,22 @@ fn main() {
             "{end:?}, {len} bytes: the read that gives the error frees the buffer of \
              the message, made at its length"
         );
+        assert!(
+            kept <= KEPT_MAX,
+            "{end:?}, {len} bytes: the receiver keeps {kept} bytes after the error"
+        );
     }
 }
 
-/// The error of the server's read after the client sends a message of `len` bytes
-/// and ends the stream in the way of `end`, and the heap bytes that read freed. The
-/// server first polls `first` after the stream comes.
-fn run(end: End, len: usize, first: Span) -> (Option<Error>, usize) {
+/// The [`Out`] of the server's read after the client sends a message of `len` bytes
+/// and ends the stream in the way of `end`. The server first polls `first` after the
+/// stream comes.
+fn run(end: End, len: usize, first: Span) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let at = SocketAddr::new(server.addresses()[0], PORT);
-    let out = Arc::new(Mutex::new((None, 0)));
+    let out = Arc::new(Mutex::new((None, 0, 0)));
     serve(&server, len, first, Arc::clone(&out));
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
@@ -113,20 +125,13 @@ fn run(end: End, len: usize, first: Span) -> (Option<Error>, usize) {
         clock.sleep(END).await;
     })
     .expect("the run ends");
-    let out = out.lock().expect("not poisoned");
-    (out.0.clone(), out.1)
+    out.lock().expect("not poisoned").clone()
 }
 
 /// Starts the server on `node`. It fills its pool for messages of `len` bytes, first
 /// polls `first` after the stream comes, lets the client's message wait for a block,
-/// and puts the error of its read after the end and the bytes that read freed in
-/// `out`.
-fn serve(
-    node: &Node,
-    len: usize,
-    first: Span,
-    out: Arc<Mutex<(Option<Error>, usize)>>,
-) {
+/// and puts the [`Out`] of its read after the end in `out`.
+fn serve(node: &Node, len: usize, first: Span, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -156,8 +161,11 @@ fn serve(
             Poll::Ready(Err(error)) => Some(error),
             _ => None,
         };
-        *out.lock().expect("not poisoned") = (error, freed);
-        drop((receiver, full));
+        let before = ALLOCATOR.held();
+        drop(receiver);
+        let kept = before.saturating_sub(ALLOCATOR.held());
+        *out.lock().expect("not poisoned") = (error, freed, kept);
+        drop(full);
     });
     drop(started.expect("a shard"));
 }
