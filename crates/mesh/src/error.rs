@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use env::files;
 
 use raft::Position;
+use spec::Pointer;
 use types::ed25519::PublicKey;
 use types::node;
 
 use crate::change::Unknown;
-use crate::pointer::Pointer;
 use crate::region::Unfit;
 use crate::{claim, log};
 

@@ -20,8 +20,8 @@ use types::time::Span;
 
 use super::{Group, Mesh};
 use crate::error::{Error, Stopped};
-use crate::pointer::Pointer;
 use crate::used::{Behind, Cause, Spec};
+use spec::Pointer;
 
 /// The directory of the file that names the pointer in use, in
 /// [`Config::dir`](super::Config::dir).

@@ -21,6 +21,8 @@ mod files;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
+#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
+mod net;
 mod shards;
 mod thread;
 mod threads;
@@ -105,6 +107,22 @@ pub fn shards() -> Result<env::shards::Shards, Error> {
 pub fn threads() -> Result<env::threads::Threads, Error> {
     let cores = cores::Cores::read().map_err(Error::Cores)?;
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
+}
+
+/// The network of this machine. A stream or listener registers at its first poll
+/// with the I/O driver of the Tokio runtime current on that thread. Each thread that
+/// `os` starts has one.
+///
+/// # Panics
+///
+/// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener,
+///   on a thread with no Tokio runtime or with no I/O driver.
+/// - [`env::net::Net::udp`], and [`env::net::Net::resolve`] of a host name: this
+///   driver has no UDP and no resolver yet.
+#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn net() -> env::net::Net {
+    env::net::Net::new(net::Driver)
 }
 
 /// The real disk under `dir/data`, which it makes when it is not there, and the

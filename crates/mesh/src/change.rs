@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use spec::Pointer;
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::PublicKey;
@@ -14,7 +15,6 @@ use crate::bytes::{
     take_public_key, take_stamp,
 };
 use crate::card;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::Options;
 

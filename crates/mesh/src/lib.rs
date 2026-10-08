@@ -23,7 +23,6 @@ mod error;
 pub mod log;
 mod member;
 mod message;
-mod pointer;
 pub mod region;
 pub mod status;
 #[cfg(any(test, feature = "sim"))]
@@ -34,4 +33,3 @@ pub mod used;
 pub use driver::{Config, Ended, Mesh, Watch};
 pub use error::{Error, Stopped};
 pub use member::Member;
-pub use pointer::Pointer;

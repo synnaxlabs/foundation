@@ -8,7 +8,7 @@ use spec::definition::Definition;
 use spec::region::Problem;
 use types::name::Name;
 
-use crate::pointer::Pointer;
+use spec::Pointer;
 
 /// The spec that a node uses. A committed pointer takes effect on a node only when its
 /// store holds each chunk and the spec has no problem at its build.

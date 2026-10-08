@@ -4,4 +4,12 @@
 -Iplugins/include
 -Isrc_generated
 -std=c99
+-fno-strict-aliasing
+-fexceptions
+-ffunction-sections
+-fdata-sections
+-pthread
+-fno-unwind-tables
+-fno-asynchronous-unwind-tables
+-fno-math-errno
 -DNDEBUG

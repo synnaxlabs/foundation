@@ -2259,6 +2259,15 @@ How to read this record:
   claim and each request of `hub::client`. Decided by `laptop.architect` at
   2026-10-08T08:12:49Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6055665349).
+  `transport::fuzzing::peer(chain)` and `transport::fuzzing::certificate`, behind the
+  `fuzzing` feature, give the fuzz target `transport_certificate` the server's
+  reading of a dialer's chain and a node's certificate. The protocol is fixed at
+  `foundation/1`: rustls agrees only a protocol from the server's own list, so the
+  compare sees that protocol or none, which the handshake tests cover. Approved by
+  `laptop.architect-2` at 2026-10-08T15:11:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892). The
+  reason was changed by `laptop.architect-2` at 2026-10-08T15:31:46Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063367399).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -2317,11 +2326,15 @@ How to read this record:
   committed spec with problems moves the pointer, and the node keeps the last spec it
   used (#1741). The pointer before the first change is version 0 at the root of the tree
   of `Config::founding`. No BQ12 signature check on the change in this milestone
-  (#1213). Trigger: #1887 moves `mesh::Pointer` to `spec::Pointer` before a `wire`
-  message carries it (`laptop.architect`, 2026-10-08T13:26:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
-  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region
-  state, and a check at each open stops a node on a later build whose checks find more
+  (#1213). The pointer is `spec::Pointer`, and `mesh` has no pointer type of its own
+  (#1887; `laptop.architect`, 2026-10-08T13:26:52Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734, and the
+  removal at 2026-10-08T16:04:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
+  supersedes the `mesh::Pointer` of
+  https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836.
+  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region state,
+  and a check at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
@@ -2333,7 +2346,7 @@ How to read this record:
   founding definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
-  the trigger for `Pointer`, 2026-10-08T08:22:08Z
+  the move of `Pointer` to a layer 1 crate, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
   check of the founding at open, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
@@ -3355,9 +3368,9 @@ How to read this record:
   `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`,
   and `transport` in its line of the crate map. `Config::founding` adds
   `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
-  `Pointer`, whose root is a `types::digest::Digest`. So a crate that opens a region
-  also has `spec` in its line. Decided by `laptop.architect`: the founding definitions,
-  2026-10-08T06:12:36Z
+  `spec::Pointer`, whose root is a `types::digest::Digest`. So a crate that opens a
+  region also has `spec` in its line. Decided by `laptop.architect`: the founding
+  definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   pointer, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); this
@@ -3884,12 +3897,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967,
   2026-10-08 03:59 UTC).
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
-  an out connector: the `select` attribute and one `reader` block with `name`, `mode`
-  (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
-  reader is complete, has the connector's name, and holds nothing. A second `reader`
-  block is `document.repeated-block`, and `read` reads only the first, where a label is
-  `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
-  #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  an out connector: the `select` attribute and one `reader` block with `mode`
+  (`hub::reader::Mode`, as a string or a reference) and `hold`. With no block the reader
+  is complete and holds nothing. A second `reader` block is `document.repeated-block`,
+  and `read` reads only the first, where a label is `document.label-count`. A negative
+  `hold` is `document.negative-span` (READER RULES, #94; `laptop.architect-2`,
+  2026-10-08T07:04:36Z,
   https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
   Supersedes `config.repeated-block` and `config.label-count` of
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967
@@ -3913,15 +3926,20 @@ How to read this record:
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
   03:59 UTC).
-  `Settings::name` is `None` for a reader with no `name`, and `None` is the
-  connector's name. `kind::Context::reader` (#1731) gives that name when it opens the
-  reader, and no other place does. Lost: `name: Name`, with the connector's name
-  passed through `Kind::parse` of every kind for one value that only the reader needs.
-  Proposed by `connector` on #1794
-  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089), and
-  approved by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653,
-  2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  A reader always has its connector's name, and the `reader` block has no `name`: a
+  `name` in it is `document.unknown-attribute`. Connector names are unique (CONNECTOR
+  BLOCK), so two connectors never share a reader, and plan needs no check for it.
+  `kind::Context::reader` (#1731) opens the reader under the connector's name. Lost:
+  keep `name` and refuse a repeated reader name at plan, a new surface for a choice that
+  nobody uses (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444,
+  2026-10-08T09:49:27Z). Supersedes `name: Option<Name>` of `reader::Settings` in
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152, and the
+  `Settings::name` of `None` for a reader with no `name` of
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653, 2026-10-08
+  05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
@@ -4048,7 +4066,47 @@ How to read this record:
   because it moves the file that the include check reads. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058103514,
-  2026-10-08 10:42 UTC).
+  2026-10-08 10:42 UTC). No flag of the upstream build is lost with no error. Decided
+  by `laptop.director`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260,
+  2026-10-08 13:10 UTC). `cargo xtask open62541` puts each flag of a compile in
+  `flags.txt` (`-D`, `-I`, `-std`, and `CODE_FLAGS`, the flags that change the code)
+  or in `LEFT_OUT`, a closed list with the reason of each, and fails on any other
+  flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
+  compiled with the flags of the connector. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
+  2026-10-08 13:31 UTC). A `-W` flag with no `,` is a warning, which changes no code,
+  so `collect` leaves it out by that pattern, not by name. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
+  2026-10-08 13:57 UTC) and `laptop.director`
+  (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
+  2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260.
+  Our change makes the random state `UA_rng` of `src/util/ua_util.c` one per thread
+  (`UA_THREAD_LOCAL`), so a draw on one thread does not move the state of another.
+  Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
+  2026-10-08 02:24 UTC). A test in `cargo test -p xtask` links the objects of the
+  check with a C driver in `xtask/`: the main thread sets the start value 1, joins a
+  thread that sets 2 and draws, then draws, and its values must equal those of a
+  thread that sets 1 alone. The driver defines each clock function to call `abort()`,
+  and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
+  the production build. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
+  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
+  production, and each thread with none draws the same fixed values. So
+  `connector-opcua` (PR 4 of #435) sets the start value with
+  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
+  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  thread calls open62541, and runs each server and each client on one thread. Its
+  test server sets the start value of the test at start, and its end-to-end check
+  asserts the same run for the same value. A state for each `UA_Server` and
+  `UA_Client` lost: the draw functions and the security policy plugins take no
+  server, so each call site changes, and LOCAL PATCHES does that work again at each
+  release. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
+  2026-10-08 15:49 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
@@ -5444,7 +5502,29 @@ How to read this record:
   adapter hides the gap between frames, so a seam that split frames would act
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
-  thread panics. Amended (2026-10-07, #995): `env::net` also gives name lookups.
+  thread panics. Amended (2026-10-08, #120): on `os`, a TCP stream or listener is a
+  non-blocking socket that no reactor holds until its first poll, which registers it
+  with the I/O driver of the Tokio runtime of that thread. `os::shards()` and
+  `os::threads()` build their runtimes with `enable_io`. A connect uses the driver of
+  the thread that polls it, and an accept that of its listener; each gives the stream
+  back unregistered, so a shard can take a stream that another thread accepted (ONE
+  PORT PER NODE). A first poll on a thread with no runtime or no I/O driver panics.
+  Rejected: one I/O thread for every socket, as `os::files` uses; each message would
+  cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
+  behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
+  it lacks, from one `libc::setsockopt`. Until #119 and #1095 land, `os::net()` is
+  behind the cargo feature `net`, and its `udp` and `resolve` of a host name panic
+  ("os::net has no UDP driver yet", "os::net has no resolver yet"); the last of the
+  two removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
+  02:32 UTC, #120,
+  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
+  `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
+  stream reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of
+  the connect, an IPv4-mapped address as plain IPv4, and any other address as given,
+  with its scope and flow label. A caller that needs the kernel's peer there makes an
+  interface change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
+  #1789, https://github.com/synnaxlabs/foundation/pull/1789#issuecomment-6063559667).
+  Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
   lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a
   retry may fix, and a caller matches the variant, not the code. On `os`,
@@ -6311,7 +6391,7 @@ Storage classes used in the table:
 | Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40), with a version per name in the associated data. Every node takes a write or a delete only at the newest version plus one, and a re-seal only at the newest version, from and to nodes of the secret's placement. A delete is a version with no value. The newest version of a name is never compacted away, also after the spec removes the secret | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it in `secret::store::Sealed`, which refuses a value that does not open at its version | `mesh` (record), `secret` (seal and open) |
 | Join ticket record | Region state: options and use count. The ticket itself is a secret, never in files | Admin through `ops` | Voters at join | `mesh`, `ops` |
 | Delegation record | The parent region's spec: `{ prefix, epoch, initial voters }` | Parent voters | Nodes (epoch fencing) | `mesh` |
-| Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `mesh` |
+| Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `spec` (type), `mesh` (record, compare-and-swap) |
 | Spec tree | Prolly tree chunks in the `blob` store on each node's disk | `apply` writes chunks | Nodes fetch the ranges they use | `spec` (tree), `blob` (chunks) |
 | Changes channel | The region's Raft log presented as a channel; seq is the log index; one per region (X29) | Voters | Any node, `plan`, agents | `mesh` (served through `hub`) |
 | Desired version, rollout lock, format flag | Desired version in the spec; lock and flag in region state (multi-region scope: 5.1) | `ops upgrade`; voters | `node` (binary swap); `codec`, `wire`, `buffer` get the flag injected | `mesh`, `ops`, `node` |
@@ -6966,7 +7046,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, or between a program and the node it connects to, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a proof is of its subject (signed hellos and requests), and whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). `os::net` holds one `setsockopt(TCP_NOTSENT_LOWAT)` call, because `rustix` does not give that option (laptop.architect-2, 2026-10-08 02:32 UTC, #120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
