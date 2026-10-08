@@ -5341,9 +5341,13 @@ How to read this record:
   4 of #585). Shard 0 opens the mesh with no founding definitions
   (`mesh::Config::founding`) until PR 1 of #1744 gives the region its founding.
   Decided by `laptop.architect` at 2026-10-08T06:11:30Z
-  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101). A
-  mesh that stops does not stop the node until #1780, before PR 4 gives the mesh to the
-  hub.
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
+  `node::Region` copies three fields of `mesh::Config`. One `mesh` value of what a node
+  knows of its region at open replaces it (#1859) when the first of PR 1 of #1744 and
+  the join answer of #336 lands, since each needs all four fields. Decided by
+  `laptop.architect` at 2026-10-08T10:23:48Z
+  (https://github.com/synnaxlabs/foundation/pull/1857#issuecomment-6057800438). A mesh
+  that stops does not stop the node until #1780, before PR 4 gives the mesh to the hub.
   Lost: `Node::found(region)` at run time, which needs a second open path and a node
   that runs with no region before it; the key in `Region`, because a node's identity is
   not region data, and PR 4 needs it with no region. Decided by `laptop.architect-2`
