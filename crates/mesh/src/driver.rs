@@ -961,8 +961,8 @@ fn request(body: &Body) -> bool {
     }
 }
 
-// Checks that `own` and each of `voters` are members of `state`, and that
-// `private_key` is the key of `own`.
+// Checks that `own`, each of `voters`, and the node of each home are members of
+// `state`, and that `private_key` is the key of `own`.
 fn check_members(
     state: &region::State,
     own: node::Key,
@@ -5229,6 +5229,17 @@ mod tests {
             ]);
             let refused = Mesh::open(config).await.err();
             assert_eq!(refused, Some(Error::NotMember(key(9))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_voter_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[1, 2], &IDS).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(3))));
         });
     }
 
