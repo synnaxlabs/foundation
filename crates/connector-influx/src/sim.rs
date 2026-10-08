@@ -547,7 +547,7 @@ fn field(text: &str, key: &str, value: &FieldValue<'_>) -> Result<Field, Error> 
         FieldValue::F64(float) if float.is_infinite() => {
             return Err(Error::Infinite {
                 line: text.into(),
-                field: key.into(),
+                key: key.into(),
             });
         }
         FieldValue::F64(float) => Field::Float(*float),
@@ -632,7 +632,7 @@ pub enum Error {
         /// The line.
         line: String,
         /// The field key.
-        field: String,
+        key: String,
     },
     /// A field is a `u` integer, which InfluxDB 1 OSS refuses.
     Unsigned {
@@ -678,10 +678,10 @@ impl fmt::Display for Error {
             Self::Duplicate { line, key } => {
                 write!(f, "the line {line:?} has the key {key:?} more than once")
             }
-            Self::Infinite { line, field } => {
+            Self::Infinite { line, key } => {
                 write!(
                     f,
-                    "the line {line:?} gives the field {field:?} an infinite float"
+                    "the line {line:?} gives the field {key:?} an infinite float"
                 )
             }
             Self::Unsigned { line, key } => write!(

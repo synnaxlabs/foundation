@@ -372,7 +372,7 @@ fn refuses_an_infinite_float() {
             error,
             Error::Infinite {
                 line: line.into(),
-                field: "v".into(),
+                key: "v".into(),
             }
         );
         assert_eq!(
