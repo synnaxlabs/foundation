@@ -311,7 +311,9 @@ How to read this record:
   channels never point at policies. Readers and connectors -> channels by name or
   selector. Calculation -> inputs, -> its own output index. Connector -> channels it
   reads and writes; channels never point at connectors. Region -> name prefix. Node,
-  connector, subject, and channel names share the one name tree.
+  connector, subject, and channel names share the one name tree. A channel's edges stay
+  in its region (REGION CHECK; `laptop.architect`, 2026-10-08T08:43:31Z,
+  https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056144931).
 
 ### 1.3 Delivery
 
@@ -3065,11 +3067,22 @@ How to read this record:
   are `channel::Problem::Duplicate`, not a panic, as a committed spec comes from other
   nodes. Lost: an input of the keys of other regions, so that an edge may cross
   regions; a `spec::Region` that cannot hold a problem, as #1741 and BQ11b keep a
-  committed spec with problems; and a module `spec::problem`. Decided by
-  `laptop.architect-2`, 2026-10-08T08:41:52Z
-  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056118794), on
+  committed spec with problems; and a module `spec::problem`.
+  `spec::region::tree(chunks, definitions)` builds the tree of a region's definitions,
+  and cannot fail. `mesh` calls it at open and at apply. Lost: the function in
+  `spec::tree`, which then points at the model above it; and the encode in the caller.
+  Supersedes: the panic for two channels with one key (architect, #756,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890).
+  Decided by `laptop.architect-2`: the check, 2026-10-08T08:41:52Z
+  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056118794); the
+  tree, 2026-10-08T08:47:57Z
+  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056217372). On
   the checks in `spec` of `laptop.architect`, change 2, 2026-10-08T08:22:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836), and
+  the tree of the founding definitions, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151). The
+  supersede and the edge rule, agreed by `laptop.architect`, 2026-10-08T08:43:31Z
+  (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056144931).
 - **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
   node's disk through `env::files`. A put returns only after the chunk is durable. A get
   gives bytes only when they hash to the digest; a chunk that fails the check (a write
