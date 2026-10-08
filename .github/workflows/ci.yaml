@@ -11,6 +11,7 @@ on:
       - 'fuzz/**'
       - 'xtask/**'
       - 'oracles/**'
+      - 'patches/**'
       - 'Cargo.toml'
       - '**/Cargo.toml'
       - 'Cargo.lock'
@@ -62,6 +63,7 @@ jobs:
               - 'fuzz/**'
               - 'xtask/**'
               - 'oracles/**'
+              - 'patches/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -143,6 +145,13 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: Dependencies
         run: cargo deny check advisories bans licenses sources
+      # A crate in `[patch.crates-io]` is a path package, which no advisory reaches.
+      # Without the table, each patched crate is checked as its release.
+      - name: Advisories of each patched release
+        run: |
+          awk '/^\[/ { patch = ($0 == "[patch.crates-io]") } !patch' Cargo.toml > unpatched
+          mv unpatched Cargo.toml
+          cargo deny check advisories
 
   wait:
     needs: changes
