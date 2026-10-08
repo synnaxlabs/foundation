@@ -67,6 +67,8 @@ codes, stderr, `foundation status`), not logic that a simulated test can reach.
 
 - It lives in `crates/node/tests/it/`: Cargo sets `CARGO_BIN_EXE_foundation` only for
   the tests of `node`.
+- It takes its clock, files, and network from `os`, as `node` does, so the
+  `disallowed-methods` list holds for it too.
 - Each test makes its own temporary data directory and removes it at the end.
 - Each listener binds port 0 on loopback, and the test reads the port it got. No fixed
   port, and nothing outside loopback.
