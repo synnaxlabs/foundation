@@ -3058,7 +3058,29 @@ How to read this record:
   `wire::blob::Error::code` gives the stop code of each decode error: `TOO_LARGE` for
   `TooLarge`, and `MALFORMED` for each other, so `blob` holds no copy of the map.
   Decided by `laptop.architect` (2026-10-08T00:54:19Z):
-  https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210.
+  https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210. A
+  requester that refuses a chunk over its own limit stops the stream with `TOO_LARGE`,
+  the true cause, and the server ends the open requests as after any stop. Supersedes,
+  for a get, the reason "the sender goes to another peer" of `TOO_LARGE` in
+  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057. A
+  `TooLarge` or a `MISMATCH` on a get is the failure of that peer for that digest. A get
+  of `blob` names one peer and gives back each digest that the peer did not give, with
+  its cause: absent, `TooLarge` with the length and the limit, or `MISMATCH`.
+  Supersedes, for a get, the words "the call gives the exact error" of the rules in
+  https://github.com/synnaxlabs/foundation/issues/1229: the get gives that digest back
+  with its exact error and goes on, the stream stops, and nothing is stored. `blob` asks
+  for the other open digests again on a new stream to the same peer. `mesh`, which picks
+  the peer, asks the next peer that holds the digest, each peer at most once for one
+  fetch. When no peer remains, `mesh` fails the fetch with an exact error that names the
+  digest and the last cause. The length in a chunk reply is a claim until the body
+  hashes, and a member node can lie (`docs/security.md`), so one peer cannot deny a
+  chunk. Lost: give up at the first `TooLarge` (one member decides it); a get of `blob`
+  over a list of peers (the choice of peer needs the membership, which `mesh` has); a
+  get that fails as a whole at the first refused chunk (`mesh` cannot tell which digests
+  the peer still owes). Decided by `laptop.architect` (2026-10-08T06:24:02Z and
+  2026-10-08T06:29:55Z):
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053784863 and
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053878785.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
