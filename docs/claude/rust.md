@@ -125,7 +125,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   (BLOCK MEMORY). An FFI connector calls C, which Miri cannot run either, so `cargo
   xtask miri` skips it. Its `sim` tests, with the C and Rust under the sanitizers,
   are to check it (#1912; `laptop.architect-2`, #435,
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018).
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
+  2026-10-08 02:24 UTC).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
