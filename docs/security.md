@@ -279,8 +279,8 @@ state on `main`.
   took a record over the pool's largest block, and then each open failed), #657 (an
   open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
-  #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold the two fields of #393.
+  #393 (two CRC-valid fields stopped the node at open); the `area_16` and
+  `below_tail_16` inputs hold the two fields of #393.
 
 ### Device to connector
 
