@@ -14,7 +14,9 @@ approval; pin the version you build against there.
 | --- | --- | --- | --- | --- | --- |
 | `blake3` | `types` (`types::digest`, for `spec` and `blob`) | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
 | `rustix` | `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
-| `tokio` | `os`, `transport`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
+| `tokio` | `os`, `transport`, `node`, benchmarks | One `LocalRuntime` per shard (C2), and the I/O driver of the TCP streams and listeners of `env::net` (#120) | MIT | 1.53.2 | 2026-10-04 |
+| `mio` | `os` through Tokio `net` | The readiness loop over epoll and kqueue of the TCP streams and listeners of `env::net` (#120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). The person: "yes" (https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6051868744) | MIT | 1.2.4 | 2026-10-08 |
+| `socket2` | `os` through Tokio `net` | Comes with Tokio `net`; `os` makes its sockets with `rustix` (#120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6051868744) | MIT or Apache-2.0 | 0.6.5 | 2026-10-08 |
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, `secret` (sealing), `types` (`Pair::new`, `Pair::sign`, `PublicKey::verify`) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
