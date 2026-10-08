@@ -64,9 +64,10 @@ command outside that worktree. Remove each worktree when its agent returns
    or, in a round with no `architecture` agent, the `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
-   another crate does the work. A finding whose fix is a small change is fixed in this
-   PR, unless another open issue holds its crate (`docs/coordination.md`, "Small
-   changes"). Before a deferral files a new issue, search the open issues for its item
+   another crate does the work. A finding whose fix is a small change in a crate that
+   this PR changes is fixed in this PR. Another one is an item of an open issue in its
+   crate (`docs/coordination.md`, "Small changes"). Before a deferral files a new
+   issue, search the open issues for its item
    (`gh issue list --state open --search '<function or file>'`). A deferral to an
    existing issue is a comment on that issue that names the item and links the round
    comment. A deferral in a risk crate (`raft`, `buffer`, `delivery`,

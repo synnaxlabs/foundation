@@ -94,8 +94,8 @@ the commit you checked:
 1. `git fetch origin` and note the `origin/main` commit.
 2. Launch `code-quality` and `drift` in parallel against that commit.
 3. Drop duplicates and findings already filed (`gh issue list --search "<path>"`).
-4. File each small finding as an item of an open issue in its crate
-   (`docs/coordination.md`, "Small changes"), and each other one as an issue with its
-   `crate:` label, one per finding. Send the links to `laptop.coordinator`.
+4. File each finding as `docs/coordination.md`, "Small changes", says: a small one as
+   an item of an open issue in its crate when one fits, and each other one as an issue
+   with its `crate:` label, one per finding. Send the links to `laptop.coordinator`.
 5. When an agent finds a gap in its own rulebook (`.claude/agents/`), propose the rule
    to the person. People own the rulebooks.

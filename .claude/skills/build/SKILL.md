@@ -48,10 +48,10 @@ or a line range.
 3. **Tests first.** Write the behavior from the issue and its decisions section as
    failing tests: property tests for codecs and pure logic, simulation tests for I/O.
 4. **Implement** until they pass. Keep the PR to a few hundred lines. When a second idea
-   appears, split. A small change goes into this PR as its own commit, or is an item
-   of an open issue in its crate, never a PR of its own (`docs/coordination.md`,
-   "Small changes"). Before the first review round, fold in each item that the issue's
-   comments add, one commit each.
+   appears, split. Handle each small change as `docs/coordination.md`, "Small
+   changes", says: one in this PR's crate goes into this PR as its own commit. Before
+   the first review round, fold in each item that the issue's comments add, one commit
+   each, and list each item in the PR body.
 5. **Local gate** (below). Fix every failure.
 6. Run `/eb-review` on the diff. Put its Complexity and Shape decisions in the PR body.
 7. `gh pr create --draft`, filling the template. Never add a Claude co-author or footer.

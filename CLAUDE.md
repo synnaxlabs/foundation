@@ -197,12 +197,13 @@ default, template, and system instruction.
 ### Rule 2: PRs of a few hundred lines into `main`, often
 
 - Each PR merges into `main` on its own and leaves `main` green.
-- Aim for a few hundred lines. A change of under about 50 lines goes into a larger PR
-  that is open in its crate, not a PR of its own, unless none fits, it fixes a broken
-  `main`, or other work waits on it (`docs/coordination.md`, "Small changes").
-- Mechanical changes (renames, format runs, regenerated code) ship alone, or as their
-  own commit of a larger PR.
-- A fix and the refactor it needs are two PRs. The refactor lands first.
+- Aim for a few hundred lines. A change of under about 50 lines goes into the PR that
+  you build in its crate, or is an item of an open issue in its crate, not a PR of its
+  own (`docs/coordination.md`, "Small changes", gives the exceptions).
+- Mechanical changes (renames, format runs, regenerated code) ship alone. A small one
+  is its own commit of a larger PR.
+- A fix and the refactor it needs are two PRs. The refactor lands first. A small
+  refactor is its own commit, before the fix, in the fix's PR.
 - Prefer branches off `main` over stacks.
 - Unfinished features ship dark behind a cargo feature or a config flag.
 

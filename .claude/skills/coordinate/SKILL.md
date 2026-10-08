@@ -30,10 +30,10 @@ Never read the whole decisions file: read only the section that an issue names.
   there are fewer than builders, take the next open issues on the path from the
   backlog, not only new ones, and admit each that passes. An idle builder is a failure
   of this step.
-- **Small changes.** A small follow-up is an item of an open issue in its crate, never
-  an issue of its own (`docs/coordination.md`, "Small changes"). Fold each open small
-  issue with no `owner:` label into such an issue as an item, and close it with the
-  item's link.
+- **Small changes.** A small follow-up is an item of an open issue in its crate, not
+  an issue of its own, unless "Alone" in `docs/coordination.md`, "Small changes",
+  applies. Fold each open small issue with no `owner:` label and no work waiting on it
+  into such an issue as an item, and close it with the item's link.
 - **Route.** An issue that changes crates on two machines: split it into one issue per
   machine, linked, each with its `crate:` labels. A builder blocked on another machine's
   issue: admit that issue first, and `send` its link to the blocked builder only when it
