@@ -110,7 +110,7 @@ impl PrivateKey {
     #[must_use]
     #[expect(
         clippy::missing_panics_doc,
-        reason = "any 32 bytes are a private key, whose public half is not of small order"
+        reason = "the public half of any 32 bytes is not of small order"
     )]
     pub fn public(&self) -> PublicKey {
         let pair = Ed25519KeyPair::from_seed_unchecked(&self.0)
