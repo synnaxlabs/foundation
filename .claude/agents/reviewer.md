@@ -66,10 +66,10 @@ Check:
   its code does there, or add or change a `build.rs` that compiles C or C++? A run that
   "Round 1" of the `review` skill asks for, and that the PR does not link, is a finding.
 - Inputs at the edges: empty, maximum size, overflow, out of order, duplicate,
-  concurrent, crash midway. For each buffer, queue, or map whose size a peer sets,
-  name the bound on all of them for each node (the pool budget, or a stated cap times
-  a stated count). A buffer with no such bound is a finding
-  (`docs/claude/performance.md`, rule 13).
+  concurrent, crash midway. For each buffer, queue, or map whose size input from
+  outside the node sets (a peer, a client, a file, or a user), name the bound on all of
+  them together for each node (the pool budget, or a stated cap times a stated count).
+  One with no such bound is a finding (`docs/claude/performance.md`, rule 13).
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
   code catch or skip an error to hide a defect?
 - Guards: does a check repeat one that another path already makes? Remove it and run
@@ -99,7 +99,8 @@ Check:
   hand each one, such as `<` to `<=`, and remove each statement whose only effect that
   test checks. Run the other tests of the crate with `--all-features`, as CI does. A
   change that only such a test catches is a finding, unless a `.cargo/mutants.toml`
-  entry gives its reason (`testing.md`). When the PR exists to remove work, which test
+  entry gives its reason, or, for a hand mutant that `cargo mutants` never makes, its
+  test doc gives it (`testing.md`). When the PR exists to remove work, which test
   fails if it is reverted? For a bug fix, revert the fix, run its regression test, and
   name the call chain through which it fails. A test that passes, or whose call chain
   does not reach the cause that the PR names, is a finding. For a fix of a test that

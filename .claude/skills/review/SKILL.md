@@ -34,8 +34,9 @@ When the PR changes a public surface or a crate's dependencies, also send its li
 the crate's architect (`docs/factory.md`), which reviews it before the person. A public
 surface change includes a change to what a public item accepts, returns, or states in
 its doc, and any change from a surface or text that the architect approved. A `pub`
-item of a workspace member that is not in the crate map (`fuzz`, `xtask`, `bench/*`) is
-not a public surface: no crate depends on it. When the PR adds or changes a decision or
+item of a crate that is not in the crate map (`fuzz`, `xtask`, `bench/*`) is not a
+public surface: no crate depends on it. Its doc, when it states what a crate does,
+still follows the next sentence. When the PR adds or changes a decision or
 a public doc that states what a crate does, and that crate, the crate whose section or
 doc holds the text, and the crates that the PR changes are not all on one architect's
 list, also send it to `laptop.architect`, which owns each contract between the two lists
