@@ -2065,6 +2065,16 @@ How to read this record:
   them, and adds no check that the handshake does not make. Decided by
   `laptop.architect` at 2026-10-08T08:04:32Z
   (https://github.com/synnaxlabs/foundation/pull/1812#issuecomment-6055539099).
+  `types::ed25519::Pair` is the one Ed25519 sign. Each signer (`mesh::claim::Signer`,
+  `mesh::card::Signed::sign`, `mesh::Ticket::admission`, `transport::Tls::new`, and
+  `hub::client` in #1748) builds one `Pair` and keeps no other signing key. The TLS
+  CertificateVerify is the exception: rustls signs it with the key of the PKCS#8
+  document that `transport` builds, as a step of the TLS 1.3 handshake. Lost: a
+  `PrivateKey` that owns the pair, which re-derives on each clone and changes each
+  constructor; and a `PrivateKey::sign`, which costs a scalar multiplication for each
+  claim and each request of `hub::client`. Decided by `laptop.architect` at
+  2026-10-08T08:12:49Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6055665349).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -6099,7 +6109,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public and private keys, with the derive and the verify, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 keys with the derive, the sign, and the verify, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
