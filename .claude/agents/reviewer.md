@@ -37,16 +37,17 @@ such link, and each approval that a `Public surface:` line of an earlier round l
 whose approved SHA comes before a commit that changes the item's surface or the meaning
 of a ruling (`.claude/skills/architect/SKILL.md`, "Review before the person" step 3),
 counts as missing, which is a finding. Take each decision or public doc that the PR adds
-or changes and that states what a crate does, when that crate, the crate whose section
-or doc holds the text, and the crates that the PR changes are not all on one architect's
-list (`docs/factory.md`, "Architects"). One with no link on the PR to the approval of
-`laptop.architect` (Round 1 of the `review` skill) is a finding. Read that approval: one
-that does not name the text, or whose approved SHA comes before a commit that changes
-what the text states, counts as missing. Read each architect review and ruling on the
-PR, on a PR that it replaces, on each issue that it closes, and linked from a round
-comment, and the text of each issue that it closes: each later step or trigger that one
-names, and that lacks the record that "Done" in the `review` skill asks for, is a
-finding. So is each change that one puts in this PR, with no commit at the head and no
+or changes and that states what a crate does, when that crate, each other crate that the
+text names, the crate whose public doc holds it, and the crates that the PR changes are
+not all on one architect's list (`docs/factory.md`, "Architects"; a folder of
+`docs/decisions/` is a topic, not a crate). One with no link on the PR to the approval
+of `laptop.architect` (Round 1 of the `review` skill) is a finding. Read that approval:
+one that does not name the text, or whose approved SHA comes before a commit that
+changes what the text states, counts as missing. Read each architect review and ruling
+on the PR, on a PR that it replaces, on each issue that it closes, and linked from a
+round comment, and the text of each issue that it closes: each later step or trigger
+that one names, and that lacks the record that "Done" in the `review` skill asks for, is
+a finding. So is each change that one puts in this PR, with no commit at the head and no
 answer. A report gives, after the summary, the `Public surface:` and `Hot path:` lines
 that `.claude/agents/architecture.md` defines: in a second round for the range, and in a
 round 1 that runs no `architecture` agent for the PR.
@@ -66,7 +67,10 @@ Check:
   its code does there, or add or change a `build.rs` that compiles C or C++? A run that
   "Round 1" of the `review` skill asks for, and that the PR does not link, is a finding.
 - Inputs at the edges: empty, maximum size, overflow, out of order, duplicate,
-  concurrent, crash midway.
+  concurrent, crash midway. For each buffer, queue, or map whose size input from
+  outside the node sets (a peer, a client, a file, or a user), name the bound on all of
+  them together for each node (the pool budget, or a stated cap times a stated count).
+  One with no such bound is a finding (`docs/claude/performance.md`, rule 13).
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
   code catch or skip an error to hide a defect?
 - Guards: does a check repeat one that another path already makes? Remove it and run
@@ -96,21 +100,22 @@ Check:
   hand each one, such as `<` to `<=`, and remove each statement whose only effect that
   test checks. Run the other tests of the crate with `--all-features`, as CI does. A
   change that only such a test catches is a finding, unless a `.cargo/mutants.toml`
-  entry gives its reason (`testing.md`). When the PR exists to remove work, which test
-  fails if it is reverted? For a bug fix, revert the fix, run its regression test, and
-  name the call chain through which it fails. A test that passes, or whose call chain
-  does not reach the cause that the PR names, is a finding. For a fix of a test that
-  fails only sometimes, also name the line of the regression test that makes the cause
-  happen: a test that needs timing, load, or the state of the runner to fail is a
-  finding. When the exception in `testing.md` holds (the crate's architect ruled, in a
-  comment that the PR links, that the code is correct in each order of the race, and
-  only a hook that only tests use could force the order), check instead that the fixed
-  test passes in each order and still fails when its defect happens in the order that
-  reaches it, and that the PR links the failing runs. Do both again in each round whose
-  range changes the fix or that test. Does each new `.cargo/mutants.toml` entry meet the
-  rule in `testing.md`? Does an entry skip code that the PR adds or changes, when the
-  entry is wider than one function or its reason ends with the PR (a stub that it
-  fills)? The PR narrows or removes that entry.
+  entry gives its reason, or, for a hand mutant that `cargo mutants` never makes, its
+  test doc gives it, and the report links that doc (`testing.md`). When the PR exists to
+  remove work, which test fails if it is reverted? For a bug fix, revert the fix, run
+  its regression test, and name the call chain through which it fails. A test that
+  passes, or whose call chain does not reach the cause that the PR names, is a finding.
+  For a fix of a test that fails only sometimes, also name the line of the regression
+  test that makes the cause happen: a test that needs timing, load, or the state of the
+  runner to fail is a finding. When the exception in `testing.md` holds (the crate's
+  architect ruled, in a comment that the PR links, that the code is correct in each
+  order of the race, and only a hook that only tests use could force the order), check
+  instead that the fixed test passes in each order and still fails when its defect
+  happens in the order that reaches it, and that the PR links the failing runs. Do both
+  again in each round whose range changes the fix or that test. Does each new
+  `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an entry skip code
+  that the PR adds or changes, when the entry is wider than one function or its reason
+  ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
 - Copies: when the PR corrects what a doc, a comment, or a decision states, or renames
   or removes a name that a text uses (a code, an item, a key), search the workspace
   (`git grep`) and the open issues (`gh issue list --search`) for each other copy of the
