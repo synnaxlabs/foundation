@@ -4205,10 +4205,14 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
   `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
   that key from the hello's subject with `spec::definition::Kind::key`, so no caller
-  builds it and only `spec` holds the key form (`laptop.architect`,
+  builds it and only `spec` holds the key form. A subject that makes no key gives
+  `Error::Unknown`. Lost: a public `Kind::label` in `spec`, which only `access` calls.
+  The first ruling kept each subject by `<name>` (`laptop.architect`,
   2026-10-08T06:56:19Z,
-  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636; the
-  tree key in place of `<name>`: PENDING).
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
+  tree key was decided by `laptop.architect` at 2026-10-08T08:10:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), which
+  supersedes the `<name>` of the first.
 - **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
   `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
   builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
@@ -4235,13 +4239,14 @@ How to read this record:
   signed bytes of the hello itself (design B), because `access` then owns a decoder of
   outside input and the hello's wire form, which HUB WIRE gives to `wire`; a free
   `verify` of any `&Hello`, which accepts a key that the program picked when a caller
-  skips `admit`; and `Error::Connection`, which the signature makes needless. A hosted
-  proof waits on #1832. Decided by `laptop.architect` at
+  skips `admit`; and `Error::Connection`, which the signature makes needless. `admit`
+  does not check `nonce`: the node that `via` names checks that it is the challenge
+  that it sent (#1748). A hosted proof waits on #1832. Decided by `laptop.architect` at
   2026-10-08T07:35:46Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
-  picks out the policies and connectors itself. A policy reaches a name when
+  picks out the policies, connectors, and subjects itself. A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));

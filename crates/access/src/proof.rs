@@ -75,6 +75,8 @@ impl Rules {
     /// Checks `hello`, signed with `signature`, at mesh time `now` (`None` when the
     /// node has none). `peer` is the node that carried the hello: this node when the
     /// program connected to it, else the node whose transport session forwarded it.
+    /// `admit` does not check `nonce`: the node that `via` names checks that it is the
+    /// challenge that it sent (#1748).
     ///
     /// # Errors
     ///
