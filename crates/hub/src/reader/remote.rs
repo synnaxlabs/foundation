@@ -18,7 +18,6 @@ use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 
 use super::{Ended, Error, Mode, STREAK, WINDOW};
 use crate::State;
-use crate::region::Homes;
 
 /// A reader session on one stream to the home. Each partial frame and each credit on
 /// its way lives in it, so a dropped [`Remote::take`] loses nothing.
@@ -57,7 +56,6 @@ impl Remote {
     /// home to open it.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
-        homes: &Homes,
         home: types::node::Key,
         set: Arc<KeySet>,
         mode: Mode,
@@ -77,8 +75,11 @@ impl Remote {
             channels: u32::try_from(set.entries().len())
                 .expect("invariant: a key set holds at most 2^32 entries"),
         };
-        let (mut sender, mut receiver) =
-            homes.open(home, class).await.map_err(Error::Transport)?;
+        let (mut sender, mut receiver) = dial(state, home)
+            .await?
+            .open(class)
+            .await
+            .map_err(Error::Transport)?;
         let mut decoder = wire::hub::Reader::new(&open);
         let opened = handshake(
             state,
@@ -340,6 +341,29 @@ fn poll_credit(
         }
     }
     Ok(())
+}
+
+/// The session to `home`, another node, that the shard's transport holds or dials.
+async fn dial(
+    state: &Rc<RefCell<State>>,
+    home: types::node::Key,
+) -> Result<transport::Session, Error> {
+    let (transport, card) = {
+        let state = state.borrow();
+        let region = state
+            .region
+            .as_ref()
+            .expect("invariant: only a node in a region has a remote home");
+        let member = region
+            .mesh
+            .member(home)
+            .expect("invariant: the mesh names only a member as a home");
+        (Rc::clone(&region.transport), member.card.card().clone())
+    };
+    transport
+        .dial(card.public_key, card.addresses.as_slice())
+        .await
+        .map_err(Error::Transport)
 }
 
 /// Sends the header, `open`, and the keys of `set` on `sender`, and waits for the

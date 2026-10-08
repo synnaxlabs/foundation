@@ -5,7 +5,6 @@ mod channel;
 mod commit;
 mod link;
 pub mod reader;
-mod region;
 pub mod serve;
 pub mod writer;
 
@@ -23,7 +22,6 @@ use types::sample::{Scalar, Type};
 use channel::Channel;
 pub use link::{Link, Served};
 use reader::Reader;
-use region::Homes;
 use writer::Writer;
 
 /// The `home` items that hub calls give, so that layer 3 names them through `hub`.
@@ -104,7 +102,7 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
-    region: Option<Rc<Homes>>,
+    region: Option<Region>,
 }
 
 impl Hub {
@@ -138,7 +136,7 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
-            region: region.map(|region| Rc::new(Homes::new(region))),
+            region,
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -306,10 +304,10 @@ impl State {
 }
 
 /// Why the home did not carry an index for a session.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Away {
     /// The mesh names this other node as the home.
-    Remote(types::node::Key, Rc<Homes>),
+    Remote(types::node::Key),
     /// The mesh stopped.
     Mesh(::mesh::Stopped),
 }
@@ -320,16 +318,18 @@ async fn carry(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
 ) -> Result<(), Away> {
-    let (homes, node) = {
+    let (watch, node) = {
         let state = state.borrow();
-        (state.region.clone(), state.node)
+        (
+            state.region.as_ref().map(|region| region.mesh.watch(index)),
+            state.node,
+        )
     };
-    if let Some(homes) = homes {
-        let mut watch = homes.watch(index);
+    if let Some(mut watch) = watch {
         loop {
             match watch.next().await.map_err(Away::Mesh)? {
                 Some(home) if home == node => break,
-                Some(home) => return Err(Away::Remote(home, homes)),
+                Some(home) => return Err(Away::Remote(home)),
                 None => {}
             }
         }

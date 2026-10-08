@@ -212,7 +212,7 @@ impl Reader {
         };
         match crate::carry(state, index).await {
             Ok(()) => {}
-            Err(Away::Remote(home, homes)) => {
+            Err(Away::Remote(home)) => {
                 let mut held = types::hash::Set::default();
                 held.insert(index);
                 let data: Vec<_> = keys
@@ -221,7 +221,7 @@ impl Reader {
                     .collect();
                 let group = Group { index, data: &data };
                 let set = state.borrow_mut().interner.intern(&[group]);
-                let remote = Remote::open(state, &homes, home, set, mode).await?;
+                let remote = Remote::open(state, home, set, mode).await?;
                 return Ok(Self {
                     source: Source::Remote(Box::new(remote)),
                     frame: None,
