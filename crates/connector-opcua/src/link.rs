@@ -6,12 +6,8 @@ use crate::ffi::{self, Bytes, Status};
 
 #[test]
 fn the_copy_names_a_status_code() {
+    assert_eq!(Status(0).name(), "Good");
     assert_eq!(Status(0x8034_0000).name(), "BadNodeIdUnknown");
-    assert_eq!(
-        format!("{:?}", Status(0x8034_0000)),
-        "BadNodeIdUnknown (0x80340000)"
-    );
-    assert_eq!(Status::GOOD.name(), "Good");
 }
 
 #[test]

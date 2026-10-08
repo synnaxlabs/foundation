@@ -17,16 +17,14 @@ fn main() {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     };
-    let (mut library, mut shim) = compiler::builds(&copy, &read("flags.txt"));
+    let compiler::Builds { library, shim } =
+        compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
     if let Err(e) = compiler::check(&library.get_compiler()) {
         panic!("{e}");
     }
-    for source in read("sources.txt").lines() {
-        library.file(copy.join(source));
-    }
     library.compile("open62541");
     // The copy calls into the shim, so the shim links after it.
-    shim.file("src/shim.c").compile("shim");
+    shim.compile("shim");
 }
 
 #[cfg(not(feature = "open62541"))]

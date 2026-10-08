@@ -1,6 +1,7 @@
 /* The symbols that the copy leaves undefined when it is built with no architecture. */
 
-/* The headers of the copy are not our code, so their warnings stay out. */
+/* The headers of the copy have unused parameters. Any other warning in them fails the
+   build. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/plugin/eventloop.h>

@@ -3,15 +3,12 @@
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
 use std::ffi::{CStr, c_char, c_void};
-use std::fmt;
 
 /// An open62541 status code.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Status(pub(crate) u32);
 
 impl Status {
-    pub(crate) const GOOD: Self = Self(0);
-
     /// Gives the name of the code, such as `BadNodeIdUnknown`.
     pub(crate) fn name(self) -> &'static str {
         // SAFETY: `UA_StatusCode_name` takes any code and gives a static C string.
@@ -19,12 +16,6 @@ impl Status {
         // SAFETY: the string is static, and ends with a NUL.
         let name = unsafe { CStr::from_ptr(name) };
         name.to_str().expect("invariant: each status name is ASCII")
-    }
-}
-
-impl fmt::Debug for Status {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({:#010x})", self.name(), self.0)
     }
 }
 
