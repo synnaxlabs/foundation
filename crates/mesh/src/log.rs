@@ -1910,6 +1910,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gives_the_version_error_for_a_record_of_another_version_past_the_end() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            let mut record = encode(0, None, &[bytes(1, 10)]);
+            record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+            let past = (2 * SEGMENT).to_le_bytes();
+            record[CHECK + 10..CHECK + 18].copy_from_slice(&past);
+            seal(&mut record);
+            put(&node, "log-0", 0, &record).await;
+        })
+        .unwrap();
+        let expected = Error::Version {
+            path: file("log-0"),
+            found: 2,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
     const LARGE: usize = 3 << 19;
 
     /// Writes a small record, one larger than a file, and two small ones: three files.
@@ -1965,28 +1985,37 @@ mod tests {
 
     #[test]
     fn refuses_a_file_that_starts_with_a_record_before_the_next_one() {
-        let records = [0, 1, 0].map(|number| encode(number, None, &[bytes(1, 10)]));
-        let [first, second, stale] = records;
-        let segments = [[first, second].concat(), stale];
+        let (mut sim, node) = create_node(0);
+        create_three_files(&mut sim, &node);
+        sim.run_on(&node, |node, _| async move {
+            let stale = encode(0, None, &[bytes(1, 10)]);
+            put(&node, "log-1", 0, &stale).await;
+        })
+        .unwrap();
         let expected = Error::Corrupt {
             path: file("log-1"),
             offset: 0,
         };
-        assert_eq!(scan(Path::new(DIR), &segments), Err(expected));
+        assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
     #[test]
     fn refuses_a_torn_record_after_the_last_that_is_not_the_next_one() {
         let first = encode(0, None, &[bytes(1, 10)]);
-        let mut torn = encode(2, None, &[bytes(2, 10)]);
-        *torn.last_mut().unwrap() ^= 1;
         let offset = wide(first.len());
-        let segments = [[first, torn].concat()];
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            let mut torn = encode(2, None, &[bytes(2, 10)]);
+            *torn.last_mut().unwrap() ^= 1;
+            put(&node, "log-0", 0, &[first, torn].concat()).await;
+        })
+        .unwrap();
         let expected = Error::Corrupt {
             path: file("log-0"),
             offset,
         };
-        assert_eq!(scan(Path::new(DIR), &segments), Err(expected));
+        assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
     #[test]
