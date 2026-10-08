@@ -385,8 +385,10 @@ fn line_directives(copy: &Path, dir: &Path) -> Result<Vec<String>, String> {
         if !path.extension().is_some_and(|e| e == "c" || e == "h") {
             continue;
         }
-        let text =
-            std::fs::read_to_string(copy.join(&path)).map_err(|e| error(&path, e))?;
+        // A release file need not be UTF-8, and `cc` reads a comment in any bytes.
+        #[expect(clippy::disallowed_methods, reason = "a dev tool reads the copy")]
+        let bytes = std::fs::read(copy.join(&path)).map_err(|e| error(&path, e))?;
+        let text = String::from_utf8_lossy(&bytes);
         // `cc` skips a byte order mark at the start of a file.
         let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
         for (index, line) in text.lines().enumerate() {
@@ -881,9 +883,14 @@ Disassembly of section .text.log:
                 ),
                 ("src/b.txt", "#line 1\n"),
                 ("src/d.h", "\u{feff}#line 2\n"),
+                ("src/m.h", "#line 3\n"),
+                ("src/q.c", "#line 4\n"),
+                ("src/z.c", "#line 5\n"),
+                ("src/k.c", "#line 6\n"),
                 ("include/c.h", "#define line 1\n# 1 \"c.y\" 1\n#line\n"),
             ],
         );
+        std::fs::write(copy.join("src/e.c"), b"/* Andr\xe9 */\n#line 2\n").unwrap();
         let held = |at: &str| {
             format!(
                 "{at}: holds a line directive, which moves the file that the include \
@@ -897,7 +904,12 @@ Disassembly of section .text.log:
                 held("include/c.h:3"),
                 held("src/a.c:1"),
                 held("src/a.c:2"),
-                held("src/d.h:1")
+                held("src/d.h:1"),
+                held("src/e.c:2"),
+                held("src/k.c:1"),
+                held("src/m.h:1"),
+                held("src/q.c:1"),
+                held("src/z.c:1")
             ])
         );
         let missing = copy.join("missing");
@@ -1171,7 +1183,7 @@ End of search list.
 
     /// A project with the layout of open62541: the `open62541` library from two
     /// object libraries, with a call of a clock function at each place that
-    /// [`CLOCK_CALLS`] lists, and a generated header.
+    /// [`CLOCK_CALLS`] lists, a generated header, and a header that is not UTF-8.
     fn create_project(repo: &Path) {
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
         let util = "#include \"open62541/config.h\"\n".to_owned()
@@ -1183,6 +1195,7 @@ End of search list.
                 (
                     "CMakeLists.txt",
                     "cmake_minimum_required(VERSION 3.20)\nproject(fixture C)\n\
+                     set(CMAKE_C_STANDARD 99)\n\
                      configure_file(config.h.in src_generated/open62541/config.h)\n\
                      file(WRITE ${CMAKE_BINARY_DIR}/other.h \"\")\n\
                      include_directories(include ${CMAKE_BINARY_DIR}/src_generated)\n\
@@ -1197,7 +1210,6 @@ End of search list.
                      add_executable(tool tools/tool.c)\n",
                 ),
                 ("config.h.in", "#define CONFIG 1\n"),
-                ("include/clock.h", "long long UA_DateTime_now(void);\n"),
                 ("src/util/ua_util.c", &util),
                 (
                     "src/util/ua_encryptedsecret.c",
@@ -1211,6 +1223,9 @@ End of search list.
                 ("tools/tool.c", "int main(void) { return 0; }\n"),
             ],
         );
+        let clock = b"/* Andr\xe9 */\nlong long UA_DateTime_now(void);\n";
+        std::fs::create_dir(repo.join("include")).unwrap();
+        std::fs::write(repo.join("include/clock.h"), clock).unwrap();
     }
 
     /// Runs [`run`] on the tag `v1` of a project from [`create_project`], changed by
@@ -1274,22 +1289,25 @@ End of search list.
         );
         assert_eq!(
             read("flags.txt"),
-            "-DNAME=\"a b\"\n-Iinclude\n-Isrc_generated\n-DNDEBUG\n"
+            "-DNAME=\"a b\"\n-Iinclude\n-Isrc_generated\n-DNDEBUG\n-std=gnu99\n"
         );
         let mut git = Command::new("git");
         let commit = exec(git.arg("-C").arg(&repo).args(["rev-parse", "v1"])).unwrap();
         assert_eq!(read("VERSION"), format!("v1\n{commit}\n"));
-        assert_eq!(
-            read("src/util/ua_util.c"),
-            std::fs::read_to_string(repo.join("src/util/ua_util.c")).unwrap()
-        );
+        #[expect(clippy::disallowed_methods, reason = "a test reads its files")]
+        for path in ["src/util/ua_util.c", "include/clock.h"] {
+            assert_eq!(
+                std::fs::read(dest.join(path)).unwrap(),
+                std::fs::read(repo.join(path)).unwrap()
+            );
+        }
         assert_eq!(check(&root), Ok(()));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
-    fn run_refuses_a_clock_address_a_header_outside_the_copy_and_a_new_call() {
+    fn run_refuses_each_problem_of_the_staged_copy() {
         let (root, repo, result) = run_on("refuses", |repo| {
             create_files(
                 repo,
@@ -1320,12 +1338,16 @@ End of search list.
                          long long (*UA_text)(void) \
                          __attribute__((section(\".text_ptr\"))) = UA_DateTime_now;\n",
                     ),
+                    ("src/more/ua_gen.c", "#line 1 \"gen.y\"\nint gen;\n"),
                 ],
             );
         });
         assert_eq!(
             result,
             Err(vec![
+                "src/more/ua_gen.c:1: holds a line directive, which moves the file that \
+                 the include check reads"
+                    .to_owned(),
                 "plugins/ua_config_default.c: the section `.text` takes the address of \
                  `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
                     .to_owned(),
@@ -1422,15 +1444,20 @@ End of search list.
             std::fs::write(copy.join(path), old + text).unwrap();
         };
         let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
-        append("flags.txt", "-O2\n-include\nsys/stat.h\n-I-\n-D\n");
+        append(
+            "flags.txt",
+            "-O2\n-include\nsys/stat.h\n-I-\n-D\n-save-temps\n",
+        );
         let refused = |flag: &str| {
             format!("flags.txt: `{flag}` is not a -D, -I, or -std flag with its value")
         };
         assert_eq!(
             check(&root),
-            Err(["-O2", "-include", "sys/stat.h", "-I-", "-D"]
-                .map(refused)
-                .to_vec())
+            Err(
+                ["-O2", "-include", "sys/stat.h", "-I-", "-D", "-save-temps"]
+                    .map(refused)
+                    .to_vec()
+            )
         );
         std::fs::write(copy.join("flags.txt"), flags).unwrap();
         append(
