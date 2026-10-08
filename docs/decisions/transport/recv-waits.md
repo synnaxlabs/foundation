@@ -29,8 +29,8 @@
   https://github.com/synnaxlabs/foundation/pull/1952#issuecomment-6066477026, and
   18:32 UTC: https://github.com/synnaxlabs/foundation/pull/1952#issuecomment-6066512702;
   scope approved on #1958, 2026-10-08 18:33 UTC:
-  https://github.com/synnaxlabs/foundation/issues/1958#issuecomment-6066530067). A caller
-  ends a wait when it drops the future; it can then call `stop`.
+  https://github.com/synnaxlabs/foundation/issues/1958#issuecomment-6066530067).
+  A caller ends a wait when it drops the future; it can then call `stop`.
   `datagram::Receiver::recv` gives no such error either: a datagram with no block drops
   and is counted, and the read waits for the next one. `hub` writes no retry for a read.
   B5 on the remote hop: the writer's `hub` never waits on a live send. When the stream
