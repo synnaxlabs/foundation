@@ -714,6 +714,46 @@ mod tests {
             });
         }
 
+        /// The epoll entries of any runtime in this process for the socket of `inode`.
+        #[cfg(target_os = "linux")]
+        fn registrations(inode: u64) -> usize {
+            let entry = format!("ino:{inode:x} ");
+            std::fs::read_dir("/proc/self/fdinfo")
+                .unwrap()
+                .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
+                .map(|info| {
+                    info.lines()
+                        .filter(|line| {
+                            line.starts_with("tfd:") && line.contains(&entry)
+                        })
+                        .count()
+                })
+                .sum()
+        }
+
+        /// While the socket stays open in `Bound`, epoll keeps a registration whose
+        /// descriptor closed before it.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn drop_removes_the_registration_from_epoll() {
+            use std::os::unix::fs::MetadataExt;
+
+            runtime().block_on(async {
+                let udp = loopback();
+                let fd = udp.bound.socket.try_clone().unwrap();
+                let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+                let inode = std::fs::metadata(path).unwrap().ino();
+                let mut writer = Writer { full: None, fd };
+                let mut cx = Context::from_waker(Waker::noop());
+                assert_eq!(registrations(inode), 0);
+                let full = writer.poll_send(&mut cx, |_| Poll::Pending);
+                assert_eq!(full, Poll::Pending);
+                assert_ne!(registrations(inode), 0);
+                drop(writer);
+                assert_eq!(registrations(inode), 0);
+            });
+        }
+
         #[test]
         fn retries_a_pending_send_when_the_socket_is_writable() {
             runtime().block_on(async {
