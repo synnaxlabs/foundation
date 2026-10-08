@@ -13,7 +13,10 @@ use env::net::{Ecn, Error, Net};
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
-use super::{BOUND, Counted, LOCALHOST, net, on_thread, runtime, runtime_with_no_io};
+use super::{
+    BOUND, Counted, LOCALHOST, assert_joins, net, on_thread, runtime,
+    runtime_with_no_io,
+};
 
 /// The largest datagram these tests receive.
 const DATAGRAM_BYTES_MAX: usize = 2048;
@@ -248,6 +251,44 @@ fn a_source_address_picks_the_local_address() {
         let datagrams = receive(&mut receiver, 1).await;
         let port = sender.local().port();
         assert_eq!(datagrams[0].source, SocketAddr::new(other.into(), port));
+    });
+}
+
+/// Linux wakes each writable registration of a socket for each datagram that any
+/// descriptor of it sends, so a sender that keeps one wakes its parked thread.
+#[test]
+fn the_sends_of_a_clone_wake_no_parked_sender() {
+    let net = net();
+    let (mut parked, receiver) = loopback(&net);
+    let mut busy = parked.clone();
+    let to = receiver.local();
+    let unparks = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&unparks);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .on_thread_unpark(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .build()
+        .expect("a current-thread runtime builds");
+    runtime.block_on(async {
+        assert_eq!(send(&mut parked, &transmit(to, b"first")).await, Ok(()));
+        let before = unparks.load(Ordering::SeqCst);
+        let done = Arc::new(Notify::new());
+        let sent = Arc::clone(&done);
+        let handle = os::threads()
+            .expect("the OS gives the cores of this process")
+            .start("udp-busy", move || async move {
+                for _ in 0..200 {
+                    assert_eq!(send(&mut busy, &transmit(to, b"busy")).await, Ok(()));
+                }
+                sent.notify_one();
+            })
+            .expect("the thread starts");
+        done.notified().await;
+        let wakes = unparks.load(Ordering::SeqCst) - before;
+        assert!(wakes <= 2, "the parked sender woke {wakes} times");
+        assert_joins(handle, Ok(()));
     });
 }
 
