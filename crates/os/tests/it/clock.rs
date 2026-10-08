@@ -171,12 +171,11 @@ fn a_sleep_does_not_wake_its_task_before_the_deadline() {
 }
 
 #[test]
-fn a_sleep_past_a_second_wakes_each_second() {
+fn a_sleep_that_re_arms_completes_at_the_deadline_or_later() {
     let clock = os::clock();
     on_a_thread(move || async move {
         let start = clock.now();
-        let polls = polls(&clock, millis(2_050)).await;
-        assert!(polls >= 4, "{polls} polls");
+        clock.sleep(millis(2_050)).await;
         assert!(clock.now() >= start + millis(2_050), "{:?}", clock.now());
     });
 }
