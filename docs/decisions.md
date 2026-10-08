@@ -3593,7 +3593,9 @@ How to read this record:
   code. A call relocation counts as a call only in a section that `objdump -d`
   disassembles. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,
-  2026-10-08 11:03 UTC). The check stands against a clock reference that the compiler
+  2026-10-08 11:03 UTC). Supersedes the clock address rule of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. The
+  check stands against a clock reference that the compiler
   makes from C in the copy, from a new tag or from our patch. It does not stand against
   an edit made to hide from it, such as assembly that stores a function's address:
   review of each copy PR covers that. A `#line` directive or a line marker in a copy
