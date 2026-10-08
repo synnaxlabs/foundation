@@ -894,7 +894,13 @@ fn names_the_pr_field_a_record_lacks() {
     );
     let pull =
         [json!({ "head": { "ref": "a" }, "base": { "ref": "main" }, "labels": [] })];
-    let comment = |created| json!({ "user": { "login": BOT }, "body": ROUND, "created_at": created });
+    let comment = |created| {
+        json!({
+            "user": { "login": BOT },
+            "body": ROUND,
+            "created_at": created,
+        })
+    };
     let files = [json!({ "filename": "a.rs" })];
     let read = record_of(&pull, &files, &[comment(CUTOFF)]).unwrap();
     assert_eq!((read.branch.as_str(), read.base.as_str()), ("a", "main"));

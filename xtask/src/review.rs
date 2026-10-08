@@ -362,7 +362,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     })
 }
 
-/// The lines of `text`, each ended by `\n`, `\r\n`, or a lone `\r`, as GitHub reads them.
+/// The lines of `text`, each ended by `\n`, `\r\n`, or a lone `\r`, as on GitHub.
 fn lines(text: &str) -> impl Iterator<Item = &str> + Clone {
     text.split('\n')
         .flat_map(|l| l.strip_suffix('\r').unwrap_or(l).split('\r'))
