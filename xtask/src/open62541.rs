@@ -226,9 +226,11 @@ impl Trees<'_> {
         for argument in arguments {
             if let Some(dir) = argument.strip_prefix("-I") {
                 let dir = self.relative(Path::new(dir))?;
-                // A bare `-I` would take the next flag as its directory.
-                let dir = if dir.as_os_str().is_empty() {
-                    ".".into()
+                // A bare `-I` takes the next flag as its directory; `-I-` is a flag.
+                let dir = if dir.as_os_str().is_empty()
+                    || dir.as_os_str().as_encoded_bytes().starts_with(b"-")
+                {
+                    Path::new(".").join(dir)
                 } else {
                     dir
                 };
@@ -1075,6 +1077,7 @@ End of search list.
             "-I/w/src/include",
             "-I/w/build/src_generated",
             "-I/w/src",
+            "-I/w/src/-gen",
             "-std=c99",
             "-O3",
             "-o",
@@ -1083,11 +1086,16 @@ End of search list.
         .map(str::to_owned);
         assert_eq!(
             trees.flags(&arguments),
-            Ok(
-                ["-DUA_X", "-Iinclude", "-Isrc_generated", "-I.", "-std=c99"]
-                    .map(str::to_owned)
-                    .to_vec()
-            )
+            Ok([
+                "-DUA_X",
+                "-Iinclude",
+                "-Isrc_generated",
+                "-I./",
+                "-I./-gen",
+                "-std=c99"
+            ]
+            .map(str::to_owned)
+            .to_vec())
         );
         assert_eq!(
             trees.flags(&["-I/w/build".to_owned()]),
