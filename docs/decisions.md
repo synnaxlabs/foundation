@@ -2892,6 +2892,10 @@ How to read this record:
   progress stops, so it never holds `Mesh::ended` for a dial timeout. Decided by
   `laptop.architect`, 2026-10-08T04:00:49Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
+  Amended (2026-10-08, PR 3b of #585): the mesh's directory is `mesh` in the data
+  directory. `node` gives it as `mesh::Config::dir`. Decided by `laptop.architect`,
+  2026-10-08T03:37:20Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
