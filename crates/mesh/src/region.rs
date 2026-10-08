@@ -59,8 +59,8 @@ pub(crate) struct State {
 
 impl State {
     /// The state of the region with prefix `region`, with `members`, each under the key
-    /// of its card, no ticket or home, the spec at version 0 with root `founding`, and
-    /// the founding `voters`.
+    /// of its card, no ticket or home, the spec at version 0 with root `root`, and the
+    /// founding `voters`.
     ///
     /// # Errors
     ///
@@ -69,7 +69,7 @@ impl State {
     pub(crate) fn new(
         region: Prefix,
         members: Vec<Member>,
-        founding: Digest,
+        root: Digest,
         voters: BTreeSet<node::Key>,
     ) -> Result<Self, Unfit> {
         let mut state = Self {
@@ -77,10 +77,7 @@ impl State {
             members: BTreeMap::new(),
             tickets: BTreeMap::new(),
             homes: BTreeMap::new(),
-            pointer: Pointer {
-                version: 0,
-                root: founding,
-            },
+            pointer: Pointer { version: 0, root },
             voters: Voters {
                 incoming: voters,
                 outgoing: BTreeSet::new(),
