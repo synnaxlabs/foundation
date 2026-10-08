@@ -518,6 +518,10 @@ async fn connect_reset(net: &Net, listener: &mut Listener, remote: SocketAddr) -
     let mut cx = Context::from_waker(Waker::noop());
     assert!(connecting.as_mut().poll(&mut cx).is_pending());
     drop(accept(listener).await);
+    // macOS takes the reset on loopback from a queue, in order: once a later
+    // handshake ends, the reset has come.
+    let after = connect(net, listener.local()).await;
+    drop((accept(listener).await, after));
     connecting.await.expect("the handshake completed")
 }
 
