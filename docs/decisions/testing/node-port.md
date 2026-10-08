@@ -67,4 +67,6 @@
   more bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. `os` makes each
   file `0600` and each directory `0700` (#1988):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
-  plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563.
+  plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
+  time of a new key and the load point, by `laptop.architect-2` (20:10 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017.
