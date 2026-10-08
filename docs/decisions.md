@@ -5009,21 +5009,21 @@ How to read this record:
   panics. The first byte is the format version, 1. Then the base pointer, the changes in
   name order, and the homes in name order. A `Spec` definition is its `spec` encoding; a
   channel kind holds its edges as names, so the plan still holds no channel key (A4).
-  The bytes hold no span. Another version is `plan::Error::Version`, which says to
-  plan again; other bytes are `plan::Error::Malformed` at the offset of the field that
-  holds the first wrong byte, or of the field that the bytes cut.
-  `decode` checks only the form: `spec::region::check` of the definitions after the
-  plan refuses the rest. `config::plan::Plan::definitions(applied, key)` gives those
+  The bytes hold no span. Another version is `plan::Error::Version`, which says to plan
+  again; other bytes are `plan::Error::Malformed` at the offset of the field that holds
+  the first wrong byte, or of the field that the bytes cut. `decode` checks only the
+  form; `definitions`, then `spec::region::check` of the definitions after the plan,
+  refuse the rest. `config::plan::Plan::definitions(applied, key)` gives those
   definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
   from `key`, which the check refuses as dangling. Each call of `key` must give a key
   that no channel holds and that no earlier call gave. `definitions` is fallible: it
-  refuses with `plan::Error::Mismatch { name }` at the first change that `plan`
-  cannot make from `applied`, which only a hand-made file holds. The change's `old` is
-  not the digest of the stored definition at its name, or the stored or new definition
-  is of a kind that no block defines or is not at the tree key of an unreserved label of
-  its kind. The rule stays in `config`, in the one place that holds `applied`; apply
-  still checks `base` first. The codec copies the channel kind layout of
-  `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`, at the next
+  refuses with `plan::Error::Mismatch { name }` at the first change in one of these
+  cases, which `plan` never makes from `applied`, so only a hand-made file holds. The
+  change's `old` is not the digest of the stored definition at its name, or the stored
+  or new definition is of a kind that no block defines or is not at the tree key of an
+  unreserved label of its kind. The rule stays in `config`, in the one place that holds
+  `applied`; apply still checks `base` first. The codec copies the channel kind layout
+  of `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`, at the next
   change to the channel kind format of `spec` or at a second user of the bytes of
   `Kind<Name>`. Each item of a plan has one path, under `config::plan`. Plan:
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221. Decided
@@ -5035,10 +5035,12 @@ How to read this record:
   `Mismatch`, a fallible `definitions`, and the #1975 deferral (2026-10-08T19:11:26Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684); a change
   at a reserved name or of a blockless kind is a `Mismatch` (2026-10-08T19:20:33Z,
-  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179); so is
-  one at a name that is not the tree key of its kind, with one predicate for `plan` and
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179); so is one
+  at a name that is not the tree key of its kind, with one predicate for `plan` and
   `definitions` (2026-10-08T19:27:39Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067449819).
+  Supersedes the `Mismatch` Display text and case list of
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684.
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no

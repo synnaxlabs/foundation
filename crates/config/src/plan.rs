@@ -108,8 +108,8 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// [`Error::Mismatch`] at the first change that [`plan`] cannot make from
-    /// `applied`, which only a hand-made file holds:
+    /// [`Error::Mismatch`] at the first change in one of these cases, which [`plan`]
+    /// never makes from `applied`, so only a hand-made file holds:
     ///
     /// - `old` is not the digest of the encoded definition at its name in `applied`:
     ///   `None` at a stored name, `Some` at a name with no stored definition, or
