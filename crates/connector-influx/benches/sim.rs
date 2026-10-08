@@ -35,9 +35,7 @@ struct Shape {
     line: fn(usize, &mut Vec<u8>) -> std::io::Result<()>,
 }
 
-const LAB: Shape = Shape::new("lab", |k, body| {
-    writeln!(body, "m,node=edge,unit=V value={k} {}", T0 + k * 1000)
-});
+const LAB: Shape = Shape::new("lab", |k, body| lab(k, k * 1000, body));
 
 const SPARSE: Shape = Shape::new("sparse", |k, body| {
     writeln!(body, "m c{}={k} {}", k % 63, T0 + k)
@@ -45,16 +43,9 @@ const SPARSE: Shape = Shape::new("sparse", |k, body| {
 
 const SHAPES: [Shape; 6] = [
     LAB,
-    Shape::new("newest_first", |k, body| {
-        writeln!(
-            body,
-            "m,node=edge,unit=V value={k} {}",
-            T0 + (POINTS - k) * 1000
-        )
-    }),
+    Shape::new("newest_first", |k, body| lab(k, (POINTS - k) * 1000, body)),
     Shape::new("evens_then_odds", |k, body| {
-        let time = (k % (POINTS / 2)) * 2 + k / (POINTS / 2);
-        writeln!(body, "m,node=edge,unit=V value={k} {}", T0 + time)
+        lab(k, (k % (POINTS / 2)) * 2 + k / (POINTS / 2), body)
     }),
     SPARSE,
     Shape::new("series", |k, body| {
@@ -64,6 +55,11 @@ const SHAPES: [Shape; 6] = [
         writeln!(body, "m state=\"running {}\" {}", k % 8, T0 + k)
     }),
 ];
+
+/// Writes the lab's line for the `k`-th point, at `time` after `T0`.
+fn lab(k: usize, time: usize, body: &mut Vec<u8>) -> std::io::Result<()> {
+    writeln!(body, "m,node=edge,unit=V value={k} {}", T0 + time)
+}
 
 impl Shape {
     const fn new(
