@@ -234,7 +234,9 @@ state on `main`.
   open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
   #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold the two fields of #393.
+  inputs hold the two fields of #393. The `carry` inputs hold a carry record (#160):
+  one valid, and one each with a count past the body, an unknown path byte, and a
+  carried tail below the path's tail.
 
 ### Device to connector
 

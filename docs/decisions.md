@@ -424,7 +424,10 @@ How to read this record:
   2026-10-07T09:12:31Z), and the boundaries and the minimum of `Layout::new`, built in
   #1276 (#1222,
   https://github.com/synnaxlabs/foundation/pull/1222#issuecomment-6033889998,
-  2026-10-07T08:16:51Z).
+  2026-10-07T08:16:51Z). The carried tail is a carry record, kind 4 at ring version 1,
+  in the form of the carry body in S4. Decided by the architect (#160,
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6051990962,
+  2026-10-08T04:07:38Z).
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
