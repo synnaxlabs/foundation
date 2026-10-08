@@ -6275,10 +6275,14 @@ How to read this record:
   the copy, with no `[patch.crates-io]`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
   2026-10-08 10:08 UTC). `fuzz/` is a workspace of its own, so `fuzz/Cargo.toml` holds
-  the `[patch.crates-io]` table of the root `Cargo.toml` (#1864). The PR that changes a
-  copy of a Rust crate lists its mutants as `docs/dependencies.md`, "Local patches",
-  states
-  (`laptop.architect-2`, 2026-10-08T11:36:09Z,
+  the `[patch.crates-io]` table of the root `Cargo.toml` (#1864). Lost: one
+  `[patch.crates-io]` table in `.cargo/config.toml` for both workspaces. Cargo reads
+  config from the working directory, so a run from outside the repository with
+  `--manifest-path` builds the registry release with no error (`laptop.architect-2`,
+  2026-10-08T14:16:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714). The PR
+  that changes a copy of a Rust crate lists its mutants as `docs/dependencies.md`,
+  "Local patches", states (`laptop.architect-2`, 2026-10-08T11:36:09Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337, and
   2026-10-08T12:05:01Z for hand mutants,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510). That rule
