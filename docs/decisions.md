@@ -3912,13 +3912,16 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1467 (2026-10-07T15:20:38Z).
   The end lines are the last paragraph of the comment, in that order, as `/review`,
   "Round comment", writes them, each at the start of its line, so an indented quote of
-  them or a line in a code block is not them. A fence of three or more backticks or
-  tildes, after at most three spaces, opens a code block, and a like fence closes it,
-  or it runs to the end of the comment. Each end line may wrap onto the lines after it,
-  and a paragraph after them fails. The first word of a value, with its backticks and
-  one final comma, period, or semicolon removed, is the word that is checked. Decided
-  by the director at 2026-10-08T02:57:36Z
-  (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). A
+  them or a line in a code block is not them. Each end line may wrap onto the lines
+  after it, and a paragraph after them fails. The first word of a value, with its
+  backticks and one final comma, period, or semicolon removed, is the word that is
+  checked. Decided by the director at 2026-10-08T02:57:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
+  check reads a code block so: a fence of three or more backticks or tildes, after at
+  most three spaces, opens it, and a like fence closes it, or it runs to the end of the
+  comment. It does not see a fence after a list marker or a quote mark, or the end of
+  an HTML block or comment; https://github.com/synnaxlabs/foundation/issues/1783 reads
+  the comment as GitHub does. A
   round comment posted before the cutoff `CUTOFF` in `xtask/src/review.rs`
   (2026-10-08T03:00:00Z) is checked as before: an earlier free-form round passes, and it
   needs no end lines. A `Hot path:` line anywhere in its text that names a function

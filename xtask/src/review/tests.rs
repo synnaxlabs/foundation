@@ -982,4 +982,9 @@ fn an_old_malformed_round_that_names_performance_needs_no_performance() {
         check(&record(vec![named, bot(ROUND)])),
         vec!["review round 1 has the range `a`, not `<from>..<head>`".to_string()]
     );
+    let free = old(
+        "## Review round 1\n\nConfirmed findings.\n\nReviewers: reviewer, \
+         architecture, breaker, performance\n\nHot path: `send`",
+    );
+    assert_eq!(check(&record(vec![free, bot(ROUND)])), Vec::<String>::new());
 }

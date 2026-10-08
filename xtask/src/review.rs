@@ -73,8 +73,8 @@ struct Malformed {
     /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form.
     fixed: bool,
     problem: String,
-    /// The problem of an old round that names a hot path ([`named`]) and whose
-    /// `Reviewers:` line, if any, names no `performance`.
+    /// The problem of an old round that names a hot path ([`named`]) and that no
+    /// `Reviewers:` line names `performance` in ([`performer`]).
     hot: Option<String>,
 }
 
@@ -257,6 +257,15 @@ fn approval(record: &Record, head: &str) -> Option<String> {
     })
 }
 
+/// Reports whether a `Reviewers:` line in `paragraphs` names `performance`.
+fn performer(paragraphs: &[Vec<&str>]) -> bool {
+    paragraphs
+        .iter()
+        .flatten()
+        .filter_map(|l| l.trim_start().strip_prefix("Reviewers: "))
+        .any(|r| listed(r).contains("performance"))
+}
+
 /// The reviewers that the value of a `Reviewers:` line lists.
 fn listed(reviewers: &str) -> BTreeSet<String> {
     reviewers
@@ -286,9 +295,7 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     let named = old && named(&paragraphs);
-    let performance = (named
-        && !reviewers.is_some_and(|r| listed(r).contains("performance")))
-    .then(|| {
+    let performance = (named && !performer(&paragraphs)).then(|| {
         format!(
             "review round {number} names no performance, which this round requires."
         )
