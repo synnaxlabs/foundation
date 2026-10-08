@@ -16,7 +16,8 @@ use noq_proto::{
     MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, ServerConfig, TimeSource,
     TransportConfig, ValidationTokenConfig, VarInt,
 };
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::PublicKey;
+use types::node::PrivateKey;
 use types::time::Span;
 
 use super::{cid, hello};

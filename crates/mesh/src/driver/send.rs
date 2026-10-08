@@ -12,8 +12,9 @@ use transport::stream::Sender;
 use transport::{Class, Session, Transport};
 use types::node;
 
-use super::{Group, Spawner, header};
+use super::{Group, REMOVED, Spawner, header};
 use crate::bytes::block;
+use crate::error::Stopped;
 use crate::message::Message;
 
 /// What sends the messages of one group: one task for each member, so a member that
@@ -84,7 +85,16 @@ impl Senders {
                 Failure::Pool | Failure::Unknown => {}
                 Failure::Transport(error) => match error {
                     transport::Error::TooLarge { .. } => {}
-                    transport::Error::Stopped { .. } => stream = None,
+                    // Only a voter of this node's own configuration tells it that
+                    // it is out.
+                    transport::Error::Stopped { code } => {
+                        let group = self.group();
+                        if code == REMOVED && group.borrow().voter(to) {
+                            group.borrow_mut().stop(Stopped::Removed { by: to });
+                            return;
+                        }
+                        stream = None;
+                    }
                     // The session failed, or no dial gave one. Other protocols can
                     // use the session, so only the handle drops.
                     transport::Error::Unreachable { .. }

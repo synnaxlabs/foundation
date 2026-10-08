@@ -10,7 +10,7 @@ use std::fmt;
 use types::name::Name;
 use types::time::{Span, Stamp};
 
-pub use readers::{Key, Readers, complete, latest};
+pub use readers::{Key, Next, Readers, complete, latest};
 
 /// A reader's position on one index: on each path, the seq of the first sample it has
 /// not received. It has every sample below it.

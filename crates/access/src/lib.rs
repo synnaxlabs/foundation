@@ -45,7 +45,8 @@ impl Rules {
                     | Definition::Placement(_)
                     | Definition::Time(_)
                     | Definition::Channel(_)
-                    | Definition::Retention(_) => {}
+                    | Definition::Retention(_)
+                    | Definition::Subject(_) => {}
                 }
             }
         }
