@@ -173,8 +173,8 @@ impl Lab {
         Node(self.members.len() - 1)
     }
 
-    /// Starts each node that has not started. Each lab method that uses a node calls
-    /// it first.
+    /// Starts each node that has not started. `run` calls it, and so does each method
+    /// that needs a running node (#585 PR 4c).
     fn boot(&mut self) {
         let members = self.members.iter_mut();
         for member in members.filter(|member| member.node.is_none()) {
@@ -607,15 +607,24 @@ fn a_mesh_of_no_node_panics() {
     Lab::new(1).mesh(&[]);
 }
 
-#[test]
-#[should_panic(expected = "lab failure: at most 255 nodes")]
-fn a_lab_starts_255_nodes_and_panics_at_the_256th() {
+/// A lab with 255 started nodes.
+fn full() -> Lab {
     let mut lab = Lab::new(1);
     for n in 0..255 {
         lab.start(&format!("n{n}"));
     }
-    assert_eq!(lab.members.len(), 255);
-    lab.start("n255");
+    lab
+}
+
+#[test]
+fn a_lab_starts_255_nodes() {
+    assert_eq!(full().members.len(), 255);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: at most 255 nodes")]
+fn a_lab_panics_at_the_256th_node() {
+    full().start("n255");
 }
 
 #[test]
