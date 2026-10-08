@@ -7,8 +7,8 @@ use serde_json::{Map, Value, json};
 
 use crate::FrontEnd;
 use crate::error::Error;
+use crate::front_end;
 use crate::operation::{self, Response, TABLE};
-use crate::plan;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Exit {
@@ -472,7 +472,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             read: |_, _| Err(Vec::new()),
         },
     )]);
-    let unknown = plan::unknown(Path::new("plant.yaml"), &front_ends);
+    let unknown = front_end::unknown(Path::new("plant.yaml"), &front_ends);
     lines.push(format!("{}\t{}\n", unknown.code, unknown.fix));
     assert_eq!(lines.concat(), include_str!("codes.golden"));
 }

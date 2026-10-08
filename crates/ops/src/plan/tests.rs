@@ -12,7 +12,8 @@ use types::channel::Key;
 use types::name::Name;
 use types::sample;
 
-use super::{File, FrontEnd, Planned, Problems, plan};
+use super::{Planned, Problems, plan};
+use crate::front_end::{self, File, FrontEnd};
 
 const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
 const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
@@ -250,10 +251,10 @@ fix: Use a file that ends in `.hcl`
 fn names_each_extension_of_the_table_in_the_fix() {
     let mut front_ends = front_ends();
     front_ends.insert("toml", FrontEnd { read: hcl });
-    let two = super::unknown(&PathBuf::from("plant.json"), &front_ends);
+    let two = front_end::unknown(&PathBuf::from("plant.json"), &front_ends);
     assert_eq!(two.fix, "Use a file that ends in `.hcl` or `.toml`");
     front_ends.insert("yaml", FrontEnd { read: hcl });
-    let diagnostic = super::unknown(&PathBuf::from("plant.json"), &front_ends);
+    let diagnostic = front_end::unknown(&PathBuf::from("plant.json"), &front_ends);
     assert_eq!(
         diagnostic.fix,
         "Use a file that ends in `.hcl`, `.toml`, or `.yaml`"
