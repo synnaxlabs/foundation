@@ -105,32 +105,29 @@ impl State {
         self.pointer
     }
 
-    /// Applies `change`. Returns the index whose home it moved, or `None` when it moved
-    /// no home. Every node refuses the same changes, so all keep one state.
+    /// Applies `change`. Returns whether it moved a home. Every node refuses the same
+    /// changes, so all keep one state.
     ///
     /// # Errors
     ///
     /// [`Refused`] when the change does not hold against the state. The state is then
     /// as before.
-    pub(crate) fn apply(
-        &mut self,
-        change: Change,
-    ) -> Result<Option<channel::Key>, Refused> {
+    pub(crate) fn apply(&mut self, change: Change) -> Result<bool, Refused> {
         match change {
             Change::Home { index, home } => {
-                Ok((self.homes.insert(index, home) != Some(home)).then_some(index))
+                Ok(self.homes.insert(index, home) != Some(home))
             }
-            Change::Join(join) => self.join(*join).map(|()| None),
+            Change::Join(join) => self.join(*join).map(|()| false),
             Change::Ticket {
                 public_key,
                 options,
-            } => self.record(public_key, options).map(|()| None),
+            } => self.record(public_key, options).map(|()| false),
             Change::Spec {
                 base,
                 root,
                 holders,
                 ..
-            } => self.move_pointer(base, root, &holders).map(|()| None),
+            } => self.move_pointer(base, root, &holders).map(|()| false),
         }
     }
 
@@ -488,7 +485,7 @@ mod tests {
         )
         .unwrap();
         let recorded = state.apply(record(7, options("plant.edge", false)));
-        assert_eq!(recorded, Ok(None));
+        assert_eq!(recorded, Ok(false));
         state
     }
 
@@ -496,7 +493,7 @@ mod tests {
     fn a_home_is_none_until_a_change_sets_it() {
         let mut state = state();
         assert_eq!(state.home(index(7)), None);
-        assert_eq!(state.apply(home(7, 1)), Ok(Some(index(7))));
+        assert_eq!(state.apply(home(7, 1)), Ok(true));
         assert_eq!(state.home(index(7)), Some(node(1)));
         assert_eq!(state.home(index(8)), None);
     }
@@ -504,9 +501,9 @@ mod tests {
     #[test]
     fn a_change_to_the_same_home_moves_nothing() {
         let mut state = state();
-        assert_eq!(state.apply(home(7, 1)), Ok(Some(index(7))));
-        assert_eq!(state.apply(home(7, 1)), Ok(None));
-        assert_eq!(state.apply(home(7, 2)), Ok(Some(index(7))));
+        assert_eq!(state.apply(home(7, 1)), Ok(true));
+        assert_eq!(state.apply(home(7, 1)), Ok(false));
+        assert_eq!(state.apply(home(7, 2)), Ok(true));
         assert_eq!(state.home(index(7)), Some(node(2)));
     }
 
@@ -518,13 +515,13 @@ mod tests {
             root: FOUNDING,
         };
         assert_eq!(state.pointer(), founding);
-        assert_eq!(state.apply(spec(0, 1, 2, &[3])), Ok(None));
+        assert_eq!(state.apply(spec(0, 1, 2, &[3])), Ok(false));
         let moved = Pointer {
             version: 1,
             root: digest(2),
         };
         assert_eq!(state.pointer(), moved);
-        assert_eq!(state.apply(spec(1, 2, 2, &[])), Ok(None));
+        assert_eq!(state.apply(spec(1, 2, 2, &[])), Ok(false));
         assert_eq!(state.pointer().version, 2);
     }
 
@@ -576,7 +573,7 @@ mod tests {
             unreachable!()
         };
         *holders = keys(&[1, 2]);
-        assert_eq!(state.apply(held), Ok(None));
+        assert_eq!(state.apply(held), Ok(false));
         assert_eq!(state.pointer().version, 1);
     }
 
@@ -584,7 +581,7 @@ mod tests {
     #[test]
     fn a_spec_change_on_a_stale_base_is_refused() {
         let mut state = state();
-        assert_eq!(state.apply(spec(0, 1, 2, &[])), Ok(None));
+        assert_eq!(state.apply(spec(0, 1, 2, &[])), Ok(false));
         let before = state.clone();
         let moved = state.pointer();
         let cases = [
@@ -658,9 +655,9 @@ mod tests {
         members[1].card = signed(2, "factory.node2");
         let mut state =
             State::new(Prefix::ROOT, members, FOUNDING, [node(1)].into()).unwrap();
-        assert_eq!(state.apply(record(8, options("site_a", false))), Ok(None));
+        assert_eq!(state.apply(record(8, options("site_a", false))), Ok(false));
         let join = join(8, 3, "site_a.pt_1");
-        assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(None));
+        assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(false));
         let names = [1, 2, 3]
             .map(|id| state.member(node(id)).map(|m| m.card.card().name.clone()));
         assert_eq!(
@@ -707,7 +704,7 @@ mod tests {
             })
         );
         assert_eq!(state, before);
-        assert_eq!(state.apply(record(8, options("plant", false))), Ok(None));
+        assert_eq!(state.apply(record(8, options("plant", false))), Ok(false));
     }
 
     #[test]
@@ -715,7 +712,7 @@ mod tests {
         let mut state = state();
         let join = join(7, 3, "plant.edge.a");
         let admission = join.admission;
-        assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(None));
+        assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(false));
         let expected = Member {
             card: signed(3, "plant.edge.a"),
             admission,
@@ -777,7 +774,7 @@ mod tests {
         );
         assert_eq!(state, before);
         let admitted = state.apply(Change::Join(Box::new(join(7, 3, "plant.edge.a"))));
-        assert_eq!(admitted, Ok(None));
+        assert_eq!(admitted, Ok(false));
     }
 
     // A status name of `len` bytes.
@@ -785,17 +782,14 @@ mod tests {
         name(&"s".repeat(len))
     }
 
-    fn apply_join(
-        state: &mut State,
-        join: Join,
-    ) -> Result<Option<channel::Key>, Refused> {
+    fn apply_join(state: &mut State, join: Join) -> Result<bool, Refused> {
         state.apply(Change::Join(Box::new(join)))
     }
 
     #[test]
     fn a_join_with_a_reserved_name_is_refused_and_counts_no_use() {
         let mut state = state();
-        assert_eq!(state.apply(record(8, options("plant", false))), Ok(None));
+        assert_eq!(state.apply(record(8, options("plant", false))), Ok(false));
         let before = state.clone();
         assert_eq!(
             apply_join(&mut state, join(8, 3, "plant.@changes")),
@@ -812,7 +806,7 @@ mod tests {
     #[test]
     fn a_join_with_a_reserved_status_name_is_refused() {
         let mut state = state();
-        assert_eq!(state.apply(record(8, options("plant", true))), Ok(None));
+        assert_eq!(state.apply(record(8, options("plant", true))), Ok(false));
         let before = state.clone();
         let mut reserved = join(8, 3, "plant");
         reserved.status = status([(name("@changes"), index(9))]);
@@ -833,7 +827,7 @@ mod tests {
             }
             .into())
         );
-        assert_eq!(apply_join(&mut state, join(8, 3, "plant")), Ok(None));
+        assert_eq!(apply_join(&mut state, join(8, 3, "plant")), Ok(false));
     }
 
     // A ticket's prefix is under the region, so only a founding member can be outside
@@ -871,13 +865,13 @@ mod tests {
         assert_eq!(state, before);
         let mut longest = join(7, 3, "plant.edge.a");
         longest.status = status([(long_status(255 - 13), index(9))]);
-        assert_eq!(apply_join(&mut state, longest), Ok(None));
+        assert_eq!(apply_join(&mut state, longest), Ok(false));
     }
 
     // Member 1 is `plant.node1`. Ticket 8 admits any node under `plant`.
     fn open_state() -> State {
         let mut state = state();
-        assert_eq!(state.apply(record(8, options("plant", true))), Ok(None));
+        assert_eq!(state.apply(record(8, options("plant", true))), Ok(false));
         state
     }
 
@@ -907,7 +901,10 @@ mod tests {
     #[test]
     fn a_join_refused_as_taken_counts_no_use() {
         let mut state = open_state();
-        assert_eq!(apply_join(&mut state, join(8, 3, "plant.edge.a")), Ok(None));
+        assert_eq!(
+            apply_join(&mut state, join(8, 3, "plant.edge.a")),
+            Ok(false)
+        );
         let before = state.clone();
         assert_eq!(
             apply_join(&mut state, join(7, 4, "plant.edge.A")),
@@ -920,7 +917,7 @@ mod tests {
         assert_eq!(state, before);
         assert_eq!(state.ticket(public(7)).map(|record| record.uses), Some(0));
         let other = with_status(join(7, 4, "plant.edge.b"), &[("disk", 10)]);
-        assert_eq!(apply_join(&mut state, other), Ok(None));
+        assert_eq!(apply_join(&mut state, other), Ok(false));
         assert_eq!(state.ticket(public(7)).map(|record| record.uses), Some(1));
     }
 
@@ -928,7 +925,7 @@ mod tests {
     fn a_join_whose_status_channel_name_a_member_holds_is_refused() {
         let mut state = open_state();
         let first = with_status(join(8, 3, "plant.a"), &[("b.c", 20)]);
-        assert_eq!(apply_join(&mut state, first), Ok(None));
+        assert_eq!(apply_join(&mut state, first), Ok(false));
         let before = state.clone();
         let cases = [
             (
@@ -953,7 +950,7 @@ mod tests {
             assert_eq!(state, before);
         }
         let other = with_status(join(8, 4, "plant.a.b"), &[("d", 21)]);
-        assert_eq!(apply_join(&mut state, other), Ok(None));
+        assert_eq!(apply_join(&mut state, other), Ok(false));
     }
 
     #[test]
@@ -976,7 +973,7 @@ mod tests {
     fn a_join_with_a_status_key_in_use_is_refused() {
         let mut state = open_state();
         let first = with_status(join(8, 3, "plant.a"), &[("disk", 20)]);
-        assert_eq!(apply_join(&mut state, first), Ok(None));
+        assert_eq!(apply_join(&mut state, first), Ok(false));
         let before = state.clone();
         let held = with_status(join(8, 4, "plant.b"), &[("disk", 20)]);
         let twice = with_status(join(8, 4, "plant.b"), &[("cpu", 21), ("disk", 21)]);
@@ -1264,7 +1261,7 @@ mod tests {
             for (i, h) in changes {
                 let before = last.insert(i, h);
                 let moved = state.apply(home(i, h));
-                prop_assert_eq!(moved, Ok((before != Some(h)).then_some(index(i))));
+                prop_assert_eq!(moved, Ok(before != Some(h)));
             }
             for i in 0..4 {
                 prop_assert_eq!(

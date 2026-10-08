@@ -826,12 +826,12 @@ impl Group {
                 },
                 Data::Voters(change) => {
                     self.state.set_voters(change.voters);
-                    Ok(None)
+                    Ok(false)
                 }
-                Data::Empty => Ok(None),
+                Data::Empty => Ok(false),
             };
             // A refused change is a no-op on every node.
-            if let Ok(Some(_)) = applied {
+            if let Ok(true) = applied {
                 self.wake_watches();
             }
             self.applied.push(at, applied.map(|_| ()));
