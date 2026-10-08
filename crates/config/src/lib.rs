@@ -5,6 +5,7 @@ mod access;
 mod channel;
 mod connector;
 mod node_settings;
+mod openssh;
 mod placement;
 mod retention;
 mod subject;
@@ -89,11 +90,13 @@ pub fn check(
         channels: names(documents, Kind::Channel)
             .map(|(name, _)| name)
             .collect(),
-        connectors: names(documents, Kind::Connector)
-            .map(|(name, label)| (name.as_str().to_ascii_lowercase().into(), label))
-            .collect(),
+        connectors: BTreeMap::new(),
         kinds,
     };
+    for (name, label) in names(documents, Kind::Connector) {
+        let lower = name.as_str().to_ascii_lowercase().into();
+        found.connectors.entry(lower).or_insert(label);
+    }
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
@@ -140,8 +143,8 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
         })
 }
 
-/// The channel names of the Documents, the connector kinds, and what `check` has
-/// found so far.
+/// The channel and connector names of the Documents, the connector kinds, and what
+/// `check` has found so far.
 #[derive(Debug)]
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
@@ -151,8 +154,8 @@ struct Found<'a> {
     labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
-    /// The label of each connector that a `connector` block in any Document defines,
-    /// by its name in lowercase.
+    /// The label of the first connector that a `connector` block in any Document
+    /// defines at each name, by the name in lowercase.
     connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
@@ -2922,11 +2925,18 @@ mod tests {
                 },
             }])
             .unwrap();
+            let in_value = Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: at(0, 60),
+                value: private.clone(),
+            }])
+            .unwrap();
             let cases = [
                 list(&[Kind::List(vec![private])]),
                 list(&[string(ALICE), call]),
                 Kind::Map(map.clone()),
                 list(&[Kind::Map(map)]),
+                Kind::Map(in_value),
             ];
             for keys in cases {
                 assert_eq!(

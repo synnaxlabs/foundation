@@ -1,6 +1,5 @@
 use std::slice;
 
-use base64ct::{Base64, Encoding};
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::{Kind, Value};
 use document::{Block, Span};
@@ -8,7 +7,8 @@ use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
 
-use crate::{Definition, Found, Reported};
+use crate::openssh::{self, Error as Line};
+use crate::{Definition, Found};
 
 const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
 const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
@@ -20,37 +20,6 @@ const SUBJECT_IS_CONNECTOR: Code = Code::new("config.subject-is-connector");
 /// `.ppk` file of `PuTTYgen`.
 const PRIVATE_MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
 const KEYS: [&str; 1] = ["keys"];
-const ALGORITHM: &str = "ssh-ed25519";
-/// The name of each other algorithm of an OpenSSH public key. A message names only
-/// these, since another first word can be a secret.
-const OTHER_ALGORITHMS: [&str; 17] = [
-    "ssh-rsa",
-    "ssh-dss",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-    "sk-ecdsa-sha2-nistp256@openssh.com",
-    "sk-ssh-ed25519@openssh.com",
-    "ssh-rsa-cert-v01@openssh.com",
-    "ssh-dss-cert-v01@openssh.com",
-    "ecdsa-sha2-nistp256-cert-v01@openssh.com",
-    "ecdsa-sha2-nistp384-cert-v01@openssh.com",
-    "ecdsa-sha2-nistp521-cert-v01@openssh.com",
-    "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
-    "ssh-ed25519-cert-v01@openssh.com",
-    "sk-ssh-ed25519-cert-v01@openssh.com",
-    "ssh-xmss@openssh.com",
-    "ssh-xmss-cert-v01@openssh.com",
-];
-/// Each Unicode line break.
-const LINE_BREAKS: [char; 7] =
-    ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
-const NOT_A_LINE: &str = "the public key is not the line of a `.pub` file";
-/// The decoded key of an Ed25519 line starts with the length and the name of its
-/// algorithm, then the length of the key.
-const BLOB_START: &[u8; 19] = b"\0\0\0\x0bssh-ed25519\0\0\0\x20";
-/// The length of the decoded key of an Ed25519 line: [`BLOB_START`] and the key.
-const BLOB_BYTES: usize = 51;
 
 /// Checks a `subject` block and gives its subject.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
@@ -58,8 +27,8 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     let fix = "Add a `keys` attribute with the line of a `.pub` file, such as \
                \"ssh-ed25519 AAAA... alice@laptop\"";
     let subject = found.required(block, "keys", subject, fix.into());
-    let connector = not_connector(found, block);
-    let (Ok(()), Ok(subject), Ok(())) = (unknown, subject, connector) else {
+    not_connector(found, block);
+    let (Ok(()), Ok(subject)) = (unknown, subject) else {
         return None;
     };
     Some(Definition::Spec(definition::Definition::Subject(subject)))
@@ -67,13 +36,13 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
 
 /// Refuses a subject at the name of a connector in any ASCII case, since a connector
 /// is a subject that its node vouches for.
-fn not_connector(found: &mut Found<'_>, block: &Block) -> Result<(), Reported> {
+fn not_connector(found: &mut Found<'_>, block: &Block) {
     let [label] = block.labels.as_slice() else {
-        return Ok(());
+        return;
     };
     let Some(connector) = found.connectors.get(&*label.text.to_ascii_lowercase())
     else {
-        return Ok(());
+        return;
     };
     let mut diagnostic = Diagnostic::new(
         SUBJECT_IS_CONNECTOR,
@@ -86,7 +55,6 @@ fn not_connector(found: &mut Found<'_>, block: &Block) -> Result<(), Reported> {
         text: "the connector".into(),
     }));
     found.diagnostics.push(diagnostic);
-    Err(Reported)
 }
 
 /// Reads one public key or a list of them as a subject.
@@ -147,47 +115,31 @@ fn no_private_text(text: &str, span: Option<Span>) -> Result<(), Diagnostic> {
     ))
 }
 
-/// Reads the line of an OpenSSH `.pub` file of an Ed25519 key: `ssh-ed25519`, the
-/// base64 of the key, and a comment, which is optional and not kept. A message quotes
-/// no part of the value after its first word, since that part can be a secret.
+/// Reads a public key, which is the line of an OpenSSH `.pub` file of an Ed25519 key.
 fn key(value: &Value) -> Result<PublicKey, Diagnostic> {
-    let bad = |message: &str| {
-        let fix = "Use the one line of a `.pub` file, such as `ssh-ed25519 AAAA... \
-                   alice@laptop`";
-        Diagnostic::new(BAD_PUBLIC_KEY, value.span, message.into(), fix.into())
-    };
+    let fix = "Use the one line of a `.pub` file, such as `ssh-ed25519 AAAA... \
+               alice@laptop`";
     let Kind::String(text) = &value.kind else {
         let noun = value.kind.noun();
-        return Err(bad(&format!("a public key is a string, not {noun}")));
-    };
-    let mut words = text.split_ascii_whitespace();
-    let (Some(algorithm), Some(encoded)) = (words.next(), words.next()) else {
-        return Err(bad(NOT_A_LINE));
-    };
-    if algorithm != ALGORITHM {
-        if !OTHER_ALGORITHMS.contains(&algorithm) {
-            return Err(bad(NOT_A_LINE));
-        }
+        let message = format!("a public key is a string, not {noun}");
         return Err(Diagnostic::new(
-            PUBLIC_KEY_ALGORITHM,
+            BAD_PUBLIC_KEY,
             value.span,
-            format!(
-                "the public key is {algorithm:?}, and a subject takes only \
-                 `{ALGORITHM}`"
-            ),
-            "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the line of its \
-             `.pub` file"
-                .into(),
+            message,
+            fix.into(),
         ));
-    }
-    if text.trim().contains(LINE_BREAKS) {
-        return Err(bad("the public key is more than one line"));
-    }
-    let mut blob = [0; BLOB_BYTES];
-    let bytes = Base64::decode(encoded, &mut blob)
-        .ok()
-        .and_then(|blob| blob.strip_prefix(BLOB_START))
-        .and_then(|key| <[u8; 32]>::try_from(key).ok())
-        .ok_or_else(|| bad("the base64 of the public key is not an Ed25519 key"))?;
-    PublicKey::new(bytes).map_err(|error| bad(&error.to_string()))
+    };
+    openssh::public_key(text).map_err(|error| {
+        let (code, fix) = match error {
+            Line::Algorithm(_) => (
+                PUBLIC_KEY_ALGORITHM,
+                "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the line of \
+                 its `.pub` file",
+            ),
+            Line::NotALine | Line::Lines | Line::NotEd25519 | Line::SmallOrder(_) => {
+                (BAD_PUBLIC_KEY, fix)
+            }
+        };
+        Diagnostic::new(code, value.span, error.to_string(), fix.into())
+    })
 }

@@ -83,6 +83,14 @@ fn refuses_a_subject_at_the_name_of_a_connector_in_another_case() {
     assert_eq!(config::check(&[connector, subject], &kinds()), expected);
 }
 
+#[test]
+fn refuses_a_subject_at_the_name_of_a_connector_in_upper_case() {
+    let (connector, subject) =
+        (read(0, &CONNECTOR.replace("plc", "PLC")), read(1, SUBJECT));
+    let expected = Err(refused(&subject, &connector, PLC));
+    assert_eq!(config::check(&[connector, subject], &kinds()), expected);
+}
+
 fn slice(file: &Document) -> &[Document] {
     std::slice::from_ref(file)
 }
