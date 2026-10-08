@@ -296,7 +296,8 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         number,
         blocks,
         text,
-    } = Shown::read(&body)?;
+    } = Shown::read(&body);
+    let number = number?;
     // Only the end lines keep their indent: an indented one is a quote, not a line.
     let lines = blocks.first().into_iter().flatten().map(|l| l.trim_start());
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
@@ -422,8 +423,9 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
 /// A comment from its round heading on, read as GitHub reads Markdown.
 #[derive(Debug)]
 struct Shown<'a> {
-    /// The text after `## Review round ` in the heading.
-    number: &'a str,
+    /// The text after `## Review round ` in the heading, or `None` when the comment
+    /// has no such heading at the top level.
+    number: Option<&'a str>,
     /// Each top-level block after the heading. A paragraph is its lines, each from the
     /// start of its source line, so it keeps its indent. Any other block has no lines.
     blocks: Vec<Vec<&'a str>>,
@@ -434,91 +436,77 @@ struct Shown<'a> {
 
 impl<'a> Shown<'a> {
     /// Reads `body` ([`unpadded`]) from its first top-level `## Review round `
-    /// heading on, or `None` when it has none.
-    fn read(body: &'a str) -> Option<Self> {
-        // The extensions of GitHub that change the blocks or the start of a line.
+    /// heading on.
+    fn read(body: &'a str) -> Self {
         let options = Options::from_iter([
             Options::ENABLE_TABLES,
             Options::ENABLE_FOOTNOTES,
+            Options::ENABLE_STRIKETHROUGH,
             Options::ENABLE_TASKLISTS,
+            Options::ENABLE_GFM,
         ]);
-        let mut events = Parser::new_ext(body, options).into_offset_iter();
-        let mut depth = 0_usize;
-        let number = events.by_ref().find_map(|(event, range)| match event {
-            Event::Start(tag) if !inline(tag.to_end()) => {
-                depth += 1;
-                let heading = matches!(
-                    tag,
-                    Tag::Heading {
-                        level: HeadingLevel::H2,
-                        ..
-                    }
-                );
-                let line = &body[range.start..line_end(body, range.start)];
-                (depth == 1 && heading)
-                    .then(|| line.strip_prefix("## Review round "))
-                    .flatten()
-            }
-            Event::End(tag) if !inline(tag) => {
-                depth -= 1;
-                None
-            }
-            _ => None,
-        })?;
-        let mut shown = Self {
-            number,
-            blocks: Vec::new(),
-            text: Vec::new(),
-        };
-        // Each open block, the heading first, with the index in `text` of a paragraph.
-        // A tight list item holds the text of its paragraph with no paragraph event.
-        let mut open: Vec<Option<usize>> = vec![None];
+        let mut number = None;
+        let (mut blocks, mut text) = (Vec::new(), Vec::new());
+        // Each open block, with the index in `text` of a paragraph. A tight list item
+        // holds the text of its paragraph with no paragraph event.
+        let mut open: Vec<Option<usize>> = Vec::new();
         let mut fresh = true;
-        for (event, range) in events {
+        for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
+            let top = open.is_empty();
             match event {
                 Event::Start(tag) if !inline(tag.to_end()) => {
-                    if open.is_empty() {
-                        shown.blocks.push(Vec::new());
+                    let heading = matches!(
+                        tag,
+                        Tag::Heading {
+                            level: HeadingLevel::H2,
+                            ..
+                        }
+                    );
+                    if top && number.is_some() {
+                        blocks.push(Vec::new());
+                    } else if top && heading {
+                        let line = &body[range.start..line_end(body, range.start)];
+                        number = line.strip_prefix("## Review round ");
                     }
                     let paragraph = matches!(tag, Tag::Paragraph | Tag::Item);
-                    open.push(paragraph.then(|| {
-                        shown.text.push(Vec::new());
-                        shown.text.len() - 1
+                    open.push((paragraph && number.is_some()).then(|| {
+                        text.push(Vec::new());
+                        text.len() - 1
                     }));
                     fresh = true;
                 }
                 Event::End(tag) if !inline(tag) => {
                     open.pop();
-                    fresh = true;
                 }
                 Event::Rule => {
-                    if open.is_empty() {
-                        shown.blocks.push(Vec::new());
+                    if top && number.is_some() {
+                        blocks.push(Vec::new());
                     }
                     fresh = true;
                 }
                 Event::SoftBreak | Event::HardBreak => fresh = true,
                 Event::End(_) | Event::TaskListMarker(_) => {}
                 _ => {
-                    if let (true, Some(Some(paragraph))) = (fresh, open.last()) {
-                        shown.line(body, *paragraph, range.start, open.len() == 1);
+                    if let (true, Some(&Some(paragraph))) = (fresh, open.last()) {
+                        let end = line_end(body, range.start);
+                        text[paragraph].push(&body[range.start..end]);
+                        if open.len() == 1 {
+                            let from = body[..range.start]
+                                .rfind(['\n', '\r'])
+                                .map_or(0, |i| i + 1);
+                            let block: &mut Vec<_> =
+                                blocks.last_mut().expect("a block is open");
+                            block.push(&body[from..end]);
+                        }
                         fresh = false;
                     }
                 }
             }
         }
-        Some(shown)
-    }
-
-    /// Adds the line of `body` at offset `start` to the text of paragraph
-    /// `paragraph`, and, for a `top` paragraph, to the last block with its indent.
-    fn line(&mut self, body: &'a str, paragraph: usize, start: usize, top: bool) {
-        let end = line_end(body, start);
-        self.text[paragraph].push(&body[start..end]);
-        if top {
-            let from = body[..start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
-            let line = &body[from..end];
-            self.blocks.last_mut().expect("a block is open").push(line);
+        Self {
+            number,
+            blocks,
+            text,
         }
     }
 }
@@ -526,16 +514,31 @@ impl<'a> Shown<'a> {
 /// Whether the tag that `tag` ends is inline: it holds text within a line of a
 /// block.
 fn inline(tag: TagEnd) -> bool {
-    matches!(
-        tag,
+    match tag {
         TagEnd::Emphasis
-            | TagEnd::Strong
-            | TagEnd::Strikethrough
-            | TagEnd::Superscript
-            | TagEnd::Subscript
-            | TagEnd::Link
-            | TagEnd::Image
-    )
+        | TagEnd::Strong
+        | TagEnd::Strikethrough
+        | TagEnd::Superscript
+        | TagEnd::Subscript
+        | TagEnd::Link
+        | TagEnd::Image => true,
+        TagEnd::Paragraph
+        | TagEnd::Heading(_)
+        | TagEnd::BlockQuote(_)
+        | TagEnd::CodeBlock
+        | TagEnd::HtmlBlock
+        | TagEnd::List(_)
+        | TagEnd::Item
+        | TagEnd::FootnoteDefinition
+        | TagEnd::DefinitionList
+        | TagEnd::DefinitionListTitle
+        | TagEnd::DefinitionListDefinition
+        | TagEnd::Table
+        | TagEnd::TableHead
+        | TagEnd::TableRow
+        | TagEnd::TableCell
+        | TagEnd::MetadataBlock(_) => false,
+    }
 }
 
 /// `text` with the spaces and tabs at the end of each line removed, which changes

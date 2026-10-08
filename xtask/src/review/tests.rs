@@ -1242,16 +1242,55 @@ fn reads_inline_markup_as_part_of_its_line() {
     let named = format!("**laptop.integrator-2** · author\n{ROUND}")
         .replace("Deferred: none", "Deferred: *none*");
     assert_eq!(check(&record(vec![bot(&named)])), Vec::<String>::new());
-    let glued = old("## Review round 1\n\nNo fields.\n\n*a*Hot path: `send`");
+    for markup in ["*a*", "**a**", "~~a~~", "[a](b)", "![a](b)"] {
+        let glued =
+            format!("## Review round 1\n\nNo fields.\n\n{markup}Hot path: `send`");
+        assert_eq!(
+            check(&record(vec![old(&glued), bot(ROUND)])),
+            Vec::<String>::new(),
+            "{markup}"
+        );
+    }
+}
+
+#[test]
+fn reads_a_line_after_a_break_or_a_block_as_its_own() {
+    let broken = ROUND.replace("Deferred: none\n", "Deferred: none\\\n");
+    assert_ne!(broken, ROUND);
+    assert_eq!(check(&record(vec![bot(&broken)])), Vec::<String>::new());
+    for item in [
+        "- a\n  ***\n  Hot path: `send`",
+        "- a\n  - Hot path: `send`",
+    ] {
+        let comment = old(&format!("## Review round 1\n\nNo fields.\n\n{item}"));
+        assert_eq!(
+            check(&record(vec![comment, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{item}"
+        );
+    }
+}
+
+#[test]
+fn reads_no_fields_in_a_list() {
+    let listed = ROUND.replace("\nReviewers:", "\n- x\n  Reviewers:");
+    assert_ne!(listed, ROUND);
     assert_eq!(
-        check(&record(vec![glued, bot(ROUND)])),
-        Vec::<String>::new()
+        check(&record(vec![bot(&listed)])),
+        vec![
+            "review round 3 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+        ]
     );
 }
 
 #[test]
 fn reads_only_a_top_level_round_heading() {
-    for quoted in ["> ## Review round 2", "- ## Review round 2"] {
+    for quoted in [
+        "> ## Review round 2",
+        "- ## Review round 2",
+        "    ## Review round 2",
+    ] {
         let comment = bot(&format!("{quoted}\n\nNo fields."));
         assert_eq!(
             check(&record(vec![comment, bot(ROUND)])),
