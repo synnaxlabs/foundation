@@ -3250,7 +3250,12 @@ How to read this record:
   the kinds 2026-10-08T09:51:31Z
   (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316).
   Supersedes: the panic for two channels with one key (architect, #756,
-  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890).
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890), and
+  `Problem::Shared` with the fix "Give each channel its own key", which replaced it
+  (architect, 2026-10-07T06:47:45Z,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6032581487); the
+  supersede of `Problem::Shared`: `laptop.architect-2`, 2026-10-08T11:11:18Z
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6058584682).
   Decided by `laptop.architect-2`: the check, 2026-10-08T08:41:52Z
   (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056118794); the
   tree, 2026-10-08T08:47:57Z
@@ -4498,16 +4503,26 @@ How to read this record:
   PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
   2026-10-08T06:42:17Z
   (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085).
-  `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
-  that key from the hello's subject with `spec::definition::Kind::key`, so no caller
-  builds it and only `spec` holds the key form. A subject that makes no key gives
-  `Error::Unknown`. Lost: a public `Kind::label` in `spec`, which only `access` calls.
-  The first ruling kept each subject by `<name>` (`laptop.architect`,
+  `access::Rules` keeps each subject by its label, which
+  `spec::definition::Kind::label` gives for its tree key. `admit` and `verify` look up
+  the hello's subject and build no key, so only `spec` holds the key form, and
+  `@admin`, a label that `Kind::key` refuses, can sign (FIRST ADMIN). A subject with no
+  definition gives `Error::Unknown`. `Kind::label` is public: `access` calls it, and
+  the `plan` of #1744 PR 1b and `export` will call it. Decided by `laptop.architect` at
+  2026-10-08T11:00:08Z
+  (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812).
+  `Rules::new` skips a subject definition at a key that gives no label
+  (`laptop.architect`, 2026-10-08T11:11:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907; built
+  for #1866). The first ruling kept each subject by `<name>` (`laptop.architect`,
   2026-10-08T06:56:19Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
-  tree key was decided by `laptop.architect` at 2026-10-08T08:10:33Z
-  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), which
-  supersedes the `<name>` of the first.
+  tree key, which `admit` built with `Kind::key`, was decided by `laptop.architect` at
+  2026-10-08T08:10:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), with
+  the lost option of a public `Kind::label` that only `access` calls. The ruling of
+  11:00:08Z supersedes ruling 1 (the tree key) of
+  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911.
 - **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
   `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
   builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
@@ -4592,7 +4607,12 @@ How to read this record:
   The subjects: `laptop.architect`, 2026-10-08T06:56:19Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636), by
   their tree key at 2026-10-08T08:10:33Z
-  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911).
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), and by
+  their label at 2026-10-08T11:00:08Z
+  (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812), which
+  supersedes ruling 1 (the tree key) of
+  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911 (SUBJECT
+  KEYS).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -4639,6 +4659,27 @@ How to read this record:
   decided that the #1744 plan names how a first start tells a new mesh from a join
   (2026-10-08T02:59:40Z,
   https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051265693).
+  `spec::founding::create(admin)` gives the first admin: the subject `@admin` at
+  `@admin.@subject`, which holds the admin's public key, and the access policy `@admin`
+  at `@admin.@access`, which allows the subjects `@admin` every action on `**` with no
+  authority, so its writes cap at `Authority(0)` (ACCESS BLOCK). A policy in a file can
+  give the admin more. Their labels are reserved, so no file holds them: `Kind::key`
+  refuses a reserved label, and `Kind::label` gives one only for a subject or an access
+  policy. A definition whose label (`definition.kind().label(key)`) is reserved is
+  Foundation's, and `plan` leaves it out. `access::Rules` finds a subject by its label,
+  so it admits `@admin` (SUBJECT KEYS). Lost: `Kind::key` takes a reserved label behind
+  a flag, so `node` writes the definitions and `config` can make a reserved key by
+  mistake; `spec::key::reserved(key)`, which needs a list of every kind that a new kind
+  can miss, and gives `plan` no label or kind to print. Decided by `laptop.architect-2`
+  (2026-10-08T06:01:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053458318), with
+  the rule and its lost option at 2026-10-08T10:56:38Z
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6058336549); no
+  authority decided by `laptop.architect` (2026-10-08T06:11:30Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101). The
+  removal of `spec::key::reserved` and the public `Definition::kind` approved by
+  `laptop.architect` (2026-10-08T11:11:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907).
 
 ### 1.13 Operations, agents, and the factory
 
@@ -5811,7 +5852,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls `region::check`, which runs it; commits). Two channels with one key are `channel::Problem::Duplicate`, not a panic (REGION CHECK; it supersedes the panic of the architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls `region::check`, which runs it; commits). Two channels with one key are `channel::Problem::Duplicate`, not a panic (REGION CHECK; it supersedes the panic of the architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890, and the `Problem::Shared` that replaced it: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6032581487, superseded by `laptop.architect-2`, 2026-10-08T11:11:18Z: https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6058584682) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
 | Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
