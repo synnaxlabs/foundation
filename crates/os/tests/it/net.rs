@@ -538,7 +538,7 @@ fn a_connect_whose_peer_resets_after_the_handshake_gives_a_stream_that_is_reset(
 }
 
 /// After a reset the kernel holds no peer, so the stream names the remote as
-/// `canonical` gives it, as `sim` does.
+/// `canonical` gives it.
 #[test]
 fn a_connect_reset_in_its_handshake_names_the_remote_it_was_given() {
     on_thread("net-connect", || async {

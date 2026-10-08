@@ -84,7 +84,7 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
 /// The peer of `stream`, connected to `remote`, as the kernel names it: without a
 /// scope or flow label the kernel does not use, and with the address an unspecified
 /// `remote` reached. After a reset the kernel holds no peer, so the peer is `remote`,
-/// which `connect` has already passed through `canonical`, as `sim` names each peer.
+/// which `connect` has already passed through `canonical`.
 fn peer(stream: &std::net::TcpStream, remote: SocketAddr) -> Result<SocketAddr, Error> {
     match stream.peer_addr() {
         Ok(peer) => Ok(canonical(peer)),
