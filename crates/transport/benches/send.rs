@@ -27,9 +27,9 @@
 //! The `parts` lines time, in rounds that take turns, each on its own stream, a `send`
 //! of one block, a `send_parts` of the same bytes as ranges of a larger block, and a
 //! copy of those ranges into a new block, then a `send` of it. A `send_parts` allocates
-//! as a `send`, plus one allocation for each copied stretch of ranges over 1452 bytes
-//! and for each growth of the segment queue of noq-proto, which it drops after each
-//! acknowledgement.
+//! as a `send`, plus one allocation for the copy of each stretch of ranges over 1452
+//! bytes and for each growth of the segment queue of noq-proto, which it drops after
+//! each acknowledgement.
 //!
 //! A send reads the clock and wakes a task, so the control does both per block. The sim
 //! and `os` costs for both differ: on a Xeon 8488C, an `os` clock read costs about 7
