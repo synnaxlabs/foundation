@@ -155,7 +155,9 @@ state on `main`.
   answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
-  placement. Not built (`spec`).
+  placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature, and
+  the leader proposes one that any voter forwards with the holders it names. So any
+  voter can move the spec pointer to any root, with chunks that no voter holds.
 - `raft` does not check the sender of a request, by decision: the caller authenticates
   the sender and decides which nodes may send (RAFT SURFACE). `Mesh::receive` refuses a
   message whose sender is not the peer that holds the stream (`Error::Spoofed`). `node`
@@ -302,7 +304,7 @@ state on `main`.
 
 - `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
   and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
-  Fuzzed: `codec_series`, `codec_encoder`.
+  Fuzzed: `codec_series`, `codec_encoder`, `codec_string`.
 
 ## Secrets
 
@@ -343,6 +345,8 @@ state on `main`.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
 - The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
+- A local patch (`patches/`) is a path package, so `cargo deny` does not check it
+  against advisories (#1867).
 - A node fetches the signed binary of a release by hash from a nearby peer (C9d). The
   signing key and its check are not built.
 
@@ -368,13 +372,15 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
+| `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
+| `spec_tree` | `spec::tree::get`, `apply`, `diff`, and `spec::region::definitions` on chunks from a peer | `get` agrees with a whole `diff`; `apply` gives the entries with the changes; `definitions` gives the decode of the entries only when `spec::region::tree` of them has the same root |
 | `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
-| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
@@ -396,7 +402,8 @@ not reached from the corpus:
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), each connector's protocol parser, and
-`connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
-which `config_check` reaches only from an input with a `connector` block of kind
-`influx`, and no input holds one yet (#1817).
+`mesh::log::sequence`, #1746), each connector's protocol parser, the OPC UA binary
+decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
+`connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
+reaches only from an input with a `connector` block of kind `influx`, and no input holds
+one yet (#1817).

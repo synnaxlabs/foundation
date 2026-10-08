@@ -14,6 +14,21 @@ pub struct Pointer {
     pub root: Digest,
 }
 
+impl Pointer {
+    /// The pointer after one change on this one, at `root`.
+    ///
+    /// # Panics
+    ///
+    /// When the version is `u64::MAX`.
+    pub(crate) fn next(self, root: Digest) -> Self {
+        let version = self
+            .version
+            .checked_add(1)
+            .expect("invariant: fewer than 2^64 spec changes apply");
+        Self { version, root }
+    }
+}
+
 impl fmt::Display for Pointer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "version {}, root {}", self.version, self.root)

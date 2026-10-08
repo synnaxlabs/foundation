@@ -162,7 +162,8 @@ pub enum Kind {
 
 impl Definition {
     /// The kind of the definition.
-    pub(crate) const fn kind(&self) -> Kind {
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
         match self {
             Self::Access(_) => Kind::Access,
             Self::Connector(_) => Kind::Connector,

@@ -5,6 +5,7 @@ use types::ed25519::PublicKey;
 use types::node;
 
 use crate::change::Unknown;
+use crate::pointer::Pointer;
 use crate::region::Unfit;
 use crate::{claim, log};
 
@@ -65,6 +66,36 @@ pub enum Error {
     Stream(transport::Error),
     /// The group stopped.
     Stopped(Stopped),
+    /// The spec pointer is not the base of a spec change, so another change applied
+    /// first. Read the spec again and apply on top of it.
+    Stale {
+        /// The base of the change.
+        base: Pointer,
+        /// The pointer when the change applied.
+        pointer: Pointer,
+    },
+    /// A spec change lists more chunks than one change can list. Apply the change in
+    /// smaller steps.
+    Large {
+        /// The count of chunks that the change lists.
+        chunks: usize,
+        /// The most chunks that one change lists.
+        most: usize,
+    },
+    /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
+    /// each problem as [`spec::region::Problem::fix`] says.
+    Problems(Vec<spec::region::Problem>),
+    /// The voters that hold the chunks of a spec change are not a majority of one
+    /// half of the voters, so the pointer did not move. This half comes first of the
+    /// halves that lack a majority, incoming before outgoing.
+    Quorum {
+        /// The voters of the half that hold the chunks.
+        held: usize,
+        /// The voters of the half.
+        voters: usize,
+    },
+    /// A call of this node's chunk store failed.
+    Blob(blob::Error),
 }
 
 impl fmt::Display for Error {
@@ -106,6 +137,30 @@ impl fmt::Display for Error {
             Self::Malformed => f.write_str("a message on a mesh stream is not valid"),
             Self::Stream(cause) => write!(f, "a mesh stream failed: {cause}"),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
+            Self::Stale { base, pointer } => write!(
+                f,
+                "the spec changed: the pointer is {pointer}, not the base {base}"
+            ),
+            Self::Large { chunks, most } => write!(
+                f,
+                "the change lists {chunks} chunks, more than the {most} that one \
+                 change can list"
+            ),
+            Self::Problems(problems) => {
+                f.write_str("the spec has problems")?;
+                let mut separator = ": ";
+                for problem in problems {
+                    write!(f, "{separator}{problem}")?;
+                    separator = "; ";
+                }
+                Ok(())
+            }
+            Self::Quorum { held, voters } => write!(
+                f,
+                "{held} of {voters} voters hold the chunks of the spec change, not a \
+                 majority"
+            ),
+            Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
         }
     }
 }
