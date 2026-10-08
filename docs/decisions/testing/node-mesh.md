@@ -82,3 +82,16 @@
   (the breaker,
   https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065770160 and
   https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065929818).
+  `node::create_key(files, key, private_key)` makes `node.key` in the data directory
+  of a node that has not started, so the `acceptance` lab knows each key before the
+  first start and puts it in the founding. It writes with the code of `identity`, so
+  the file has one owner, and 68 zero bytes count as no key. A file that holds other
+  bytes gives `Error::Directory` with `Exists`, and nothing is written over it. There
+  is no new `Error` variant, as the advice of `Error::Key` is wrong for this case, and
+  no idempotent form: the lab calls it once, in `Lab::start`. Trigger: when #1744
+  lands, the lab founds its region through the node, and `create_key` stays only if a
+  tool still needs it. Lost: a second copy of the format in `acceptance`; a restart of
+  each node and a read of its key from outside `node`; a form that gives back only the
+  public key, as the lab signs each card with the private key. Decided by
+  `laptop.architect-2` at 2026-10-08T23:23:28Z
+  (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6071015421).

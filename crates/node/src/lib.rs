@@ -32,6 +32,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
 use env::thread::Handle;
+use types::ed25519::PrivateKey;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
 
@@ -78,12 +79,13 @@ pub struct Config<M> {
     /// has the node's key, and its card holds the public half of the node's private
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
-    /// `node` give `Some`. Give the same value at each start: the node keeps no copy of
-    /// it, and until the mesh stores it (#1209), a log opened with another value checks
-    /// proofs against the wrong voters and starts at another spec. A patch until the
-    /// node keeps its region in its data directory when it founds or joins one, and
-    /// reads it at each start (#1744). The hub of each task knows each channel of the
-    /// founding's `definitions`. Give only a founding that `spec::region::check`
+    /// `node`, and the `acceptance` lab, which writes the file first with
+    /// [`create_key`], give `Some`. Give the same value at each start: the node keeps
+    /// no copy of it, and until the mesh stores it (#1209), a log opened with another
+    /// value checks proofs against the wrong voters and starts at another spec. A patch
+    /// until the node keeps its region in its data directory when it founds or joins
+    /// one, and reads it at each start (#1744). The hub of each task knows each channel
+    /// of the founding's `definitions`. Give only a founding that `spec::region::check`
     /// accepts. One with a data channel whose index is not an index of it, or with two
     /// channels of one key, makes shard 0 panic, and [`Node::join`] gives
     /// [`Error::Panicked`].
@@ -340,6 +342,24 @@ impl Node {
         });
         error(self.failed, shards.collect())
     }
+}
+
+/// Makes the file `node.key` in `files`, the data directory of a node that has not
+/// started, with `key` and `private_key`, and makes it durable. Each start of the node
+/// then uses them. For tests and tools that must know a node's key before its first
+/// start; a node that starts with no file makes its own key.
+///
+/// # Errors
+///
+/// [`Error::Directory`] with [`env::files::Error::Exists`] when the file is there and
+/// holds a key, and [`Error::Directory`] for a file call that fails. It writes nothing
+/// over a key.
+pub async fn create_key(
+    files: &env::files::Files,
+    key: types::node::Key,
+    private_key: PrivateKey,
+) -> Result<(), Error> {
+    identity::store(files, &identity::Identity { key, private_key }).await
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
@@ -675,10 +695,11 @@ impl Serve {
     /// region's founding spec, and serves the node's port, until `guard` completes,
     /// the transport stops, or the mesh's group stops. A transport or a group that
     /// stops goes into `failed` before any task drops. Then drops the tasks, the hub,
-    /// `home`, `guard`, each session and stream future, and the mesh, and waits for
-    /// each task of the mesh to end, the last of which drops the transport. Runs no
-    /// task and takes no session when a shard did not open, or when the identity did
-    /// not load or the mesh did not open, which goes into `failed`.
+    /// `home`, `guard`, each session and stream future, and the mesh, and, with a mesh,
+    /// waits for each task of the mesh to end. The transport drops with the last of the
+    /// port's future and the tasks of the mesh. Runs no task and takes no session when
+    /// a shard did not open, or when the identity did not load or the mesh did not
+    /// open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,

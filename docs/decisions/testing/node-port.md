@@ -13,8 +13,8 @@
   after the header. The node reads no datagram until the first protocol that takes
   datagrams has a server (#1661). The node admits every peer that
   completes the handshake; the mesh checks each message of a mesh stream (NODE MESH).
-  At the stop, each session and stream future drops, then the transport. The bound on
-  the wait for a header is #1628.
+  With no mesh, at the stop, each session and stream future drops, then the transport.
+  The bound on the wait for a header is #1628.
   Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
@@ -50,10 +50,42 @@
   `Node::join` returns, so a restart at once opens the log:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. This
   supersedes the stop order of
+  is not the member it names gets `Spoofed`, and the stream stops at that message. The
+  `Hub` rule comes with PR 4. At the stop, each session and stream future drops, then
+  the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
+  DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. For a
+  node with a mesh, this supersedes the stop order of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669.
   Amended (2026-10-08, #1830, by `laptop.architect-2`, 07:26 UTC): with a mesh, each
   session and stream future drops, then the mesh, and the transport drops when the
   last task of the mesh ends, before `lock` drops:
+  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235. Amended
+  again (2026-10-08, #1962, by `laptop.architect-2`, 20:07 UTC): with a mesh, shard 0
+  waits for each task of the mesh to end, and the transport drops with the last of the
+  port's future and the tasks of the mesh:
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. This
+  holds also when the mesh's group stops before the node, which then stops the node
+  (NODE MESH), by `laptop.architect-2` (21:31 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456.
+  Supersedes the #1780 clause of
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Under
+  `sim`, the port is free once `lock` is, which a test pins. Under `os`, the carrier's
+  task can hold the socket after `lock` drops, until the runtime of shard 0 drops,
+  before `Node::join` returns: with a socket that works, the task ends only once each
+  connection drained and the runtime polls it. #2017 makes shard 0 wait for the task
+  before it drops `lock`, by `laptop.architect-2` (21:58 UTC, words of 22:23 UTC and
+  22:47 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070577797.
+  Supersedes the port clause of
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. No test
+  sees the drop of the transport itself: the end of shard 0 drops the carrier's task,
+  which frees the socket also when a clone of the transport leaks, by
+  `laptop.architect-2` (21:39 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. Supersedes
+  the drop of the transport of
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
   Once each buffer has opened, shard 0 reads the node's key and private key from the
