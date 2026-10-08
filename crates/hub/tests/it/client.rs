@@ -730,8 +730,8 @@ fn renews_the_hello_once_the_pool_has_room() {
     );
 }
 
-/// A renewal that finds the pool full tries again each second, so it comes the
-/// second after the pool has room.
+/// A renewal that finds the pool full tries again each second, so it comes a second
+/// after its time when the pool has room a quarter second after it.
 #[test]
 fn retries_a_renewal_each_second_while_the_pool_is_full() {
     raw(
@@ -740,10 +740,9 @@ fn retries_a_renewal_each_second_while_the_pool_is_full() {
             let renewal = admit(&mut hello, &node.clock()).await;
             let late = Span::from_nanos(renewal.nanos() - HALF.nanos());
             assert!(
-                late >= Span::from_nanos(3 * Span::SECOND.nanos())
-                    && late
-                        < Span::from_nanos(3 * Span::SECOND.nanos() + QUIET.nanos()),
-                "the renewal comes 3 seconds late: {late:?}"
+                late >= Span::SECOND
+                    && late < Span::from_nanos(Span::SECOND.nanos() + QUIET.nanos()),
+                "the renewal comes a second late: {late:?}"
             );
             drop(session);
         },
@@ -757,7 +756,7 @@ fn retries_a_renewal_each_second_while_the_pool_is_full() {
                 .await;
             let held = fill(&pool);
             node.clock()
-                .sleep(Span::from_nanos(3 * Span::SECOND.nanos() + QUIET.nanos()))
+                .sleep(Span::from_nanos(Span::SECOND.nanos() * 5 / 4))
                 .await;
             drop(held);
             node.clock().sleep(Span::SECOND).await;
