@@ -49,6 +49,10 @@ carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep t
 change small, and list it here with its reason. The patched copy lives in
 `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
 
+| Crate | Release | Change | Why |
+| --- | --- | --- | --- |
+| `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+
 ## Tests, benchmarks, and tools
 
 These never ship in the binary.
