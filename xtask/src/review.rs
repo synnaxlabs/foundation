@@ -2,6 +2,7 @@
 //! it parses is in `.claude/skills/review/SKILL.md`, "Round comment".
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
@@ -418,6 +419,13 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
     (values, lines.len())
 }
 
+/// The GitHub extensions that `pulldown-cmark` has.
+const OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_FOOTNOTES)
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_GFM);
+
 /// A comment read as GitHub reads Markdown: its text from its round heading on, and its
 /// raw HTML.
 #[derive(Debug, Default)]
@@ -445,19 +453,17 @@ impl<'a> Shown<'a> {
     /// Reads `body` ([`unpadded`]). Its round heading is the first top-level
     /// `## Review round ` heading.
     fn read(body: &'a str) -> Self {
-        let options = Options::from_iter([
-            Options::ENABLE_TABLES,
-            Options::ENABLE_FOOTNOTES,
-            Options::ENABLE_STRIKETHROUGH,
-            Options::ENABLE_TASKLISTS,
-            Options::ENABLE_GFM,
-        ]);
         let mut shown = Self::default();
         // Each open block, with the index in `text` of a paragraph. A tight list item
         // holds the text of its paragraph with no paragraph event.
         let mut open: Vec<Option<usize>> = Vec::new();
         let (mut fresh, mut code) = (true, false);
-        for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
+        // The source of each footnote label so far, `[^label]:`.
+        let mut notes = Vec::new();
+        for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
+            if let Event::Start(Tag::FootnoteDefinition(_)) = event {
+                notes.push(note(body, range.start));
+            }
             let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
             let source = &body[start..range.start + line.len()];
@@ -467,7 +473,7 @@ impl<'a> Shown<'a> {
                 Event::Html(_) | Event::InlineHtml(_) => true,
                 Event::Text(_) => {
                     !code
-                        && marks(&body[start..range.start])
+                        && marks(body, start..range.start, &notes)
                         && line.strip_prefix('<').is_some_and(|l| l.starts_with(opens))
                 }
                 _ => false,
@@ -596,13 +602,26 @@ fn heading(line: &str) -> Option<&str> {
         .strip_prefix("## Review round ")
 }
 
-/// Whether `prefix`, the source of a line before some text, holds only the indent and
-/// the marks of quotes, list items, and footnote labels, so that the text starts a line
-/// of a block. An escaped `<` has its backslash in `prefix`.
-fn marks(prefix: &str) -> bool {
-    let mut rest = prefix;
+/// The source in `body` of `[^label]:`, the label of the footnote definition at
+/// `start`. The label ends at its first `]` that no backslash escapes.
+fn note(body: &str, start: usize) -> Range<usize> {
+    let mut escaped = false;
+    let close = body[start + 2..].find(|c| {
+        let close = c == ']' && !escaped;
+        escaped = c == '\\' && !escaped;
+        close
+    });
+    start..start + close.expect("a footnote label ends at a `]`") + 4
+}
+
+/// Whether `prefix`, the source in `body` of a line before some text, holds only the
+/// indent and the marks of quotes, list items, and the footnote labels `notes`, so that
+/// the text starts a line of a block. An escaped `<` has its backslash in `prefix`.
+fn marks(body: &str, prefix: Range<usize>, notes: &[Range<usize>]) -> bool {
+    let mut rest = &body[prefix.clone()];
     loop {
         rest = rest.trim_start_matches([' ', '\t']);
+        let at = prefix.end - rest.len();
         let number = rest.trim_start_matches(|c: char| c.is_ascii_digit());
         let item = if number.len() < rest.len() {
             number.strip_prefix(['.', ')'])
@@ -611,8 +630,8 @@ fn marks(prefix: &str) -> bool {
         };
         let item = item.filter(|after| after.starts_with([' ', '\t']));
         let note = || {
-            let (label, after) = rest.strip_prefix("[^")?.split_once("]:")?;
-            (!label.is_empty() && !label.contains(']')).then_some(after)
+            let note = notes.iter().find(|n| n.start == at)?;
+            Some(&body[note.end..prefix.end])
         };
         match item.or_else(|| rest.strip_prefix('>')).or_else(note) {
             Some(after) => rest = after,

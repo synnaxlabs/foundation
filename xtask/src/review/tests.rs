@@ -1155,6 +1155,8 @@ fn fails_a_round_with_raw_html() {
         ("-\t<source", "-\t<source"),
         ("[^1]: <source", "[^1]: <source"),
         ("> [^a]: <source", "> [^a]: <source"),
+        ("[^a\\]b]: <source", "[^a\\]b]: <source"),
+        ("- [^a]:<source", "- [^a]:<source"),
     ];
     for (html, line) in cases {
         let comment =
@@ -1185,8 +1187,18 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
     assert_eq!(check(&record(vec![bot(&unranged)])), vec![raw("<div>")]);
     let hidden = ROUND.replace("\nReviewers:", "\n<details>\n\nReviewers:");
     assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<details>")]);
-    let headless = ROUND.replace("## Review round 3", "<search\n## Review round 3");
-    assert_eq!(check(&record(vec![bot(&headless)])), vec![raw("<search")]);
+    for heading in [
+        "<search\n## Review round 3",
+        "<search\n   ## Review round 3",
+        "<search\n## Review round 3\n## Review round 4",
+    ] {
+        let headless = ROUND.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(&headless)])),
+            vec![raw("<search")],
+            "{heading}"
+        );
+    }
 }
 
 #[test]
@@ -1205,6 +1217,7 @@ fn passes_a_round_whose_text_github_shows_as_text() {
         "1.<source",
         "a <b",
         "[^]: <source",
+        "[^a]b]: <source",
     ];
     for text in shown {
         let comment =
