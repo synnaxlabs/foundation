@@ -2,7 +2,9 @@
 
 use std::future::poll_fn;
 use std::ops::Range;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, ready};
 
 use block::Block;
 
@@ -125,8 +127,7 @@ impl Sender {
     /// }
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
-        let whole = Part::whole(&message);
-        self.send_parts(message, &[whole]).await
+        Sending::new(self, message, None).await
     }
 
     /// Sends `message` whole when the stream can take it now, and never waits. Gives
@@ -196,24 +197,7 @@ impl Sender {
         block: Block,
         parts: &[Part],
     ) -> Result<(), Error> {
-        let mut sending = Sending {
-            session: &self.session,
-            stream: &self.stream,
-            message: Some(block),
-            done: false,
-        };
-        let sent = poll_fn(|cx| {
-            let Sending {
-                session,
-                stream,
-                message,
-                ..
-            } = &mut sending;
-            session.poll_write(cx, stream, message, parts)
-        })
-        .await;
-        sending.done = true;
-        sent
+        Sending::new(self, block, Some(parts)).await
     }
 
     /// [`send_parts`](Self::send_parts) when the stream can take the message now, as
@@ -288,14 +272,44 @@ impl Drop for Sender {
     }
 }
 
-/// A [`Sender::send`] in progress. Dropping it before it is done ends its wait, and
-/// cancels the message once the stream took it.
+/// A [`Sender::send`] or [`Sender::send_parts`] in progress. Dropping it before it is
+/// done ends its wait, and cancels the message once the stream took it.
 struct Sending<'a> {
     session: &'a quic::Session,
     stream: &'a quic::stream::Sender,
     /// `None` once the stream took it.
     message: Option<Block>,
+    /// The parts of `message`, or `None` for one part, the whole block.
+    parts: Option<&'a [Part]>,
     done: bool,
+}
+
+impl<'a> Sending<'a> {
+    fn new(sender: &'a Sender, message: Block, parts: Option<&'a [Part]>) -> Self {
+        Self {
+            session: &sender.session,
+            stream: &sender.stream,
+            message: Some(message),
+            parts,
+            done: false,
+        }
+    }
+}
+
+impl Future for Sending<'_> {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        let whole = this.message.as_ref().map(Part::whole);
+        let parts = this.parts.unwrap_or(whole.as_slice());
+        let sent = this
+            .session
+            .poll_write(cx, this.stream, &mut this.message, parts);
+        let sent = ready!(sent);
+        this.done = true;
+        Poll::Ready(sent)
+    }
 }
 
 impl Drop for Sending<'_> {
