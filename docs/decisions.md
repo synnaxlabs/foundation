@@ -2645,6 +2645,10 @@ How to read this record:
   (the decoder sees parts, and the receiver has the whole chunk). Decided by
   `laptop.architect` (2026-10-07T20:43:10Z):
   https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057.
+  `wire::blob::Error::code` gives the stop code of each decode error: `TOO_LARGE` for
+  `TooLarge`, and `MALFORMED` for each other, so `blob` holds no copy of the map.
+  Decided by `laptop.architect` (2026-10-08T00:54:19Z):
+  https://github.com/synnaxlabs/foundation/pull/1626#issuecomment-6049910210.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,

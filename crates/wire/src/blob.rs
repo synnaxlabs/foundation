@@ -15,10 +15,8 @@
 //! chunk at its head, and checks that a body holds exactly the bytes of its head. The
 //! receiver checks the digest over the whole chunk.
 //!
-//! A chunk longer than the limit ([`Error::TooLarge`]) stops the stream with
-//! [`TOO_LARGE`]. Each other message that does not decode, comes from the wrong side,
-//! or breaks a rule of this module stops it with
-//! [`MALFORMED`](crate::header::MALFORMED).
+//! A message that does not decode, comes from the wrong side, or breaks a rule of this
+//! module stops the stream with the code of its error ([`Error::code`]).
 //!
 //! Fields are little-endian.
 //!
@@ -33,6 +31,7 @@ use std::fmt;
 use types::digest::Digest;
 
 use crate::common::{Fields, Writer};
+use crate::header;
 
 const GET: u8 = 1;
 const PUT: u8 = 2;
@@ -269,8 +268,7 @@ impl Server {
     /// [`Error::TooLarge`] for a put longer than the limit, and [`Error::Body`] for a
     /// message longer than the rest of the body. A message of a body has no kind, so a
     /// message where the body continues is read as one. The caller then stops the
-    /// session with [`TOO_LARGE`] for [`Error::TooLarge`], and with
-    /// [`MALFORMED`](crate::header::MALFORMED) for each other error.
+    /// session with [`Error::code`].
     pub fn decode<'m>(
         &mut self,
         message: &'m [u8],
@@ -338,8 +336,7 @@ impl Requester {
     /// [`Error::TooLarge`] for a chunk longer than the limit, and [`Error::Body`] for
     /// a message longer than the rest of the body. A message of a body has no kind, so
     /// a message where the body continues is read as one. The caller then stops the
-    /// session with [`TOO_LARGE`] for [`Error::TooLarge`], and with
-    /// [`MALFORMED`](crate::header::MALFORMED) for each other error.
+    /// session with [`Error::code`].
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromServer<'m>, Error> {
         if self.transit.in_body() {
             let (bytes, last) = self.transit.part(message)?;
@@ -440,6 +437,22 @@ pub enum Error {
         /// The bytes that remain in the body.
         remain: usize,
     },
+}
+
+impl Error {
+    /// The stop code that ends the session for this error: [`TOO_LARGE`] for
+    /// [`Error::TooLarge`], and [`MALFORMED`](crate::header::MALFORMED) for each
+    /// other.
+    #[must_use]
+    pub fn code(&self) -> u32 {
+        match self {
+            Self::TooLarge { .. } => TOO_LARGE,
+            Self::Empty
+            | Self::Kind { .. }
+            | Self::Length { .. }
+            | Self::Body { .. } => header::MALFORMED,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -900,6 +913,30 @@ mod tests {
     #[test]
     fn pins_the_stop_codes() {
         assert_eq!((MISMATCH, TOO_LARGE, FULL), (16, 17, 18));
+    }
+
+    #[test]
+    fn gives_the_stop_code_of_each_error() {
+        let errors = [
+            Error::Empty,
+            Error::Kind { kind: 9 },
+            Error::Length { len: 4 },
+            Error::TooLarge { len: 17, max: 16 },
+            Error::Body {
+                len: 11,
+                remain: 10,
+            },
+        ];
+        for error in errors {
+            let code = match error {
+                Error::TooLarge { .. } => 17,
+                Error::Empty
+                | Error::Kind { .. }
+                | Error::Length { .. }
+                | Error::Body { .. } => 2,
+            };
+            assert_eq!(error.code(), code, "{error}");
+        }
     }
 
     #[test]
