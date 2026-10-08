@@ -9,14 +9,16 @@ use std::alloc::{self, Layout};
 use std::ffi::c_void;
 use std::ptr;
 
-/// The size of the header before each block, which holds the size that C asked for,
-/// and the alignment of each block: the `max_align_t` of each target.
-const HEADER: usize = 16;
+/// The alignment of each block, the `max_align_t` of each target, and the size of the
+/// header before it, which holds the size that C asked for.
+const ALIGN: usize = 16;
+
+const _: () = assert!(size_of::<usize>() <= ALIGN, "the size fits in the header");
 
 /// Gives the layout of a block of `size` bytes and its header, or `None` when it is
 /// too large.
 fn layout(size: usize) -> Option<Layout> {
-    Layout::from_size_align(size.checked_add(HEADER)?, HEADER).ok()
+    Layout::from_size_align(size.checked_add(ALIGN)?, ALIGN).ok()
 }
 
 /// Writes `size` into the header of `block` and gives the pointer after the header,
@@ -26,29 +28,29 @@ fn layout(size: usize) -> Option<Layout> {
 ///
 /// `block` is NULL or a live block of `layout(size)`.
 #[expect(clippy::cast_ptr_alignment, reason = "each block is aligned to 16")]
-unsafe fn give(block: *mut u8, size: usize) -> *mut c_void {
+unsafe fn stamp(block: *mut u8, size: usize) -> *mut c_void {
     if block.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: the block starts with `HEADER` bytes, aligned to 16.
+    // SAFETY: the block starts with a header of `ALIGN` bytes, aligned to `ALIGN`.
     unsafe { block.cast::<usize>().write(size) };
-    // SAFETY: the block holds at least `HEADER` bytes.
-    unsafe { block.add(HEADER) }.cast()
+    // SAFETY: the block holds at least its header.
+    unsafe { block.add(ALIGN) }.cast()
 }
 
 /// Gives the block of `ptr` and its layout.
 ///
 /// # Safety
 ///
-/// `ptr` is a live pointer that `give` gave.
+/// `ptr` is a live pointer that `stamp` gave.
 #[expect(clippy::cast_ptr_alignment, reason = "each block is aligned to 16")]
 unsafe fn block(ptr: *mut c_void) -> (*mut u8, Layout) {
-    // SAFETY: `give` put the header just before `ptr`, in the same block.
-    let block = unsafe { ptr.cast::<u8>().sub(HEADER) };
-    // SAFETY: `give` wrote the size there.
+    // SAFETY: `stamp` put the header just before `ptr`, in the same block.
+    let block = unsafe { ptr.cast::<u8>().sub(ALIGN) };
+    // SAFETY: `stamp` wrote the size there.
     let size = unsafe { block.cast::<usize>().read() };
     // SAFETY: `layout(size)` was valid when the block was made.
-    let layout = unsafe { Layout::from_size_align_unchecked(size + HEADER, HEADER) };
+    let layout = unsafe { Layout::from_size_align_unchecked(size + ALIGN, ALIGN) };
     (block, layout)
 }
 
@@ -61,7 +63,7 @@ extern "C" fn connector_opcua_malloc(size: usize) -> *mut c_void {
     // SAFETY: the layout is not empty.
     let block = unsafe { alloc::alloc(layout) };
     // SAFETY: `block` is NULL or a block of `layout(size)`.
-    unsafe { give(block, size) }
+    unsafe { stamp(block, size) }
 }
 
 /// `calloc`. It gives NULL when `count * size` overflows.
@@ -76,7 +78,7 @@ extern "C" fn connector_opcua_calloc(count: usize, size: usize) -> *mut c_void {
     // SAFETY: the layout is not empty.
     let block = unsafe { alloc::alloc_zeroed(layout) };
     // SAFETY: `block` is NULL or a block of `layout(size)`.
-    unsafe { give(block, size) }
+    unsafe { stamp(block, size) }
 }
 
 /// `realloc`. `realloc(NULL, size)` is `malloc(size)`, and `realloc(ptr, 0)` frees
@@ -103,7 +105,7 @@ unsafe extern "C" fn connector_opcua_realloc(
     // has the same alignment and a valid size.
     let block = unsafe { alloc::realloc(block, old, new.size()) };
     // SAFETY: `block` is NULL or a block of `new`.
-    unsafe { give(block, size) }
+    unsafe { stamp(block, size) }
 }
 
 /// `free`. `free(NULL)` does nothing.

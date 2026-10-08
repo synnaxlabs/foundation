@@ -42,6 +42,12 @@ fn each_block_is_aligned_and_holds_its_size() {
 
 #[test]
 fn a_failure_gives_null() {
+    // Through a pointer, as C calls them: the optimizer may drop an inlined allocation
+    // that is only compared with NULL, as if it succeeded.
+    let (malloc, calloc): (
+        extern "C" fn(usize) -> _,
+        extern "C" fn(usize, usize) -> _,
+    ) = std::hint::black_box((malloc, calloc));
     for size in [usize::MAX, usize::MAX - 15, isize::MAX.unsigned_abs(), HUGE] {
         assert!(malloc(size).is_null(), "malloc({size})");
         assert!(calloc(1, size).is_null(), "calloc(1, {size})");

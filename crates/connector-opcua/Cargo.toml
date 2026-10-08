@@ -27,6 +27,17 @@ sim = { path = "../sim" }
 name = "alloc"
 harness = false
 
+[[test]]
+name = "memory"
+harness = false
+required-features = ["open62541"]
+
+[[bench]]
+name = "decode"
+harness = false
+test = true
+required-features = ["open62541"]
+
 [[bench]]
 name = "run"
 harness = false
