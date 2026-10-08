@@ -4579,9 +4579,7 @@ How to read this record:
   reads the key from its data directory (#1660). The node admits every peer that
   completes the handshake until the mesh states its rule. At the stop, each session and
   stream future drops, then the transport. The bound on the wait for a header is #1628.
-  A transport that stops with an error ends the routing and the node runs on with no
-  port, until #1647 stops the node. #1647 merges before the first protocol in `route`
-  gets a server. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
   datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
@@ -4591,6 +4589,13 @@ How to read this record:
   over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
   bandwidth-delay product. The number of sessions has no bound until #1628.
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
+  Amended (2026-10-08, #1647, by `laptop.architect-2`, 00:05 UTC): a transport that
+  stops with an error stops the node, and `Node::join` gives `Error::Transport`. The
+  node does not rebind the port:
+  https://github.com/synnaxlabs/foundation/issues/1647#issuecomment-6049354544.
+  Supersedes the deferral of
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048464411
+  (2026-10-07 22:50 UTC), under which the node ran on with no port until #1647.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -4797,6 +4802,7 @@ How to read this record:
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
+| NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
 
 ---
 
