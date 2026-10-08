@@ -3220,11 +3220,12 @@ How to read this record:
   reader is complete. A second `reader` block is `config.repeated-block`, and `read`
   reads only the first, where a label is `config.label-count`. A negative `hold` is
   `config.negative-span` (READER RULES, #94). A `hold` in `latest` mode is
-  `connector.latest-hold`, since only a complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
-  `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
-  `document.unknown-attribute` or `document.unknown-block` for each other key it does
-  not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
-  key. Decided by `laptop.architect-2` on #1153
+  `connector.latest-hold`, since only a complete reader holds. #1785 moves the three
+  `config.*` checks into `document::read`. `read(config, keys, blocks)` takes the
+  kind's own attributes and blocks and gives `document.unknown-attribute` or
+  `document.unknown-block` for each other key it does not read (DOCUMENT KEYS), so a
+  kind's key list does not change when `read` reads a new key. Decided by
+  `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC, and
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
