@@ -666,8 +666,8 @@ impl fmt::Display for Error {
             }
             Self::Poisoned { path } => write!(
                 f,
-                "a sync of file {} failed or was dropped, or a rename of it was dropped; \
-                 close it, then reopen it and recover",
+                "a sync of file {} failed or was dropped, or a rename of it was \
+                 dropped; close it, then reopen it and recover",
                 path.display()
             ),
             Self::Busy { path } => write!(
