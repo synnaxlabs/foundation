@@ -8,6 +8,7 @@ use std::ptr::{self, NonNull};
 
 use env::clock::Clock;
 use env::rng::Rng;
+use types::time::Monotonic;
 
 use crate::event::Loop;
 use crate::ffi::{self, Status};
@@ -54,6 +55,12 @@ impl Client {
         client
     }
 
+    /// Gives the due time of the next timer, or `None` when no timer waits.
+    #[must_use]
+    pub fn next(&self) -> Option<Monotonic> {
+        self.events.next()
+    }
+
     /// Runs the due timers and delayed callbacks once.
     ///
     /// # Panics
@@ -70,7 +77,7 @@ impl Client {
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
-            .field("next", &self.events.next())
+            .field("next", &self.next())
             .finish_non_exhaustive()
     }
 }
@@ -96,14 +103,10 @@ mod tests {
         let mut sim = sim::Sim::new(sim::Config::default());
         let clock = sim.node(sim::node::Config::default()).clock();
         let mut client = Client::new(clock, 1);
-        let first = client.events.next().expect("a timer waits");
+        let first = client.next().expect("a timer waits");
         sim.run_for(Span::MILLISECOND).expect("the run has no task");
         client.run();
-        assert_eq!(
-            client.events.next(),
-            Some(first + Span::MILLISECOND),
-            "{client:?}"
-        );
+        assert_eq!(client.next(), Some(first + Span::MILLISECOND), "{client:?}");
     }
 
     #[test]

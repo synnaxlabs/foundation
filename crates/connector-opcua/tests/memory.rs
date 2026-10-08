@@ -1,12 +1,14 @@
-//! C allocates and frees through the global allocator of the binary. As the global
-//! allocator, `held` covers every thread, so this binary has no test harness.
+//! C allocates and frees through the global allocator of the binary, and a drop frees
+//! each block that C holds. As the global allocator, `held` covers every thread, so
+//! this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 #![expect(unsafe_code, reason = "the test calls the C library")]
 
 use std::ffi::c_void;
 
-use connector_opcua as _;
+use connector_opcua::bench::Client;
+use sim::Sim;
 
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
@@ -37,6 +39,11 @@ unsafe extern "C" {
 const HEADER: usize = 16;
 
 fn main() {
+    c_allocates_through_the_global_allocator();
+    the_drop_frees_the_client_its_loop_and_its_timers();
+}
+
+fn c_allocates_through_the_global_allocator() {
     let id = NodeId {
         namespace: 0,
         kind: 0,
@@ -67,4 +74,18 @@ fn main() {
         before,
         "C freed through the global allocator"
     );
+}
+
+fn the_drop_frees_the_client_its_loop_and_its_timers() {
+    let mut sim = Sim::new(sim::Config::default());
+    let clock = sim.node(sim::node::Config::default()).clock();
+    let before = ALLOCATOR.held();
+    let client = Client::new(env::clock::Clock::clone(&clock), 100);
+    let held = ALLOCATOR.held().strict_sub(before);
+    assert!(
+        held > 100 * size_of::<usize>(),
+        "{held} bytes for 100 timers"
+    );
+    drop(client);
+    assert_eq!(ALLOCATOR.held(), before, "the drop freed each block");
 }

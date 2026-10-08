@@ -32,15 +32,20 @@ fn the_count_holds_the_allocations_of_c() {
 }
 
 /// Each run for 2 s of simulated time, so the housekeeping timer of the client runs
-/// too.
+/// too. After each run, the timers wait 1 ms more.
 fn a_run_allocates_nothing() {
     for timers in [1, 100, 10_000] {
         let (mut sim, clock) = sim();
-        let mut client = Client::new(clock, timers);
+        let mut client = Client::new(env::clock::Clock::clone(&clock), timers);
         for at in 1..=2000 {
             sim.run_for(Span::MILLISECOND).expect("the run has no task");
             let ((), count) = ALLOCATOR.count(|| client.run());
             assert_eq!(count, 0, "{timers} timers, at {at} ms");
+            assert_eq!(
+                client.next(),
+                Some(clock.now() + Span::MILLISECOND),
+                "the run ran the timers, at {at} ms"
+            );
         }
     }
 }
