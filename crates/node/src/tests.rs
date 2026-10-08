@@ -2725,7 +2725,8 @@ mod port {
         }
 
         /// The region of the node [`OWN`] on `host` alone, whose founding spec holds
-        /// the index `plant.time` (key 1) and the data channel `plant.value` (key 2).
+        /// the index `plant.time` (key 1), with its home at [`OWN`], and the data
+        /// channel `plant.value` (key 2).
         fn founded(host: &sim::node::Node) -> Founding {
             use super::super::hub::{I64, data, index};
             let mut founding = region(&[member(OWN, &KEY, host)]);
@@ -2736,6 +2737,9 @@ mod port {
                     .definitions
                     .insert(name, Definition::Channel(channel));
             }
+            founding
+                .homes
+                .insert(types::channel::Key::from_u128(1), OWN);
             founding
         }
 
