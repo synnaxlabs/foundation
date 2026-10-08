@@ -522,6 +522,29 @@ mod tests {
                 assert!(!connected(&pair.client) && lost(&pair.client).is_none());
             });
         }
+
+        #[test]
+        fn signs_its_resets_with_a_key_from_its_entropy() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let program = |shard: &testing::Shard| {
+                    let setup = shard.client().setup().expect("a setup");
+                    Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN)
+                };
+                pair.server.endpoint = program(shard);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(100));
+                let initial = pair.client.sent[0].2.clone();
+                let token = |reset: &[u8]| reset[reset.len() - 16..].to_vec();
+                let first = token(&pair.server.sent[0].2);
+                let mut other = program(shard);
+                let meta = pair::meta(pair::CLIENT, &initial);
+                other.receive(pair.now(), &meta, &initial);
+                let mut buffer = Vec::new();
+                let reset = other.transmit(pair.now(), &mut buffer).expect("a reset");
+                assert_ne!(token(reset.contents), first);
+            });
+        }
     }
 
     mod ids {
