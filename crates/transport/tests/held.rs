@@ -39,7 +39,7 @@ const LONG: usize = 100_000;
 const LONGER: usize = 250_000;
 const MESSAGE_BYTES_MAX: usize = 1 << 18;
 /// The most heap that the receiver frees when it drops after the error. A list of 64
-/// chunks of 32 bytes is 2 KiB; one of 128 is 4 KiB.
+/// chunks is 2 KiB, since each slot is 32 bytes; one of 128 is 4 KiB.
 const KEPT_MAX: usize = 3 << 10;
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);

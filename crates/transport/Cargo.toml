@@ -32,6 +32,10 @@ harness = false
 name = "chunks"
 harness = false
 
+[[test]]
+name = "kept"
+harness = false
+
 [[bench]]
 name = "send"
 harness = false
