@@ -259,8 +259,10 @@ mod request {
     }
 
     #[test]
-    fn refuses_a_body_over_the_cap() {
-        let mut over = encode_request(request(0));
+    fn takes_a_body_at_the_cap_and_refuses_one_over_it() {
+        let at = encode_request(request(BODY_BYTES_MAX));
+        assert_eq!(Request::decode(&at), Ok(request(BODY_BYTES_MAX)));
+        let mut over = at;
         over[1..9].copy_from_slice(&(BODY_BYTES_MAX + 1).to_le_bytes());
         assert_eq!(
             Request::decode(&over),
@@ -313,8 +315,12 @@ mod response {
     }
 
     #[test]
-    fn refuses_a_body_over_the_cap() {
-        let mut over = encode_response(Response { length: 0 });
+    fn takes_a_body_at_the_cap_and_refuses_one_over_it() {
+        let at = Response {
+            length: BODY_BYTES_MAX,
+        };
+        assert_eq!(Response::decode(&encode_response(at)), Ok(at));
+        let mut over = encode_response(at);
         over[1..9].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(
             Response::decode(&over),
