@@ -305,6 +305,13 @@ mod tests {
 
     #[test]
     fn a_node_may_fill_the_window_of_a_program_and_open_one_stream_of_each_kind() {
+        // The small pool gets the 1 MiB floor, and the large one its largest block.
+        for (budget, window) in [(1 << 16, 1 << 20), (1 << 24, 14_680_064)] {
+            fill(budget, window);
+        }
+    }
+
+    fn fill(budget: usize, window: usize) {
         const MESSAGE: usize = 1 << 14;
         const WINDOW: usize = 1 << 17;
         let (mut sim, program, node) = nodes(0);
@@ -335,13 +342,13 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(sent, 1 << 20);
+            assert_eq!(sent, window);
             drop((session, sender, receiver, one_way));
             node.clock().sleep(IDLE).await;
         });
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
-            let budget = block::Config { budget: 1 << 16 };
+            let budget = block::Config { budget };
             let memory = Heap::new(budget.reservation());
             let config = Config {
                 pool: Rc::new(Pool::new(budget, memory)),
