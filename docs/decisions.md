@@ -2892,10 +2892,10 @@ How to read this record:
   other calls that change the region and the change records stay private. The surface
   is approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
   above). The architect approved the surface as built at 2026-10-07T19:55:12Z:
-  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. It has
-  the types that the caller builds, `Config.time`, and the sentence that `open` does
-  not check the key of the transport. The last two are superseded above. `member`
-  is approved by the architect, 2026-10-07T15:17:13Z:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. It has the
+  types that the caller builds, `Config.time`, and the sentence that `open` does not
+  check the key of the transport. The last two are superseded above. `member` is
+  approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
   of the PRs is decided by the architect, 2026-10-07T17:18:52Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6043038615. The
@@ -3897,16 +3897,15 @@ How to read this record:
   `config.bad-action`. `authority` is optional, an integer from 0 to 255
   (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
   the least, as default deny gives the least. Lost: an `authority` that `write` makes
-  required, a rule that C8 does not have. The action words are a table in `config`
-  until a second reader needs them, such as the `plan` output of access; then they
-  move to `spec` as `Action::as_str`. Decided by `laptop.architect-2`
-  (2026-10-08T02:41:38Z,
+  required, a rule that C8 does not have. The action words are a table in `config` until
+  a second reader needs them, such as the `plan` output of access; then they move to
+  `spec` as `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
   The gate: "The gate gives authority 0 no special meaning: such a writer outranks no
   writer and follows GATE RULES, so it takes control when it opens on an index that no
-  writer holds." `control` and `home` must not read `Authority(0)` as "may not write"
-  or "may not take control". A change to that is a change to GATE RULES, and it goes
-  to `laptop.architect`. The quoted sentence supersedes the sentence on the gate in
+  writer holds." `control` and `home` must not read `Authority(0)` as "may not write" or
+  "may not take control". A change to that is a change to GATE RULES, and it goes to
+  `laptop.architect`. The quoted sentence supersedes the sentence on the gate in
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
   `laptop.architect` decided it and approved the default cap (2026-10-08T05:21:56Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6052936198).
@@ -5924,14 +5923,14 @@ wait until its acceptance scenario passes. The plan and owners are on #462. The 
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
 
-Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps
-priority. ONE NODE is a milestone: one real node reads an OPC UA server through
-`connector-opcua` and pushes the samples to InfluxDB through `connector-influx`. The
-`foundation` binary starts the node from a config, on a real disk and network. Its
-acceptance runs a simulated OPC UA server, the node, and a simulated InfluxDB. A first
-version may run with no OPC UA security, so the open choice of the OPC UA crypto
-plugin (5.1) does not block it. The person approved it ("Yes"), relayed by
-`laptop.monitor` at 2026-10-08T01:52:14Z:
+Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps priority.
+ONE NODE is a milestone: one real node reads an OPC UA server through `connector-opcua`
+and pushes the samples to InfluxDB through `connector-influx`. The `foundation` binary
+starts the node from a config, on a real disk and network. Its acceptance runs a
+simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
+with no OPC UA security, so the open choice of the OPC UA crypto plugin (5.1) does not
+block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
+2026-10-08T01:52:14Z:
 https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
 approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order.
 FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
