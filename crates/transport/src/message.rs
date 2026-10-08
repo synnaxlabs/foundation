@@ -500,12 +500,14 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_prefix_after_a_long_message_it_fails() {
+        fn when_stream_ends_inside_a_prefix_after_each_size_of_message_it_fails() {
             let pool = pool(1 << 16);
-            // At 1 to 3 bytes per chunk the message fills the list of chunks.
-            for split in 1..=8 {
+            // At 1 byte per chunk, each size leaves a list of each capacity up to a
+            // full one.
+            for (len, split) in (0..=70).map(|len| (len, 1)).chain([(200, 2), (200, 7)])
+            {
                 for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
-                    let bytes = [encode(&[vec![1; 200]]).as_slice(), cut].concat();
+                    let bytes = [encode(&[vec![1; len]]).as_slice(), cut].concat();
                     let mut source = Source::new(bytes, split);
                     let mut reader = Reader::new(usize::MAX);
                     assert_eq!(
@@ -513,7 +515,7 @@ mod tests {
                         Err(Error::Broken {
                             reason: "the stream ended inside a message".to_owned()
                         }),
-                        "{cut:x?}, {split} per chunk"
+                        "{len} bytes, then {cut:x?}, {split} per chunk"
                     );
                     // Private: only a peer that misframes ends a stream inside a
                     // message, and no heap count is exact in a binary with a test
@@ -526,24 +528,26 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_prefix_while_admit_refuses_it_fails() {
+        fn when_stream_ends_inside_a_prefix_while_admit_or_take_refuses_it_fails() {
             let pool = pool(1 << 16);
-            for split in 1..=7 {
-                for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
-                    let mut source = Source::new(cut.to_vec(), split);
-                    let mut reader = Reader::new(usize::MAX);
-                    let read = reader.read(
-                        |_| false,
-                        |len| pool.alloc(len).ok(),
-                        |max| Ok(source.take(max)),
-                    );
-                    assert_eq!(
-                        read.map(|read| read.map(|block| block.is_some())),
-                        Err(Error::Broken {
-                            reason: "the stream ended inside a message".to_owned()
-                        }),
-                        "{cut:x?}, {split} per chunk"
-                    );
+            for (admits, gives) in [(false, true), (true, false), (false, false)] {
+                for split in 1..=7 {
+                    for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
+                        let mut source = Source::new(cut.to_vec(), split);
+                        let mut reader = Reader::new(usize::MAX);
+                        let read = reader.read(
+                            |_| admits,
+                            |len| pool.alloc(len).ok().filter(|_| gives),
+                            |max| Ok(source.take(max)),
+                        );
+                        assert_eq!(
+                            read.map(|read| read.map(|block| block.is_some())),
+                            Err(Error::Broken {
+                                reason: "the stream ended inside a message".to_owned()
+                            }),
+                            "admit {admits}, take {gives}: {cut:x?}, {split} per chunk"
+                        );
+                    }
                 }
             }
         }
