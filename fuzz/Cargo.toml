@@ -257,6 +257,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "wire_hub_client"
+path = "fuzz_targets/wire_hub_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "wire_blob"
 path = "fuzz_targets/wire_blob.rs"
 test = false
