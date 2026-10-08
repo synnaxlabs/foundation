@@ -57,8 +57,8 @@ pub struct Entry {
 }
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
-/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for a policy. Each order of `documents` gives the
-/// same entries, or each gives problems.
+/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for a policy.
+/// Each order of `documents` gives the same entries, or each gives problems.
 ///
 /// # Errors
 ///
@@ -566,8 +566,8 @@ mod tests {
                 "config.unknown-block",
                 at(0, 0),
                 "`nodes` is not a kind of block",
-                "Use `channel`, `node_settings`, `placement`, or `retention`, or remove the \
-                 block",
+                "Use `channel`, `node_settings`, `placement`, or `retention`, or \
+                 remove the block",
             )])
         );
     }
@@ -1890,7 +1890,8 @@ mod tests {
             let mut repeat = refused(
                 "config.duplicate-name",
                 at(1, 1),
-                "the name \"Edge.time\" repeats the earlier `channel` name \"edge.time\"",
+                "the name \"Edge.time\" repeats the earlier `channel` name \
+                 \"edge.time\"",
                 "Give each `channel` block a name that differs by more than case",
             );
             repeat.notes.push(Note {
