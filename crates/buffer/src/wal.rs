@@ -20,6 +20,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 
+use crate::carry;
 use crate::entry::{self, ENTRIES_MAX};
 use crate::record::{
     self, ALIGN, AREA_START, BLOCK, Body, Check, HEADER_LEN, Head, Kind, Record,
@@ -39,6 +40,10 @@ const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry")
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
+const _: () = assert!(
+    carry::body_len(carry::TAILS_MAX) <= TABLE - HEADER_LEN,
+    "the walk holds a full carry body whole"
+);
 
 fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length in memory fits in u64")
@@ -874,10 +879,10 @@ impl Cursor {
         Ok(step)
     }
 
-    /// Makes the writer that continues the ring after the last data or carry record
-    /// walked, or from the tail when the walk read none, with the records before the offset
-    /// `tail` released, and seals its restart record with `chain`, a new random
-    /// value, as the body. The chain continues from `chain`.
+    /// Makes the writer that continues the ring after the last data or carry
+    /// record walked, or from the tail when the walk read none, with the records
+    /// before the offset `tail` released, and seals its restart record with `chain`,
+    /// a new random value, as the body. The chain continues from `chain`.
     ///
     /// # Errors
     ///
@@ -2286,13 +2291,10 @@ mod tests {
             panic!("the walk did not reach the carry record");
         }
 
-        /// The walk holds a carry record whole only within the table bound, which
-        /// holds the largest carry body.
+        /// The walk holds a carry record whole only within the table bound.
         #[test]
         fn gives_a_carry_record_whole_only_within_the_table_bound() {
             let bound = TABLE - HEADER_LEN;
-            let full = crate::carry::body_len(crate::carry::TAILS_MAX);
-            assert!(full <= bound, "a full body of {full} bytes");
             for len in [0, ALIGN - HEADER_LEN, ALIGN - HEADER_LEN + 1, bound] {
                 assert_eq!(carried(len), Ok(len), "a body of {len} bytes");
             }
