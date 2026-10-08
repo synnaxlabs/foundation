@@ -45,16 +45,25 @@ pub struct Settings {
 /// not read, a label, attribute, or block in `reader` that it does not take, a second
 /// `reader` block, a negative `hold`, and a `hold` with no `name` or in `latest` mode,
 /// since only a named complete reader holds.
+///
+/// # Panics
+///
+/// When `keys` holds `select` or `blocks` holds `reader`: the kind's lists are
+/// internal, and `read` reads those two itself.
 pub fn read(
     config: &Document,
     keys: &[&str],
     blocks: &[&str],
 ) -> Result<Settings, Vec<Diagnostic>> {
+    assert!(
+        !keys.contains(&"select") && !blocks.contains(&"reader"),
+        "a kind lists `select` or `reader`, which `read` reads itself"
+    );
     let mut diagnostics = document::read::unknown(
         config,
         "the connector",
-        &with("select", keys),
-        &with("reader", blocks),
+        &[&["select"], keys].concat(),
+        &[&["reader"], blocks].concat(),
     );
     let select = keep(
         document::read::required(
@@ -191,12 +200,6 @@ fn mode(value: &Value) -> Result<Mode, Diagnostic> {
             "Write \"complete\" or \"latest\"".into(),
         )),
     }
-}
-
-/// `own` and then each of `keys` that is not `own`.
-fn with<'a>(own: &'a str, keys: &[&'a str]) -> Vec<&'a str> {
-    let others = keys.iter().copied().filter(|key| *key != own);
-    std::iter::once(own).chain(others).collect()
 }
 
 /// The value of `result`, or `None` after it adds the diagnostic.

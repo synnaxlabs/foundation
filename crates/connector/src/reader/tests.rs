@@ -153,31 +153,19 @@ fn refuses_a_key_that_neither_it_nor_the_kind_reads() {
 }
 
 #[test]
-fn names_each_key_once_when_the_kind_lists_one_that_it_reads() {
-    let config = document(
-        &[
-            (0, "select", string("edge.*")),
-            (20, "port", Kind::Integer(1)),
-        ],
-        vec![block(45, "inner", Document::default())],
-    );
-    assert_eq!(
-        read(&config, &["select", "address"], &["reader"]),
-        Err(vec![
-            refused(
-                "document.unknown-attribute",
-                20,
-                "`port` is not an attribute of the connector",
-                "Use `select` or `address`, or remove it",
-            ),
-            refused(
-                "document.unknown-block",
-                45,
-                "the connector cannot hold the `inner` block",
-                "Use `reader`, or remove it",
-            ),
-        ])
-    );
+#[should_panic(
+    expected = "a kind lists `select` or `reader`, which `read` reads itself"
+)]
+fn panics_when_the_kind_lists_select() {
+    drop(read(&config(&[]), &["select", "address"], &[]));
+}
+
+#[test]
+#[should_panic(
+    expected = "a kind lists `select` or `reader`, which `read` reads itself"
+)]
+fn panics_when_the_kind_lists_reader() {
+    drop(read(&config(&[]), &[], &["reader"]));
 }
 
 #[test]
@@ -333,7 +321,13 @@ fn refuses_only_a_bad_mode_with_a_hold() {
 #[test]
 fn refuses_a_second_reader_block_after_a_good_one() {
     let mut config = config(&[(60, "name", string("influx"))]);
-    config.blocks.push(block(95, "reader", Document::default()));
+    let mut second =
+        block(95, "reader", document(&[(97, "from", string("a"))], vec![]));
+    second.labels.push(Label {
+        text: "r".into(),
+        span: at(96),
+    });
+    config.blocks.push(second);
     assert_eq!(
         read(&config, &[], &[]),
         Err(vec![refused(
