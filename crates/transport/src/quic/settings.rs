@@ -1010,10 +1010,11 @@ mod tests {
 
         // The client gets only the first datagram of the server's flight, which acks
         // both of its Initials, so it has nothing ack-eliciting in flight and probes
-        // against the anti-amplification deadlock. Its one round trip of 200 ms gives a
-        // PTO base of 600 ms; the cap at an idle of 1 s is 333 ms.
+        // against the anti-amplification deadlock by the release's rule. Its one round
+        // trip of 200 ms gives a PTO base of 600 ms; the cap at an idle of 1 s is 333 ms.
         #[test]
-        fn against_the_amplification_deadlock_never_come_before_the_probe_timeout() {
+        fn against_the_amplification_deadlock_come_once_at_the_cap_then_at_the_probe_timeout()
+         {
             let gaps = testing::run(1, |shard| {
                 let delay = Duration::from_millis(100);
                 let mut pair = Pair::new(shard, Span::SECOND, delay);
@@ -1035,9 +1036,11 @@ mod tests {
             });
             // A probe with data in flight is two datagrams, the second 16 ms later.
             let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY * 5).collect();
-            let pto_base = Duration::from_millis(600);
-            assert!(probes.len() >= 2, "{gaps:?}");
-            assert!(probes.iter().all(|&&gap| gap >= pto_base), "{gaps:?}");
+            let (cap, pto_base) =
+                (Duration::from_secs(1) / 3, Duration::from_millis(600));
+            assert!(probes.len() >= 3, "{gaps:?}");
+            assert_eq!(*probes[0], cap, "{gaps:?}");
+            assert!(probes[1..].iter().all(|&&gap| gap >= pto_base), "{gaps:?}");
         }
     }
 

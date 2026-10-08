@@ -3617,7 +3617,9 @@ impl Connection {
                 _ => SpaceId::Initial,
             };
 
-            let duration = pto_duration(path.rtt.pto_base(), pto_count, max_interval);
+            let backoff = 2u32.pow(path.pto_count.min(MAX_BACKOFF_EXPONENT));
+            let duration = path.rtt.pto_base() * backoff;
+            let duration = duration.min(max_interval);
             return Some((now + duration, space));
         }
 
@@ -3638,13 +3640,25 @@ impl Connection {
                 continue;
             }
 
-            let max_ack_delay = if space == SpaceId::Data {
-                self.ack_frequency.max_ack_delay_for_pto()
-            } else {
-                Duration::ZERO
+            // Compute the PTO duration for this space: an exponential backoff, capped at
+            // the maximum interval between two tail-loss probes, but never below the
+            // time an answer needs.
+            let duration = {
+                let max_ack_delay = if space == SpaceId::Data {
+                    self.ack_frequency.max_ack_delay_for_pto()
+                } else {
+                    Duration::ZERO
+                };
+                let pto_base = path.rtt.pto_base() + max_ack_delay;
+                // The cap is never below `pto_base`, so with no backoff the duration is
+                // `pto_base`. This runs for each sent packet and each ACK.
+                if pto_count == 0 {
+                    pto_base
+                } else {
+                    let backoff = 2u32.pow(pto_count.min(MAX_BACKOFF_EXPONENT));
+                    (pto_base * backoff).min(max_interval.max(pto_base))
+                }
             };
-            let pto_base = path.rtt.pto_base() + max_ack_delay;
-            let duration = pto_duration(pto_base, pto_count, max_interval);
 
             let Some(last_ack_eliciting) = pns.time_of_last_ack_eliciting_packet else {
                 continue;
@@ -7575,17 +7589,6 @@ fn get_max_ack_delay(params: &TransportParameters) -> Duration {
 
 /// Prevents overflow and improves behavior in extreme circumstances.
 const MAX_BACKOFF_EXPONENT: u32 = 16;
-
-/// The PTO duration after `pto_count` PTOs: an exponential backoff from `pto_base`,
-/// capped at `max_interval`, but never below the time an answer needs (`pto_base`).
-fn pto_duration(pto_base: Duration, pto_count: u32, max_interval: Duration) -> Duration {
-    // Runs for each sent packet and each ACK, nearly always with no backoff.
-    if pto_count == 0 {
-        return pto_base;
-    }
-    let backoff = 2u32.pow(pto_count.min(MAX_BACKOFF_EXPONENT));
-    (pto_base * backoff).min(max_interval.max(pto_base))
-}
 
 /// The max interval between successive tail-loss probes.
 ///
