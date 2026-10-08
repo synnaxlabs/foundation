@@ -79,8 +79,9 @@
   `Complete`, since the class sets the priority of each frame that the home sends back;
   the home's `hub` checks it at the `Open` and stops the session with `MALFORMED`.
   Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
-  is not the home of the index), 18 `FAILED` (the home's buffer failed), 19 `BUSY` (the
-  home's pool had no block for a reply; a later open can succeed), and 2
+  is not the home of the index), 18 `FAILED` (the home failed: its buffer or its mesh
+  stopped), 19 `BUSY` (the side that stops had no block for the session, in both
+  directions; a later open can succeed), and 2
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
   or breaks a rule above), which every protocol may use. A reset drops the frames in
   flight, which is correct for `FAILED`, since the session cannot go on (lost: a
