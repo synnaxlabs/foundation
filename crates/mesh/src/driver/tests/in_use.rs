@@ -384,6 +384,40 @@ fn a_retry_keeps_the_cause_of_the_read_before_it() {
     });
 }
 
+// The read of v1 misses one chunk, and the retry get of it waits on a put that does
+// not end. v2 commits with each chunk in the store.
+#[test]
+fn a_call_at_a_later_pointer_waits_for_no_retry_of_an_older_one() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &create_large(200));
+        let lacked = *update.chunks.iter().find(|at| **at != update.root).unwrap();
+        let held = update.chunks.iter().copied().filter(|at| *at != lacked);
+        let held: Vec<Digest> = held.collect();
+        put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let second = settled.await.unwrap();
+        let missing = spec::region::Error::Tree(tree::Error::Missing(lacked));
+        let behind = Some(Behind {
+            pointer: second,
+            cause: Cause::Read(missing),
+        });
+        assert_eq!(mesh.spec().await.unwrap().behind, behind);
+        let block = mesh.pool.copy(chunks.get(lacked).unwrap()).unwrap();
+        let mut stuck = pin!(mesh.store.put(lacked, &block));
+        assert!(now(stuck.as_mut()).await.is_pending());
+        node.clock().sleep(seconds(2)).await;
+        let b = create_subjects(&["plant.b"], 1);
+        let third = commit(&mesh, second, &b).await;
+        let mut call = pin!(mesh.spec());
+        node.clock().sleep(seconds(3)).await;
+        let used = Poll::Ready(Ok(in_use(third, &b)));
+        assert_eq!(now(call.as_mut()).await, used);
+    });
+}
+
 // The first read misses one chunk. The next get of it fails, and the one after finds
 // no chunk.
 #[test]

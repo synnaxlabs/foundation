@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::poll_fn;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -76,6 +76,16 @@ enum Job {
     },
 }
 
+/// What the store part of a job gave.
+enum Gave {
+    Got(Digest, Result<Option<Vec<u8>>, blob::Error>),
+    /// The result of the read, and each chunk that it got from the store.
+    Read(
+        Result<(BTreeMap<Name, Definition>, Chunks), Cause>,
+        Vec<Vec<u8>>,
+    ),
+}
+
 /// What a job gave.
 enum Done {
     /// The spec read, had no problem, and its file is durable: its definitions and
@@ -123,6 +133,21 @@ impl Used {
         let used = self.spec.pointer.iter();
         let behind = self.spec.behind.iter().map(|behind| &behind.pointer);
         used.chain(behind).any(|pointer| pointer.version >= version)
+    }
+
+    // Whether a read of `pointer` ended, so that a job for it is a retry.
+    fn retry(&self, pointer: Pointer) -> bool {
+        let behind = self.spec.behind.as_ref();
+        behind.is_some_and(|behind| behind.pointer == pointer)
+    }
+
+    // Whether a newer pointer replaced `pointer`. If not, `cx` wakes when one does.
+    fn replaced(&mut self, pointer: Pointer, cx: &mut Context<'_>) -> bool {
+        if self.newest.as_ref().map(|newest| newest.pointer) != Some(pointer) {
+            return true;
+        }
+        self.task = Some(cx.waker().clone());
+        false
     }
 
     // The next job for the newest pointer, once its step allows one.
@@ -348,28 +373,55 @@ pub(super) async fn keep(
             }
             let prefix = group.state.prefix().clone();
             let next = group.used.next(&clock, &mut retry, cx);
-            next.map(|next| Some((next, prefix)))
+            next.map(|(pointer, job)| {
+                Some((pointer, job, prefix, group.used.retry(pointer)))
+            })
         });
-        let Some(((pointer, job), prefix)) = next.await else {
+        let Some((pointer, job, prefix, retried)) = next.await else {
             return;
         };
-        let done = match job {
-            Job::Get(digest) => {
-                let got = store.get(digest).await;
-                Done::Got(digest, got.map(|chunk| chunk.map(|chunk| chunk.to_vec())))
+        let mut gave = pin!(async {
+            match job {
+                Job::Get(digest) => {
+                    let got = store.get(digest).await;
+                    let got = got.map(|chunk| chunk.map(|chunk| chunk.to_vec()));
+                    Gave::Got(digest, got)
+                }
+                Job::Read { listed, chunks } => {
+                    let mut got = Vec::new();
+                    let read = read(&store, &prefix, chunks, pointer, listed, &mut got);
+                    Gave::Read(read.await, got)
+                }
             }
-            Job::Read { listed, chunks } => {
-                let mut got = Vec::new();
-                match read(&store, &prefix, chunks, pointer, listed, &mut got).await {
-                    Ok((definitions, chunks)) => {
-                        match name(&files, &held, pointer).await {
-                            Ok(()) => Done::Taken(definitions, chunks),
-                            Err(cause) => Done::Failed { cause, got },
-                        }
-                    }
+        });
+        // A retry stops when a newer pointer replaces its own, so that a call never
+        // waits for it. The file part of a read never stops.
+        let gave = poll_fn(|cx| {
+            if let Poll::Ready(gave) = gave.as_mut().poll(cx) {
+                return Poll::Ready(Some(gave));
+            }
+            let Some(group) = group.upgrade() else {
+                return Poll::Ready(None);
+            };
+            let replaced = retried && group.borrow_mut().used.replaced(pointer, cx);
+            if replaced {
+                Poll::Ready(None)
+            } else {
+                Poll::Pending
+            }
+        });
+        let Some(gave) = gave.await else {
+            continue;
+        };
+        let done = match gave {
+            Gave::Got(digest, got) => Done::Got(digest, got),
+            Gave::Read(Ok((definitions, chunks)), got) => {
+                match name(&files, &held, pointer).await {
+                    Ok(()) => Done::Taken(definitions, chunks),
                     Err(cause) => Done::Failed { cause, got },
                 }
             }
+            Gave::Read(Err(cause), got) => Done::Failed { cause, got },
         };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
