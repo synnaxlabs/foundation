@@ -21,8 +21,7 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// Each error but `Stale` proposes nothing, and `Problems` and `Large` come before
-    /// the others.
+    /// `Problems` and `Large` propose nothing, and come before the others.
     ///
     /// - [`Error::Problems`] when the spec has problems.
     /// - [`Error::Large`] when its tree has more chunks than one change lists.
