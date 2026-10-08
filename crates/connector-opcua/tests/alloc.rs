@@ -1,5 +1,6 @@
 //! One run of the open62541 event loop with due timers allocates nothing, in C or in
-//! Rust. The count covers each thread, so this binary has no test harness.
+//! Rust, and the fuzz round trip makes a fixed count of allocations. The count covers
+//! each thread, so this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -61,7 +62,8 @@ fn the_drop_frees_the_client() {
     assert_eq!(freed, 1, "the drop freed the URI of the client");
 }
 
-/// A `Variant` of 7 `ExtensionObject` values, then the zeros that #435 needs.
+/// A `Variant` (23, as `ffi` is private) of 7 `ExtensionObject` values, then the
+/// zeros that #435 needs.
 fn the_fuzz_round_trip_allocates_for_each_step() {
     let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
     data.resize(data.len() + 7 * 4, 0);

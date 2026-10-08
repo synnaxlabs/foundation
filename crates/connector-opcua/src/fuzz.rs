@@ -38,14 +38,9 @@ pub fn decode(data: &[u8]) {
     );
     // A `Variant` of `ExtensionObject` values decodes only when 4 bytes follow its
     // length for each value, and the header of the first value fits at each value
-    // (#435). So only an encoding that fails one of those checks gets zeros after it.
+    // (#435). So an encoding that does not decode gets zeros after it.
     let (again, read) = Value::decode(data_type, &once)
-        .or_else(|e| {
-            if e != Status::BAD_DECODING_ERROR
-                && e != Status::BAD_ENCODING_LIMITS_EXCEEDED
-            {
-                return Err(e);
-            }
+        .or_else(|_| {
             let mut padded = once.clone();
             padded.resize(once.len() * 2, 0);
             Value::decode(data_type, &padded)
@@ -243,6 +238,10 @@ mod tests {
         data.extend(extension_objects());
         // The input decodes only with the 4 bytes for each value that #435 needs.
         data.extend([0; 7]);
+        let (_, read) = Value::decode(&ffi::types()[VARIANT], &data[2..])
+            .map_err(Status::name)
+            .unwrap();
+        assert_eq!(read, extension_objects().len());
         decode(&data);
     }
 
@@ -275,6 +274,10 @@ mod tests {
     fn decode_round_trips_a_range_then_a_null_extension_object() {
         let mut data = vec![u8::try_from(VARIANT).unwrap(), 0];
         data.extend(range_then_null());
+        let (_, read) = Value::decode(&ffi::types()[VARIANT], &data[2..])
+            .map_err(Status::name)
+            .unwrap();
+        assert_eq!(read, data.len() - 2 - 8);
         decode(&data);
     }
 
