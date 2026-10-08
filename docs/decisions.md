@@ -4112,7 +4112,9 @@ How to read this record:
   gives it the time of `env`. Lost: timers in Rust, a copy of library code that already
   takes the time as an input. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
-  2026-10-08 17:47 UTC).
+  2026-10-08 17:47 UTC; the release path,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
+  2026-10-08 18:08 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
