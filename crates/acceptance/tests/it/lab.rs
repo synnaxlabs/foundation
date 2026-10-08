@@ -617,7 +617,7 @@ fn full() -> Lab {
 }
 
 #[test]
-fn a_lab_starts_255_nodes() {
+fn a_lab_takes_255_nodes() {
     full();
 }
 
