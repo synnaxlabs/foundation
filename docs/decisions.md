@@ -3516,6 +3516,17 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
+  a body that its reader does not take, with the attribute keys and the block keywords
+  apart, so a key that names an attribute never passes as a block.
+  `read::missing` reports a body with none of some keys, and `read::required` reads
+  one key or gives that diagnostic. `config` and every kind use them, so one mistake
+  has one code: `document.unknown-attribute`, `document.unknown-block`, and
+  `document.missing-attribute`. A top-level attribute or an unknown kind of block in a
+  file uses them too. Decided by `laptop.architect-2` on #1153
+  ([ruling](https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019),
+  2026-10-08 03:05 UTC). Lost: a `Body` value that records each key read and reports
+  the rest at `finish`, which drops the diagnostics when a caller returns early.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for

@@ -10,8 +10,7 @@ const KEYS: [&str; 2] = ["select", "keep"];
 
 /// Checks a `retention` block and gives its policy.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let select = found.select(block, "indexes that it caps", "site_a.**");
     let fix = "Add a `keep` attribute with a span such as \"3d\"";
     let keep = found.required(block, "keep", read::span, fix.into());
