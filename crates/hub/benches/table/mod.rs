@@ -51,30 +51,37 @@ impl Line {
     }
 }
 
-/// The result of `f`, and the ns it takes.
+/// The result of `f`, and the ns it takes and the allocations that `allocator`
+/// counts in it, as [`Line::add`] takes them.
 #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
-pub(crate) fn clocked<T>(f: impl FnOnce() -> T) -> (T, u64) {
-    let start = Instant::now();
-    let value = f();
-    (value, nanos(Instant::now().duration_since(start)))
+pub(crate) fn timed<T>(
+    allocator: &counting::Allocator,
+    f: impl FnOnce() -> T,
+) -> (T, (u64, u64)) {
+    let ((value, span), allocations) = allocator.count(|| {
+        let start = Instant::now();
+        let value = f();
+        (value, Instant::now().duration_since(start))
+    });
+    (value, (nanos(span), allocations))
 }
 
 fn nanos(span: Duration) -> u64 {
     u64::try_from(span.as_nanos()).expect("a call takes under 2^64 ns")
 }
 
-/// Prints `lines` under `title`. The first line is the timer floor, which `net`
-/// takes from each p50.
+/// Prints `timer` and then `lines` under `title`. `net` is a line's p50 less the p50
+/// of `timer`, the floor of each figure.
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
-pub(crate) fn print(title: &str, lines: &[Line]) {
+pub(crate) fn print(title: &str, timer: &Line, lines: &[Line]) {
     println!("{title}");
     println!("pN: the round at percentile N");
     println!(
         "{:<14} {:>9} {:>9} {:>9} {:>9} {:>13}",
         "line", "p10", "p50", "p90", "net", "allocs/call"
     );
-    let floor = lines[0].at(50);
-    for line in lines {
+    let floor = timer.at(50);
+    for line in std::iter::once(timer).chain(lines) {
         let calls = per(line.nanos.len()) * per(line.calls);
         let allocations = per(line.allocations) / calls;
         println!(
