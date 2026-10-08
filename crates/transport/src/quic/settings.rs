@@ -745,10 +745,9 @@ mod tests {
                 .collect()
         }
 
-        /// Connects over a link with `delay`, stops the server, writes 100 bytes from
-        /// the client, and runs `span`. The client's sends start at the write.
-        fn unanswered(shard: &testing::Shard, delay: Duration, span: Duration) -> Pair {
-            let mut pair = pair(shard, delay);
+        /// Connects `pair`, stops the server, writes 100 bytes from the client, and
+        /// runs `span`. The client's sends start at the write.
+        fn unanswered(mut pair: Pair, span: Duration) -> Pair {
             pair.dial(pair::SERVER_KEY.public());
             pair.run(Duration::from_secs(3));
             pair.server.silent = true;
@@ -777,7 +776,7 @@ mod tests {
         #[test]
         fn with_data_in_flight_double_up_to_2_s_apart() {
             let gaps = testing::run(1, |shard| {
-                let pair = unanswered(shard, DELAY, Duration::from_secs(100));
+                let pair = unanswered(pair(shard, DELAY), Duration::from_secs(100));
                 gaps(&pair.client, 0)
             });
             assert!(gaps.len() >= 30, "{gaps:?}");
@@ -788,12 +787,37 @@ mod tests {
             assert_eq!(gaps, doubled.collect::<Vec<_>>());
         }
 
+        #[test]
+        fn at_an_idle_of_1_s_come_at_most_a_third_of_it_apart() {
+            let (dial, data) = testing::run(1, |shard| {
+                let idle = Span::SECOND;
+                let mut pair = Pair::new(shard, idle, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                while pair.server.sent.is_empty() {
+                    pair.run(Duration::from_millis(1));
+                }
+                // The server's first flight is on the link, so the client has a round
+                // trip and sends its last handshake packet to a silent server.
+                pair.server.silent = true;
+                pair.run(Duration::from_secs(1));
+                let dial = gaps(&pair.client, 0);
+                let pair = Pair::new(shard, idle, DELAY);
+                let pair = unanswered(pair, Duration::from_secs(1));
+                (dial, gaps(&pair.client, 0))
+            });
+            let gap_max = Duration::from_secs(1) / 3;
+            for gaps in [dial, data] {
+                assert!(gaps.len() >= 2, "{gaps:?}");
+                assert!(gaps.iter().all(|&gap| gap <= gap_max), "{gaps:?}");
+            }
+        }
+
         // A round trip of 1.2 s with no second sample gives a probe timeout over 2 s.
         #[test]
         fn never_come_before_the_probe_timeout() {
             let gaps = testing::run(1, |shard| {
                 let delay = Duration::from_millis(600);
-                let pair = unanswered(shard, delay, Duration::from_secs(60));
+                let pair = unanswered(pair(shard, delay), Duration::from_secs(60));
                 gaps(&pair.client, 0)
             });
             // A probe is two datagrams, the second a few ms after the first.
@@ -805,7 +829,7 @@ mod tests {
         #[test]
         fn after_a_write_between_two_probes_come_one_gap_after_the_write() {
             let (since, gaps) = testing::run(1, |shard| {
-                let mut pair = unanswered(shard, DELAY, Duration::from_secs(60));
+                let mut pair = unanswered(pair(shard, DELAY), Duration::from_secs(60));
                 let probe = pair.client.sent.last().expect("a probe").0;
                 let now = Duration::from_secs(63);
                 let write = now.max(probe + Duration::from_secs(1));
@@ -849,7 +873,7 @@ mod tests {
         #[test]
         fn a_timer_that_fires_long_after_its_deadline_sends_one_probe() {
             let sent = testing::run(1, |shard| {
-                let mut pair = unanswered(shard, DELAY, Duration::from_secs(10));
+                let mut pair = unanswered(pair(shard, DELAY), Duration::from_secs(10));
                 pair.client.silent = true;
                 pair.run(Duration::from_secs(20));
                 pair.client.silent = false;
