@@ -372,6 +372,8 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
         let to_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9);
         let far_v4 = IpAddr::from([192, 0, 2, 1]);
         let far_v6 = IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+        let multicast = IpAddr::from([224, 0, 0, 1]);
+        let broadcast = IpAddr::from([255, 255, 255, 255]);
         let invalid = Err(Error::Io { code: 22 });
         let cases = [
             (
@@ -386,7 +388,11 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
                 SocketAddr::new(LOCALHOST.into(), 0),
                 invalid.clone(),
             ),
+            (v4, Some(multicast), to_v4, invalid.clone()),
+            (v4, Some(broadcast), to_v4, invalid.clone()),
             (any_v6, Some(far_v6), to_v6, invalid.clone()),
+            (any_v6, Some(multicast), to_v4, invalid.clone()),
+            (any_v6, Some(broadcast), to_v4, invalid.clone()),
             (
                 any_v6,
                 Some(far_v4),

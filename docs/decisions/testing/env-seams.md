@@ -63,8 +63,9 @@
   `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
   nothing stores a failure. For a source that is not local or is of the other family,
   `os` gives the kernel's answer, and `sim` gives `Io { code: 99 }`. On Linux, that is
-  `Unreachable` for IPv4 (`ENETUNREACH`) and `Io { code: 22 }` (`EINVAL`) for IPv6 or
-  the other family, and port 0 gives `Io { code: 22 }`. Until #1972 patches `noq-udp`,
+  `Unreachable` for a unicast IPv4 source (`ENETUNREACH`), and `Io { code: 22 }`
+  (`EINVAL`) for a multicast or broadcast IPv4 source, for IPv6, for the other family,
+  and for port 0. Until #1972 patches `noq-udp`,
   such a transmit can turn GSO and the IPv4 ECN mark off for the life of the socket.
   Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066909518,
