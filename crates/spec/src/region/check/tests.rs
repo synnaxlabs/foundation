@@ -276,12 +276,17 @@ fn finds_no_problem_in_the_founding_definitions_at_a_reserved_label() {
 #[test]
 fn finds_a_subject_and_a_policy_at_another_reserved_label_misplaced() {
     let definitions = create_definitions(&[
+        ("ops.@admin.@subject", subject()),
         ("ops.@x.@access", access()),
         ("ops.@x.@subject", subject()),
     ]);
     assert_eq!(
         check(&prefix("ops"), &definitions),
         [
+            Problem::Misplaced {
+                name: name("ops.@admin.@subject"),
+                kind: Kind::Subject,
+            },
             Problem::Misplaced {
                 name: name("ops.@x.@access"),
                 kind: Kind::Access,

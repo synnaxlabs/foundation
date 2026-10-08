@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn gives_a_reserved_label_only_at_a_founding_key() {
-        for label in ["plant.@x", "@admin.x"] {
+        for label in ["plant.@x", "plant.@admin", "@admin.x"] {
             for (kind, segment) in KINDS {
                 let key = name(&format!("{label}.{segment}"));
                 assert_eq!(kind.label(&key), None, "{key}");
