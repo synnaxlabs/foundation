@@ -1,6 +1,6 @@
 //! What the fuzz targets have in common.
 
-use types::sample::Scalar;
+use types::sample::{Scalar, Sides, Type};
 
 pub mod hub;
 
@@ -65,6 +65,47 @@ fn index(scalar: Scalar) -> usize {
         Scalar::Span => 12,
         Scalar::Uuid => 13,
     }
+}
+
+/// The sample type other than a scalar that the front of a codec input picks, and the
+/// bytes after it. A byte picks the kind: an array, a matrix, a list, `String`, or
+/// `Bytes`. An array then takes a scalar byte and a little-endian `u32` length, a
+/// matrix a scalar byte and two `u16` sides, and a list a scalar byte and a byte whose
+/// remainder by 5 is its `max`.
+#[must_use]
+pub fn data_type(bytes: &[u8]) -> Option<(Type, &[u8])> {
+    let (kind, rest) = bytes.split_first()?;
+    Some(match kind % 5 {
+        0 => {
+            let [element, a, b, c, d, rest @ ..] = rest else {
+                return None;
+            };
+            let len = u32::from_le_bytes([*a, *b, *c, *d]);
+            let element = scalar(*element);
+            (Type::Array { element, len }, rest)
+        }
+        1 => {
+            let [element, a, b, c, d, rest @ ..] = rest else {
+                return None;
+            };
+            let sides = Sides {
+                rows: u16::from_le_bytes([*a, *b]),
+                columns: u16::from_le_bytes([*c, *d]),
+            };
+            let element = scalar(*element);
+            (Type::Matrix { element, sides }, rest)
+        }
+        2 => {
+            let [element, max, rest @ ..] = rest else {
+                return None;
+            };
+            let max = u32::from(max % 5);
+            let element = scalar(*element);
+            (Type::List { element, max }, rest)
+        }
+        3 => (Type::String, rest),
+        _ => (Type::Bytes, rest),
+    })
 }
 
 /// Checks that a value read from `text` prints as text that reads back to it.
