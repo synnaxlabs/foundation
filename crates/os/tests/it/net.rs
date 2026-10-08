@@ -373,6 +373,19 @@ fn a_vectored_write_across_the_unsent_bound_takes_the_whole_parts() {
     });
 }
 
+/// On macOS, whole parts that fill the unsent bound go in one write.
+#[test]
+#[cfg(target_os = "macos")]
+fn whole_parts_that_fill_the_unsent_bound_go_in_one_write() {
+    on_thread("net-fill", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        let half = vec![7; options().unsent_bytes_max / 2];
+        let written = write(&mut client, &[&half, &half, &[1]]).await;
+        assert_eq!(written, Ok(options().unsent_bytes_max));
+    });
+}
+
 /// Writes of 64 bytes that total less than the unsent bound each go at once, with no
 /// read on the peer: macOS waits for the write event only once the bound is reached.
 #[test]
