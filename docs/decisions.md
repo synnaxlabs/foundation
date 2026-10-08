@@ -4680,19 +4680,19 @@ How to read this record:
   is "Make the placement `p` win for the connector `c` and its indexes", where `p` wins
   for `c`, or for the index when no placement selects `c` (same comment of 15:21:54Z,
   and `laptop.architect`, 2026-10-08T16:22:59Z). It is the target state that each other
-  fix names, so each diagnostic of `c` gives one edit. When no placement can win for `c`
-  and each of its indexes at the node `n` of `c`, each diagnostic of `c` gives one fix
-  that names each winner, so one edit applies it. When `t` wins for `c` and gets case 2
-  of `config.connector-home`, the fix is that of case 2: "Exclude the connector `c` and
-  its indexes from the `select` of `t` and `r`, and select them with another placement
-  whose `home` is `n`", where `t` and `r` are each placement that wins for `c` or an
-  index of `c`. When no placement selects `c`, and more than one placement wins for the
-  indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the indexes
-  of the connector `c` from the `select` of `p`, and select the connector and its
-  indexes with another placement whose `home` is `n`", where `p` is each placement that
-  wins for an index of `c`. A list of winners is "`p`", "`p` and `q`", or "`p`, `q`, and
-  `r`": the winner of `c` first, then the others in tree key order. "Another" keeps a
-  listed placement from being the new one, which its exclusion would empty
+  fix names, so each split diagnostic of `c` gives one edit. When no placement can win
+  for `c` and each of its indexes at the node `n` of `c`, each diagnostic of `c` gives
+  one fix that names each winner, so one edit applies it. When `t` wins for `c` and gets
+  case 2 of `config.connector-home`, the fix is that of case 2: "Exclude the connector
+  `c` and its indexes from the `select` of `t` and `r`, and select them with another
+  placement whose `home` is `n`", where `t` and `r` are each placement that wins for `c`
+  or an index of `c`. When no placement selects `c`, and more than one placement wins
+  for the indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the
+  indexes of the connector `c` from the `select` of `p`, and select the connector and
+  its indexes with another placement whose `home` is `n`", where `p` is each placement
+  that wins for an index of `c`. A list of winners is "`p`", "`p` and `q`", or "`p`,
+  `q`, and `r`": the winner of `c` first, then the others in tree key order. "Another"
+  keeps a listed placement from being the new one, which its exclusion would empty
   (`laptop.architect`, 2026-10-08T15:46:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
   2026-10-08T16:04:09Z,
