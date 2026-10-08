@@ -2034,12 +2034,12 @@ How to read this record:
   subject. The same ruling moves it when a program first holds the private key of a
   subject (#1748; item of `laptop.director`:
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
-  `types::ed25519::PrivateKey::public` is the one place that derives a node's public
-  key from its private key; `mesh`, `transport`, and `node` call it, and keep no
-  copy. So `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key.
-  Cost: each crate that depends on `types` builds `aws-lc-rs` one time for each target
-  directory. Lost: a `pub fn` in `transport`, a pass-through for a thing that is not
-  transport; and the copies, which grow with each crate that needs the key. Decided by
+  `types::ed25519::PrivateKey::public` is the one place that derives the public key
+  from the private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
+  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
+  crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
+  Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
+  and the copies, which grow with each crate that needs the key. Decided by
   `laptop.architect` (2026-10-07T14:16:15Z):
   https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
   `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
@@ -2943,9 +2943,10 @@ How to read this record:
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and
   `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`,
-  and `transport` in its line of the crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
-  `Status`: no public call reads the one or gives the two. The join answer of #336
-  decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
+  and `transport` in its line of the crate map. `Config` has no `clock::Reader`, and
+  `Error` has no `Unsynced` and no `Status`: no public call reads the one or gives the
+  two. The join answer of #336 decides, with its caller, where a join that no voter
+  stamps goes (MEMBER RECORD).
   Decided by `laptop.architect` (2026-10-07T22:33:29Z):
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
