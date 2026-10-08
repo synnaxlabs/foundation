@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use proptest::prelude::*;
+use spec::access::Action;
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use types::ed25519::{Pair, PrivateKey};
@@ -230,6 +231,32 @@ mod admit {
     }
 
     #[test]
+    fn admits_the_founding_admin() {
+        let tree = spec::founding::create(public(&pair(TEST_1)));
+        let rules = Rules::new([(types::name::Prefix::ROOT, &tree)]);
+        let hello = Hello {
+            subject: name("@admin"),
+            ..create_hello()
+        };
+
+        let admitted = admit(&rules, NOW, hello.clone()).unwrap();
+
+        assert_eq!(admitted.hello(), &hello);
+        let every = [
+            Action::Read,
+            Action::Write,
+            Action::Plan,
+            Action::Apply,
+            Action::Secret,
+            Action::Admin,
+        ];
+        for on in ["plant.pt_1", "@admin.@subject"] {
+            let grant = rules.grant(&hello.subject, &name(on));
+            assert_eq!(grant.actions(), every.into_iter().collect(), "{on}");
+        }
+    }
+
+    #[test]
     fn refuses_a_subject_that_the_spec_does_not_have() {
         let rules = rules(&[("ops.bob", &[public(&pair(TEST_1))])]);
 
@@ -409,7 +436,7 @@ mod admit {
     }
 
     #[test]
-    fn keeps_each_subject_of_each_region_tree_by_its_tree_key() {
+    fn keeps_each_subject_of_each_region_tree_by_its_label() {
         let key = public(&pair(TEST_1));
         let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
         let region: BTreeMap<Name, Definition> =
@@ -459,19 +486,178 @@ mod admit {
     }
 
     #[test]
-    fn refuses_a_subject_that_makes_no_subject_key() {
-        let reserved = name("ops.@subject");
-        let long = name(&"a".repeat(Name::MAX_BYTES));
-        for subject in [reserved, long] {
-            let hello = Hello {
-                subject: subject.clone(),
-                ..create_hello()
-            };
+    fn refuses_the_tree_key_of_a_listed_subject() {
+        let subject = name("ops.ana.@subject");
+        let hello = Hello {
+            subject: subject.clone(),
+            ..create_hello()
+        };
 
-            let error = admit(&listed(), NOW, hello).unwrap_err();
+        let error = admit(&listed(), NOW, hello).unwrap_err();
 
-            assert_eq!(error, Error::Unknown { subject });
+        assert_eq!(error, Error::Unknown { subject });
+    }
+}
+
+mod renew {
+    use super::*;
+
+    /// The golden hello with a new nonce and an expiry a minute later.
+    fn renewal() -> Hello {
+        Hello {
+            nonce: [0xb5; 16],
+            expires: EXPIRES + Span::MINUTE,
+            ..create_hello()
         }
+    }
+
+    /// Signs `hello` with `private`, renews [`admitted`] with it at `now`, and gives
+    /// the hello that the result holds.
+    fn renew(
+        rules: &Rules,
+        now: Option<Interval>,
+        private: &str,
+        hello: Hello,
+    ) -> Result<Hello, Error> {
+        let signature = sign(&pair(private), &super::hello(&hello));
+        rules
+            .renew(&admitted(), now, hello, &signature)
+            .map(|renewed| renewed.hello().clone())
+    }
+
+    #[test]
+    fn gives_the_renewal_in_place_of_the_hello() {
+        assert_eq!(renew(&listed(), NOW, TEST_1, renewal()), Ok(renewal()));
+    }
+
+    #[test]
+    fn refuses_a_renewal_that_changes_the_subject_key_via_or_connection() {
+        let rules = rules(&[
+            ("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))]),
+            ("ops.bob", &[public(&pair(TEST_1))]),
+        ]);
+        let subject = Hello {
+            subject: name("ops.bob"),
+            ..renewal()
+        };
+        let connection = Hello {
+            connection: connection::Key([0xc5; 16]),
+            ..renewal()
+        };
+        let key = Hello {
+            key: public(&pair(TEST_2)),
+            ..renewal()
+        };
+        let via = Hello {
+            via: node::Key::from_u128(7),
+            ..renewal()
+        };
+
+        let changed = |field| Err(Error::Changed { field });
+        assert_eq!(renew(&rules, NOW, TEST_1, subject), changed(Field::Subject));
+        assert_eq!(renew(&rules, NOW, TEST_2, key), changed(Field::Key));
+        assert_eq!(renew(&rules, NOW, TEST_1, via), changed(Field::Via));
+        assert_eq!(
+            renew(&rules, NOW, TEST_1, connection),
+            changed(Field::Connection)
+        );
+    }
+
+    /// A renewal that changes more than one field names the first in the order of
+    /// `Field`.
+    #[test]
+    fn names_the_first_field_that_changed() {
+        let rules =
+            rules(&[("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))])]);
+        let subject = Hello {
+            subject: name("ops.bob"),
+            key: public(&pair(TEST_2)),
+            ..renewal()
+        };
+        let key = Hello {
+            key: public(&pair(TEST_2)),
+            via: node::Key::from_u128(7),
+            connection: connection::Key([0xc5; 16]),
+            ..renewal()
+        };
+        let via = Hello {
+            via: node::Key::from_u128(7),
+            connection: connection::Key([0xc5; 16]),
+            ..renewal()
+        };
+
+        let changed = |field| Err(Error::Changed { field });
+        assert_eq!(renew(&rules, NOW, TEST_2, subject), changed(Field::Subject));
+        assert_eq!(renew(&rules, NOW, TEST_2, key), changed(Field::Key));
+        assert_eq!(renew(&rules, NOW, TEST_1, via), changed(Field::Via));
+    }
+
+    #[test]
+    fn checks_the_change_before_the_mesh_time() {
+        let changed = Hello {
+            subject: name("ops.bob"),
+            ..renewal()
+        };
+
+        assert_eq!(
+            renew(&listed(), None, TEST_1, changed),
+            Err(Error::Changed {
+                field: Field::Subject
+            })
+        );
+    }
+
+    #[test]
+    fn checks_a_renewal_as_a_first_hello() {
+        let late = Some(at(EXPIRES + Span::MINUTE));
+        let capped = Some(Interval {
+            earliest: EXPIRES - CAP,
+            latest: EXPIRES - CAP + Span::SECOND,
+        });
+
+        assert_eq!(
+            renew(&listed(), None, TEST_1, renewal()),
+            Err(Error::Unsynced)
+        );
+        assert_eq!(
+            renew(&listed(), NOW, TEST_2, renewal()),
+            Err(Error::Signature)
+        );
+        assert_eq!(
+            renew(&rules(&[]), NOW, TEST_1, renewal()),
+            Err(Error::Unknown {
+                subject: name("ops.ana")
+            })
+        );
+        assert_eq!(
+            renew(&listed(), late, TEST_1, renewal()),
+            Err(Error::Expired {
+                expires: EXPIRES + Span::MINUTE,
+                now: EXPIRES + Span::MINUTE,
+            })
+        );
+        assert_eq!(
+            renew(&listed(), capped, TEST_1, renewal()),
+            Err(Error::Capped {
+                expires: EXPIRES + Span::MINUTE,
+                cap: EXPIRES,
+            })
+        );
+    }
+
+    /// A spec that no longer lists the key refuses the renewal of a hello that it
+    /// admitted.
+    #[test]
+    fn refuses_a_renewal_once_the_spec_drops_the_key() {
+        let moved = rules(&[("ops.ana", &[public(&pair(TEST_2))])]);
+
+        assert_eq!(
+            renew(&moved, NOW, TEST_1, renewal()),
+            Err(Error::Unlisted {
+                subject: name("ops.ana"),
+                key: public(&pair(TEST_1)),
+            })
+        );
     }
 }
 
@@ -676,6 +862,27 @@ fn names_each_refusal_and_its_fix() {
     for (error, message, fix) in cases {
         assert_eq!(error.to_string(), message);
         assert_eq!(error.fix(), fix);
+    }
+}
+
+#[test]
+fn names_each_changed_field() {
+    let cases = [
+        (Field::Subject, "subject"),
+        (Field::Key, "key"),
+        (Field::Via, "`via` node"),
+        (Field::Connection, "connection"),
+    ];
+    for (field, text) in cases {
+        let error = Error::Changed { field };
+        assert_eq!(
+            error.to_string(),
+            format!("the renewal names another {text} than the hello it renews")
+        );
+        assert_eq!(
+            error.fix(),
+            "Renew with the subject, key, `via`, and connection of the hello it renews"
+        );
     }
 }
 

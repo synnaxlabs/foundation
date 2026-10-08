@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-use spec::definition::Kind;
 use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
@@ -22,24 +21,13 @@ const REQUEST_TAG: &[u8] = b"foundation/request/1";
 /// the 18 bytes `foundation/hello/1`, the length of the subject (1 byte), the
 /// subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
 /// UUID text), the connection (16), the nonce (16), and `expires` in nanoseconds (8).
-///
-/// # Panics
-///
-/// Never: a name is at most [`Name::MAX_BYTES`] (255) bytes.
+/// After the tag, these are the bytes of [`Hello::encode`].
 #[must_use]
 pub fn hello(hello: &Hello) -> Vec<u8> {
-    let subject = hello.subject.as_str().as_bytes();
-    let mut bytes = Vec::with_capacity(HELLO_TAG.len() + 1 + subject.len() + 88);
-    bytes.extend_from_slice(HELLO_TAG);
-    bytes.push(
-        u8::try_from(subject.len()).expect("invariant: a name is at most 255 bytes"),
-    );
-    bytes.extend_from_slice(subject);
-    bytes.extend_from_slice(&hello.key.to_bytes());
-    bytes.extend_from_slice(&hello.via.as_u128().to_le_bytes());
-    bytes.extend_from_slice(&hello.connection.0);
-    bytes.extend_from_slice(&hello.nonce);
-    bytes.extend_from_slice(&hello.expires.nanos().to_le_bytes());
+    let mut bytes = vec![0; HELLO_TAG.len() + hello.encoded_len()];
+    let (tag, fields) = bytes.split_at_mut(HELLO_TAG.len());
+    tag.copy_from_slice(HELLO_TAG);
+    hello.encode(fields);
     bytes
 }
 
@@ -114,6 +102,36 @@ impl Rules {
         Ok(Admitted { hello })
     }
 
+    /// Checks `hello`, signed with `signature`, which renews `admitted` on its
+    /// connection, as [`admit`](Self::admit) checks a first hello. Keep the result in
+    /// place of `admitted`.
+    ///
+    /// # Errors
+    ///
+    /// The first that applies, in order: [`Error::Changed`] when `hello` names another
+    /// value of a [`Field`] than `admitted`, then [`Error::Unsynced`],
+    /// [`Error::Unknown`], [`Error::Unlisted`], [`Error::Signature`],
+    /// [`Error::Expired`], [`Error::Capped`].
+    pub fn renew(
+        &self,
+        admitted: &Admitted,
+        now: Option<Interval>,
+        hello: Hello,
+        signature: &[u8; 64],
+    ) -> Result<Admitted, Error> {
+        let first = &admitted.hello;
+        let changed = [
+            (hello.subject != first.subject, Field::Subject),
+            (hello.key != first.key, Field::Key),
+            (hello.via != first.via, Field::Via),
+            (hello.connection != first.connection, Field::Connection),
+        ];
+        if let Some(&(_, field)) = changed.iter().find(|(differs, _)| *differs) {
+            return Err(Error::Changed { field });
+        }
+        self.admit(now, first.via, hello, signature)
+    }
+
     /// Checks that `body`, signed with `signature`, is a request of the connection of
     /// `admitted`, at mesh time `now`: its subject still lists its key, the hello has
     /// not expired, and the key signed [`request`] of the hello's connection and
@@ -140,16 +158,14 @@ impl Rules {
         live(hello, now)
     }
 
-    /// Refuses `hello` unless the spec lists its key for its subject. A subject that
-    /// makes no tree key has no definition.
+    /// Refuses `hello` unless the spec lists its key for its subject.
     fn listed(&self, hello: &Hello) -> Result<(), Error> {
-        let subject = Kind::Subject
-            .key(hello.subject.as_str())
-            .ok()
-            .and_then(|key| self.subjects.get(&key))
-            .ok_or_else(|| Error::Unknown {
-                subject: hello.subject.clone(),
-            })?;
+        let subject =
+            self.subjects
+                .get(&hello.subject)
+                .ok_or_else(|| Error::Unknown {
+                    subject: hello.subject.clone(),
+                })?;
         subject
             .keys()
             .binary_search(&hello.key)
@@ -213,6 +229,36 @@ pub enum Error {
         /// The latest expiry that the node takes: [`CAP`] past the earliest mesh time.
         cap: Stamp,
     },
+    /// A renewal names another value of `field` than the hello it renews: the first
+    /// that differs, in the order of [`Field`].
+    Changed {
+        /// The field.
+        field: Field,
+    },
+}
+
+/// A field of a hello that a renewal must keep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    /// The subject.
+    Subject,
+    /// The key.
+    Key,
+    /// The node that the hello names as `via`.
+    Via,
+    /// The connection.
+    Connection,
+}
+
+impl fmt::Display for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Subject => "subject",
+            Self::Key => "key",
+            Self::Via => "`via` node",
+            Self::Connection => "connection",
+        })
+    }
 }
 
 impl Error {
@@ -231,6 +277,10 @@ impl Error {
             Self::Via { .. } => "Name the node that the program connects to as `via`",
             Self::Expired { .. } => "Send a new hello with a later expiry",
             Self::Capped { .. } => "Send a hello that expires within 15 minutes",
+            Self::Changed { .. } => {
+                "Renew with the subject, key, `via`, and connection of the hello it \
+                 renews"
+            }
         }
     }
 }
@@ -255,6 +305,12 @@ impl fmt::Display for Error {
             ),
             Self::Capped { expires, cap } => {
                 write!(f, "the hello expires at {expires}, after the cap {cap}")
+            }
+            Self::Changed { field } => {
+                write!(
+                    f,
+                    "the renewal names another {field} than the hello it renews"
+                )
             }
         }
     }

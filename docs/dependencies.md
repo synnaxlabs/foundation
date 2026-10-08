@@ -20,6 +20,7 @@ approval; pin the version you build against there.
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `crc32c` | `buffer`, the `buffer_open` fuzz target | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
 | `bytes` | `transport`, `connector` (`http`), `connector-influx` (feature `sim`) | The buffer type of `noq-proto`'s stream and datagram calls (#55), and of the body of each `connector` HTTP request and response, as `hyper` takes it (R7), also in the simulated HTTP servers | MIT | 1.12.1 | 2026-10-04 |
+| `base64ct` | `config` | Strict, constant-time base64 of the OpenSSH public key of a subject (#1755). No dependencies, default features only. The person, 2026-10-08T03:54:15Z, through laptop.monitor: "yes" (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051829870) | Apache-2.0 or MIT | 1.8.3 | 2026-10-08 |
 | `clap` | `ops` | The command line, generated from the operation table (C7, r7 area 8) | MIT or Apache-2.0 | 4.6.7 | 2026-10-05 |
 | `schemars` | `ops` | JSON Schemas of operation inputs for MCP tools (C7, r7 area 8) | MIT | 1.2.2 | 2026-10-05 |
 | `serde` | `ops` | Typed operation input and output for `--json` and MCP | MIT or Apache-2.0 | 1.0.229 | 2026-10-05 |

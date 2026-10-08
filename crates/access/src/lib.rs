@@ -6,7 +6,7 @@
 pub mod proof;
 
 use spec::access::{Action, Actions, Policy};
-use spec::definition::Definition;
+use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use types::authority::Authority;
 use types::hash::{Map, Set};
@@ -46,7 +46,9 @@ impl Rules {
                         rules.connectors.insert(name.clone());
                     }
                     Definition::Subject(subject) => {
-                        rules.subjects.insert(name.clone(), subject.clone());
+                        if let Some(label) = Kind::Subject.label(name) {
+                            rules.subjects.insert(label, subject.clone());
+                        }
                     }
                     Definition::Region(_)
                     | Definition::NodeSettings(_)

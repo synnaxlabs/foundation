@@ -16,17 +16,8 @@ impl Kind {
     /// The first that applies: [`Error::Long`] when the key would hold more than
     /// [`Name::MAX_BYTES`], [`Error::Name`] when `label` is not a name, and
     /// [`Error::Reserved`] when a segment of `label` starts with `@`.
-    #[expect(
-        clippy::missing_panics_doc,
-        clippy::unwrap_in_result,
-        reason = "a checked label and a kind segment always make a name"
-    )]
     pub fn key(self, label: &str) -> Result<Name, Error> {
-        let segment = match self {
-            Self::Connector | Self::Channel => None,
-            _ => Some(self.as_str()),
-        };
-        let most = segment.map_or(Name::MAX_BYTES, |segment| {
+        let most = self.segment().map_or(Name::MAX_BYTES, |segment| {
             Name::MAX_BYTES - segment.len() - 2
         });
         if label.len() > most {
@@ -36,29 +27,46 @@ impl Kind {
         if label.reserved() {
             return Err(Error::Reserved);
         }
-        Ok(match segment {
+        Ok(self.join(label))
+    }
+
+    /// The tree key of a definition of this kind with the label `label`, reserved or
+    /// not. Panics when the key would hold more than [`Name::MAX_BYTES`].
+    pub(crate) fn join(self, label: Name) -> Name {
+        match self.segment() {
             None => label,
-            Some(segment) => format!("{label}.@{segment}").parse().expect(
-                "a short label that is not reserved and a kind segment make a name",
-            ),
-        })
+            Some(segment) => format!("{label}.@{segment}")
+                .parse()
+                .expect("invariant: a short label and a kind segment make a name"),
+        }
     }
 
     /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
-    /// when it does not. Only the label of a subject or an access policy, the kinds
-    /// of the founding definitions, can be reserved, which [`Kind::key`] refuses.
-    pub(crate) fn label(self, key: &Name) -> Option<Name> {
-        let label: Name = match self {
-            Self::Connector | Self::Channel => key.clone(),
-            _ => key
+    /// when it does not. Only a subject or an access policy can have a reserved label:
+    /// Foundation makes those ([`crate::founding::create`]), and [`Kind::key`] refuses
+    /// them, so no file holds a definition whose label is reserved.
+    #[must_use]
+    pub fn label(self, key: &Name) -> Option<Name> {
+        let label: Name = match self.segment() {
+            None => key.clone(),
+            Some(segment) => key
                 .as_str()
-                .strip_suffix(self.as_str())?
+                .strip_suffix(segment)?
                 .strip_suffix(".@")?
                 .parse()
                 .ok()?,
         };
         let founding = matches!(self, Self::Subject | Self::Access);
         (founding || !label.reserved()).then_some(label)
+    }
+
+    /// The segment of the kind in its tree key, or `None` for a connector or a channel,
+    /// which is at its own name.
+    const fn segment(self) -> Option<&'static str> {
+        match self {
+            Self::Connector | Self::Channel => None,
+            _ => Some(self.as_str()),
+        }
     }
 
     /// The name of the kind, such as `node_settings`: the keyword a file format names
