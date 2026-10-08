@@ -299,6 +299,13 @@ state on `main`.
 
 - Each protocol parser reads bytes from a device. A connector reaches the core only
   through `hub`. Not built. Each parser gets a fuzz target when it lands.
+- `connector-opcua` decodes OPC UA with the C code of open62541. Fuzzed:
+  `connector_opcua_decode`. Its chunk processing is not fuzzed yet (#1990).
+- The random generator of the open62541 copy is PCG32
+  (`UA_ENABLE_DETERMINISTIC_RNG`), which a peer can predict. So no nonce, key, or
+  session token may come from `UA_UInt32_random` or `UA_Guid_random`. A security
+  policy that encrypts, and an OPC UA server of Foundation, are not built. Each takes
+  its nonces and tokens from aws-lc.
 
 ### Encoded series
 
@@ -386,6 +393,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
+| `connector_opcua_decode` | `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Build the C code with `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`, or libFuzzer sees none of it |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -405,8 +413,8 @@ not reached from the corpus:
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), each connector's protocol parser, the OPC UA binary
-decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
+`mesh::log::sequence`, #1746), each connector's protocol parser, the chunk processing
+of open62541 (`ua_securechannel.c`, #1990), and `connector::reader::read`,
 `connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
 reaches only from an input with a `connector` block of kind `influx`, and no input holds
 one yet (#1817).
