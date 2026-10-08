@@ -300,6 +300,17 @@ const OUTSIDE: [&str; 34] = [
     "syslog",
 ];
 
+/// At `UA_MULTITHREADING` 0 the copy takes no lock and calls no atomic, so the symbol
+/// tests fail on each such name only while the list holds none.
+#[test]
+fn the_list_holds_no_lock_and_no_atomic() {
+    let held: Vec<_> = OUTSIDE
+        .iter()
+        .filter(|name| name.starts_with("pthread_") || name.starts_with("__aarch64_"))
+        .collect();
+    assert!(held.is_empty(), "{held:?}");
+}
+
 /// The symbols that `nm` with `flag` gives for `files`.
 fn names(
     files: &[std::path::PathBuf],
@@ -339,11 +350,6 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     let outside: Vec<&str> =
         undefined.difference(&defined).map(String::as_str).collect();
     assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
-    // At `UA_MULTITHREADING` 0 the copy takes no lock.
-    assert!(
-        !outside.iter().any(|name| name.starts_with("pthread_mutex")),
-        "{outside:?}"
-    );
     let unlisted: Vec<&str> = outside
         .into_iter()
         .filter(|name| !OUTSIDE.contains(name))
@@ -417,11 +423,6 @@ fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
     let undefined = names(&objects, "--undefined-only");
     assert!(
         undefined.contains("connector_opcua_malloc"),
-        "{undefined:?}"
-    );
-    // At `UA_MULTITHREADING` 0 the copy calls no atomic.
-    assert!(
-        !undefined.iter().any(|name| name.starts_with("__aarch64_")),
         "{undefined:?}"
     );
     let unlisted: Vec<String> = undefined
