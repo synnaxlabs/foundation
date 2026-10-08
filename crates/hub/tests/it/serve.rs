@@ -722,11 +722,14 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
     });
 }
 
-/// A text series longer than `PEER_MESSAGE` whose length is not a multiple of 8: the
-/// cut falls inside it, and its zeros go in the second message.
+/// A text series that encodes to more than `PEER_MESSAGE` bytes, not a multiple of 8:
+/// the cut falls inside it, and its zeros go in the second message.
 #[test]
 fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
-    let raw = [&1497_u32.to_le_bytes()[..], &[b'x'; 1497]].concat();
+    let text: Vec<_> = (0..2001_u32)
+        .map(|i| b' ' + u8::try_from((i * 37 + i * i) % 95).expect("fits"))
+        .collect();
+    let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
     let written = raw.clone();
     let home = |test: Test, incoming| async move {
         test.hub.define(Channel {
@@ -762,6 +765,7 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
         let got = got(&mut peer, &mut reader).await.expect("a frame");
         assert_eq!(places(&got), [0, 1, 2]);
         let end = usize::try_from(got.ends[0].1).expect("fits");
+        assert!(end > PEER_MESSAGE);
         assert_ne!(end % 8, 0);
         assert!(
             got.body[end..end.next_multiple_of(8)]
