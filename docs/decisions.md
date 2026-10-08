@@ -1585,7 +1585,12 @@ How to read this record:
   100k series took 3.9 to 6.0 ms, not 1.6 to 1.7 ms). The architect accepted the cost of
   the dense walk against 1e658b7a, up to the head numbers of #1695 (laptop.architect,
   2026-10-08T01:36:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050376022).
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050376022). The cut
+  counts only the series at the places, and is 8. Lost: a count of each series of the
+  frame (`outside_lay` 56 to 69 µs, not 0.1 µs), and a cut of 16 (a frame just over it
+  cost 148 to 255 µs more than one just under). The architect also accepted
+  `narrow_lay` at +3 to +4 ns per frame (laptop.architect, 2026-10-08T02:33:03Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050982066).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every
