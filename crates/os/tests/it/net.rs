@@ -289,7 +289,7 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
 }
 
 /// Linux takes the FIN before the RST: the read gives 0, and a write gives the reset.
-/// macOS gives the reset on the read.
+/// macOS takes both from a queue, so its read gives the reset or 0.
 #[test]
 fn a_drop_with_unread_bytes_after_close_resets_the_peer() {
     on_thread("net-unread", || async {
@@ -302,8 +302,7 @@ fn a_drop_with_unread_bytes_after_close_resets_the_peer() {
         drop(client);
         let reset = Err(Error::Reset { remote });
         let outcome = read(&mut server, &mut [0; 8]).await;
-        if cfg!(target_os = "macos") {
-            assert_eq!(outcome, reset);
+        if cfg!(target_os = "macos") && outcome == reset {
             return;
         }
         assert_eq!(outcome, Ok(0));
