@@ -2127,6 +2127,7 @@ mod tests {
         #[test]
         fn refuses_a_block_inside_a_channel() {
             assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
+            assert_inner_blocks_refused("channel", &[("kind", string("stream"))]);
             assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
         }
 

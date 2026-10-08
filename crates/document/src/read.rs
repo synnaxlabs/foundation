@@ -1209,7 +1209,8 @@ mod tests {
             let body = body(&[(1, "keep")], &[]);
             let read =
                 required(&body, "the block", at(0), "keep", read::span, "Add".into());
-            assert_eq!(read.unwrap_err().code, Code::new("document.bad-span"));
+            let value = &body.attributes.get("keep").unwrap().value;
+            assert_eq!(read, Err(read::span(value).unwrap_err()));
         }
 
         #[test]
