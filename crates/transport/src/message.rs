@@ -930,6 +930,7 @@ mod tests {
             assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Room(5)));
             reader.admit();
             assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Pending));
+            // Private: no call shows the heap that the reader keeps.
             assert_eq!(reader.held(), (Some((1, 5)), 0));
             source.open = false;
             assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
