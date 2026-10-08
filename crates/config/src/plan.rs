@@ -493,7 +493,8 @@ enum Fix<'a> {
         owners: Vec<&'a Name>,
         node: &'a Name,
     },
-    /// Name `node` as the `home` of the placement that wins.
+    /// Name `node` as the `home` of the placement that wins, and keep `node` out of its
+    /// `standby` and `copies`.
     Home { node: &'a Name },
     /// Make `placement` win for the connector and its indexes.
     Win { placement: &'a Name },
