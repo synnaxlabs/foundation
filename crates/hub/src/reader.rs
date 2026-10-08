@@ -213,12 +213,12 @@ impl Reader {
         match crate::carry(state, index).await {
             Ok(()) => {}
             Err(Away::Remote(home, homes)) => {
-                let mut data = Vec::with_capacity(keys.len());
-                for (key, data_type) in keys {
-                    if key != index && !data.iter().any(|&(held, _)| held == key) {
-                        data.push((key, data_type));
-                    }
-                }
+                let mut held = types::hash::Set::default();
+                held.insert(index);
+                let data: Vec<_> = keys
+                    .into_iter()
+                    .filter(|&(key, _)| held.insert(key))
+                    .collect();
                 let group = Group { index, data: &data };
                 let set = state.borrow_mut().interner.intern(&[group]);
                 let remote = Remote::open(state, &homes, home, set, mode).await?;
