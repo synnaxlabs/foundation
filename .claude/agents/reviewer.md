@@ -29,10 +29,10 @@ Name each answer that defers work or decides what a ruling means, with its issue
 each link to the architect that step 3 asks for. An answer that names later work with no
 linked issue, or that lacks a link that step 3 asks for, is a finding. Read each such
 link, and each approval that a `Public surface:` line of an earlier round links (not the
-link of a `departs from` item): one that does not name the item, or whose approved SHA
-comes before a commit that changes the item's surface or the meaning of a ruling
-(`.claude/skills/architect/SKILL.md`, "Review before the person" step 3), counts as
-missing, which is a finding. Take each decision or public doc that the PR adds or
+ruling link that follows `departs from`): one that does not name the item, or whose
+approved SHA comes before a commit that changes the item's surface or the meaning of a
+ruling (`.claude/skills/architect/SKILL.md`, "Review before the person" step 3), counts
+as missing, which is a finding. Take each decision or public doc that the PR adds or
 changes and that states what a crate does, when that crate, the crate whose section or
 doc holds the text, and the crates that the PR changes are not all on one architect's
 list (`docs/factory.md`, "Architects"). One with no link on the PR to the approval of
