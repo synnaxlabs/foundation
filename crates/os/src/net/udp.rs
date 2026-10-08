@@ -260,13 +260,10 @@ fn send_all(
     let Some(segment) = segment else {
         return sent(send(&datagram(contents, None)), remote);
     };
-    // When the kernel or the card cannot segment, `noq-udp` turns GSO off for the
-    // socket, and each datagram goes out alone.
+    // When the kernel or the card cannot segment, `noq-udp` sends the batch a
+    // datagram at a time and turns GSO off for the socket.
     if bound.state.max_gso_segments().get() > 1 {
-        match send(&datagram(contents, Some(segment))) {
-            Err(_) if bound.state.max_gso_segments().get() == 1 => {}
-            outcome => return sent(outcome, remote),
-        }
+        return sent(send(&datagram(contents, Some(segment))), remote);
     }
     for contents in contents.chunks(segment) {
         ready!(sent(send(&datagram(contents, None)), remote))?;
@@ -523,9 +520,7 @@ mod tests {
         #[derive(Clone, Copy)]
         enum Outcome {
             Fails(Errno),
-            /// `noq-udp` refuses a batch with `EINVAL` from the OS, which turns GSO
-            /// off for the socket.
-            Refused,
+            Sent,
         }
 
         /// The contents and segment size of each send, with the outcomes to give.
@@ -542,26 +537,21 @@ mod tests {
                 }
             }
 
-            fn send(
-                &mut self,
-                bound: &Bound,
-                datagram: &noq_udp::Transmit<'_>,
-            ) -> io::Result<()> {
+            fn send(&mut self, datagram: &noq_udp::Transmit<'_>) -> io::Result<()> {
                 let send = (datagram.contents.to_vec(), datagram.segment_size);
                 self.sends.push(send);
                 match self.outcomes.pop() {
                     Some(Outcome::Fails(code)) => {
                         Err(io::Error::from_raw_os_error(code.raw_os_error()))
                     }
-                    Some(Outcome::Refused) => refuse(bound),
-                    None => Ok(()),
+                    Some(Outcome::Sent) | None => Ok(()),
                 }
             }
         }
 
-        /// Sends a batch that Linux refuses with `EINVAL`: more than 64 or 128
-        /// segments.
-        fn refuse(bound: &Bound) -> io::Result<()> {
+        /// Sends a batch of more than 64 or 128 segments, which Linux refuses with
+        /// `EINVAL`. Its first datagram goes out alone, so `noq-udp` turns GSO off.
+        fn turn_gso_off(bound: &Bound) {
             let refused = noq_udp::Transmit {
                 destination: bound.local,
                 ecn: None,
@@ -570,8 +560,8 @@ mod tests {
                 src_ip: None,
             };
             let sent = bound.state.try_send((&bound.socket).into(), &refused);
-            assert_eq!(sent.as_ref().map_err(errno), Err(Errno::INVAL));
-            sent
+            assert_eq!(sent.map_err(|e| errno(&e)), Ok(()));
+            assert_eq!(bound.state.max_gso_segments().get(), 1);
         }
 
         fn batch(contents: &[u8], segment: usize) -> Transmit<'_> {
@@ -586,7 +576,7 @@ mod tests {
             transmit: &Transmit<'_>,
             recorded: &mut Recorded,
         ) -> Poll<Result<(), Error>> {
-            send_all(&udp.bound, transmit, |d| recorded.send(&udp.bound, d))
+            send_all(&udp.bound, transmit, |d| recorded.send(d))
         }
 
         #[test]
@@ -616,22 +606,6 @@ mod tests {
 
         #[test]
         #[cfg(target_os = "linux")]
-        fn sends_each_datagram_alone_when_the_os_refuses_a_batch() {
-            let mut recorded = Recorded::new(&[Outcome::Refused]);
-            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
-            assert_eq!(sent, Poll::Ready(Ok(())));
-            let alone = |bytes: &[u8]| (bytes.to_vec(), None);
-            let expected = [
-                (b"abcde".to_vec(), Some(2)),
-                alone(b"ab"),
-                alone(b"cd"),
-                alone(b"e"),
-            ];
-            assert_eq!(recorded.sends, expected);
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
         fn gives_a_failure_of_a_batch_that_leaves_gso_on() {
             let failed = Outcome::Fails(Errno::INVAL);
             let mut recorded = Recorded::new(&[failed]);
@@ -643,9 +617,26 @@ mod tests {
 
         #[test]
         #[cfg(target_os = "linux")]
+        fn a_refused_transmit_in_segments_of_0_bytes_leaves_gso_on() {
+            let udp = loopback();
+            let bound = &udp.bound;
+            let refused = noq_udp::Transmit {
+                destination: SocketAddr::new(bound.local.ip(), 0),
+                ecn: None,
+                contents: b"abc",
+                segment_size: Some(0),
+                src_ip: None,
+            };
+            let sent = bound.state.try_send((&bound.socket).into(), &refused);
+            assert_eq!(sent.map_err(|e| errno(&e)), Err(Errno::INVAL));
+            assert!(bound.state.max_gso_segments().get() > 1);
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
         fn sends_each_datagram_alone_after_the_os_refused_a_batch() {
             let udp = loopback();
-            assert!(refuse(&udp.bound).is_err());
+            turn_gso_off(&udp.bound);
             let mut recorded = Recorded::new(&[]);
             let sent = run(&udp, &batch(b"abc", 2), &mut recorded);
             assert_eq!(sent, Poll::Ready(Ok(())));
@@ -665,9 +656,11 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn stops_at_a_failure_of_one_datagram() {
-            let outcomes = [Outcome::Refused, Outcome::Fails(Errno::NETUNREACH)];
+            let udp = loopback();
+            turn_gso_off(&udp.bound);
+            let outcomes = [Outcome::Sent, Outcome::Fails(Errno::NETUNREACH)];
             let mut recorded = Recorded::new(&outcomes);
-            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
+            let sent = run(&udp, &batch(b"abcde", 2), &mut recorded);
             let remote = v4(2);
             assert_eq!(sent, Poll::Ready(Err(Error::Unreachable { remote })));
             assert_eq!(recorded.sends.len(), 2);
