@@ -7,6 +7,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 use env::net::{Ecn, Error, Net};
@@ -18,6 +19,8 @@ use super::{
     runtime_with_no_io,
 };
 
+/// How long a receive waits before it takes that no more datagrams come.
+const SILENCE: Duration = Duration::from_millis(100);
 /// The largest datagram these tests receive.
 const DATAGRAM_BYTES_MAX: usize = 2048;
 
@@ -353,6 +356,96 @@ fn a_v6_socket_on_a_specific_address_cannot_reach_ipv4() {
                 Err(Error::Unreachable { remote })
             );
         }
+    });
+}
+
+/// ENV SEAMS: `os` gives the kernel's answer for a source that is not local or is of
+/// the other family, and for port 0.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
+    on_thread("udp-bad-source", || async {
+        let net = net();
+        let v4 = SocketAddr::new(LOCALHOST.into(), 0);
+        let any_v6 = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let to_v4 = SocketAddr::new(LOCALHOST.into(), 9);
+        let to_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9);
+        let far_v4 = IpAddr::from([192, 0, 2, 1]);
+        let far_v6 = IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+        let invalid = Err(Error::Io { code: 22 });
+        let cases = [
+            (
+                v4,
+                Some(far_v4),
+                to_v4,
+                Err(Error::Unreachable { remote: to_v4 }),
+            ),
+            (
+                v4,
+                None,
+                SocketAddr::new(LOCALHOST.into(), 0),
+                invalid.clone(),
+            ),
+            (any_v6, Some(far_v6), to_v6, invalid.clone()),
+            (
+                any_v6,
+                Some(far_v4),
+                to_v4,
+                Err(Error::Unreachable { remote: to_v4 }),
+            ),
+            (
+                any_v6,
+                Some(Ipv6Addr::LOCALHOST.into()),
+                to_v4,
+                invalid.clone(),
+            ),
+            (any_v6, Some(LOCALHOST.into()), to_v6, invalid.clone()),
+            (
+                any_v6,
+                None,
+                SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0),
+                invalid.clone(),
+            ),
+        ];
+        for (local, source, destination, expected) in cases {
+            let (mut sender, _) = bind(&net, local);
+            let to = Transmit {
+                source,
+                ..transmit(destination, b"x")
+            };
+            assert_eq!(
+                send(&mut sender, &to).await,
+                expected,
+                "a socket on {local}, source {source:?}, to {destination}"
+            );
+        }
+    });
+}
+
+/// The OS drops each datagram that the receive buffer has no room for. A receiver
+/// with the default buffer of Linux holds about 90 of these.
+#[test]
+fn a_small_receive_buffer_holds_few_datagrams() {
+    on_thread("udp-buffer", || async {
+        let net = net();
+        let config = udp::Config {
+            recv_buffer_bytes: 1 << 12,
+            ..config(SocketAddr::new(LOCALHOST.into(), 0))
+        };
+        let (_, mut receiver) = net.udp(&config).expect("the address is free");
+        let (mut sender, _) = loopback(&net);
+        let to = transmit(receiver.local(), &[7; 1_000]);
+        for _ in 0..200 {
+            assert_eq!(send(&mut sender, &to).await, Ok(()));
+        }
+        let mut held = 0;
+        while let Ok(datagrams) = timeout(SILENCE, receive(&mut receiver, 1)).await {
+            held += datagrams.len();
+        }
+        assert!(
+            (1..20).contains(&held),
+            "the receiver held {held} datagrams"
+        );
     });
 }
 
