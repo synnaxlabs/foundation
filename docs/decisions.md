@@ -3559,6 +3559,18 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931,
   2026-10-08 05:03 UTC). Supersedes the `Host` and `Port` fields and messages of
   https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253.
+- **OPEN62541 SOURCE (#435)** We copy the upstream source files of open62541 unchanged,
+  not the amalgamation: the amalgamation adds the POSIX clock and event loop even with
+  `UA_ARCHITECTURE=none`. `cargo xtask open62541 <tag>` builds the tag with our CMake
+  options and copies each `.c` file that the build compiles and each header it
+  includes. The 3 global clock functions give a fixed time. So the task fails on a call
+  of one from a (file, enclosing function) pair outside its closed list, and on a
+  listed pair with no call; a list per file would pass a new call in a listed file. It
+  finds each call by relocation in objects built with no inlining, no folding of
+  identical functions, and no LTO. Lost: a text search of the C source, which a macro
+  can fool. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
+  2026-10-08 02:27 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
