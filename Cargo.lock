@@ -842,6 +842,7 @@ dependencies = [
  "env",
  "home",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",

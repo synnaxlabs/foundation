@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# `os::net()`, until the UDP and resolve drivers land (#119, #1095).
+# `os::net()`, until the UDP driver lands (#119).
 net = []
 
 [dependencies]
