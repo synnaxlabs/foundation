@@ -159,3 +159,11 @@
   allocation test a client on the loop. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
   2026-10-08 19:05 UTC).
+  The logger of the loop writes each message of level warning and up to fd 2: it
+  formats the line into a stack buffer of 512 bytes with `mp_vsnprintf` and sends it
+  in one `write`, so a line allocates nothing, takes no `stdio` lock, and does not mix
+  with a line of another thread. A longer line is cut, not dropped. Trigger: when
+  `node` has a log, the loop takes its sink from its caller. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068103327,
+  2026-10-08 20:07 UTC).

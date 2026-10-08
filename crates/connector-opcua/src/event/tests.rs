@@ -518,12 +518,15 @@ fn a_warning_goes_to_stderr_and_an_info_message_does_not() {
 }
 
 #[test]
-fn a_long_message_is_cut_to_511_bytes() {
+fn a_long_line_is_cut_to_512_bytes_with_its_newline() {
     let output = child("event::tests::connect_to_a_long_url");
     assert!(output.status.success());
-    let message = format!("Endpoint URL is invalid: {}", long().to_str().unwrap());
+    let line = format!(
+        "connector-opcua: open62541 warning: Endpoint URL is invalid: {}",
+        long().to_str().unwrap()
+    );
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        format!("connector-opcua: open62541 warning: {}\n", &message[..511])
+        format!("{}\n", &line[..511])
     );
 }
