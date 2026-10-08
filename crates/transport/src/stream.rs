@@ -897,6 +897,56 @@ mod tests {
     }
 
     #[test]
+    fn a_send_cut_by_the_window_and_dropped_gives_back_its_block() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                // The peer accepts the stream only once a byte of it arrives.
+                side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+                let body = vec![7; 60_000];
+                let mut sent = 0;
+                let at = loop {
+                    let block = side.block(&body);
+                    let at = block.as_ptr();
+                    match poll_once(pin!(sender.send(block))).await {
+                        Some(done) => done.expect("sent"),
+                        None => break at,
+                    }
+                    sent += 1;
+                };
+                assert!((1..=17).contains(&sent), "{sent}");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                // The sender lives, so only the reset can have dropped the block.
+                let mut held = Vec::new();
+                let found = loop {
+                    let Ok(next) = side.pool.alloc(body.len()) else {
+                        break false;
+                    };
+                    if next.as_ptr() == at {
+                        break true;
+                    }
+                    held.push(next);
+                };
+                assert!(found, "the reset drops the block that the window cut");
+                drop((held, sender));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                assert_eq!(until_error(&mut incoming.receiver).await, CANCELLED);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_send_future_dropped_before_its_first_poll_sends_nothing() {
         let (mut sim, ..) = testing::sessions(
             0,
