@@ -1,0 +1,7 @@
+-DUA_DYNAMIC_LINKING_EXPORT
+-Ideps
+-Iinclude
+-Iplugins/include
+-Isrc_generated
+-std=c99
+-DNDEBUG
