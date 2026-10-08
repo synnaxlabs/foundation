@@ -267,8 +267,8 @@ fn connectors<'f>(
                     label(placement)
                 ),
                 format!(
-                    "Name `{node}` as the `home`, or leave out `home`, and keep \
-                     `{node}` out of `standby` and `copies`"
+                    "Name `{node}` as the `home`, and keep `{node}` out of `standby` \
+                     and `copies`"
                 ),
             )),
             Ok(_) => {}
