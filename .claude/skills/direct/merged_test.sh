@@ -1,9 +1,9 @@
 #!/bin/sh
 # Runs merged.sh against fixed answers. A stub `gh` prints `$STUB/<n>` on its call <n>,
 # and writes its arguments, one to a line, to `$STUB/args.<n>`. A stub `date` gives a
-# fixed UTC time. A stub `sleep` returns at once, and stops the script when no answer is
-# left. It keeps its files in a new folder from `mktemp -d`, which it removes at exit.
-# Exit 1 on a failure.
+# later UTC time on each call. A stub `sleep` returns at once, and stops the script when
+# no answer is left. It keeps its files in a new folder from `mktemp -d`, which it
+# removes at exit. Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
@@ -23,7 +23,10 @@ cat > "$tmp/bin/sleep" <<'STUB'
 STUB
 cat > "$tmp/bin/date" <<'STUB'
 #!/bin/sh
-[ "$*" = '-u +%Y-%m-%dT%H:%M:%SZ' ] && echo 2026-01-02T03:04:05Z
+[ "$*" = '-u +%Y-%m-%dT%H:%M:%SZ' ] || exit 1
+n=$(($(cat "$STUB/dates" 2>/dev/null || echo 0) + 1))
+echo "$n" > "$STUB/dates"
+echo "2026-01-02T03:04:0${n}Z"
 STUB
 chmod +x "$tmp/bin/gh" "$tmp/bin/sleep" "$tmp/bin/date"
 failed=0
@@ -59,9 +62,10 @@ mkdir "$tmp/first"
 echo '#5 +1 -1 First' > "$tmp/first/2"
 check first '#5 +1 -1 First'
 
-# Each call lists the PRs merged into main since the start, most recently updated first.
+# Each call lists the PRs merged into main since the one start time, most recently
+# updated first.
 for n in 1 2; do
-  grep -q -x -F 'base:main merged:>=2026-01-02T03:04:05Z sort:updated-desc' \
+  grep -q -x -F 'base:main merged:>=2026-01-02T03:04:01Z sort:updated-desc' \
     "$tmp/first/args.$n" && continue
   printf 'FAIL search: call %s\n' "$n"
   cat "$tmp/first/args.$n"
