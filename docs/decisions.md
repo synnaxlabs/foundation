@@ -1023,8 +1023,9 @@ How to read this record:
   in one call see the same time, and a lease never compares readings of two clocks
   (approved by the coordinator on 2026-10-06, #964). Before the node first has mesh
   time, it opens no writer, with `writer::Error::Unsynced`. A write needs an open
-  writer, so it never meets that case. A reader opens with no mesh time: its open and
-  its close take no stamp (#1024; decided by the architect, #963). This is a patch: #523
+  writer, so it never meets that case. An unnamed reader opens with no mesh time: its
+  open and its close take no stamp (#1024; decided by the architect, #963). A named
+  reader needs mesh time (HOME NAMED READERS). This is a patch: #523
   decides where samples wait before the first estimate (CLOCK PEER ANSWER), and removes
   or keeps `Unsynced`. Lost: time as arguments of each call, because each caller repeats
   the same two reads and can pass an old one. Approved by the coordinator on 2026-10-05
@@ -1034,16 +1035,23 @@ How to read this record:
   (OS CLOCK BOUND) it is 36500 days ahead, so the ahead limit stops nothing and one bad
   stamp makes each later true stamp `Backwards` (#952 review, 2026-10-06).
 - **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
-  `codec`, and `home` items, apart from two. `Config`, which only `node` builds, names
+  `codec`, and `home` items, apart from three. `Config`, which only `node` builds, names
   `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
   shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool,
   so `hub` takes no pool of its own and the two cannot differ (architect,
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051). `Config`
-  takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
-  for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
-  the caller gives it with no entry that waits for a commit. The condition is stated,
-  not checked: `node` appends nothing before `Shard::new`, and `Config` takes the
-  buffer by value, so no later append can come from outside (architect,
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
+  `home::reader` re-exports the `delivery` values that the surface names: `Next`,
+  `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
+  2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
+  Supersedes the clause "apart from `Config`" of
+  https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116, which the
+  `Shard::pool` ruling above made two. `Config` takes no pool: the shard uses
+  `Buffer::pool()`. It takes one `clock: clock::Reader` for monotonic and mesh time. The
+  shard is the only writer of the buffer in `Config`: the caller gives it with no entry
+  that waits for a commit. The condition is stated, not checked: `node` appends nothing
+  before `Shard::new`, and `Config` takes the buffer by value, so no later append can
+  come from outside (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6033691871; lost: a
   check in `Shard::new`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
   PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
@@ -1078,6 +1086,27 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861). The
   surface was approved by `laptop.architect` (2026-10-08T07:01:09Z:
   https://github.com/synnaxlabs/foundation/pull/1824#issuecomment-6054411394).
+- **HOME NAMED READERS (#1742, #1851)** `Shard::open_named_complete` and
+  `open_named_latest` open a reader by its `reader::named::Key`, and `Shard::ack` moves
+  the position of a named complete reader. Before the node first has mesh time, a named
+  open gives `reader::Unsynced`, because a hold ends at a mesh time stamp. A named
+  complete reader opens at its last ack within its hold, else at the live tail, and
+  ends `Behind` when its position is below the frames that memory keeps. Until #274
+  reads from disk, it stays `Behind` at each open within its hold. Its close starts
+  its hold. A hold that ended goes at the next named complete open of its index, until
+  #274 ends it at `Readers::deadline`. An open of the same key takes the old session
+  over, and `reader::Opened::replaced` names it. `home::reader` re-exports
+  `delivery::{Error, Position, named}`, so `hub` does not depend on `delivery`
+  (`laptop.architect`, 2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
+  `home` drops the position records of `delivery` until #274 appends them to the index
+  log, so a reopen after a restart starts at the live tail. Lost: one open that takes a
+  `delivery::Reader`, because only a named open can fail. Decided by `laptop.architect`
+  (2026-10-08T10:01:19Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). The
+  subject in the key and the order of the PRs: `laptop.architect`
+  (2026-10-08T10:15:04Z:
+  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053).
 - **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
@@ -5067,7 +5096,14 @@ How to read this record:
   a layer-2 item only through `hub` (X44), so it has no other path. Only `hub`
   re-exports, and only items its own signatures use. Layer 2 and `node` name the item
   at its home. Copies of the types lost: each change in `home` needs a change in
-  `hub`. Decided by the architect (#340).
+  `hub`. Decided by the architect (#340). A second exception: `home::reader`
+  re-exports each `delivery` value that the surface of `home` names, and `hub` names
+  each through `home::reader`, not at its home (`laptop.architect`,
+  2026-10-08T11:12:45Z:
+  https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
+  Supersedes the clause "Only `hub` does this" of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6030532788 for
+  those values.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
