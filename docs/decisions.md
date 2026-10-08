@@ -2290,7 +2290,9 @@ How to read this record:
   Byte form: the base version (8 bytes, little-endian), the base root (32), the new root
   (32), the chunk count (2 bytes, little-endian), then each digest (32), in strictly
   rising order, then the holder count (2 bytes, little-endian), then each holder key
-  (16), in strictly rising order. The new version is `base.version + 1`. Lost: a version
+  (16), in strictly rising order, then the home count (2 bytes, little-endian), then
+  each index key (16) and its home key (16), in strictly rising index order (S12
+  (placement part) + B7). The new version is `base.version + 1`. Lost: a version
   in the record, which can disagree with the base. A record lists at most `CHUNKS_MAX` =
   1024 digests, about 32 KiB, so that one record fits in an append of 64 KiB, a node's
   limit; decode refuses a larger count. An entry over a member's limit is never sent,
@@ -2359,11 +2361,16 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
-- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by tree
-  key, the region's spec through the leader, as `set_home` does, and gives the new
-  pointer. It first runs `spec::region::check` (REGION CHECK) at the region's prefix: a
-  problem gives `Error::Problems`, which holds each problem as `check` gives it, and
-  proposes nothing. `mesh` defines no problem of its own. It then builds the tree with
+- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions, homes)` makes the definitions,
+  by tree key, the region's spec through the leader, as `set_home` does, and gives the
+  new pointer. It first runs `spec::region::check` (REGION CHECK) at the region's
+  prefix: a problem gives `Error::Problems`, which holds each problem as `check` gives
+  it, and proposes nothing. `mesh` defines no problem of its own. `homes` maps index
+  names to node names (S12 (placement part) + B7). An index that `definitions` does not
+  hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
+  give `Error::Homes`, both before the read of the base tree. A node name that no
+  member has gives `Error::UnknownNode`, after `Error::NoVote` and before the first
+  put. None of them proposes anything. It then builds the tree with
   `spec::region::tree`. The change lists each chunk of the new tree that the tree of the
   base lacks, or each chunk of the new tree when `Config::store`, the node's
   `blob::Store`, cannot give the tree of the base. A change that lists more than
@@ -6344,7 +6351,7 @@ Storage classes used in the table:
 | Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; removal of an ephemeral node after its time offline | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
-| Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
+| Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (the first home of an index that a spec change adds) | `hub` routing through `mesh` watches | `mesh` |
 | Seq blocks | Region state of the home node's region | The home, through lease renewals | A new home after promotion | `mesh` |
 | Index history (re-index) | Region state: spans and seals. The spec keeps only the current index. Which region: X39 | The old home proposes the seal; voters seal at lease end if it is down | `hub` joins spans for readers | `mesh` |
 | Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40), with a version per name in the associated data. Every node takes a write or a delete only at the newest version plus one, and a re-seal only at the newest version, from and to nodes of the secret's placement. A delete is a version with no value. The newest version of a name is never compacted away, also after the spec removes the secret | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it in `secret::store::Sealed`, which refuses a value that does not open at its version | `mesh` (record), `secret` (seal and open) |
