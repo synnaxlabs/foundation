@@ -482,3 +482,30 @@ fn decoder(bencher: Bencher<'_, '_>, case: Case) {
         }
     });
 }
+
+/// Refuses a full `String` series of [`create_last_utf8`] whose last sample is not
+/// UTF-8.
+#[divan::bench(args = ["validate", "decode"], sample_count = 1000)]
+fn refuse(bencher: Bencher<'_, '_>, call: &str) {
+    let shape = SHAPES.iter().find(|shape| shape.name == "str.last");
+    let mut values = shape.expect("a shape").values(LEN);
+    *values.last_mut().expect("a sample") = 0xff;
+    let mut bytes = vec![0; max_len(Type::Bytes, values.len())];
+    let written = Encoder::new(Type::Bytes)
+        .encode(LEN, &values, &mut bytes)
+        .expect("the values fit the count");
+    bytes.truncate(written);
+    let mut out = vec![0; values.len()];
+    let mut refuse = || {
+        let len = divan::black_box(LEN);
+        let bytes = divan::black_box(&bytes);
+        match call {
+            "validate" => codec::validate(Type::String, len, bytes).err(),
+            "decode" => codec::decode(Type::String, len, bytes, &mut out).err(),
+            _ => panic!("invariant: {call} is a call"),
+        }
+    };
+    let refused = Some(codec::Error::Utf8 { sample: LEN - 1 });
+    assert_eq!(refuse(), refused, "{call}");
+    bencher.counter(ItemsCount::new(LEN)).bench_local(refuse);
+}
