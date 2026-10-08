@@ -2297,11 +2297,16 @@ mod port {
         Program,
     }
 
+    /// A pool of 1 MiB to send on.
+    fn pool() -> Rc<block::Pool> {
+        let config = block::Config { budget: 1 << 20 };
+        let memory = block::Heap::new(config.reservation());
+        Rc::new(block::Pool::new(config, memory))
+    }
+
     /// A part of a port at a free address of `host`, and a pool of 1 MiB to send on.
     fn port(host: &sim::node::Node) -> (Rc<block::Pool>, transport::port::Part) {
-        let pool = block::Config { budget: 1 << 20 };
-        let memory = block::Heap::new(pool.reservation());
-        let pool = Rc::new(block::Pool::new(pool, memory));
+        let pool = pool();
         let at = SocketAddr::new(host.addresses()[0], 0);
         let bound = transport::Port::bind(&host.net(), at).expect("a port");
         let part = bound.split(NonZeroUsize::MIN).pop().expect("one part");
@@ -3312,9 +3317,9 @@ mod port {
             start(host, region(&[member(OWN, &KEY, host)]))
         }
 
-        /// Starts the member [`OTHER`] of `members` on `host`: an endpoint and a hub
-        /// with no node, which serve the mesh as a node's do. Runs `act` with the
-        /// mesh, then drops the mesh and its port.
+        /// Starts the member [`OTHER`] of `members` on `host` without a `Node`: an
+        /// endpoint and a hub with its key, which serve the mesh as a node's do. Runs
+        /// `act` with the mesh, then drops the mesh and its port.
         fn peer<F: Future<Output = ()> + 'static>(
             host: &sim::node::Node,
             members: Vec<Member>,
@@ -3338,9 +3343,7 @@ mod port {
                     clock: own.clock(),
                     entropy: own.entropy(),
                 };
-                let pool = block::Config { budget: 1 << 20 };
-                let memory = block::Heap::new(pool.reservation());
-                let pool = Rc::new(block::Pool::new(pool, memory));
+                let pool = super::pool();
                 let stop = crate::stop::Stop::default();
                 let (open, buffer, next, time) =
                     super::super::home::create_open(&own, &tasks, 0, stop);
