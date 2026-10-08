@@ -13,11 +13,11 @@
   (HUB LINK). A request dropped before its response began keeps the turn until the
   response begins or the stream ends, because the node holds it open until then.
   `Config` holds its own `pool`, which a program may share with the transport. The
-  stream holds each block of a body until the node has it, so a request needs room for
-  the blocks that the session holds in flight, whose bytes reach the node's
-  `transport::Config::window_bytes`, plus the block of the next chunk of the body,
-  which it takes before it waits for the window. Each block counts at its
-  `block::footprint`. A chunk is at most `block::Pool::largest`. A request gives
+  stream holds each block of a body until the node has it. A body goes in chunks of the
+  smaller of `transport::stream::Sender::bytes_max` and `block::Pool::largest`. The
+  stream holds the chunks that fit in the node's `transport::Config::window_bytes`,
+  and the next chunk takes its block before it waits for the window. So a request
+  needs `(window_bytes / chunk + 1) * block::footprint(chunk)` bytes, and gives
   `Error::Pool` when the pool has no room.
   `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
   client closes the session with `Code(0)`. A node's stop and close with a code are one
@@ -49,6 +49,7 @@
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). It
   approved the pool sentence, which adds the block of the next chunk and counts each
   block at its footprint, at 5b5901b4, at 22:43:35Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522).
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522). The
+  bound in closed form, with the chunk of `Sender::bytes_max`, is owed its approval.
   Supersedes the sentence "Any pool works" of
   https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.

@@ -54,12 +54,13 @@ pub struct Config {
     pub tasks: env::tasks::Tasks,
     /// The pool that the client sends from. It can be the pool of the program's
     /// transport. Each message that the client sends takes a block from it, which the
-    /// stream holds until the node has it. So a request needs room for the blocks
-    /// that the session holds in flight, whose bytes reach the node's
-    /// [`transport::Config::window_bytes`], plus the block of the next chunk of the
-    /// body, which it takes before it waits for the window. Each block counts at its
-    /// [`block::footprint`]. A chunk is at most [`block::Pool::largest`]. A request
-    /// gives [`Error::Pool`] when the pool has no room.
+    /// stream holds until the node has it. A body goes in chunks of the smaller of
+    /// [`transport::stream::Sender::bytes_max`] and [`block::Pool::largest`]. The
+    /// stream holds the chunks that fit in the node's
+    /// [`transport::Config::window_bytes`], and the next chunk takes its block before
+    /// it waits for the window. So a request needs `(window_bytes / chunk + 1) *
+    /// block::footprint(chunk)` bytes, and gives [`Error::Pool`] when the pool has no
+    /// room.
     pub pool: Rc<block::Pool>,
 }
 

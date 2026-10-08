@@ -954,8 +954,9 @@ fn gives_a_reset_and_a_close_as_one_refusal() {
 /// `Error::Pool`.
 #[test]
 fn sends_a_body_at_the_cap_from_the_smallest_pool_with_room() {
-    // 16 chunks of 64 KiB fill the window of 1 MiB, and the 17th waits for room.
-    let smallest = 17 * block::footprint(1 << 16);
+    // The node's window and largest message.
+    let (window, chunk) = (1 << 20, 1 << 16);
+    let smallest = (window / chunk + 1) * block::footprint(chunk);
     for (budget, expected) in [
         (smallest, Ok(())),
         (
