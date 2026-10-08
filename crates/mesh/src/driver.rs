@@ -1110,7 +1110,7 @@ mod tests {
 
     use super::*;
     use crate::card;
-    use crate::change::Unknown;
+    use crate::change::{CHUNKS_MAX, Unknown};
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::region::Unfit;
     use crate::status::Many;
@@ -1749,6 +1749,38 @@ mod tests {
         }
         cluster.start();
         cluster.run(seconds(5));
+        assert_eq!(cluster.board().pointers, pointers);
+    }
+
+    // Voter 3 starts late, so the leader sends it the record in a catch-up `Append`.
+    #[test]
+    fn a_late_voter_gets_a_spec_change_of_the_most_chunks() {
+        let mut cluster = Cluster::new(3);
+        let founding = create_founding();
+        let base = Pointer {
+            version: 0,
+            root: root(&founding),
+        };
+        cluster.board.lock().unwrap().founding = founding;
+        let chunks = (0..CHUNKS_MAX)
+            .map(|at| Digest::of(&at.to_le_bytes()))
+            .collect();
+        let change = Change::Spec {
+            base,
+            root: common::digest(1),
+            chunks,
+        };
+        cluster.script_each(&[encoded(&change), encoded(&home(1))]);
+        cluster.start_voter(1);
+        cluster.start_voter(2);
+        cluster.run(seconds(5));
+        cluster.start_voter(3);
+        cluster.run(seconds(5));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        let pointers: BTreeMap<_, _> = IDS.map(|id| (id, moved)).into();
         assert_eq!(cluster.board().pointers, pointers);
     }
 
