@@ -21,7 +21,7 @@ use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::frame::Form;
 use types::frame::Path as FramePath;
-use types::sample::Type;
+use types::sample::{Scalar, Type};
 use types::time::Span;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
@@ -780,6 +780,71 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
         let mut out = [0; 8];
         codec::decode(I64, 1, &got.body[value], &mut out).expect("decodes");
         assert_eq!(i64::from_le_bytes(out), 30);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A frame of 184 series of 16 bytes and then a series of `f64[0]`, whose sample has 0
+/// bytes: the body fills two messages of the peer, and no third message follows.
+#[test]
+fn sends_no_message_for_a_last_series_of_no_bytes() {
+    const KEYS: std::ops::Range<u128> = 10..193;
+    const EMPTY: u128 = 300;
+    let home = |test: Test, incoming| async move {
+        let names: Vec<_> = KEYS
+            .map(|key| format!("v{key}"))
+            .chain(["empty".to_owned()])
+            .collect();
+        let empty = Type::Array {
+            element: Scalar::F64,
+            len: 0,
+        };
+        let types = KEYS.map(|_| I64).chain([empty]);
+        for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
+            test.hub.define(Channel {
+                key: channel::Key::from_u128(key),
+                name: super::name(name),
+                data_type,
+                index: channel::Key::from_u128(1),
+            });
+        }
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        let mut writer = test.writer("a", &names).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            let set = Arc::clone(writer.set());
+            let mut series: Vec<_> = KEYS
+                .chain([1])
+                .map(|key| (super::entry(&set, key), 8))
+                .chain([(super::entry(&set, EMPTY), 0)])
+                .collect();
+            series.sort_unstable();
+            let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+            for key in KEYS {
+                let entry = super::entry(&set, key);
+                let value = i64::try_from(key).expect("fits");
+                let series = draft.series_mut(entry).expect("the series is present");
+                series.copy_from_slice(&value.to_le_bytes());
+            }
+            let index = super::entry(&set, 1);
+            let series = draft.series_mut(index).expect("the series is present");
+            series.copy_from_slice(&now.to_le_bytes());
+            draft.set_count(0, 1);
+            writer.write(LIVE, draft).expect("the home takes it");
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+    };
+    session(67, Class::Complete, false, home, |mut peer| async move {
+        let keys: Vec<_> = KEYS.chain([1, EMPTY]).collect();
+        let mut reader = open_complete(&mut peer, &keys, 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        let series = u32::try_from(keys.len()).expect("fits");
+        assert_eq!(places(&got), (0..series).collect::<Vec<_>>());
+        let two = u32::try_from(2 * PEER_MESSAGE).expect("fits");
+        assert_eq!(&got.ends[183..], [(183, two), (184, two)]);
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });
