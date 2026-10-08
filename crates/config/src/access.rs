@@ -1,5 +1,3 @@
-use std::slice;
-
 use document::diagnostic::{Code, Diagnostic};
 use document::value::{Kind, Value};
 use document::{Block, read};
@@ -7,7 +5,7 @@ use spec::access::{Action, Actions, Policy};
 use spec::definition;
 use types::authority::Authority;
 
-use crate::{Definition, Found, written};
+use crate::{Definition, Found, items, written};
 
 const BAD_ACTION: Code = Code::new("config.bad-action");
 const EMPTY_ALLOW: Code = Code::new("config.empty-allow");
@@ -61,18 +59,15 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
 
 /// Reads one action or a list of actions, each a string or a reference.
 fn actions(value: &Value) -> Result<Actions, Diagnostic> {
-    let items = match &value.kind {
-        Kind::List(items) if items.is_empty() => {
-            return Err(Diagnostic::new(
-                EMPTY_ALLOW,
-                value.span,
-                "the `allow` list holds no action".into(),
-                "Add one or more actions, such as \"read\"".into(),
-            ));
-        }
-        Kind::List(items) => items,
-        _ => slice::from_ref(value),
-    };
+    let items = items(value);
+    if items.is_empty() {
+        return Err(Diagnostic::new(
+            EMPTY_ALLOW,
+            value.span,
+            "the `allow` list holds no action".into(),
+            "Add one or more actions, such as \"read\"".into(),
+        ));
+    }
     items.iter().map(action).collect()
 }
 

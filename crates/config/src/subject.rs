@@ -1,5 +1,3 @@
-use std::slice;
-
 use base64ct::{Base64, Encoding};
 use document::Block;
 use document::diagnostic::{Code, Diagnostic, Note};
@@ -8,7 +6,7 @@ use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
 
-use crate::{Definition, Found};
+use crate::{Definition, Found, items};
 
 const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
 const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
@@ -56,10 +54,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
 
 /// Reads one public key or a list of them as a subject.
 fn subject(value: &Value) -> Result<Subject, Diagnostic> {
-    let items = match &value.kind {
-        Kind::List(items) => items.as_slice(),
-        _ => slice::from_ref(value),
-    };
+    let items = items(value);
     items.iter().try_for_each(no_private_key)?;
     let keys = items.iter().map(key).collect::<Result<_, _>>()?;
     Subject::new(keys).map_err(|error| {

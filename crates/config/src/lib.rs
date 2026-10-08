@@ -9,6 +9,7 @@ mod retention;
 mod subject;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
+use std::slice;
 
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
@@ -58,7 +59,8 @@ pub struct Entry {
 }
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
-/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for a policy.
+/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for each other
+/// block.
 /// Each order of `documents` gives the same entries, or each gives problems.
 ///
 /// # Errors
@@ -67,8 +69,9 @@ pub struct Entry {
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there. A block inside a policy does not stop
-/// that check: a policy holds no block, so each block inside one is a separate problem.
+/// and reads, and the ones it needs are there. A block inside a policy or a subject
+/// does not stop that check: neither holds a block, so each block inside one is a
+/// separate problem.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
 /// channel knows.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
@@ -310,6 +313,14 @@ impl<'a> Found<'a> {
 /// The name of `block` in a message: "the `retention` block".
 fn of(block: &Block) -> String {
     format!("the `{}` block", block.keyword)
+}
+
+/// The items of a list, or the one value that is not a list.
+fn items(value: &Value) -> &[Value] {
+    match &value.kind {
+        document::value::Kind::List(items) => items,
+        _ => slice::from_ref(value),
+    }
 }
 
 #[cfg(test)]
