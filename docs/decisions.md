@@ -891,6 +891,14 @@ How to read this record:
   the task to each `Commit` held past the drop, a second meaning only after the drop.
   Decided by `laptop.architect` (#1234, 2026-10-07T07:06:07Z):
   https://github.com/synnaxlabs/foundation/issues/1234#issuecomment-6032824731.
+  `Buffer::ended` gives an `End`, which resolves once the commit task ended: with the
+  error of the file call that ended it, else `Ok`, which means that each entry appended
+  before the drop is durable. Like a `Commit`, it holds the ring open until it drops.
+  `node::keep` is to await it in place of its commit (#1329, which amends HUB END).
+  Lost: the error of the task to a `Commit` held past the drop (#1234 refused it), and
+  no future (a failed write at a stop reaches no caller). Decided by `laptop.architect`
+  (#1329, 2026-10-08T02:39:34Z):
+  https://github.com/synnaxlabs/foundation/issues/1329#issuecomment-6051054623.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group with
   samples of a write: the writer's key set with only that group present, its range,
   and its encoded series. The home stores it, keeps it as the index's newest frame,

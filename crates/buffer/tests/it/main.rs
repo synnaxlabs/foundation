@@ -9,16 +9,16 @@ use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected, Stored,
-    Tail, Unfit,
+    Buffer, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected,
+    Stored, Tail, Unfit,
 };
 use env::clock::Clock;
 use env::entropy::Entropy;
@@ -3392,6 +3392,275 @@ fn a_commit_held_past_the_drop_gives_ok_when_a_later_write_fails() {
         assert_eq!(late.await, Err(failed));
     })
     .expect("the buffer ends");
+}
+
+/// An `End` gives the error of the write that ended the task after the drop, while a
+/// `Commit` of the entries before it gives `Ok`.
+#[test]
+fn an_end_gives_the_error_of_a_write_after_the_drop() {
+    let (mut sim, node) = create_node(114);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let end = buffer.ended();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let early = buffer.committed();
+        assert_eq!(buffer.committed().await, Ok(()));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, Some(40), Parts::default())])
+            .expect("queues");
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(end.await, Err(failed));
+        assert_eq!(early.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// With no fault, an `End` gives `Ok` once the task wrote the entries queued at the
+/// drop, and a reopen recovers them.
+#[test]
+fn an_end_gives_ok_once_the_entries_queued_at_the_drop_are_durable() {
+    let (mut sim, node) = create_node(115);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer
+            .append([entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())])
+            .expect("queues");
+        let end = buffer.ended();
+        drop(buffer);
+        assert_eq!(end.await, Ok(()));
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(5, Some(50))));
+}
+
+/// A failed write ends the task while the buffer is held, and an `End` gives its
+/// error then.
+#[test]
+fn an_end_gives_the_error_of_a_write_before_the_drop() {
+    let (mut sim, node) = create_node(116);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let end = buffer.ended();
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(end.await, Err(failed.clone()));
+        assert_eq!(
+            buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
+            Err(Rejected::Files(failed))
+        );
+    })
+    .expect("the buffer ends");
+}
+
+/// Records that it woke.
+struct Flag(AtomicBool);
+
+impl Wake for Flag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// An `End` polled while the buffer is held stays pending across a commit that
+/// syncs, which does not wake it, and gives `Ok` after the drop.
+#[test]
+fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
+    let (mut sim, node) = create_node(118);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let mut end = pin!(buffer.ended());
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let polled = end.as_mut().poll(&mut Context::from_waker(&waker));
+        assert_eq!(polled, Poll::Pending);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        assert_eq!(buffer.committed().await, Ok(()));
+        assert!(!flag.0.load(Ordering::Relaxed), "a commit wakes no End");
+        let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
+        assert_eq!(polled, Poll::Pending);
+        drop(buffer);
+        assert_eq!(end.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// `End`s polled from other tasks and dropped while the buffer is held keep no
+/// waker.
+#[test]
+fn a_dropped_end_keeps_no_waker_while_the_buffer_is_held() {
+    let (mut sim, node) = create_node(130);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let flags: Vec<Arc<Flag>> = (0..64)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        for flag in &flags {
+            let mut end = pin!(buffer.ended());
+            let waker = Waker::from(Arc::clone(flag));
+            let polled = end.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        let held = flags
+            .iter()
+            .filter(|flag| Arc::strong_count(flag) > 1)
+            .count();
+        assert_eq!(held, 0, "the drop of each End takes its waker out");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// Each `End` keeps only the waker of its last poll, and the end of the task wakes
+/// the last waker of each.
+#[test]
+fn the_end_of_the_task_wakes_the_last_waker_of_each_end() {
+    let (mut sim, node) = create_node(131);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let flags: Vec<Arc<Flag>> = (0..3)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        let poll = |end: &mut Pin<&mut End>, flag: &Arc<Flag>| {
+            let waker = Waker::from(Arc::clone(flag));
+            end.as_mut().poll(&mut Context::from_waker(&waker))
+        };
+        let mut first = pin!(buffer.ended());
+        let mut second = pin!(buffer.ended());
+        assert_eq!(poll(&mut first, &flags[0]), Poll::Pending);
+        assert_eq!(poll(&mut first, &flags[1]), Poll::Pending);
+        assert_eq!(Arc::strong_count(&flags[0]), 1, "a later poll takes it out");
+        assert_eq!(poll(&mut second, &flags[2]), Poll::Pending);
+        drop(buffer);
+        node.clock().sleep(commits(20)).await;
+        let woken: Vec<bool> = flags
+            .iter()
+            .map(|flag| flag.0.load(Ordering::Relaxed))
+            .collect();
+        assert_eq!(woken, [false, true, true]);
+        assert_eq!(first.await, Ok(()));
+        assert_eq!(second.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// An `End` taken at a drop during a sync that then fails gives its error.
+#[test]
+fn an_end_taken_at_a_drop_during_a_failing_sync_gives_its_error() {
+    run(120, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(shard.memory.syncs(), 3, "the sync runs");
+        let end = buffer.ended();
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(end.await, Err(failed));
+    });
+}
+
+/// An `End` taken after a failed commit gives its error at its first poll.
+#[test]
+fn an_end_taken_after_a_failed_commit_gives_its_error_at_once() {
+    let (mut sim, node) = create_node(119);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        let mut end = pin!(buffer.ended());
+        let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
+        assert_eq!(polled, Poll::Ready(Err(failed)));
+    })
+    .expect("the buffer ends");
+}
+
+/// An `End` held past the drop holds the ring after the task ended, so an open fails
+/// with `Busy` until the `End` drops.
+#[test]
+fn an_open_while_an_end_of_a_dropped_buffer_is_held_fails_with_busy() {
+    let (mut sim, node) = create_node(117);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let first = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        first
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let mut end = first.ended();
+        drop(first);
+        assert_eq!((&mut end).await, Ok(()));
+        let busy_open = Buffer::open(config(), &mut slots).await.map(drop);
+        assert_eq!(busy_open, Err(busy()));
+        drop(end);
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(1, Some(1))));
 }
 
 #[test]
