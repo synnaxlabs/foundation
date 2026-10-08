@@ -681,8 +681,8 @@ enum Phase {
 /// `piece` bytes. The cursor reads such a record in three parts: its first block,
 /// the rest of its body in pieces while the CRC runs, then its start again, up to
 /// [`TABLE`] bytes, for the first bytes of the body. A walk reads at most twice
-/// the bytes it walks, plus one block and one largest record for a torn record at
-/// the end, and holds one window at a time.
+/// the bytes it walks, plus one largest record for a torn record at the end, and
+/// holds one window at a time.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     layout: Layout,
@@ -993,7 +993,7 @@ mod tests {
     }
 
     /// Walks the area with the real cursor to the end of the chain. Checks that it
-    /// asks for at most twice the bytes it walks, one block, and one largest record.
+    /// asks for at most twice the bytes it walks and one largest record.
     fn walk(area: &[u8], tail: Position) -> Result<(Vec<Vec<u8>>, Cursor), Invalid> {
         walk_in(layout(), area, tail)
     }
@@ -1016,7 +1016,7 @@ mod tests {
                 Step::End => {
                     let walked = cursor.at.offset - tail.offset;
                     let window = (BODY_MAX + HEADER_LEN).next_multiple_of(ALIGN);
-                    let most = 2 * walked + to_u64(ALIGN + window);
+                    let most = 2 * walked + to_u64(window);
                     assert!(asked <= most, "asked {asked} for {walked} bytes walked");
                     return Ok((data, cursor));
                 }
@@ -1425,11 +1425,8 @@ mod tests {
 
         #[test]
         fn takes_an_area_of_four_records() {
-            assert_eq!(
-                Layout::new(4 * 4096, 4087).map(|layout| layout.window),
-                Ok(4096)
-            );
-            assert_eq!(Layout::new(8 * 4096, 4088).map(|l| l.window), Ok(8192));
+            assert_eq!(Layout::new(4 * 4096, 4087).map(Layout::area), Ok(4 * 4096));
+            assert_eq!(Layout::new(8 * 4096, 4088).map(Layout::area), Ok(8 * 4096));
         }
 
         #[test]
@@ -2460,6 +2457,31 @@ mod tests {
             assert_eq!(cursor.offset(), 4096, "the walk stops at the torn record");
             let (_, cursor) = walk(&ring.area, START).expect("a valid ring");
             assert_eq!(cursor.offset(), 4096);
+        }
+
+        #[test]
+        fn asks_for_one_largest_record_at_a_torn_largest_record() {
+            let mut area = vec![0; index(AREA)];
+            put(&mut area, 0, START.chain, Kind::Data.byte(), &[7; BODY_MAX]);
+            area[3 * ALIGN] ^= 1;
+            let mut cursor = Cursor::new(layout(), START, PIECE);
+            let mut asked = 0;
+            for _ in 0..BLOCKS {
+                let Window { place, len } = cursor.window();
+                asked += len;
+                let step = cursor.next(&area[index(place)..index(place) + len]);
+                if step == Ok(Step::End) {
+                    break;
+                }
+                assert_eq!(step, Ok(Step::More));
+            }
+            assert_eq!(
+                (asked, cursor.offset()),
+                (4 * ALIGN, 0),
+                "each block one time"
+            );
+            let (_, cursor) = walk(&area, START).expect("a valid ring");
+            assert_eq!(cursor.offset(), 0);
         }
 
         /// The body pieces end at the table bound, then every piece; the start
