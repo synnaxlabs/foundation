@@ -2373,6 +2373,40 @@ mod tests {
         }
 
         #[test]
+        fn refuses_an_edge_that_is_not_a_name() {
+            let documents =
+                value(&[("index", Kind::Integer(7)), ("data_type", string("f64"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 111),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_error_edge_of_an_index_that_is_not_a_name() {
+            let time = channel(
+                0,
+                0,
+                "edge.time",
+                &[("kind", string("index")), ("error", Kind::Integer(7))],
+            );
+            assert_eq!(
+                check(&[document(vec![time])]),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 13),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
         fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
             let documents = value(&[
                 ("kind", string("stream")),
