@@ -59,7 +59,9 @@ PR that changes such a copy lists each mutant that `cargo mutants --list --in-di
 empty list for a diff that changes a code line of a `.rs` file in the copy (trimmed,
 not empty and not starting with `//`, as REVIEW CHECK counts it) is a finding. The
 `breaker` of the PR runs each mutant on the list. The root `Cargo.toml` excludes
-`.claude`, so cargo in a copy inside an agent worktree finds no workspace above it.
+`.claude`: cargo skips a workspace that excludes the path and looks further up, so
+cargo in a copy inside an agent worktree finds no workspace once the `Cargo.toml` of
+the main checkout holds this exclude.
 Decided by laptop.architect-2, 2026-10-08T11:36:09Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. Supersedes
 (b) of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058668724 and
