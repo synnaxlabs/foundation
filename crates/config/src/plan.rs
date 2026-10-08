@@ -283,11 +283,12 @@ fn connectors<'f>(
             .iter()
             .filter(|(name, ..)| index.starts_with(name))
             .max_by_key(|(name, ..)| name.segments().count());
-        let Some((connector, _, _, theirs)) = nearest else {
+        let Some((connector, _, node, theirs)) = nearest else {
             continue;
         };
         if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
-            diagnostics.extend(split(found, index, own, connector, theirs));
+            let split = split(found, placements, index, own, connector, node, theirs);
+            diagnostics.extend(split);
         }
     }
 }
@@ -327,12 +328,15 @@ fn connector_home(
 }
 
 /// A `config.split-placement` diagnostic when `own`, the placement that wins for
-/// `index`, is not `theirs`, the one that wins for the connector `connector`.
+/// `index`, is not `theirs`, the one that wins for the connector `connector` on
+/// `node`.
 fn split(
     found: &Found<'_>,
+    placements: &[(&Name, &Policy)],
     index: &Name,
     own: Option<&Name>,
     connector: &Name,
+    node: &Name,
     theirs: Option<&Name>,
 ) -> Option<Diagnostic> {
     let (at, message) = match (own, theirs) {
@@ -363,15 +367,29 @@ fn split(
         ),
         _ => return None,
     };
-    Some(Diagnostic::new(
-        SPLIT_PLACEMENT,
-        found.entries[at].label_span,
-        message,
+    let home = placements
+        .iter()
+        .find(|(key, _)| *key == at)
+        .and_then(|(_, policy)| policy.home());
+    let fix = if theirs.is_none() && home.is_some_and(|home| home != node) {
+        format!(
+            "Exclude the indexes of the connector `{connector}` from the `select` of \
+             `{}`, and select the connector and its indexes with a placement whose \
+             `home` is `{node}`",
+            label(at)
+        )
+    } else {
         format!(
             "Make the placement `{}` win for the connector `{connector}` and the index \
              `{index}`",
             label(theirs.unwrap_or(at))
-        ),
+        )
+    };
+    Some(Diagnostic::new(
+        SPLIT_PLACEMENT,
+        found.entries[at].label_span,
+        message,
+        fix,
     ))
 }
 

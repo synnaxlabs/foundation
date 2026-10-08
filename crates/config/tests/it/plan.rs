@@ -1221,6 +1221,76 @@ fn plans_after_the_split_placement_fix() {
 }
 
 #[test]
+fn plans_after_the_split_placement_fix_of_indexes_placed_at_another_home() {
+    let text = |indexes: &[&str], excluded: bool| {
+        let mut channels = Vec::new();
+        let mut writes = Vec::new();
+        let mut out = Vec::new();
+        for index in indexes {
+            channels.push(format!("channel \"{index}\" {{\n  kind = \"index\"\n}}\n"));
+            writes.push(format!("\"{index}\""));
+            out.push(format!("\"!{index}\""));
+        }
+        let (channels, writes) = (channels.concat(), writes.join(", "));
+        let (select, a) = if excluded {
+            let a = format!(
+                "placement \"a\" {{\n  select = [\"a\", {writes}]\n  home = \"n\"\n}}\n"
+            );
+            (format!("{writes}, \"z\", {}", out.join(", ")), a)
+        } else {
+            (format!("{writes}, \"z\""), String::new())
+        };
+        format!(
+            "\
+{channels}connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [{writes}]
+}}
+connector \"z\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = []
+}}
+placement \"p\" {{
+  select = [{select}]
+  home = \"m\"
+}}
+{a}"
+        )
+    };
+    let nodes = ["m", "n"];
+    let fix = "Exclude the indexes of the connector `a` from the `select` of `p`, and \
+               select the connector and its indexes with a placement whose `home` \
+               is `n`";
+    for indexes in [&["a.time"][..], &["a.time", "a.value"]] {
+        let refused = text(indexes, false);
+        let found = problems(Spec::create_empty().plan(&[&refused], &nodes));
+        let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+        let expected = vec![("config.split-placement", fix.to_owned()); indexes.len()];
+        assert_eq!(found, expected, "{refused}");
+        let fixed = text(indexes, true);
+        let plan = Spec::create_empty().plan(&[&fixed], &nodes);
+        assert!(plan.is_ok(), "{fixed}: {plan:?}");
+    }
+}
+
+/// The `config.unplaced` problem at the label `at` of `text`, where the placements
+/// `first` and `second` tie.
+fn tie(text: &str, at: &str, first: &str, second: &str) -> Problem {
+    problem(
+        "config.unplaced",
+        (0, label(text, at)),
+        &format!(
+            "the placements `{first}` and `{second}` select the name with the same \
+             specificity"
+        ),
+        "Change the `select` of one of the two placements, so that one selects the \
+         name more specifically",
+    )
+}
+
+#[test]
 fn gives_no_split_placement_after_a_tie() {
     let text = "\
 channel \"a.time\" {
