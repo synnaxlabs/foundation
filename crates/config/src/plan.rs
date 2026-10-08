@@ -9,7 +9,7 @@ use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Span};
 use spec::channel::{Channel, Problem};
 use spec::definition;
-use spec::placement::{Placed, Policy, Unplaced, place};
+use spec::placement::{Placed, Policy, Tie, label, place};
 use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
@@ -279,7 +279,7 @@ fn placements<'f>(found: &'f Found<'_>) -> Vec<(&'f Name, &'f Policy)> {
 }
 
 /// The node of an index's first writer, and where [`place`] puts the index.
-type Index<'f> = (Option<&'f Name>, Result<Placed<'f>, Unplaced>);
+type Index<'f> = (Option<&'f Name>, Result<Placed<'f>, Tie>);
 
 /// Places each index, with the node of its first writer. Reports each index that two
 /// writer nodes or [`place`] leave with no home.
@@ -296,9 +296,7 @@ fn indexes<'f>(
         };
         let writer = writer(found, index, diagnostics);
         let placed = place(index, placements.iter().copied(), writer);
-        if let Err(problem) = &placed {
-            diagnostics.push(unplaced(entry.label_span, problem));
-        }
+        diagnostics.extend(unplaced(entry.label_span, &placed));
         indexes.insert(index, (writer, placed));
     }
     indexes
@@ -322,20 +320,20 @@ fn homes(
         .into_iter()
         .filter(|(index, _)| !stored(index))
         .filter_map(|(index, (_, placed))| {
-            Some((index.clone(), placed.ok()?.home.clone()))
+            Some((index.clone(), placed.ok()?.home.ok()?.clone()))
         })
         .collect()
 }
 
 /// A connector's key, entry, and node, and where [`place`] puts it.
-type Connector<'f> = (&'f Name, &'f Entry, &'f Name, Result<Placed<'f>, Unplaced>);
+type Connector<'f> = (&'f Name, &'f Entry, &'f Name, Result<Placed<'f>, Tie>);
 
 /// An index, the node of its first writer, where [`place`] puts it, and its nearest
 /// connector.
 type Nearest<'f, 'c> = (
     &'f Name,
     Option<&'f Name>,
-    &'f Result<Placed<'f>, Unplaced>,
+    &'f Result<Placed<'f>, Tie>,
     &'c Connector<'f>,
 );
 
@@ -374,23 +372,23 @@ fn connectors<'f>(
         .collect();
     let moves = moves(&connectors, &nearest, placements);
     for (name, entry, node, placed) in &connectors {
-        match placed {
-            Ok(Placed {
-                placement: Some(placement),
-                home,
-                ..
-            }) if home != node => {
-                let fix = moves.get(name).map(String::as_str);
-                diagnostics
-                    .push(connector_home(found, placement, home, name, node, fix));
-            }
-            Ok(_) => {}
-            Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
+        if let Ok(Placed {
+            placement: Some(placement),
+            home: Ok(home),
+            ..
+        }) = placed
+            && home != node
+        {
+            let fix = moves.get(name).map(String::as_str);
+            diagnostics.push(connector_home(found, placement, home, name, node, fix));
+        } else {
+            diagnostics.extend(unplaced(entry.label_span, placed));
         }
     }
     for (index, _, own, (connector, _, _, theirs)) in nearest {
-        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
+        if let (Ok(own), Ok(theirs)) = (own, theirs) {
             let fix = moves.get(connector).map(String::as_str);
+            let (own, theirs) = (own.placement, theirs.placement);
             diagnostics.extend(split(found, index, own, connector, theirs, fix));
         }
     }
@@ -408,14 +406,16 @@ fn moves<'c>(
 ) -> BTreeMap<&'c Name, String> {
     let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
     for (_, _, node, placed) in connectors {
-        if let Ok(Some(placement)) = winner(placed) {
+        if let Some(placement) =
+            placed.as_ref().ok().and_then(|placed| placed.placement)
+        {
             nodes.entry(placement).or_default().insert(*node);
         }
     }
     let mut owners = BTreeMap::<_, BTreeSet<_>>::new();
     let mut unwritten = BTreeSet::new();
     for (_, writer, own, (connector, _, node, _)) in nearest {
-        if let Ok(Some(own)) = winner(own) {
+        if let Some(own) = own.as_ref().ok().and_then(|own| own.placement) {
             owners.entry(*connector).or_default().insert(own);
             nodes.entry(own).or_default().insert(*node);
         }
@@ -434,7 +434,7 @@ fn moves<'c>(
     };
     let mut moves = BTreeMap::new();
     for (name, _, node, placed) in connectors {
-        let Ok(placement) = winner(placed) else {
+        let Ok(Placed { placement, .. }) = *placed else {
             continue;
         };
         let owners: Vec<_> = owners
@@ -578,29 +578,18 @@ fn split(
     ))
 }
 
-/// The tree key of the placement that wins for the name that `placed` places, or
-/// `None` when no placement selects it. Gives the tie when two placements tie.
-fn winner<'p>(
-    placed: &'p Result<Placed<'_>, Unplaced>,
-) -> Result<Option<&'p Name>, &'p Unplaced> {
-    match placed {
-        Ok(placed) => Ok(placed.placement),
-        Err(Unplaced::NoHome { placement }) => Ok(placement.as_ref()),
-        Err(Unplaced::Overlap { placement, .. }) => Ok(Some(placement)),
-        Err(tie @ Unplaced::Tie { .. }) => Err(tie),
-    }
-}
-
-/// A `config.unplaced` diagnostic at `at`, the label of the name that `problem` names.
-fn unplaced(at: Option<Span>, problem: &Unplaced) -> Diagnostic {
-    Diagnostic::new(UNPLACED, at, problem.to_string(), problem.fix().into())
-}
-
-/// The label of the placement at the tree key `key`.
-fn label(key: &Name) -> Name {
-    definition::Kind::Placement
-        .label(key)
-        .expect("invariant: the key of a placement block has its label form")
+/// The `config.unplaced` diagnostic at `at`, the label of the name that `placed`
+/// places, when it has no home.
+fn unplaced(at: Option<Span>, placed: &Result<Placed<'_>, Tie>) -> Option<Diagnostic> {
+    let (message, fix) = match placed {
+        Ok(Placed { home: Ok(_), .. }) => return None,
+        Ok(Placed {
+            home: Err(homeless),
+            ..
+        }) => (homeless.to_string(), homeless.fix()),
+        Err(tie) => (tie.to_string(), tie.fix()),
+    };
+    Some(Diagnostic::new(UNPLACED, at, message, fix.into()))
 }
 
 /// The node of the first connector that writes `index` or a channel on it. Reports

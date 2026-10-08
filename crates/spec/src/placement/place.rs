@@ -7,7 +7,7 @@ use types::name::Name;
 
 use super::Policy;
 use crate::definition::Kind;
-use crate::resolve::{Tie, resolve};
+use crate::resolve::{self, resolve};
 
 /// Where one index or connector lives: its home, and the standby and copies of the
 /// placement that wins for it.
@@ -16,8 +16,9 @@ pub struct Placed<'a> {
     /// The tree key of the placement that wins for the name, or `None` when no
     /// placement selects it.
     pub placement: Option<&'a Name>,
-    /// The node that orders, buffers, and gates the index, or that runs the connector.
-    pub home: &'a Name,
+    /// The node that orders, buffers, and gates the index, or that runs the
+    /// connector, or why the name has none.
+    pub home: Result<&'a Name, Homeless<'a>>,
     /// The node that takes over when the home fails.
     pub standby: Option<&'a Name>,
     /// The nodes that keep a copy, in name order with no repeat.
@@ -36,39 +37,32 @@ pub struct Placed<'a> {
 ///
 /// # Errors
 ///
-/// - [`Unplaced::Tie`] when the two most specific placements tie.
-/// - [`Unplaced::NoHome`] when neither the winner nor `writer` gives a home. Only an
-///   index gives it: a connector passes its own node as `writer`.
-/// - [`Unplaced::Overlap`] when the home comes from `writer` and that node is also the
-///   winner's standby or a copy.
+/// Returns [`Tie`] when the two most specific placements tie. A winner with no home is
+/// not an error: [`Placed::home`] gives [`Homeless`].
 pub fn place<'a>(
     name: &Name,
     placements: impl IntoIterator<Item = (&'a Name, &'a Policy)>,
     writer: Option<&'a Name>,
-) -> Result<Placed<'a>, Unplaced> {
+) -> Result<Placed<'a>, Tie> {
     let winner = resolve(name, placements, Policy::select)
-        .map_err(|Tie { first, second }| Unplaced::Tie { first, second })?;
+        .map_err(|resolve::Tie { first, second }| Tie { first, second })?;
     let placement = winner.map(|(key, _)| key);
     let policy = winner.map(|(_, policy)| policy);
     let home = match (policy.and_then(Policy::home), writer) {
-        (Some(home), _) => home,
-        (None, Some(writer)) => {
-            if let Some((placement, policy)) = winner
-                && (policy.standby() == Some(writer)
-                    || policy.copies().contains(writer))
+        (Some(home), _) => Ok(home),
+        (None, Some(writer)) => match winner {
+            Some((placement, policy))
+                if policy.standby() == Some(writer)
+                    || policy.copies().contains(writer) =>
             {
-                return Err(Unplaced::Overlap {
-                    node: writer.clone(),
-                    placement: placement.clone(),
-                });
+                Err(Homeless::Overlap {
+                    node: writer,
+                    placement,
+                })
             }
-            writer
-        }
-        (None, None) => {
-            return Err(Unplaced::NoHome {
-                placement: placement.cloned(),
-            });
-        }
+            _ => Ok(writer),
+        },
+        (None, None) => Err(Homeless::Unset { placement }),
     };
     Ok(Placed {
         placement,
@@ -78,49 +72,70 @@ pub fn place<'a>(
     })
 }
 
-/// An index or a connector that [`place`] cannot place. Its `Display` names each
-/// placement by its label, for a message at the label of the name. It calls the name
-/// "the name" in `Tie` and `Overlap`, and "the index" in `NoHome`, which only an index
-/// gives.
+/// The two placements, the first two in name order of those tied, that select a name
+/// with the same specificity, so none wins. Its `Display` names each by its label and
+/// calls the name "the name".
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unplaced {
-    /// The two placements, the first two in name order of those tied, select the name
-    /// with the same specificity.
-    Tie {
-        /// The first of the tied placements, in name order.
-        first: Name,
-        /// The second of the tied placements, in name order.
-        second: Name,
-    },
+pub struct Tie {
+    /// The first of the tied placements, in name order.
+    pub first: Name,
+    /// The second of the tied placements, in name order.
+    pub second: Name,
+}
+
+impl Tie {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        "Change the `select` of one of the two placements, so that one selects the name \
+         more specifically"
+    }
+}
+
+impl fmt::Display for Tie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the placements `{}` and `{}` select the name with the same specificity",
+            label(&self.first),
+            label(&self.second)
+        )
+    }
+}
+
+impl std::error::Error for Tie {}
+
+/// Why a placed index or connector has no home. Its `Display` names the placement by
+/// its label. It calls the name "the index" in `Unset`, which only an index gives, and
+/// "the name" in `Overlap`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Homeless<'a> {
     /// The placement that wins for the index names no home, or no placement selects
     /// it, and no connector writes it.
-    NoHome {
+    Unset {
         /// The tree key of the placement that wins, or `None` when no placement
         /// selects the index.
-        placement: Option<Name>,
+        placement: Option<&'a Name>,
     },
-    /// The node of the connector is the home and also has a role in the placement.
+    /// The node of the connector would be the home, but it has another role in the
+    /// placement that wins.
     Overlap {
         /// The node of the connector.
-        node: Name,
+        node: &'a Name,
         /// The tree key of the placement that wins for the name.
-        placement: Name,
+        placement: &'a Name,
     },
 }
 
-impl Unplaced {
+impl Homeless<'_> {
     /// What to do instead: a sentence with no final period.
     #[must_use]
     pub const fn fix(&self) -> &'static str {
         match self {
-            Self::Tie { .. } => {
-                "Change the `select` of one of the two placements, so that one selects \
-                 the name more specifically"
-            }
-            Self::NoHome { placement: Some(_) } => {
+            Self::Unset { placement: Some(_) } => {
                 "Name a `home` in the placement, or write the index with a connector"
             }
-            Self::NoHome { placement: None } => {
+            Self::Unset { placement: None } => {
                 "Select the index with a placement that names a `home`, or write it \
                  with a connector"
             }
@@ -132,17 +147,10 @@ impl Unplaced {
     }
 }
 
-impl fmt::Display for Unplaced {
+impl fmt::Display for Homeless<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tie { first, second } => write!(
-                f,
-                "the placements `{}` and `{}` select the name with the same \
-                 specificity",
-                label(first),
-                label(second)
-            ),
-            Self::NoHome {
+            Self::Unset {
                 placement: Some(placement),
             } => write!(
                 f,
@@ -150,7 +158,7 @@ impl fmt::Display for Unplaced {
                  connector writes the index",
                 label(placement)
             ),
-            Self::NoHome { placement: None } => write!(
+            Self::Unset { placement: None } => write!(
                 f,
                 "no placement selects the index, and no connector writes it"
             ),
@@ -164,12 +172,14 @@ impl fmt::Display for Unplaced {
     }
 }
 
-/// The label of the placement at tree key `key`, or `key` when it has no label form.
-fn label(key: &Name) -> Name {
+impl std::error::Error for Homeless<'_> {}
+
+/// The label of the placement at the tree key `key`, or `key` when it is not the tree
+/// key of a placement.
+#[must_use]
+pub fn label(key: &Name) -> Name {
     Kind::Placement.label(key).unwrap_or_else(|| key.clone())
 }
-
-impl std::error::Error for Unplaced {}
 
 #[cfg(test)]
 mod tests {
@@ -212,7 +222,7 @@ mod tests {
         index: &str,
         placements: &'a [(Name, Policy)],
         writer: Option<&'a Name>,
-    ) -> Result<Placed<'a>, Unplaced> {
+    ) -> Result<Placed<'a>, Tie> {
         place(&name(index), placements.iter().map(|(k, p)| (k, p)), writer)
     }
 
@@ -221,7 +231,7 @@ mod tests {
         let placements = [(key("edge"), policy(&["edge.*"], Some("edge"), None))];
         let placed = check("edge.time", &placements, None).unwrap();
         assert_eq!(placed.placement, Some(&key("edge")));
-        assert_eq!(placed.home, &name("edge"));
+        assert_eq!(placed.home, Ok(&name("edge")));
         assert_eq!(placed.standby, None);
         assert!(placed.copies.is_empty());
     }
@@ -231,7 +241,7 @@ mod tests {
         let placements = [(key("p"), policy(&["a.*"], Some("n_1"), Some("n_2")))];
         let writer = name("n_2");
         let placed = check("a.time", &placements, Some(&writer)).unwrap();
-        assert_eq!(placed.home, &name("n_1"));
+        assert_eq!(placed.home, Ok(&name("n_1")));
         assert_eq!(placed.standby, Some(&name("n_2")));
     }
 
@@ -244,7 +254,7 @@ mod tests {
             placed,
             Placed {
                 placement: None,
-                home: &writer,
+                home: Ok(&writer),
                 standby: None,
                 copies: &[]
             }
@@ -263,7 +273,7 @@ mod tests {
         let writer = name("n_4");
         let placed = check("a.time", &placements, Some(&writer)).unwrap();
         assert_eq!(placed.placement, Some(&key("narrow")));
-        assert_eq!(placed.home, &writer, "the wide home does not apply");
+        assert_eq!(placed.home, Ok(&writer), "the wide home does not apply");
         assert_eq!(placed.standby, Some(&name("n_2")));
         assert_eq!(placed.copies, [name("n_3")]);
     }
@@ -279,14 +289,16 @@ mod tests {
         ];
         let placed = check("a.time", &placements, None).unwrap();
         assert_eq!(placed.placement, Some(&key("wide")));
-        assert_eq!(placed.home, &name("n_1"));
+        assert_eq!(placed.home, Ok(&name("n_1")));
     }
 
     #[test]
     fn refuses_an_index_that_no_placement_selects_and_no_connector_writes() {
         let placements = [(key("p"), policy(&["b.*"], Some("n_1"), None))];
-        let none = Unplaced::NoHome { placement: None };
-        assert_eq!(check("a.time", &placements, None), Err(none.clone()));
+        let none = Homeless::Unset { placement: None };
+        let placed = check("a.time", &placements, None).unwrap();
+        assert_eq!(placed.placement, None);
+        assert_eq!(placed.home, Err(none));
         assert_eq!(
             none.to_string(),
             "no placement selects the index, and no connector writes it"
@@ -304,10 +316,14 @@ mod tests {
             (key("wide"), policy(&["a.**"], Some("n_1"), None)),
             (key("narrow"), policy(&["a.*"], None, Some("n_2"))),
         ];
-        let hidden = Unplaced::NoHome {
-            placement: Some(key("narrow")),
+        let narrow = key("narrow");
+        let hidden = Homeless::Unset {
+            placement: Some(&narrow),
         };
-        assert_eq!(check("a.time", &placements, None), Err(hidden.clone()));
+        let placed = check("a.time", &placements, None).unwrap();
+        assert_eq!(placed.placement, Some(&narrow));
+        assert_eq!(placed.home, Err(hidden));
+        assert_eq!(placed.standby, Some(&name("n_2")), "the winner stays whole");
         assert_eq!(
             hidden.to_string(),
             "the placement `narrow` wins for the index and names no home, and no \
@@ -327,7 +343,7 @@ mod tests {
             (key("p_1"), policy(&["a.*"], Some("n_3"), None)),
             (key("p_0"), policy(&["**"], Some("n_4"), None)),
         ];
-        let tie = Unplaced::Tie {
+        let tie = Tie {
             first: key("p_1"),
             second: key("p_2"),
         };
@@ -336,7 +352,7 @@ mod tests {
             tie.to_string(),
             "the placements `p_1` and `p_2` select the name with the same specificity"
         );
-        let keyless = Unplaced::Tie {
+        let keyless = Tie {
             first: name("p_1"),
             second: key("p_2"),
         };
@@ -358,7 +374,7 @@ mod tests {
         let twice = [(key("p"), placement.clone()), (key("p"), placement)];
         assert_eq!(
             check("a.time", &twice, None),
-            Err(Unplaced::Tie {
+            Err(Tie {
                 first: key("p"),
                 second: key("p"),
             })
@@ -373,19 +389,21 @@ mod tests {
             policy_with_copies(&["a.*"], None, None, &["n_0", "n_1"]),
         )];
         let writer = name("n_1");
+        let p = key("p");
+        let overlap = Homeless::Overlap {
+            node: &writer,
+            placement: &p,
+        };
         for placements in [&standby, &copy] {
+            let placed = check("a.time", placements, Some(&writer)).unwrap();
+            assert_eq!(placed.placement, Some(&p));
+            assert_eq!(placed.home, Err(overlap));
             assert_eq!(
-                check("a.time", placements, Some(&writer)),
-                Err(Unplaced::Overlap {
-                    node: name("n_1"),
-                    placement: key("p"),
-                })
+                placed.copies,
+                placements[0].1.copies(),
+                "the winner stays whole"
             );
         }
-        let overlap = Unplaced::Overlap {
-            node: name("n_1"),
-            placement: key("p"),
-        };
         assert_eq!(
             overlap.to_string(),
             "the node `n_1` of a connector is the home and has another role in the \
@@ -396,6 +414,13 @@ mod tests {
             "Move the node to `home` when it is the one node of the placement, else \
              remove it from the placement"
         );
+    }
+
+    #[test]
+    fn labels_a_placement_key_and_gives_another_name_as_is() {
+        assert_eq!(label(&key("edge")), name("edge"));
+        assert_eq!(label(&name("edge")), name("edge"));
+        assert_eq!(label(&name("a.time")), name("a.time"));
     }
 
     fn pattern() -> impl Strategy<Value = String> {
@@ -409,6 +434,7 @@ mod tests {
             index in prop::collection::vec("[ab]", 1..4),
             patterns in prop::collection::vec(pattern(), 0..6),
             homes in prop::collection::vec(any::<bool>(), 6),
+            written in any::<bool>(),
         ) {
             let index = name(&index.join("."));
             let placements = patterns
@@ -422,9 +448,10 @@ mod tests {
                     (key(&label), policy)
                 })
                 .collect::<Vec<_>>();
-            let writer = name("writer");
+            let node = name("writer");
+            let writer = written.then_some(&node);
             let pairs = placements.iter().map(|(k, p)| (k, p));
-            let got = place(&index, pairs, Some(&writer));
+            let got = place(&index, pairs, writer);
             let matching = placements
                 .iter()
                 .filter_map(|(k, p)| Some((p.select().matches(&index)?, k, p)))
@@ -438,17 +465,20 @@ mod tests {
             match (top.as_slice(), got) {
                 ([], Ok(placed)) => {
                     prop_assert_eq!(placed.placement, None);
-                    prop_assert_eq!(placed.home, &writer);
+                    let unset = Homeless::Unset { placement: None };
+                    prop_assert_eq!(placed.home, writer.ok_or(unset));
                     prop_assert!(placed.copies.is_empty());
                 }
                 ([(_, key, winner)], Ok(placed)) => {
                     prop_assert_eq!(placed.placement, Some(*key));
                     prop_assert_eq!(placed.copies, winner.copies());
-                    prop_assert_eq!(placed.home, winner.home().unwrap_or(&writer));
+                    let unset = Homeless::Unset { placement: Some(*key) };
+                    let home = winner.home().or(writer).ok_or(unset);
+                    prop_assert_eq!(placed.home, home);
                 }
                 (
                     [(_, first, _), (_, second, _), ..],
-                    Err(Unplaced::Tie { first: a, second: b }),
+                    Err(Tie { first: a, second: b }),
                 ) => {
                     prop_assert_eq!(&a, *first);
                     prop_assert_eq!(&b, *second);

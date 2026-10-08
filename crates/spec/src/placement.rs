@@ -7,7 +7,7 @@ use types::name::{Name, Selector};
 
 mod place;
 
-pub use place::{Placed, Unplaced, place};
+pub use place::{Homeless, Placed, Tie, label, place};
 
 /// Places the connectors and indexes that `select` matches: a home node, a standby node
 /// that takes over when the home fails, and copy nodes that are never promoted.
