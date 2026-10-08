@@ -79,7 +79,7 @@ this form stops the program with its type and position.
 2. In this directory, run `go run .` with Go 1.25 or later.
 3. Run `cargo test -p config-hcl --test conformance`.
 4. When `read` differs from HCL on purpose, add a line to `differences.txt` with the
-   decision in `docs/decisions.md`. Otherwise fix `read`, or file an issue and leave
+   decision in `docs/decisions/`. Otherwise fix `read`, or file an issue and leave
    the text out until the fix.
 
 When the test says that `write` gives new bytes, add them as a new text. Never change

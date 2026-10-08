@@ -420,22 +420,8 @@ impl Receiver {
     ///     receiver.recv().await
     /// }
     /// ```
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "a receiver holds its stream until `stop` takes the receiver"
-    )]
     pub async fn recv(&mut self) -> Result<Option<Block>, Error> {
-        let stream = self.stream.as_mut();
-        let mut receiving = Receiving {
-            session: &self.session,
-            stream: stream
-                .expect("invariant: a receiver holds its stream until it stops"),
-            done: false,
-        };
-        let received =
-            poll_fn(|cx| receiving.session.poll_read(cx, receiving.stream)).await;
-        receiving.done = true;
-        received
+        self.receiving().read(quic::Session::poll_read).await
     }
 
     /// Waits for the next whole message and writes it to the start of `buffer`.
@@ -464,8 +450,20 @@ impl Receiver {
         &mut self,
         buffer: &mut [u8],
     ) -> Result<Option<usize>, Error> {
-        let _ = buffer;
-        todo!("#68")
+        self.receiving()
+            .read(|session, cx, stream| session.poll_read_into(cx, stream, buffer))
+            .await
+    }
+
+    fn receiving(&mut self) -> Receiving<'_> {
+        Receiving {
+            session: &self.session,
+            stream: self
+                .stream
+                .as_mut()
+                .expect("invariant: a receiver holds its stream until it stops"),
+            done: false,
+        }
     }
 
     /// Asks the sender to stop: messages not yet received drop, and the sender sees
@@ -491,12 +489,27 @@ impl Drop for Receiver {
     }
 }
 
-/// A [`Receiver::recv`] in progress. Dropping it before it is done gives up its wait
-/// for room in the receive budget, so the room goes to the next read.
+/// A read of a [`Receiver`] in progress. Dropping it before it is done gives up its
+/// wait for room in the receive budget, so the room goes to the next read.
 struct Receiving<'a> {
     session: &'a quic::Session,
     stream: &'a mut quic::stream::Receiver,
     done: bool,
+}
+
+impl Receiving<'_> {
+    async fn read<T>(
+        mut self,
+        mut poll: impl FnMut(
+            &quic::Session,
+            &mut Context<'_>,
+            &mut quic::stream::Receiver,
+        ) -> Poll<T>,
+    ) -> T {
+        let read = poll_fn(|cx| poll(self.session, cx, self.stream)).await;
+        self.done = true;
+        read
+    }
 }
 
 impl Drop for Receiving<'_> {
@@ -653,6 +666,225 @@ mod tests {
                 assert_eq!(bytes(read), Ok(Some(b"a".to_vec())));
                 assert_eq!(bytes(incoming.receiver.recv().await), Ok(None));
                 side.session.close(Code(3));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_into_writes_each_message_to_the_start_in_turn_with_recv() {
+        let long = vec![5; 1500];
+        let messages = [b"".to_vec(), b"a".to_vec(), long.clone(), b"bc".to_vec()];
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            move |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                for message in messages.iter().chain([&b"def".to_vec()]) {
+                    sender.send(side.block(message)).await.expect("sent");
+                }
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            move |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut buffer = vec![9; 2000];
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(Some(0)));
+                assert_eq!(buffer, vec![9; 2000]);
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(Some(1)));
+                assert_eq!(buffer[..2], *b"a\x09");
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(Some(1500)));
+                assert_eq!(buffer[..1500], long);
+                assert_eq!(buffer[1500..], vec![9; 500]);
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(b"bc".to_vec())));
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(Some(3)));
+                assert_eq!(buffer[..3], *b"def");
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(None));
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_longer_than_the_buffer_is_too_large_and_stays_queued() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                for message in [[1; 100].as_slice(), b"x"] {
+                    sender.send(side.block(message)).await.expect("sent");
+                }
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut short = [0; 99];
+                let over = Error::TooLarge {
+                    bytes: 100,
+                    bytes_max: 99,
+                };
+                for _ in 0..2 {
+                    let read = receiver.recv_into(&mut short).await;
+                    assert_eq!(read, Err(over.clone()));
+                    assert_eq!(short, [0; 99]);
+                }
+                assert_eq!(
+                    over.to_string(),
+                    "a message of 100 bytes is over the limit of 99"
+                );
+                let mut buffer = [0; 100];
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(Some(100)));
+                assert_eq!(buffer, [1; 100]);
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(b"x".to_vec())));
+                assert_eq!(receiver.recv_into(&mut short).await, Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_into_gets_the_ranges_and_zeros_of_send_parts() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let frame: Vec<u8> = (0..=255).collect();
+                let parts = [
+                    Part {
+                        range: 0..8,
+                        zeros: 0,
+                    },
+                    Part {
+                        range: 64..69,
+                        zeros: 3,
+                    },
+                    Part {
+                        range: 250..256,
+                        zeros: 255,
+                    },
+                ];
+                let sent = sender.send_parts(side.block(&frame), &parts).await;
+                sent.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut buffer = [9; 300];
+                let read = receiver.recv_into(&mut buffer).await;
+                let expected = [
+                    (0..8).collect::<Vec<u8>>(),
+                    (64..69).collect(),
+                    vec![0; 3],
+                    (250..=255).collect(),
+                    vec![0; 255],
+                ]
+                .concat();
+                assert_eq!(read, Ok(Some(expected.len())));
+                assert_eq!(buffer[..expected.len()], expected);
+                assert_eq!(buffer[expected.len()..], [9; 300 - 277]);
+                assert_eq!(receiver.recv_into(&mut buffer).await, Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_reset_after_too_large_ends_the_stream() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, mut receiver) = opened.expect("a stream");
+                sender.send(side.block(&[1; 100])).await.expect("sent");
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(b"b".to_vec())));
+                sender.reset(Code(16));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut short = [0; 99];
+                let over = Error::TooLarge {
+                    bytes: 100,
+                    bytes_max: 99,
+                };
+                let read = incoming.receiver.recv_into(&mut short).await;
+                assert_eq!(read, Err(over.clone()));
+                let reply = incoming.sender.as_mut().expect("a reply half");
+                reply.send(side.block(b"b")).await.expect("sent");
+                let reset = Error::Reset { code: Code(16) };
+                let read = loop {
+                    match incoming.receiver.recv_into(&mut short).await {
+                        Err(error) if error == over => {
+                            side.node.clock().sleep(Span::MILLISECOND).await;
+                        }
+                        read => break read,
+                    }
+                };
+                assert_eq!(read, Err(reset.clone()));
+                let read = incoming.receiver.recv_into(&mut short).await;
+                assert_eq!(read, Err(reset));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_into_gives_the_peers_reset() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, mut receiver) = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(b"b".to_vec())));
+                // Too large for one flight, so the peer cannot have it all yet.
+                sender
+                    .send(side.block(&vec![7; 32 << 10]))
+                    .await
+                    .expect("sent");
+                sender.reset(Code(16));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut buffer = vec![0; 64 << 10];
+                let read = incoming.receiver.recv_into(&mut buffer).await;
+                assert_eq!(read, Ok(Some(1)));
+                let reply = incoming.sender.as_mut().expect("a reply half");
+                reply.send(side.block(b"b")).await.expect("sent");
+                let reset = Error::Reset { code: Code(16) };
+                loop {
+                    match incoming.receiver.recv_into(&mut buffer).await {
+                        Ok(Some(_)) => {}
+                        read => {
+                            assert_eq!(read, Err(reset));
+                            break;
+                        }
+                    }
+                }
+                side.session.close(Code(4));
             },
         );
         assert_eq!(sim.run(), Ok(()));
@@ -2192,6 +2424,31 @@ mod tests {
                         refusals: 0
                     }
                 );
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_recv_into_takes_no_block_from_a_full_pool() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| scarce(config, heap()),
+            |side| async move {
+                send_large(&side, &[Class::Complete], Span::ZERO).await;
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let held = side.pool.alloc(LARGE).expect("room");
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut buffer = vec![1; LARGE];
+                let read = incoming.receiver.recv_into(&mut buffer).await;
+                assert_eq!(read, Ok(Some(LARGE)));
+                assert_eq!(buffer, vec![0; LARGE]);
+                assert_eq!(incoming.receiver.recv_into(&mut buffer).await, Ok(None));
+                drop(held);
                 side.session.close(Code(4));
             },
         );

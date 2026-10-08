@@ -1,4 +1,4 @@
-//! The crate map. It must match section 4 of `docs/decisions.md`.
+//! The crate map. It must match `docs/decisions/crate-map.md`.
 
 /// One crate in the map.
 pub(crate) struct Crate {
@@ -28,6 +28,7 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("access", "document"),
     ("config", "config-hcl"),
     ("config", "connector-influx"),
+    ("ops", "config-hcl"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.

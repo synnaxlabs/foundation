@@ -1,4 +1,5 @@
-//! The home order of an index: the placement that wins for it, then its writer.
+//! The home order of an index or a connector: the placement that wins for it, then
+//! the node of its connector.
 
 use std::fmt;
 
@@ -8,14 +9,14 @@ use super::Policy;
 use crate::definition::Kind;
 use crate::resolve::{Tie, resolve};
 
-/// Where one index lives: its home, and the standby and copies of the placement that
-/// wins for it.
+/// Where one index or connector lives: its home, and the standby and copies of the
+/// placement that wins for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placed<'a> {
-    /// The tree key of the placement that wins for the index, or `None` when no
+    /// The tree key of the placement that wins for the name, or `None` when no
     /// placement selects it.
     pub placement: Option<&'a Name>,
-    /// The node that orders, buffers, and gates the index.
+    /// The node that orders, buffers, and gates the index, or that runs the connector.
     pub home: &'a Name,
     /// The node that takes over when the home fails.
     pub standby: Option<&'a Name>,
@@ -23,28 +24,29 @@ pub struct Placed<'a> {
     pub copies: &'a [Name],
 }
 
-/// Places the index `index`. Of `placements`, the one that selects the index most
-/// specifically wins whole: a less specific one never fills a node it leaves out. The
-/// home is the winner's home, else `writer`, the node of the connector that writes the
-/// index.
+/// Places `name`, an index or a connector. Of `placements`, the one that selects
+/// `name` most specifically wins whole: a less specific one never fills a node it
+/// leaves out. The home is the winner's home, else `writer`: the node of the connector
+/// that writes the index, or of the connector itself.
 ///
 /// `placements` gives each placement with its tree key. It holds each placement that
-/// reaches the index, once: those of its region and of each region above it. Node
+/// reaches `name`, once: those of its region and of each region above it. Node
 /// names compare as written, so `Edge` and `edge` are two nodes. The caller checks
 /// that a node exists, is not reserved, and is in the home's region.
 ///
 /// # Errors
 ///
 /// - [`Unplaced::Tie`] when the two most specific placements tie.
-/// - [`Unplaced::NoHome`] when neither the winner nor `writer` gives a home.
+/// - [`Unplaced::NoHome`] when neither the winner nor `writer` gives a home. Only an
+///   index gives it: a connector passes its own node as `writer`.
 /// - [`Unplaced::Overlap`] when the home comes from `writer` and that node is also the
 ///   winner's standby or a copy.
 pub fn place<'a>(
-    index: &Name,
+    name: &Name,
     placements: impl IntoIterator<Item = (&'a Name, &'a Policy)>,
     writer: Option<&'a Name>,
 ) -> Result<Placed<'a>, Unplaced> {
-    let winner = resolve(index, placements, Policy::select)
+    let winner = resolve(name, placements, Policy::select)
         .map_err(|Tie { first, second }| Unplaced::Tie { first, second })?;
     let placement = winner.map(|(key, _)| key);
     let policy = winner.map(|(_, policy)| policy);
@@ -76,11 +78,13 @@ pub fn place<'a>(
     })
 }
 
-/// An index that [`place`] cannot place. Its `Display` names each placement by its
-/// label, and the index as "the index", for a message at the index.
+/// An index or a connector that [`place`] cannot place. Its `Display` names each
+/// placement by its label, for a message at the label of the name. It calls the name
+/// "the name" in `Tie` and `Overlap`, and "the index" in `NoHome`, which only an index
+/// gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unplaced {
-    /// The two placements, the first two in name order of those tied, select the index
+    /// The two placements, the first two in name order of those tied, select the name
     /// with the same specificity.
     Tie {
         /// The first of the tied placements, in name order.
@@ -95,11 +99,11 @@ pub enum Unplaced {
         /// selects the index.
         placement: Option<Name>,
     },
-    /// The node of the writer is the home and also has a role in the placement.
+    /// The node of the connector is the home and also has a role in the placement.
     Overlap {
-        /// The node of the writer.
+        /// The node of the connector.
         node: Name,
-        /// The tree key of the placement that wins for the index.
+        /// The tree key of the placement that wins for the name.
         placement: Name,
     },
 }
@@ -111,7 +115,7 @@ impl Unplaced {
         match self {
             Self::Tie { .. } => {
                 "Change the `select` of one of the two placements, so that one selects \
-                 the index more specifically"
+                 the name more specifically"
             }
             Self::NoHome { placement: Some(_) } => {
                 "Name a `home` in the placement, or write the index with a connector"
@@ -121,7 +125,8 @@ impl Unplaced {
                  with a connector"
             }
             Self::Overlap { .. } => {
-                "Name a `home` in the placement, or remove the node from it"
+                "Move the node to `home` when it is the one node of the placement, \
+                 else remove it from the placement"
             }
         }
     }
@@ -132,7 +137,7 @@ impl fmt::Display for Unplaced {
         match self {
             Self::Tie { first, second } => write!(
                 f,
-                "the placements `{}` and `{}` select the index with the same \
+                "the placements `{}` and `{}` select the name with the same \
                  specificity",
                 label(first),
                 label(second)
@@ -151,8 +156,8 @@ impl fmt::Display for Unplaced {
             ),
             Self::Overlap { node, placement } => write!(
                 f,
-                "the node `{node}` writes the index and has another role in the \
-                 placement `{}`",
+                "the node `{node}` of a connector is the home and has another role in \
+                 the placement `{}`",
                 label(placement)
             ),
         }
@@ -329,7 +334,7 @@ mod tests {
         assert_eq!(check("a.time", &placements, None), Err(tie.clone()));
         assert_eq!(
             tie.to_string(),
-            "the placements `p_1` and `p_2` select the index with the same specificity"
+            "the placements `p_1` and `p_2` select the name with the same specificity"
         );
         let keyless = Unplaced::Tie {
             first: name("p_1"),
@@ -337,13 +342,13 @@ mod tests {
         };
         assert_eq!(
             keyless.to_string(),
-            "the placements `p_1` and `p_2` select the index with the same specificity",
+            "the placements `p_1` and `p_2` select the name with the same specificity",
             "a name with no label form shows as given"
         );
         assert_eq!(
             tie.fix(),
             "Change the `select` of one of the two placements, so that one selects the \
-             index more specifically"
+             name more specifically"
         );
     }
 
@@ -383,11 +388,13 @@ mod tests {
         };
         assert_eq!(
             overlap.to_string(),
-            "the node `n_1` writes the index and has another role in the placement `p`"
+            "the node `n_1` of a connector is the home and has another role in the \
+             placement `p`"
         );
         assert_eq!(
             overlap.fix(),
-            "Name a `home` in the placement, or remove the node from it"
+            "Move the node to `home` when it is the one node of the placement, else \
+             remove it from the placement"
         );
     }
 

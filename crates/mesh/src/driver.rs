@@ -815,12 +815,12 @@ impl Group {
                 },
                 Data::Voters(change) => {
                     self.state.set_voters(change.voters);
-                    Ok(None)
+                    Ok(false)
                 }
-                Data::Empty => Ok(None),
+                Data::Empty => Ok(false),
             };
             // A refused change is a no-op on every node.
-            if let Ok(Some(_)) = applied {
+            if let Ok(true) = applied {
                 self.wake_watches();
             }
             self.applied.push(at, applied.map(|_| ()));
@@ -1154,6 +1154,8 @@ mod tests {
     /// The idle time of each transport.
     const IDLE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
     const INDEX: channel::Key = channel::Key::from_u128(7);
+    /// An index that a spec change can add after `INDEX`.
+    const SECOND: channel::Key = channel::Key::from_u128(8);
 
     /// What each node's watch gave, in order.
     type Homes = BTreeMap<u8, Vec<Option<node::Key>>>;
@@ -1164,6 +1166,7 @@ mod tests {
         root: Digest,
         chunks: BTreeSet<Digest>,
         holders: BTreeSet<node::Key>,
+        homes: BTreeMap<channel::Key, node::Key>,
     }
 
     /// What the voters of a cluster did and what they do next.
@@ -1187,6 +1190,8 @@ mod tests {
         hidden: Option<u8>,
         /// The records of those members on each node, at the same time.
         records: BTreeMap<u8, BTreeMap<u8, Member>>,
+        /// The home of `SECOND` on each node, at the same time.
+        seconds: BTreeMap<u8, Option<node::Key>>,
         /// The region state of each node, at the same time.
         states: BTreeMap<u8, region::State>,
         /// The spec pointer of each node, at the same time.
@@ -1559,8 +1564,9 @@ mod tests {
                 root,
                 chunks,
                 holders,
+                homes,
             } = spec;
-            let result = mesh.settle_spec(base, root, chunks, holders).await;
+            let result = mesh.settle_spec(base, root, chunks, holders, homes).await;
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
         }
@@ -1730,7 +1736,9 @@ mod tests {
                 .collect();
             // No call of `Mesh` gives the use count of a ticket.
             let state = mesh.group.borrow().state.clone();
+            let second = mesh.watch(SECOND).next().await.unwrap();
             let mut board = board.lock().unwrap();
+            board.seconds.insert(id, second);
             board.states.insert(id, state);
             board.pointers.insert(id, mesh.pointer());
             board.homes.entry(id).or_default().push(home);
@@ -1863,6 +1871,7 @@ mod tests {
             root: common::digest(byte),
             chunks: [common::digest(byte)].into(),
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         let changes = [change(1), change(2), home(1)];
         cluster.script_each(&changes.map(|change| encoded(&change)));
@@ -1903,6 +1912,7 @@ mod tests {
             root: common::digest(1),
             chunks,
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         cluster.script_each(&[encoded(&change), encoded(&home(1))]);
         cluster.start_voter(1);

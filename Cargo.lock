@@ -842,6 +842,7 @@ dependencies = [
  "env",
  "home",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",
@@ -1168,10 +1169,15 @@ name = "ops"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "config",
+ "config-hcl",
+ "connector",
  "document",
  "schemars",
  "serde",
  "serde_json",
+ "spec",
+ "types",
 ]
 
 [[package]]

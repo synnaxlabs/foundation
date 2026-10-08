@@ -1,18 +1,14 @@
 //! The channels that sessions may name.
 
 use types::channel;
-use types::name::Name;
 use types::sample::Type;
 
-/// A channel that sessions may name, as [`Hub::define`](crate::Hub::define) takes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Channel {
-    /// The channel's key.
-    pub key: channel::Key,
-    /// The name that sessions use.
-    pub name: Name,
-    /// The layout of its samples. An index has `Stamp`.
-    pub data_type: Type,
+/// What sessions read of a defined channel.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Channel {
+    pub(crate) key: channel::Key,
+    /// The layout of its samples. Sessions read it only for a data channel.
+    pub(crate) data_type: Type,
     /// The index it is on. An index names itself.
-    pub index: channel::Key,
+    pub(crate) index: channel::Key,
 }

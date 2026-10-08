@@ -117,3 +117,26 @@ fn each_posix_constructor_prints_its_name_and_aborts() {
         );
     }
 }
+
+unsafe extern "C" {
+    fn UA_Timer_init(timer: *mut c_void);
+    fn UA_Timer_next(timer: *mut c_void) -> i64;
+    fn UA_Timer_process(timer: *mut c_void, now: i64) -> i64;
+    fn UA_Timer_remove(timer: *mut c_void, key: u64);
+    fn UA_Timer_clear(timer: *mut c_void);
+}
+
+/// The library does not compile `timer.c`, and the archive drops an object that
+/// nothing names. So this test links only when `sources.txt` holds it.
+#[test]
+fn the_copy_links_the_timer() {
+    let functions = std::hint::black_box([
+        UA_Timer_init as *const (),
+        UA_Timer_next as *const (),
+        UA_Timer_process as *const (),
+        UA_Timer_remove as *const (),
+        UA_Timer_clear as *const (),
+    ]);
+    let distinct: std::collections::BTreeSet<_> = functions.iter().collect();
+    assert_eq!(distinct.len(), functions.len());
+}

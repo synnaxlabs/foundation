@@ -1,7 +1,7 @@
 # Security
 
 The threat model of Foundation. The red-team sessions own this file and update it when
-a surface lands. `docs/decisions.md` wins where they differ. A defect that an
+a surface lands. `docs/decisions/` wins where they differ. A defect that an
 attacker can use is a GitHub issue with the `security` label and a failing test.
 
 ## What we protect
@@ -345,9 +345,10 @@ state on `main`.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
 - The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
-- A local patch of a crate (`patches/`) is a path package, so `cargo deny` does not
-  check it against advisories (#1867). The open62541 copy in `patches/open62541/` is C,
-  not a crate: no check compares it with advisories until #1910.
+- A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
+  does not check against advisories. The `Advisories of each patched release` step of
+  the `deny` job checks its release (#1867). The open62541 copy in `patches/open62541/`
+  is C, not a crate: no check compares it with advisories until #1910.
 - A node fetches the signed binary of a release by hash from a nearby peer (C9d). The
   signing key and its check are not built.
 
@@ -365,7 +366,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
 | `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body message is where `body` says and no longer than the rest of the body; each refusal is the one the state gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
-| `wire_hub_client` | `wire::hub::client::Gateway::decode`, `Program::decode`, and the encoders of `Challenge`, `Signed`, `Request`, and `Response` | Each message encodes to the same bytes; each event comes in the order of a client stream, and each refusal is the one that the order gives; each body ends at its length; each valid message made from the input decodes to itself |
+| `wire_hub_client` | `wire::hub::client::Challenge::decode`, `Signed::decode`, `Request::decode`, `Response::decode`, `Body::take`, `Body::end`, and the encoders of each message | Each message encodes to the same bytes; each decoder refuses another kind with `Error::Kind`; each body ends at its length and nowhere else, and each refusal of a body is the one that its rest gives; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `transport_certificate` | `transport::fuzzing::peer`: the client verifier and the peer of a node's server, for a dialer's chain of 0 to 3 certificates (feature `fuzzing`) | Gives the peer that a second reader of the rules gives: a client for no certificate, none for a chain of more than one or a certificate over 1024 bytes, and else none or the node whose key follows the Ed25519 key header in the certificate; a certificate that a node issues reads back to its key, and two of it are refused. Not reached: the handshake signature, which fuzzed bytes cannot make |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |

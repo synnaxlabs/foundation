@@ -2,3 +2,4 @@ ops.argument	Match the arguments to the operation in `foundation docs`
 ops.unknown-operation	Use a name from `foundation docs`
 ops.input	Give standard input a source that can be read
 ops.output	Give standard output a destination that can be written
+ops.unknown-extension	Use a file that ends in `.hcl`

@@ -7,10 +7,17 @@ publish.workspace = true
 
 [dependencies]
 clap = { workspace = true }
+config = { path = "../config" }
+connector = { path = "../connector" }
 document = { path = "../document" }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+spec = { path = "../spec" }
+types = { path = "../types" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+config-hcl = { path = "../config-hcl" }

@@ -52,11 +52,11 @@ exception when the patch lands (#55).
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 `fuzz/Cargo.toml`, keep the change small, and list it here with its reason. The
-patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`). A C
-library that we patch (open62541) has no `[patch.crates-io]`: its `build.rs` reads
-`patches/open62541/`. Searches skip `patches/` (`.ignore`): to search a copy, give its
-path or use `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables
-equal (#1867).
+patched copy lives in `patches/<crate>/` (LOCAL PATCHES in
+`docs/decisions/releases/local-patches.md`). A C library that we patch (open62541) has
+no `[patch.crates-io]`: its `build.rs` reads `patches/open62541/`. Searches skip
+`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`. No
+check yet keeps the two `[patch.crates-io]` tables equal (#1867).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
@@ -84,13 +84,14 @@ The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
 the empty-list sentence of
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy of
-a Rust crate is a path package, so `cargo deny` does not check it against advisories
-(#1867).
+a Rust crate is a path package, which `cargo deny` does not check against advisories,
+so the `Advisories of each patched release` step of the `deny` job in
+`.github/workflows/ci.yaml` checks its release (#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
-| `noq-proto` | 1.3.0 | The gap between two probes is at most the cap (PROBE GAP in `docs/decisions.md`) | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
-| `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`) | With one state per process, the values of a test server depend on the draws of other threads (#435) |
+| `noq-proto` | 1.3.0 | The gap between two probes is at most the cap (`docs/decisions/transport/probe-gap.md`) | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`), and a draw on a thread with no start value aborts | With one state per process, the values of a test server depend on the draws of other threads; a thread with no start value draws the same values as each other such thread (#435) |
 
 ## Tests, benchmarks, and tools
 
