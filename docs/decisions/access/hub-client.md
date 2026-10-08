@@ -46,8 +46,9 @@
   approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It
   gave the reason against `tokio::sync::Semaphore` at 22:15:33Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). The
-  pool sentence, which adds the block of the next chunk and counts each block at its
-  footprint, is owed its approval.
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). It
+  approved the pool sentence, which adds the block of the next chunk and counts each
+  block at its footprint, at 5b5901b4, at 22:43:35Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522).
   Supersedes the sentence "Any pool works" of
   https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.
