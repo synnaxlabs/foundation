@@ -82,16 +82,48 @@ fn passes_the_last_round_of_1089() {
 }
 
 #[test]
-fn fails_a_free_form_earlier_round() {
-    let first = bot(
-        "## Review round 1\n\nConfirmed findings, most severe first.\n\n\
-                     1. **`Checked::new` overflows the stack**.",
-    );
-    assert_eq!(
-        check(&record(vec![first, bot(ROUND)])),
-        vec![
-            "review round 1 has no `Range:` line. Write the round in the format of \
+fn fails_each_free_form_earlier_round() {
+    let free = |n| {
+        bot(&format!(
+            "## Review round {n}\n\nConfirmed findings, most severe first.\n\n\
+             1. **`Checked::new` overflows the stack**."
+        ))
+    };
+    let missing = |n| {
+        format!(
+            "review round {n} has no `Range:` line. Write the round in the format of \
              .claude/skills/review/SKILL.md, \"Round comment\"."
+        )
+    };
+    assert_eq!(
+        check(&record(vec![free(1), free(2), bot(ROUND)])),
+        vec![missing(1), missing(2)]
+    );
+}
+
+/// Round 1 of a code PR with each reviewer it requires, its findings, and `end`.
+fn first(end: &str) -> Comment {
+    bot(&format!(
+        "## Review round 1\n\nReviewers: reviewer, architecture, breaker\n\
+         Range: `a..b`\nFindings: 2\n\n1. **`send` drops a frame**.{end}"
+    ))
+}
+
+#[test]
+fn fails_an_earlier_round_with_no_end_line() {
+    assert_eq!(
+        check(&record(vec![first(""), bot(ROUND)])),
+        vec![unended("Deferred").replace("round 3", "round 1")]
+    );
+}
+
+#[test]
+fn an_earlier_round_that_names_a_hot_path_needs_performance() {
+    let hot = END.replace("Hot path: none", "Hot path: `stream::Sender::send`");
+    assert_eq!(
+        check(&record(vec![first(&hot), bot(ROUND)])),
+        vec![
+            "review round 1 names no performance, which this round requires."
                 .to_string()
         ]
     );
@@ -127,18 +159,44 @@ fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
     );
     assert_eq!(
         check(&record(vec![bot(&swapped)])),
-        vec![unended("Public surface")]
+        vec![unended("Deferred")]
     );
     let twice = ROUND.to_string() + "\nHot path: `Sender::send`";
     assert_eq!(
         check(&record(vec![bot(&twice)])),
         vec![
-            "review round 3 has a second `Hot path:` line after its `Deferred:` line."
+            "review round 3 has a second `Hot path:` line in its end lines."
                 .to_string()
         ]
     );
-    let spaced = ROUND.replace("\nHot path:", "\n\n  Hot path:") + "\n  \n";
-    assert_eq!(check(&record(vec![bot(&spaced)])), Vec::<String>::new());
+    let spaced = ROUND.replace("\nHot path:", "\n\nHot path:");
+    assert_eq!(
+        check(&record(vec![bot(&spaced)])),
+        vec![unended("Deferred")]
+    );
+    let indented = ROUND.replace("\nHot path:", "\n  Hot path:") + "\n  \n";
+    assert_eq!(check(&record(vec![bot(&indented)])), Vec::<String>::new());
+    let followed = ROUND.to_string() + "\n\nThe author fixes each finding.";
+    assert_eq!(
+        check(&record(vec![bot(&followed)])),
+        vec![unended("Deferred")]
+    );
+}
+
+#[test]
+fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
+    let quoted = ROUND.replace(
+        "No bug, no lost coverage, no oracle weakening.\n\n\
+         Deferred: none\nPublic surface: none\nHot path: none",
+        "The breaker tried a round that ends with\n\n```\nDeferred: none\n\
+         Public surface: none\nHot path: none\n```\n\nand one that names \
+         `stream::Sender::send` as its hot path. None fails.",
+    );
+    assert_ne!(quoted, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&quoted)])),
+        vec![unended("Deferred")]
+    );
 }
 
 #[test]
@@ -171,6 +229,25 @@ fn a_round_that_names_a_hot_path_needs_performance() {
                 .to_string()
         ]
     );
+    let prefixed = later("reviewer, breaker").replace(
+        "Hot path: none",
+        "Hot path: nonempty_frames, once per frame",
+    );
+    assert_eq!(
+        check(&record(vec![bot(&prefixed)])),
+        check(&record(vec![bot(&hot)]))
+    );
+    let listed = later("reviewer, breaker").replace(
+        "Hot path: none",
+        "Hot path:\n- `stream::Sender::send`, once per frame",
+    );
+    assert_eq!(
+        check(&record(vec![bot(&listed)])),
+        check(&record(vec![bot(&hot)]))
+    );
+    let quiet = later("reviewer, breaker")
+        .replace("Hot path: none", "Hot path: `none`, tests only");
+    assert_eq!(check(&record(vec![bot(&quiet)])), Vec::<String>::new());
     let measured = hot.replace("breaker\n", "breaker, performance\n");
     assert_eq!(check(&record(vec![bot(&measured)])), Vec::<String>::new());
     let cold = later("reviewer, breaker").replace(

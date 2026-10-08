@@ -18,6 +18,13 @@ type CodeChange<'a> = &'a dyn Fn(&str, &str) -> Result<Option<String>, String>;
 /// other accounts never count.
 const BOT: &str = "synnax-foundation-factory[bot]";
 
+/// The end of each problem that asks for the round comment format.
+const FORMAT: &str =
+    "in the format of .claude/skills/review/SKILL.md, \"Round comment\".";
+
+/// The names of the lines that end each round comment, in order.
+const END: [&str; 3] = ["Deferred", "Public surface", "Hot path"];
+
 /// The record of a PR that the check reads.
 #[derive(Debug)]
 struct Record {
@@ -110,8 +117,8 @@ fn problems(
         .collect();
     if rounds.is_empty() {
         problems.push(format!(
-            "no review round comment by {BOT}. Run `/review` and post each round in \
-             the format of .claude/skills/review/SKILL.md, \"Round comment\"."
+            "no review round comment by {BOT}. Run `/review` and post each round \
+             {FORMAT}"
         ));
     }
     for (i, round) in rounds.iter().enumerate() {
@@ -211,18 +218,20 @@ fn approval(record: &Record, head: &str) -> Option<String> {
 }
 
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
-/// The fields are the first block of lines after that line, so the findings text
-/// cannot set them. The comment ends with its `Deferred:`, `Public surface:`, and
-/// `Hot path:` lines.
+/// The fields are the first paragraph after that line, so the findings text cannot
+/// set them. The last paragraph is the end lines ([`END`]).
 fn round(body: &str) -> Option<Result<Round, String>> {
     let mut lines = body.lines().map(str::trim);
     let number = lines.find_map(|l| l.strip_prefix("## Review round "))?;
-    let lines = lines
-        .skip_while(|l| l.is_empty())
-        .take_while(|l| !l.is_empty());
+    let paragraphs: Vec<Vec<&str>> = lines
+        .collect::<Vec<_>>()
+        .split(|l| l.is_empty())
+        .filter(|p| !p.is_empty())
+        .map(<[&str]>::to_vec)
+        .collect();
     let (mut reviewers, mut range, mut findings) = (None, None, None);
     let mut breakerless = false;
-    for line in lines {
+    for line in paragraphs.first().into_iter().flatten() {
         breakerless |= line.starts_with("Breaker: skipped");
         if let Some(value) = line.strip_prefix("Reviewers: ") {
             reviewers.get_or_insert(value);
@@ -238,10 +247,7 @@ fn round(body: &str) -> Option<Result<Round, String>> {
         )));
     };
     let missing = |name| {
-        format!(
-            "review round {number} has no `{name}:` line. Write the round in the \
-             format of .claude/skills/review/SKILL.md, \"Round comment\"."
-        )
+        format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
@@ -259,7 +265,8 @@ fn round(body: &str) -> Option<Result<Round, String>> {
                 )
             })?,
         };
-        let hot = hot_path(body, number)?;
+        let last = paragraphs.get(1..).and_then(<[_]>::last);
+        let hot = hot(last.map_or(&[][..], Vec::as_slice), number)?;
         Ok(Round {
             number,
             reviewers: reviewers
@@ -271,46 +278,44 @@ fn round(body: &str) -> Option<Result<Round, String>> {
             from: from.to_string(),
             end: end.to_string(),
             findings,
-            hot: !hot.starts_with("none"),
+            hot,
         })
     };
     Some(fields())
 }
 
-/// The text after `Hot path:` on its line in round `number`. The comment `body` must
-/// end with its `Deferred:`, `Public surface:`, and `Hot path:` lines, in that order,
-/// each of which may wrap onto the lines after it.
-fn hot_path(body: &str, number: u32) -> Result<&str, String> {
-    const END: [&str; 3] = ["Deferred:", "Public surface:", "Hot path:"];
-    let lines: Vec<_> = body.lines().map(str::trim).collect();
-    let start = lines.iter().rposition(|l| l.starts_with(END[0]));
-    let mut found = lines[start.unwrap_or(lines.len())..]
-        .iter()
-        .filter_map(|l| {
-            END.iter()
-                .find_map(|name| Some((*name, l.strip_prefix(name)?.trim())))
-        });
-    let mut hot = "";
-    for name in END {
-        match found.next() {
-            Some((line, value)) if line == name => hot = value,
-            _ => {
-                return Err(format!(
-                    "review round {number} does not end with a `{name}` line. End each \
-                     round with its `Deferred:`, `Public surface:`, and `Hot path:` \
-                     lines, in that order, in the format of \
-                     .claude/skills/review/SKILL.md, \"Round comment\"."
-                ));
-            }
+/// Whether the end lines `paragraph` of round `number` name a hot path: the first
+/// word of its `Hot path:` value is not `none`. The paragraph must be the [`END`]
+/// lines in order, each of which may wrap onto the lines after it.
+fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
+    let mut values: Vec<(&str, String)> = Vec::new();
+    for line in paragraph {
+        let name = END
+            .iter()
+            .find(|name| line.starts_with(&format!("{name}:")));
+        match (name, values.last_mut()) {
+            (Some(name), _) => values.push((*name, line[name.len() + 1..].to_string())),
+            (None, Some((_, value))) => *value = format!("{value} {line}"),
+            (None, None) => break,
         }
     }
-    if let Some((name, _)) = found.next() {
+    let [deferred, surface, hot] = END;
+    for (i, name) in END.into_iter().enumerate() {
+        if values.get(i).is_none_or(|(found, _)| *found != name) {
+            return Err(format!(
+                "review round {number} does not end with a `{name}:` line. End each \
+                 round with its `{deferred}:`, `{surface}:`, and `{hot}:` lines, in \
+                 that order, {FORMAT}"
+            ));
+        }
+    }
+    if let Some((name, _)) = values.get(END.len()) {
         return Err(format!(
-            "review round {number} has a second `{name}` line after its `Deferred:` \
-             line."
+            "review round {number} has a second `{name}:` line in its end lines."
         ));
     }
-    Ok(hot)
+    let first = values[2].1.split_whitespace().next().unwrap_or_default();
+    Ok(first.trim_matches(|c: char| !c.is_alphanumeric() && c != '_') != "none")
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.
