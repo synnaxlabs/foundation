@@ -557,9 +557,9 @@ How to read this record:
   Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
   on a 4096-byte boundary so a commit never rewrites a synced block, except the
   restart record of an open and the records after it, which may go over a restart or
-  wrap record that no data or carry record follows (#649). The CRC covers `len`, `kind`, and
-  the body. It continues from the record before (a chain), so bytes of an earlier
-  chain never read as the next record.
+  wrap record that no data or carry record follows (#649). The CRC covers `len`,
+  `kind`, and the body. It continues from the record before (a chain), so bytes of an
+  earlier chain never read as the next record.
   Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
   not used and the next record is at its start; restart (3), written at each open
   right after the last data or carry record the walk reads, or at the tail when it
@@ -594,9 +594,12 @@ How to read this record:
   tail and end, with no run. A path that it met keeps its end and runs, and takes the
   carried stamp when it has none (a trim passed the entry with the stamp). A carried
   end that is not that end, or a carried stamp that is not its stamp, is a wrong
-  shape. The form on disk
-  for the ruling of #160
-  (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
+  shape. A restart record follows a carry record as it follows a data record: this
+  supersedes the placement of #649. The form on disk is for the ruling of #160
+  (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113), and
+  laptop.architect approved kind 4 at version 1
+  (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6051990962,
+  2026-10-08T04:07:38Z).
   For each path, memory holds one run per data record with an entry of it: the
   mark before the path's first entry in the record and the record's offset, oldest
   first, 24 bytes per record and path in a deque that doubles, so at most 48/51
