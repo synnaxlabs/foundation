@@ -68,8 +68,9 @@ fn passing_files_pass_together(documents: &[Document]) {
     );
 }
 
-/// Each block gives one entry, keyed `<label>.@<keyword>` and unique in any case, with
-/// a definition that the spec tree reads back.
+/// Each block gives one entry, keyed by its label for a channel or `<label>.@<keyword>`
+/// for a policy, and unique in any case. A policy has a definition that the spec tree
+/// reads back, and each edge of a channel names a channel entry.
 fn entries_match(documents: &[Document], entries: &BTreeMap<Name, config::Entry>) {
     let by_key: BTreeMap<String, &config::Entry> = entries
         .iter()
@@ -86,16 +87,34 @@ fn entries_match(documents: &[Document], entries: &BTreeMap<Name, config::Entry>
         let [label] = block.labels.as_slice() else {
             panic!("a block with {} labels passed", block.labels.len());
         };
-        let key = format!("{}.@{}", label.text, block.keyword).to_ascii_lowercase();
+        let key = match &*block.keyword {
+            "channel" => label.text.to_string(),
+            keyword => format!("{}.@{keyword}", label.text),
+        }
+        .to_ascii_lowercase();
         let definition = &by_key
             .get(&key)
             .unwrap_or_else(|| panic!("no entry for {key}"))
             .definition;
-        assert_eq!(
-            Definition::decode(&definition.encode()).as_ref(),
-            Ok(definition),
-            "the definition of {key} changed in its encoding"
-        );
+        match definition {
+            config::Definition::Spec(definition) => assert_eq!(
+                Definition::decode(&definition.encode()).as_ref(),
+                Ok(definition),
+                "the definition of {key} changed in its encoding"
+            ),
+            config::Definition::Channel(kind) => {
+                for (edge, to) in kind.edges() {
+                    assert!(
+                        matches!(
+                            entries.get(to).map(|entry| &entry.definition),
+                            Some(config::Definition::Channel(_))
+                        ),
+                        "the {edge} of {key} is {to}, which is not a channel entry"
+                    );
+                }
+            }
+            _ => panic!("{key} gave a definition that this target does not know"),
+        }
     }
 }
 

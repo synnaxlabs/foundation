@@ -149,7 +149,7 @@ fn one_of(words: &[&str]) -> String {
     }
 }
 
-/// What `check` has found so far.
+/// The channel names of the Documents, and what `check` has found so far.
 #[derive(Debug, Default)]
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
@@ -191,7 +191,7 @@ impl<'a> Found<'a> {
                 self.report(read::label(label)).ok()?;
                 unreachable!("`read::label` refuses each label that `Kind::key` does");
             }
-            Err(key::Error::Reserved) => {
+            Err(error @ key::Error::Reserved) => {
                 self.diagnostics.push(Diagnostic::new(
                     RESERVED_NAME,
                     label.span,
@@ -199,7 +199,7 @@ impl<'a> Found<'a> {
                         "{:?} has a segment that starts with `@`, which is reserved",
                         label.text
                     ),
-                    "Remove the `@` from each segment".into(),
+                    error.fix().into(),
                 ));
                 return None;
             }
@@ -1941,13 +1941,11 @@ mod tests {
                 Err(vec![
                     unknown(
                         at(0, 13),
-                        "the control channel of `edge.time` is `edge.ctl`, which no \
-                         `channel` block defines",
+                        "no `channel` block defines the control channel `edge.ctl`",
                     ),
                     unknown(
                         at(0, 15),
-                        "the error channel of `edge.time` is `edge.err`, which no \
-                         `channel` block defines",
+                        "no `channel` block defines the error channel `edge.err`",
                     ),
                 ])
             );
@@ -1965,13 +1963,11 @@ mod tests {
                 Err(vec![
                     unknown(
                         at(0, 113),
-                        "the quality channel of `edge.value` is `edge.q`, which no \
-                         `channel` block defines",
+                        "no `channel` block defines the quality channel `edge.q`",
                     ),
                     unknown(
                         at(0, 115),
-                        "the index channel of `edge.value` is `edge.tim`, which no \
-                         `channel` block defines",
+                        "no `channel` block defines the index channel `edge.tim`",
                     ),
                 ])
             );
@@ -2170,6 +2166,137 @@ mod tests {
         fn refuses_a_block_inside_a_channel() {
             assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
             assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
+        }
+
+        #[test]
+        fn refuses_an_edge_to_the_label_of_a_policy() {
+            let placement = block(
+                0,
+                0,
+                "placement",
+                &["site"],
+                &[("select", string("site.*")), ("home", string("site"))],
+            );
+            let documents = [document(vec![
+                placement,
+                channel(
+                    0,
+                    100,
+                    "v",
+                    &[("data_type", string("f64")), ("index", string("site"))],
+                ),
+            ])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![unknown(
+                    at(0, 113),
+                    "no `channel` block defines the index channel `site`",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_of_a_block_with_two_labels() {
+            let documents = [document(vec![block(
+                0,
+                0,
+                "channel",
+                &["v", "w"],
+                &[("data_type", string("f64")), ("index", string("nope"))],
+            )])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.label-count",
+                        at(0, 2),
+                        "the `channel` block has 2 labels, and it needs one, its name",
+                        "Give the block one label, its name, such as \"site_a.budget\"",
+                    ),
+                    unknown(
+                        at(0, 13),
+                        "no `channel` block defines the index channel `nope`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_beside_a_bad_data_type() {
+            let documents =
+                value(&[("data_type", string("F64")), ("index", string("nope"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.bad-data-type",
+                        at(0, 111),
+                        "cannot read the data type \"F64\": expected a data type such \
+                         as f64, f32[3], list<u8, 16>, string, bytes, or quality",
+                        "Use one of the forms that the message names, with exact case \
+                         and a space only after the comma of a list",
+                    ),
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the index channel `nope`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_beside_a_bad_unit() {
+            let documents = value(&[
+                ("data_type", string("f64")),
+                ("index", string("edge.tim")),
+                ("unit", string("k Pa")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 113),
+                        "no `channel` block defines the index channel `edge.tim`",
+                    ),
+                    refused(
+                        "config.bad-unit",
+                        at(0, 115),
+                        "cannot read the unit \"k Pa\": a unit has the character ' ' \
+                         at byte 1, which is not printable ASCII",
+                        "Use only printable ASCII characters with no space, such as \
+                         m/s2",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn refuses_an_unknown_edge_beside_an_unknown_attribute() {
+            let documents = [document(vec![channel(
+                0,
+                0,
+                "edge.time",
+                &[
+                    ("kind", string("index")),
+                    ("error", string("edge.err")),
+                    ("unit", string("s")),
+                ],
+            )])];
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    unknown(
+                        at(0, 13),
+                        "no `channel` block defines the error channel `edge.err`",
+                    ),
+                    refused(
+                        "config.unknown-attribute",
+                        at(0, 14),
+                        "`unit` is not an attribute of the `channel` block",
+                        "Use `kind`, `error`, or `control`, or remove it",
+                    ),
+                ])
+            );
         }
     }
 }
