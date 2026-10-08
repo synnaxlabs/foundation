@@ -22,7 +22,6 @@ use types::frame::Path;
 use types::time::Stamp;
 
 use crate::entry::{self, Fields, Invalid};
-use crate::log::Mark;
 
 /// The encoded size of one [`Tail`].
 const LEN: usize = 16 + 1 + 8 + 8 + 9;
@@ -40,8 +39,10 @@ pub(crate) const GIVEN_MAX: u64 = (1 << 63) - 1;
 pub(crate) struct Tail {
     pub(crate) index: channel::Key,
     pub(crate) path: Path,
-    /// The mark after the path's newest durable entry.
-    pub(crate) end: Mark,
+    /// The seq after the path's newest durable entry.
+    pub(crate) seq: u64,
+    /// How many durable entries with no samples are at `seq`.
+    pub(crate) given: u64,
     /// The `last` of the path's newest durable entry that has one.
     pub(crate) stamp: Option<Stamp>,
 }
@@ -53,8 +54,8 @@ impl Tail {
         for field in [
             &self.index.as_u128().to_le_bytes()[..],
             &[entry::path_byte(self.path)],
-            &self.end.seq.to_le_bytes(),
-            &self.end.given.to_le_bytes(),
+            &self.seq.to_le_bytes(),
+            &self.given.to_le_bytes(),
             &entry::last_bytes(self.stamp),
         ] {
             let (slot, after) = rest.split_at_mut(field.len());
@@ -77,7 +78,8 @@ impl Tail {
         Ok(Self {
             index,
             path,
-            end: Mark { seq, given },
+            seq,
+            given,
             stamp,
         })
     }
@@ -88,7 +90,6 @@ impl Tail {
 /// # Panics
 ///
 /// When `count` is over [`TAILS_MAX`].
-#[cfg_attr(not(test), expect(dead_code, reason = "a commit writes carry records"))]
 pub(crate) const fn body_len(count: usize) -> usize {
     assert!(
         count <= TAILS_MAX,
@@ -172,10 +173,8 @@ mod tests {
         Tail {
             index: channel::Key::from_u128(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
             path: Path::Backfill,
-            end: Mark {
-                seq: 0x1112_1314_1516_1718,
-                given,
-            },
+            seq: 0x1112_1314_1516_1718,
+            given,
             stamp: stamp.map(Stamp::from_nanos),
         }
     }
@@ -293,7 +292,8 @@ mod tests {
             .prop_map(|(index, backfill, seq, given, stamp)| Tail {
                 index: channel::Key::from_u128(index),
                 path: if backfill { Path::Backfill } else { Path::Live },
-                end: Mark { seq, given },
+                seq,
+                given,
                 stamp: stamp.map(Stamp::from_nanos),
             })
     }

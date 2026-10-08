@@ -83,8 +83,8 @@ impl fmt::Display for Invalid {
                  {stamp:?}",
                 carried.index,
                 carried.path,
-                carried.end.seq,
-                carried.end.given,
+                carried.seq,
+                carried.given,
                 carried.stamp,
                 end.seq,
                 end.given
@@ -367,11 +367,11 @@ impl Logs {
         let Some(log) = self.paths.get_mut(&key) else {
             let mut log = Log::new(carried.index);
             log.durable = Tail {
-                seq: carried.end.seq,
+                seq: carried.seq,
                 stamp: carried.stamp,
             };
             log.appended = log.durable;
-            log.empty = carried.end.given;
+            log.empty = carried.given;
             self.paths.insert(key, log);
             return Ok(());
         };
@@ -389,7 +389,11 @@ impl Logs {
         );
         let end = log.end();
         let stamp = log.durable.stamp;
-        if carried.end != end || stamp.is_some_and(|_| carried.stamp != stamp) {
+        let carried_end = Mark {
+            seq: carried.seq,
+            given: carried.given,
+        };
+        if carried_end != end || stamp.is_some_and(|_| carried.stamp != stamp) {
             return Err(Invalid::Carried {
                 carried: *carried,
                 end,
@@ -1080,7 +1084,8 @@ mod tests {
         carry::Tail {
             index: channel::Key::from_u128(1),
             path: Path::Live,
-            end: mark(seq, given),
+            seq,
+            given,
             stamp: stamp.map(Stamp::from_nanos),
         }
     }
