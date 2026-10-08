@@ -69,7 +69,9 @@ Decided by laptop.architect-2, 2026-10-08T11:36:09Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. Supersedes
 (b) of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058668724 and
 the text of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517
-from "So the PR". Its first sentence stays: laptop.architect-2, 2026-10-08T12:32:38Z:
+from "So the PR". The first sentence of the rule stays from
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517
+(laptop.architect-2, 2026-10-08T11:24:06Z), confirmed at 2026-10-08T12:32:38Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059938562.
 The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
