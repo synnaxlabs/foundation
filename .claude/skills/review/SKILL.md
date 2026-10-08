@@ -168,10 +168,10 @@ nothing checked again. So when round 1 led to fix commits:
    given, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
-commits and the fix commits out of every round range. A clean merge needs no round:
-its `git show --remerge-diff <merge>` is empty, and the base moves no path that the PR
-changed into a code path (REVIEW CHECK in `docs/decisions.md`). Any other merge gets a
-round on that diff, which runs as step 1 says.
+commits and the fix commits out of every round range. A clean merge needs no round: its
+`git show --remerge-diff <merge>` is empty, and the base moves no path that the PR
+changed and that is not code into a code path (REVIEW CHECK in `docs/decisions.md`). Any
+other merge gets a round on that diff, which runs as step 1 says.
 
 ## Done
 
@@ -185,13 +185,13 @@ risk crate, the `Public surface:` line of the last round comment links the archi
 approval of each item, each finding of an architect review has its fix commit or a
 linked answer, and each later step that a round, an architect review, an architect's
 ruling, or an issue that the PR closes names is stated on an open issue that does it (a
-new issue, or a comment on an existing one) or as a trigger in the decisions entry, with
-a comment on each other open issue or PR whose work is that trigger, and
-each issue in `gh pr view <n> --json closingIssuesReferences`, or after a closing word
-in a commit message of the PR, is one that the PR finishes. GitHub closes each at the
-merge. It reads an issue link after a form of "close", "fix", or "resolve" as closing,
-also in a sentence about the past, such as "#1228 closed #1197" in the body of #1185.
-A pushed commit stays as it is (`CLAUDE.md`, Git rule 3). So when the message of a
-pushed commit names an issue that the PR does not finish, a new PR replaces the PR
+new issue, or a comment on an existing one) or as a trigger in the decisions entry, each
+trigger that is the work of another open issue or PR is commented on that issue or PR,
+and each issue in `gh pr view <n> --json closingIssuesReferences`, or after a closing
+word in a commit message of the PR, is one that the PR finishes. GitHub closes each at
+the merge. It reads an issue link after a form of "close", "fix", or "resolve" as
+closing, also in a sentence about the past, such as "#1228 closed #1197" in the body of
+#1185. A pushed commit stays as it is (`CLAUDE.md`, Git rule 3). So when the message of
+a pushed commit names an issue that the PR does not finish, a new PR replaces the PR
 (Round 1). Only then is the PR marked ready: by its author, or by `laptop.monitor` for a
 red-team or rule PR.
