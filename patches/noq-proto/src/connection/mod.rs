@@ -3618,8 +3618,8 @@ impl Connection {
             };
 
             let backoff = 2u32.pow(path.pto_count.min(MAX_BACKOFF_EXPONENT));
-            let duration = path.rtt.pto_base() * backoff;
-            let duration = duration.min(max_interval);
+            let pto_base = path.rtt.pto_base();
+            let duration = (pto_base * backoff).min(max_interval.max(pto_base));
             return Some((now + duration, space));
         }
 
