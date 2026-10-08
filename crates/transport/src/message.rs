@@ -27,16 +27,25 @@ pub(crate) fn prefix(len: usize) -> Varint {
         .unwrap_or_else(|| panic!("a message of {len} bytes is over the varint limit"))
 }
 
-/// Each cut of the least and the greatest real prefix of 2, 4, and 8 bytes, so each
-/// value bit is both clear and set.
+/// Each cut of the least and the greatest real prefix of 2, 4, and 8 bytes, and of
+/// 2^15 and 2^31, so each value bit of each cut is both clear and set.
 #[cfg(test)]
 pub(crate) fn cut_prefixes() -> impl Iterator<Item = Vec<u8>> {
-    [64, 16_383, 16_384, (1 << 30) - 1, 1 << 30, (1 << 62) - 1]
-        .into_iter()
-        .flat_map(|len| {
-            let whole = prefix(len).to_vec();
-            (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
-        })
+    [
+        64,
+        16_383,
+        16_384,
+        1 << 15,
+        (1 << 30) - 1,
+        1 << 30,
+        1 << 31,
+        (1 << 62) - 1,
+    ]
+    .into_iter()
+    .flat_map(|len| {
+        let whole = prefix(len).to_vec();
+        (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
+    })
 }
 
 /// Splits a stream's bytes into whole messages, each in one block.
@@ -469,8 +478,7 @@ mod tests {
             fn when_stream_ends_inside_a_prefix_it_fails(
                 limit in prop_oneof![
                     Just(16),
-                    Just(1_472),
-                    Just(1 << 16),
+                    1_472_usize..=1 << 20,
                     Just(usize::MAX),
                 ],
                 // `None` repeats the first byte.
