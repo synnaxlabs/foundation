@@ -23,7 +23,9 @@ home = { path = "../home" }
 hub = { path = "../hub" }
 ops = { path = "../ops" }
 os = { path = "../os" }
+transport = { path = "../transport" }
 types = { path = "../types" }
+wire = { path = "../wire" }
 
 [dev-dependencies]
 codec = { path = "../codec" }

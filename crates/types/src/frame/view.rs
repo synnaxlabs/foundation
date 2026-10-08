@@ -55,9 +55,16 @@ impl Mask {
     /// `set`.
     #[must_use]
     pub fn new(set: &KeySet, wanted: impl IntoIterator<Item = channel::Slot>) -> Self {
-        let mut entries: Vec<u32> = wanted
-            .into_iter()
-            .filter_map(|slot| set.find(slot))
+        Self::of_entries(set, wanted.into_iter().filter_map(|slot| set.find(slot)))
+    }
+
+    /// The `entries` of `set`, and the index of each, as [`Mask::new`] gives for their
+    /// slots, with no search of `set`.
+    pub(super) fn of_entries(
+        set: &KeySet,
+        entries: impl Iterator<Item = usize>,
+    ) -> Self {
+        let mut entries: Vec<u32> = entries
             .flat_map(|entry| [entry, set.index(entry)].map(to_u32))
             .collect();
         entries.sort_unstable();
@@ -152,7 +159,7 @@ impl<'a> View<'a> {
     /// [`Frame::body`], in the order of [`View::iter`]. The bounds are in the frame's
     /// body, not in a frame of only these series: [`split`](super::split) cannot cut
     /// with them. Time is as for [`View::iter`].
-    pub fn bounds(
+    pub(crate) fn bounds(
         &self,
     ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + use<'a> {
         let (_, descriptors, _) = parts(&self.frame.0);
@@ -246,7 +253,7 @@ impl<const N: usize> Iterator for Join<'_, N> {
 
 /// The first position in `items` where `before` is false, as `slice::partition_point`
 /// gives it, in time logarithmic in that position.
-fn gallop<T>(items: &[T], mut before: impl FnMut(&T) -> bool) -> usize {
+pub(super) fn gallop<T>(items: &[T], mut before: impl FnMut(&T) -> bool) -> usize {
     let mut high = 1;
     while items.get(high).is_some_and(&mut before) {
         high *= 2;
