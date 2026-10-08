@@ -2641,6 +2641,7 @@ mod port {
         use ::mesh::status::Status;
         use std::future::poll_fn;
         use std::pin::pin;
+        use std::task::Poll;
 
         use ::mesh::Member;
         use types::channel;
@@ -2657,6 +2658,9 @@ mod port {
         const AFTER: channel::Key = channel::Key::from_u128(8);
         const TEN: Span = Span::from_nanos(10 * Span::SECOND.nanos());
         const TWENTY: Span = Span::from_nanos(20 * Span::SECOND.nanos());
+
+        /// The code of a mesh message that the mesh refuses.
+        const REFUSED: Code = Code(16);
 
         /// The first file of the mesh's log.
         const LOG: &str = "mesh/log/log-0";
@@ -2818,9 +2822,73 @@ mod port {
         fn the_mesh_serves_a_mesh_stream() {
             let header = wire::header::encode(wire::Protocol::Mesh);
             let Seen { sent, read, .. } = sent(&header);
-            let code = Code(2);
+            let code = Code(wire::header::MALFORMED);
             assert_eq!(sent, transport::Error::Stopped { code });
             assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// The error of the first send that fails, when a peer that is not a member
+        /// opens a one-way mesh stream to a node with a region, then sends `message`
+        /// until a send fails.
+        fn sent_one_way(message: &[u8]) -> transport::Error {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let peer = sim.node(sim::node::Config::default());
+            let listen = listen(&host);
+            let message = message.to_vec();
+            let out = Arc::new(Mutex::new(None));
+            let seen = Arc::clone(&out);
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = peer.clone();
+            let started = peer.shards().start(shard, move |tasks| async move {
+                let node = transport(&own, tasks.clone(), KEY).0.public_key();
+                let (transport, pool) = transport(&own, tasks, CLIENT);
+                let dialed = transport.dial(node, &[Address::Udp(listen)]).await;
+                let session = dialed.expect("the dial reaches the node");
+                let sender = session.open_sender(Class::Complete).await;
+                let mut sender = sender.expect("a stream");
+                let block = |bytes: &[u8]| {
+                    let mut block = pool.alloc(bytes.len()).unwrap();
+                    block.copy_from_slice(bytes);
+                    block.freeze()
+                };
+                let header = wire::header::encode(wire::Protocol::Mesh);
+                let mut sent = sender.send(block(&header)).await;
+                while sent.is_ok() {
+                    own.clock().sleep(Span::MILLISECOND).await;
+                    sent = sender.send(block(&message)).await;
+                }
+                *seen.lock().unwrap() = Some(sent.unwrap_err());
+                session.closed().await;
+            });
+            drop(started.expect("the peer starts"));
+            assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let sent = out.lock().unwrap().take();
+            sent.expect("the peer ran")
+        }
+
+        /// A peer outside the region that sends a mesh message in the name of a member
+        /// is refused: the mesh stops the stream with the code of a refused message.
+        #[test]
+        fn a_message_in_the_name_of_a_member_is_refused() {
+            // A `raft` heartbeat reply from [`OWN`] to [`OWN`] in term 1, with no
+            // proof and no chain.
+            let mut reply = vec![1];
+            reply.extend(OWN.as_u128().to_le_bytes());
+            reply.extend(OWN.as_u128().to_le_bytes());
+            reply.extend(1_u64.to_le_bytes());
+            reply.push(0);
+            reply.extend(0_u64.to_le_bytes());
+            reply.push(6);
+            let code = REFUSED;
+            assert_eq!(sent_one_way(&reply), transport::Error::Stopped { code });
         }
 
         /// A header with a byte after it names no protocol, so a node with a mesh
@@ -2854,6 +2922,83 @@ mod port {
                 Error::Mesh(error.clone()).to_string(),
                 format!("the node's mesh did not open: {error}")
             );
+        }
+
+        /// Takes the lock of `host` as soon as it is free, then opens the mesh's log
+        /// to write. Gives whether the lock was held, and the open of the log.
+        fn probe(
+            sim: &mut sim::Sim,
+            host: &sim::node::Node,
+        ) -> (bool, Result<(), env::files::Error>) {
+            sim.run_on(host, |host, _| async move {
+                let files = host.files();
+                let clock = host.clock();
+                let mut waited = false;
+                let lock = loop {
+                    let mode = env::files::Mode::Create { len: 0 };
+                    match files.open(Path::new("lock"), mode).await {
+                        Err(env::files::Error::Busy { .. }) => {
+                            waited = true;
+                            clock.sleep(Span::from_nanos(1_000)).await;
+                        }
+                        opened => break opened.expect("the lock opens"),
+                    }
+                };
+                let mode = env::files::Mode::Write;
+                let log = files.open(Path::new(LOG), mode).await.map(drop);
+                drop(lock);
+                (waited, log)
+            })
+            .expect("the probe ends")
+        }
+
+        /// A stop at any point of the start and the run of a node whose mesh writes
+        /// its log for each home that the peer sets, then a probe that takes the
+        /// lock as soon as it is free: the mesh's log has closed by then. The peer
+        /// ends once a set waits [`TEN`], so the probe's run ends.
+        #[test]
+        fn the_lock_outlives_the_log_of_the_mesh() {
+            let (mut held, mut logged) = (false, false);
+            // The mesh opens at about 1.5 ms, and from 1.6 s the log writes a home
+            // about each 0.7 ms.
+            let opens = (0..200).map(|step| step * 13_000);
+            let writes = (0..100).map(|step| 1_700_000_000 + step * 7_000);
+            for after in opens.chain(writes) {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+                let members = pair(&hosts);
+                let node = start(&hosts[0], (OWN, KEY), region(&members));
+                peer(&hosts[1], members, |mesh, host| async move {
+                    let clock = host.clock();
+                    for key in 100.. {
+                        let key = channel::Key::from_u128(key);
+                        let mut set = pin!(mesh.set_home(key, OTHER.0));
+                        let mut late = pin!(clock.sleep(TEN));
+                        let set = poll_fn(|cx| match set.as_mut().poll(cx) {
+                            Poll::Ready(set) => Poll::Ready(set.is_ok()),
+                            Poll::Pending => late.as_mut().poll(cx).map(|()| false),
+                        });
+                        if !set.await {
+                            break;
+                        }
+                    }
+                });
+                let after = Span::from_nanos(after);
+                assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+                node.stop();
+                let (waited, log) = probe(&mut sim, &hosts[0]);
+                held |= waited;
+                logged |= log.is_ok();
+                let busy = matches!(log, Err(env::files::Error::Busy { .. }));
+                assert!(!busy, "at {after:?}: {log:?}");
+                // A probe that takes the lock before the claim refuses the node.
+                let refused = Error::Directory(env::files::Error::Busy {
+                    path: PathBuf::from("lock"),
+                });
+                let joined = node.join();
+                assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
+            }
+            assert!(held && logged);
         }
 
         /// A node that starts again with its region, at once after a stop or a power
