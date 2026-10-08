@@ -1876,15 +1876,28 @@ How to read this record:
   caller and must own its ranges (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
   `send_parts` gives the carrier one slice of the block for each run of adjacent parts
-  over 1452 bytes, and one write of each stretch of shorter runs and zeros between
-  them. The block's count changes once per message. A short run changes no count. The
-  write reads the caller's parts, and the stream keeps only the parts that the carrier
-  did not take, the first one cut at the first byte not taken, in a list that keeps its
-  capacity. Lost: a list of slices and stretches built for each message, because it
-  costs each part on each send. Decided by `laptop.architect-2` (#68, 2026-10-07 19:01
-  UTC: https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
+  over 1452 bytes. It copies each stretch of shorter runs and zeros between them. A
+  stretch of at most 1452 bytes goes into the endpoint's buffer, which noq copies in the
+  same `write`. A longer one goes into a new buffer of its length, which noq keeps until
+  the ACK. A partial write of a longer stretch keeps the rest of its buffer and copies
+  nothing again. The block's count changes once for each run over 1452 bytes but the
+  last, whose slice takes the block. A short run changes no count. The write reads the
+  caller's parts, and the stream keeps only the parts that the carrier did not take, the
+  first one cut at the first byte not taken, in a list that keeps its capacity. Lost: a
+  list of slices and stretches built for each message, because it costs each part on
+  each send. Decided by `laptop.architect-2` (#68, 2026-10-07 19:01 UTC:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
   2026-10-07 20:44 UTC:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911).
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911). Lost for
+  a stretch over 1452 bytes: writes of at most 1452 bytes, because noq-proto allocates
+  about 3 times for each segment that they fill (1.87x copy-then-send and 13 allocations
+  over `send` for 1000 ranges of 8 B); and writes of at most 16 KiB, because each byte
+  of a longer stretch is still copied twice, a cut copies up to 16 KiB again, and no
+  source gives the 16 KiB. Decided by `laptop.architect-2` (#68, 2026-10-08 07:29 UTC,
+  the count for each long run:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6054932643, and
+  2026-10-08 07:46 UTC, the long stretch and the last run:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055243052).
   `send` and `try_send` write one part, the whole block, through the same write. One
   whole part with no zeros skips the sum and the walk of the parts, and keeps the same
   cut, list, wait, and reset. `send` and `send_parts` poll the carrier through one
