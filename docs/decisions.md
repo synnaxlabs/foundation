@@ -4133,7 +4133,9 @@ How to read this record:
   journaled file system can reach, or a state that only a missing `sync_dir` reaches.
   Lost: a log for each directory, which gives states that need no missing `sync_dir`.
   Decided by `laptop.architect-2` (2026-10-07T19:20:28Z):
-  https://github.com/synnaxlabs/foundation/issues/1551#issuecomment-6045125302.
+  https://github.com/synnaxlabs/foundation/issues/1551#issuecomment-6045125302; the
+  calls in flight and the text, 2026-10-08T02:27:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1743#issuecomment-6050920514.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
