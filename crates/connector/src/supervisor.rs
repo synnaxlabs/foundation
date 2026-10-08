@@ -1,5 +1,6 @@
 //! Runs connectors and restarts them after errors.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use document::Document;
@@ -40,13 +41,13 @@ pub struct Config {
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
 /// It is not `Send`: each shard makes its own.
 #[derive(Debug)]
-pub struct Supervisor(Config);
+pub struct Supervisor(Rc<Config>);
 
 impl Supervisor {
     /// Makes a supervisor for one shard.
     #[must_use]
     pub fn new(config: Config) -> Self {
-        Self(config)
+        Self(Rc::new(config))
     }
 
     /// Runs one connector: parses its config, starts `run`, and restarts it with
@@ -73,11 +74,12 @@ impl Supervisor {
             clock,
             entropy,
             ..
-        } = &self.0;
+        } = &*self.0;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while !cancel.cancelled() {
             let token = Ended(cancel.child());
-            let ctx = Context::new(name.clone(), (), token.0.clone(), &self.0);
+            let ctx =
+                Context::new(name.clone(), (), token.0.clone(), Rc::clone(&self.0));
             let start = clock.now();
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
             drop(token);

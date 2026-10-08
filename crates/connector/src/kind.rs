@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Span};
 use env::clock::Clock;
-use env::entropy::Entropy;
 use env::net::Net;
 use env::rng::Rng;
 use env::tasks::Tasks;
@@ -102,16 +102,14 @@ impl std::error::Error for Error {
     }
 }
 
-/// One run's capabilities.
+/// One run's capabilities. It is not `Send`: it stays on the supervisor's shard, so a
+/// kind's own thread takes clones of the parts it needs.
 #[derive(Debug)]
 pub struct Context<C> {
     name: Name,
     config: C,
     cancel: cancel::Token,
-    clock: Clock,
-    entropy: Entropy,
-    net: Net,
-    tasks: Tasks,
+    inputs: Rc<supervisor::Config>,
 }
 
 impl<C> Context<C> {
@@ -119,16 +117,13 @@ impl<C> Context<C> {
         name: Name,
         config: C,
         cancel: cancel::Token,
-        inputs: &supervisor::Config,
+        inputs: Rc<supervisor::Config>,
     ) -> Self {
         Self {
             name,
             config,
             cancel,
-            clock: inputs.clock.clone(),
-            entropy: inputs.entropy.clone(),
-            net: inputs.net.clone(),
-            tasks: inputs.tasks.clone(),
+            inputs,
         }
     }
 
@@ -138,10 +133,7 @@ impl<C> Context<C> {
             name: self.name,
             config,
             cancel: self.cancel,
-            clock: self.clock,
-            entropy: self.entropy,
-            net: self.net,
-            tasks: self.tasks,
+            inputs: self.inputs,
         }
     }
 
@@ -167,26 +159,26 @@ impl<C> Context<C> {
     /// The node's clock.
     #[must_use]
     pub fn clock(&self) -> &Clock {
-        &self.clock
+        &self.inputs.clock
     }
 
     /// A new random source, seeded from the node's entropy, that simulation replays.
     #[must_use]
     pub fn rng(&self) -> Rng {
-        self.entropy.rng()
+        self.inputs.entropy.rng()
     }
 
     /// Connects streams and datagrams.
     #[must_use]
     pub fn net(&self) -> &Net {
-        &self.net
+        &self.inputs.net
     }
 
     /// Runs the kind's own tasks on its shard. A task ends only on its own: one that
     /// must not outlive the run waits on [`cancel`](Self::cancel).
     #[must_use]
     pub fn tasks(&self) -> &Tasks {
-        &self.tasks
+        &self.inputs.tasks
     }
 }
 
@@ -344,7 +336,6 @@ mod tests {
     use document::{Attribute, Map, Position, Source};
 
     use std::cell::RefCell;
-    use std::rc::Rc;
 
     use super::*;
     use crate::cancel::Token;
@@ -572,8 +563,8 @@ mod tests {
     fn runs_until_cancelled_with_its_context() {
         let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
-            let inputs = inputs(&node, tasks.clone(), Table::new());
-            let ctx = Context::new(name("plant.counter"), 3, token.clone(), &inputs);
+            let inputs = Rc::new(inputs(&node, tasks.clone(), Table::new()));
+            let ctx = Context::new(name("plant.counter"), 3, token.clone(), inputs);
             let clock = node.clock();
             let (ctx_name, n) = (ctx.name().clone(), *ctx.config());
             let out = Rc::new(RefCell::new(None));
@@ -597,8 +588,8 @@ mod tests {
     #[test]
     fn gives_a_new_random_source_on_each_call() {
         let (a, b) = run_on(|node, tasks| async move {
-            let inputs = inputs(&node, tasks, Table::new());
-            let ctx = Context::new(name("a"), (), Token::new(), &inputs);
+            let inputs = Rc::new(inputs(&node, tasks, Table::new()));
+            let ctx = Context::new(name("a"), (), Token::new(), inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
         assert_ne!(a, b);
