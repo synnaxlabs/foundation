@@ -32,7 +32,8 @@ pub(super) struct Stream {
     /// `poll_close` ran: the FIN is queued.
     closed: bool,
     /// The error that ended the stream. The kernel reports a reset once and then an
-    /// end of stream, so each later write of bytes, close, and read gives this.
+    /// end of stream, so each later write of bytes, close, and read that finds no
+    /// bytes gives this.
     failed: Option<Error>,
 }
 
