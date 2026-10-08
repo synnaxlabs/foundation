@@ -90,4 +90,7 @@ exclude_re = [
   # A pair or a refusal at or below the lowest floor only takes memory: no outcome
   # reads it.
   'crates/mesh/src/applied\.rs:.*replace Applied::trim with \(\)',
+  # Equal keys mean a session from the node's own key, which only a dial of itself
+  # makes, and no caller dials itself.
+  'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
 ]
