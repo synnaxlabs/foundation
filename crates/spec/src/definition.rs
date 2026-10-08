@@ -461,44 +461,30 @@ impl<'a> Reader<'a> {
         Ok(taken)
     }
 
-    fn u64(&mut self) -> Result<u64, Error> {
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], Error> {
         let at = self.at();
         let (&bytes, rest) = self
             .rest
             .split_first_chunk()
             .ok_or(Error::Truncated { at })?;
         self.rest = rest;
-        Ok(u64::from_le_bytes(bytes))
+        Ok(bytes)
+    }
+
+    fn u64(&mut self) -> Result<u64, Error> {
+        self.array().map(u64::from_le_bytes)
     }
 
     fn u16(&mut self) -> Result<u16, Error> {
-        let at = self.at();
-        let (&bytes, rest) = self
-            .rest
-            .split_first_chunk()
-            .ok_or(Error::Truncated { at })?;
-        self.rest = rest;
-        Ok(u16::from_le_bytes(bytes))
+        self.array().map(u16::from_le_bytes)
     }
 
     fn u32(&mut self) -> Result<u32, Error> {
-        let at = self.at();
-        let (&bytes, rest) = self
-            .rest
-            .split_first_chunk()
-            .ok_or(Error::Truncated { at })?;
-        self.rest = rest;
-        Ok(u32::from_le_bytes(bytes))
+        self.array().map(u32::from_le_bytes)
     }
 
     fn key(&mut self) -> Result<Key, Error> {
-        let at = self.at();
-        let (&bytes, rest) = self
-            .rest
-            .split_first_chunk()
-            .ok_or(Error::Truncated { at })?;
-        self.rest = rest;
-        Ok(Key::from_u128(u128::from_le_bytes(bytes)))
+        self.array().map(|bytes| Key::from_u128(u128::from_le_bytes(bytes)))
     }
 
     fn optional_key(&mut self) -> Result<Option<Key>, Error> {
