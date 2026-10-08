@@ -4984,7 +4984,7 @@ How to read this record:
   the body's messages (`laptop.architect`, 2026-10-08T15:38:46Z,
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704). When
   the stream ends, `Body::end` gives `Error::Unfinished` if bytes of the body remain, so
-  each rule of a body is in `wire` (`laptop.architect`,
+  each rule of a body is in `wire` (`laptop.architect`, 2026-10-08T16:52:55Z,
   https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697). Lost:
   a decoder for each side that takes the kind of the stream from its first message,
   because each caller checks the kind again; `Gateway::hello()` and
