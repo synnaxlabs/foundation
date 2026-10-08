@@ -578,7 +578,7 @@ impl Shard {
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
     /// order and with the latest readers of an index first. Call it after each write,
-    /// since a latest reader gets a frame before its commit, and after each commit.
+    /// because a latest reader gets a frame before its commit, and after each commit.
     /// Complete readers first get the live frames now on disk. A key is a hint: take
     /// from each until [`take`](Self::take) gives [`Next::Empty`](reader::Next::Empty)
     /// or [`Next::Behind`](reader::Next::Behind). When a commit ended since the last
