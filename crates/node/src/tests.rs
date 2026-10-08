@@ -1786,8 +1786,6 @@ mod lock {
 }
 
 mod hub {
-    use std::collections::BTreeMap;
-
     use ::hub::Hub;
     use ::hub::reader::{Mode, Received};
     use ::hub::writer::{self, Writer};
@@ -1832,13 +1830,18 @@ mod hub {
         }
     }
 
-    /// Defines each of `channels`, by its name, in one call.
+    /// Defines each of `channels`, by its name, in one call, in the order of
+    /// `channels`: a map would sort them by name, and a test of slots needs the order.
     pub(super) fn define(hub: &Hub, channels: &[(&str, Channel)]) {
-        let definitions: BTreeMap<_, _> = channels
+        let definitions: Vec<_> = channels
             .iter()
             .map(|(n, c)| (name(n), Definition::Channel(c.clone())))
             .collect();
-        hub.define(&definitions);
+        hub.define(
+            definitions
+                .iter()
+                .map(|(name, definition)| (name, definition)),
+        );
     }
 
     /// A writer on `channels`, opened again each millisecond of `clock` until the node
