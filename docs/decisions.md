@@ -5561,10 +5561,9 @@ How to read this record:
   Rejected: one I/O thread for every socket, as `os::files` uses; each message would
   cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
-  it lacks, from one `libc::setsockopt`. Until #119 and #1095 land, `os::net()` is
-  behind the cargo feature `net`, and its `udp` and `resolve` of a host name panic
-  ("os::net has no UDP driver yet", "os::net has no resolver yet"); the last of the
-  two removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
+  it lacks, from one `libc::setsockopt`. Until #119 lands, `os::net()` is behind the
+  cargo feature `net`, and its `udp` panics ("os::net has no UDP driver yet"); #119
+  removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
   02:32 UTC, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
   `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
@@ -5581,7 +5580,27 @@ How to read this record:
   `Io` with `errno`, `EAI_AGAIN` to `Io` with `EAGAIN`, `EAI_MEMORY` to `Io` with
   `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Decided by the
   architect, #995
-  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
+  (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608). A
+  host with a NUL byte is `NotFound`, with no lookup. Decided by `laptop.architect-2`
+  (2026-10-08 16:52 UTC, #1095,
+  https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287).
+  `EAI_NONAME` with errno `EMFILE` or `ENFILE` is `Io` with that code: the lookup met
+  a full descriptor table, so glibc ran it without part of its configuration or
+  without its name service modules, and its answer is not final. Lost: `NotFound`
+  for each `EAI_NONAME`, because it gives a wrong final answer while the table is
+  full. Decided by `laptop.architect-2` (2026-10-08 17:19 UTC, #1919,
+  https://github.com/synnaxlabs/foundation/pull/1919#issuecomment-6065269037). Each
+  lookup runs `getaddrinfo` on an OS thread of its own, which ends with the lookup,
+  also after its future drops, and reads errno right after the call. A spawn that
+  fails gives `Io` with its errno. Nothing caps the threads in flight. The caller on
+  record, `connector::http`, makes one lookup for each new connection, so the threads
+  in flight are at most the new connections per second times about 30 s, while no
+  name server answers. Add a cap before a caller can start lookups at a rate that
+  grows with peers, devices, or data.
+  Lost: Tokio's blocking pool, because the drop of a runtime waits for each of its
+  blocking tasks, and `os` drops each runtime it builds. The literal grammar waits on
+  #1927. Decided by `laptop.architect-2` (2026-10-08 17:08 UTC, #1919,
+  https://github.com/synnaxlabs/foundation/pull/1919#issuecomment-6065081738).
   From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
   mean to a caller. Amended (2026-10-07, #1117): `Mode::Create` makes a missing file
   with `len` zeroed bytes. It treats an empty file that is there as missing and
@@ -7113,7 +7132,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, or between a program and the node it connects to, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a proof is of its subject (signed hellos and requests), and whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). `os::net` holds one `setsockopt(TCP_NOTSENT_LOWAT)` call, because `rustix` does not give that option (laptop.architect-2, 2026-10-08 02:32 UTC, #120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). `os::net` holds one `setsockopt(TCP_NOTSENT_LOWAT)` call, because `rustix` does not give that option (laptop.architect-2, 2026-10-08 02:32 UTC, #120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). `os::net::resolve` holds the `getaddrinfo` and `freeaddrinfo` calls, because std gives one error for `EAI_NONAME` and `EAI_AGAIN` (laptop.architect-2, 2026-10-08 16:52 UTC, #1095, https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
