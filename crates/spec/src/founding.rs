@@ -16,7 +16,8 @@ const ADMIN: &str = "@admin";
 /// The definitions that Foundation makes at the first start of a mesh, by tree key:
 /// the subject `@admin`, which holds `admin`, and the access policy `@admin`, which
 /// allows that subject every action on `**`, with no authority. No file can hold
-/// them, because their labels are reserved.
+/// them, because their labels are reserved. A later build can give other
+/// definitions, so a node keeps what the first start gave.
 #[must_use]
 #[expect(
     clippy::missing_panics_doc,
