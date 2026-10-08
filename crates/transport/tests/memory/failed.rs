@@ -47,7 +47,7 @@ pub(crate) fn main() {
 }
 
 /// The [`Out`] of the server's read of a message of `len` bytes, which the client
-/// resets once that read gives `Pending`.
+/// resets once that read gives `Pending` or ends.
 fn run(len: usize) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
@@ -69,7 +69,7 @@ fn run(len: usize) -> Out {
             .await
             .expect("a stream");
         sender.send(filled(&pool, len)).await.expect("sent");
-        while waits.lock().expect("not poisoned").1 == 0 {
+        while matches!(*waits.lock().expect("not poisoned"), (None, 0, _)) {
             node.clock().sleep(Span::from_nanos(100_000)).await;
         }
         drop(sender);
