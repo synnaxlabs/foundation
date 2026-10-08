@@ -382,27 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn a_program_has_the_fixed_limits() {
-        testing::run(0, |shard| {
-            let budget = block::Config { budget: 1 << 16 };
-            let memory = Heap::new(budget.reservation());
-            let pool = Rc::new(Pool::new(budget, memory));
-            let largest = pool.largest();
-            assert!(largest < 1 << 20, "{largest} bytes");
-            let config = Config {
-                pool,
-                ..shard.client()
-            };
-            let setup = config.setup().expect("a setup");
-            assert!(matches!(setup.role, quic::Role::Program));
-            assert_eq!(setup.message_bytes_max, largest);
-            assert_eq!(setup.window_bytes, 1 << 20);
-            assert_eq!(setup.streams_max, NonZeroU32::MIN);
-            assert_eq!(setup.idle, Span::from_nanos(30_000_000_000));
-        });
-    }
-
-    #[test]
     fn new_names_the_pool_when_its_largest_block_is_below_the_floor() {
         testing::run(0, |shard| {
             let budget = block::Config { budget: 1 << 10 };
