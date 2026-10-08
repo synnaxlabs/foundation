@@ -6,7 +6,7 @@ use std::future::poll_fn;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use block::Block;
 use transport::stream::{Receiver, Sender};
@@ -20,28 +20,36 @@ use super::{Ended, Error, Mode, STREAK, WINDOW};
 use crate::State;
 use crate::region::Homes;
 
-/// A reader session on one stream to the home. Each partial frame lives in it, so a
-/// dropped [`Remote::take`] loses nothing.
+/// A reader session on one stream to the home. Each partial frame and each credit on
+/// its way lives in it, so a dropped [`Remote::take`] loses nothing.
 #[derive(Debug)]
 pub(super) struct Remote {
+    /// `None` once the session ended.
+    out: Option<Out>,
+    inbound: Inbound,
+    /// The grant that the home has, and the charge of each frame given back, for a
+    /// complete reader.
+    credit: Option<(u64, u64)>,
+    ended: Option<Ended>,
+    /// Frames given in a row since `take` last waited.
+    streak: u32,
+}
+
+/// The receiving half of the stream, and the frame that arrives on it.
+#[derive(Debug)]
+struct Inbound {
     state: Rc<RefCell<State>>,
     /// `None` once the session ended.
-    stream: Option<(Out, Receiver)>,
+    receiver: Option<Receiver>,
     decoder: wire::hub::Reader,
     /// The reader's key set. Place `n` of the open is entry `n`.
     set: Arc<KeySet>,
     /// The mask of every entry of `set`.
     mask: Mask,
-    /// The grant that the home has, and the charge of each frame given back, for a
-    /// complete reader.
-    credit: Option<(u64, u64)>,
     head: Option<Head>,
     /// The entry and end of each series of the frame that arrives.
     ends: Vec<(usize, usize)>,
     draft: Option<Draft>,
-    ended: Option<Ended>,
-    /// Frames given in a row since `take` last waited.
-    streak: u32,
 }
 
 impl Remote {
@@ -94,15 +102,18 @@ impl Remote {
         }
         let mask = Mask::new(&set, set.entries().iter().map(|entry| entry.slot));
         Ok(Self {
-            state: Rc::clone(state),
-            stream: Some((Out::Idle(sender), receiver)),
-            decoder,
-            set,
-            mask,
+            out: Some(Out::Idle(sender)),
+            inbound: Inbound {
+                state: Rc::clone(state),
+                receiver: Some(receiver),
+                decoder,
+                set,
+                mask,
+                head: None,
+                ends: Vec::new(),
+                draft: None,
+            },
             credit,
-            head: None,
-            ends: Vec::new(),
-            draft: None,
             ended: None,
             streak: 0,
         })
@@ -139,27 +150,41 @@ impl Remote {
             .await;
         }
         let mut waited = false;
-        let next = {
-            let mut next = pin!(self.next());
-            poll_fn(|cx| {
-                let next = next.as_mut().poll(cx);
-                waited |= next.is_pending();
-                next
-            })
-            .await
+        let next = match self.grant() {
+            Ok(()) => {
+                let Self {
+                    out,
+                    inbound,
+                    credit,
+                    ..
+                } = &mut *self;
+                let mut next = pin!(inbound.next());
+                poll_fn(|cx| {
+                    if let Err(ended) = poll_credit(out, credit, cx) {
+                        return Poll::Ready(Err(ended));
+                    }
+                    let next = next.as_mut().poll(cx);
+                    waited |= next.is_pending();
+                    next
+                })
+                .await
+            }
+            Err(ended) => Err(ended),
         };
         self.streak = if waited { 0 } else { self.streak + 1 };
         match next {
-            Ok(frame) => Ok((frame, &self.set, &self.mask)),
+            Ok(frame) => Ok((frame, &self.inbound.set, &self.inbound.mask)),
             Err(ended) => {
-                if let Some((out, receiver)) = self.stream.take()
-                    && let Some(refusal) = refusal(&ended)
-                {
-                    receiver.stop(Code(refusal.code()));
+                let (out, receiver) = (self.out.take(), self.inbound.receiver.take());
+                if let Some(refusal) = refusal(&ended) {
+                    let code = Code(refusal.code());
+                    receiver
+                        .expect("invariant: a session holds its stream until it ends")
+                        .stop(code);
                     // A credit on its way drops with its sender, which resets with
                     // code 0. The home still sees the stop.
-                    if let Out::Idle(sender) = out {
-                        sender.reset(Code(refusal.code()));
+                    if let Some(Out::Idle(sender)) = out {
+                        sender.reset(code);
                     }
                 }
                 Err(self.ended.insert(ended).clone())
@@ -167,13 +192,49 @@ impl Remote {
         }
     }
 
+    /// Sends the credit once the home's grant is half a window short of the frames
+    /// given back plus a window, unless a credit is on its way. A credit that finds
+    /// no room goes on its way, and [`poll_credit`] sends it.
+    fn grant(&mut self) -> Result<(), Ended> {
+        let Some((granted, taken)) = &mut self.credit else {
+            return Ok(());
+        };
+        let limit_bytes = *taken + WINDOW;
+        let Some(Out::Idle(sender)) = &mut self.out else {
+            return Ok(());
+        };
+        if limit_bytes - *granted < WINDOW / 2 {
+            return Ok(());
+        }
+        let mut block = self
+            .inbound
+            .state
+            .borrow()
+            .alloc(Credit::LEN)
+            .map_err(Ended::Pool)?;
+        Credit { limit_bytes }.encode(&mut block);
+        let Some(block) = sender.try_send(block.freeze()).map_err(ended)? else {
+            *granted = limit_bytes;
+            return Ok(());
+        };
+        let Some(Out::Idle(mut sender)) = self.out.take() else {
+            unreachable!("invariant: no credit is on its way");
+        };
+        let sending = async move {
+            let sent = sender.send(block).await;
+            (sender, limit_bytes, sent)
+        };
+        self.out = Some(Out::Sending(Box::pin(sending)));
+        Ok(())
+    }
+}
+
+impl Inbound {
     async fn next(&mut self) -> Result<Frame, Ended> {
-        self.grant()?;
-        let (out, receiver) = self
-            .stream
+        let receiver = self
+            .receiver
             .as_mut()
             .expect("invariant: a session holds its stream until it ends");
-        let credit = &mut self.credit;
         loop {
             if let Some(start) = self.decoder.body() {
                 let draft = self
@@ -181,12 +242,11 @@ impl Remote {
                     .as_mut()
                     .expect("invariant: a body arrives into its draft");
                 let body = &mut draft.body_mut()[start..];
-                let last = match wait(out, credit, receiver.recv_into(body)).await? {
+                let last = match receiver.recv_into(body).await {
                     Ok(Some(len)) => last(self.decoder.decode(&body[..len]))?,
                     Ok(None) => return Err(finished(&self.decoder)),
                     Err(transport::Error::TooLarge { .. }) => {
-                        let message =
-                            wait(out, credit, recv(receiver, &self.decoder)).await??;
+                        let message = recv(receiver, &self.decoder).await?;
                         last(self.decoder.decode(&message))?
                     }
                     Err(error) => return Err(ended(error)),
@@ -196,7 +256,7 @@ impl Remote {
                 }
                 continue;
             }
-            let message = wait(out, credit, recv(receiver, &self.decoder)).await??;
+            let message = recv(receiver, &self.decoder).await?;
             match self.decoder.decode(&message).map_err(Ended::Message)? {
                 FromHome::Head(head) => {
                     self.head = Some(head);
@@ -226,41 +286,6 @@ impl Remote {
                 }
             }
         }
-    }
-
-    /// Sends the credit once the home's grant is half a window short of the frames
-    /// given back plus a window, unless a credit is on its way. A credit that finds
-    /// no room goes on its way, and [`wait`] sends it.
-    fn grant(&mut self) -> Result<(), Ended> {
-        let Some((granted, taken)) = &mut self.credit else {
-            return Ok(());
-        };
-        let limit_bytes = *taken + WINDOW;
-        let Some((Out::Idle(sender), _)) = &mut self.stream else {
-            return Ok(());
-        };
-        if limit_bytes - *granted < WINDOW / 2 {
-            return Ok(());
-        }
-        let mut block = self
-            .state
-            .borrow()
-            .alloc(Credit::LEN)
-            .map_err(Ended::Pool)?;
-        Credit { limit_bytes }.encode(&mut block);
-        let Some(block) = sender.try_send(block.freeze()).map_err(ended)? else {
-            *granted = limit_bytes;
-            return Ok(());
-        };
-        let Some((Out::Idle(mut sender), receiver)) = self.stream.take() else {
-            unreachable!("invariant: the stream is idle");
-        };
-        let sending = async move {
-            let sent = sender.send(block).await;
-            (sender, limit_bytes, sent)
-        };
-        self.stream = Some((Out::Sending(Box::pin(sending)), receiver));
-        Ok(())
     }
 
     /// The frame of the head, the ends, and the draft that arrived.
@@ -294,33 +319,27 @@ impl fmt::Debug for Out {
     }
 }
 
-/// The output of `future`, while `out` sends the credit on its way, which raises the
-/// grant in `credit` once the stream holds it.
+/// Polls the credit that `out` has on its way, and raises the grant in `credit` once
+/// the stream holds it.
 ///
 /// # Errors
 ///
 /// The [`Ended`] of a send that failed.
-async fn wait<T>(
-    out: &mut Out,
+fn poll_credit(
+    out: &mut Option<Out>,
     credit: &mut Option<(u64, u64)>,
-    future: impl Future<Output = T>,
-) -> Result<T, Ended> {
-    let mut future = pin!(future);
-    poll_fn(|cx| {
-        if let Out::Sending(sending) = out
-            && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
-        {
-            *out = Out::Idle(sender);
-            if let Err(error) = sent {
-                return Poll::Ready(Err(ended(error)));
-            }
-            if let Some((granted, _)) = credit {
-                *granted = limit_bytes;
-            }
+    cx: &mut Context<'_>,
+) -> Result<(), Ended> {
+    if let Some(Out::Sending(sending)) = out
+        && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
+    {
+        *out = Some(Out::Idle(sender));
+        sent.map_err(ended)?;
+        if let Some((granted, _)) = credit {
+            *granted = limit_bytes;
         }
-        future.as_mut().poll(cx).map(Ok)
-    })
-    .await
+    }
+    Ok(())
 }
 
 /// Sends the header, `open`, and the keys of `set` on `sender`, and waits for the
