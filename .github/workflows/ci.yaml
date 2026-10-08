@@ -186,6 +186,42 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 90
     steps:
+      # A mutant can allocate in a loop until the host runs out of memory. Each runner
+      # unit on the host has a cap, the caps leave 2 GiB of the host free, and the
+      # unit's OOMPolicy=continue keeps the runner up, so only a test process dies
+      # (#803). Hosts whose template sets none of this: #898.
+      - name: Check the memory cap of the runner
+        run: |
+          set -o pipefail
+          c=$(cut -d: -f3 /proc/self/cgroup)
+          case $c in
+            /system.slice/actions.runner.*.service) ;;
+            *) echo "::error::The job runs in $c, in no runner unit (#898)."; exit 1 ;;
+          esac
+          total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          # systemd reads each runner unit, also one that is stopped and has no cgroup.
+          units=$(systemctl list-unit-files --plain --no-legend 'actions.runner.*' |
+            cut -d' ' -f1)
+          grep -qxF "${c##*/}" <<< "$units" ||
+            { echo "::error::systemd lists no unit ${c##*/} (#898)."; exit 1; }
+          sum=0
+          for u in $units; do
+            p=$(systemctl show -p OOMPolicy --value "$u")
+            [ "$p" = continue ] ||
+              { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
+            m=$(systemctl show -p MemoryMax --value "$u")
+            [ "$m" != infinity ] ||
+              { echo "::error::$u has no MemoryMax (#803, #898)."; exit 1; }
+            # A longer cap is past any host, and the sum of such caps can wrap.
+            [ "${#m}" -le 15 ] ||
+              { echo "::error::$u has MemoryMax $m, past the host (#803)."; exit 1; }
+            sum=$((sum + m / 1024))
+          done
+          [ "$sum" -le $((total - 2097152)) ] || {
+            echo "::error::The runner caps take $sum KiB of $total KiB (#803)."
+            exit 1
+          }
+          echo "The runner caps take $sum KiB of $total KiB"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -195,14 +231,6 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - name: Mutants in the diff
-        env:
-          # A mutant can allocate in a loop until the host runs out of memory, which
-          # kills the runner. Each test process gets 4 GiB, so the mutant aborts and
-          # is caught. The cap counts reserved memory, not touched pages: each sim
-          # node in a transport test reserves about 110 MiB for its block pool, so 8
-          # threads of tests with 4 nodes stay under it.
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=4294967296 --
-          RUST_TEST_THREADS: 8
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
           status=0

@@ -143,12 +143,13 @@ impl Float {
 pub enum Error {
     /// An empty part.
     Empty(Part),
-    /// A name with a character that no name may hold: a backslash, a newline, a
-    /// carriage return, a tab, or NUL.
+    /// A part with a character that [`Measurement::new`] refuses.
     Character {
-        /// The name.
-        name: String,
-        /// The character.
+        /// The part that holds `character`.
+        part: Part,
+        /// The text of the part, as given.
+        text: String,
+        /// The first refused character in `text`.
         character: char,
     },
     /// A name or key that InfluxDB keeps for itself: one that starts with `_`, or
@@ -186,10 +187,21 @@ impl fmt::Display for Error {
                 write!(f, "the value of the tag {key:?} is empty")
             }
             Self::Empty(Part::FieldKey) => write!(f, "a field key is empty"),
-            Self::Character { name, character } => write!(
-                f,
-                "the name {name:?} holds {character:?}, which no name may hold"
-            ),
+            Self::Character {
+                part,
+                text,
+                character,
+            } => {
+                match part {
+                    Part::Measurement => write!(f, "the measurement name {text:?}")?,
+                    Part::TagKey => write!(f, "the tag key {text:?}")?,
+                    Part::TagValue(key) => {
+                        write!(f, "the value {text:?} of the tag {key:?}")?;
+                    }
+                    Part::FieldKey => write!(f, "the field key {text:?}")?,
+                }
+                write!(f, " holds {character:?}, which a line cannot hold")
+            }
             Self::Reserved(name) => {
                 write!(f, "InfluxDB keeps the name {name:?} for itself")
             }
@@ -237,7 +249,8 @@ fn escape(
         .find(|c| matches!(c, '\\' | '\n' | '\r' | '\t' | '\0'))
     {
         return Err(Error::Character {
-            name: text.into(),
+            part,
+            text: text.into(),
             character,
         });
     }
