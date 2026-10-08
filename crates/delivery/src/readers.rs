@@ -2460,6 +2460,25 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn pays_a_frame_that_waits_for_credit_at_the_charge_of_its_places() {
+            let sets = Sets::new();
+            let mut readers = Readers::new(0);
+            let places = Charge::Places([sets.slot(3)].into());
+            let key = readers
+                .open(Reader::Unnamed, Start::At(live(0)), CHARGE, places)
+                .key;
+            for n in 0..3 {
+                readers.queue(&sets.full(), &sets.wide, n..n + 1);
+            }
+            assert_eq!(readers.release(3), [key]);
+            assert_eq!(drain(&mut readers, key).0.len(), 1);
+            readers.grant(key, 3 * CHARGE);
+            let (taken, end) = drain(&mut readers, key);
+            assert_eq!(taken.len(), 2, "each frame that waits costs one series");
+            assert!(matches!(end, Next::Empty));
+        }
+
+        #[test]
         fn gives_a_one_channel_view_of_ten_a_frame_for_each_charge_of_its_series() {
             let sets = Sets::new();
             let mut readers = Readers::new(0);
