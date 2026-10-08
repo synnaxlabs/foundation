@@ -51,7 +51,9 @@ Check:
   a rejected alternative is the better architecture.
 
 Start the report with two lines. First `Public surface: none`, or each public item (its
-signature or doc) and crate dependency that the PR changes, with file and line. Then
+signature or doc) and crate dependency that the PR changes, and each change to what a
+text that an architect comment on the PR gave or approved states (code, doc, or
+decisions entry), with file and line, and the link of that comment. Then
 `Hot path: none`, or each changed function that runs once per sample, series, frame, or
 data message, with the loop that runs it, whatever the PR body says. A function that a
 crate benchmark measures per frame, sample, series, or message is one. So is a stub that
