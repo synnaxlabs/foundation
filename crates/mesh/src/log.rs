@@ -1759,7 +1759,8 @@ mod tests {
                 }
             }
             assert_ne!(polls, 0);
-            assert_eq!(log.number, 1);
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, ["lock", "log-0", "log-1"].map(PathBuf::from));
         })
         .unwrap();
         sim.crash(&node, Crash::Power);
@@ -1768,6 +1769,40 @@ mod tests {
             entries: entries.into(),
         };
         assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    #[test]
+    fn an_open_that_meets_a_log_that_drops_gives_busy_or_each_entry() {
+        let mut wrong = Vec::new();
+        for steps in 0..32 {
+            let (mut sim, node) = create_node(0);
+            let result = sim
+                .run_on(&node, move |node, _| async move {
+                    let clock = node.clock();
+                    let (mut first, _) = open(&node).await.unwrap();
+                    first.write(None, &[bytes(1, 100)]).await.unwrap();
+                    let mut second = pin!(open(&node));
+                    for _ in 0..steps {
+                        let poll =
+                            poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx))).await;
+                        if let Poll::Ready(result) = poll {
+                            return result.map(|(_, stored)| stored.entries.len());
+                        }
+                        clock.sleep(Span::from_nanos(20_000)).await;
+                    }
+                    first
+                        .write(None, &[bytes(2, narrow(SEGMENT))])
+                        .await
+                        .unwrap();
+                    drop(first);
+                    second.await.map(|(_, stored)| stored.entries.len())
+                })
+                .unwrap();
+            if result != Err(busy()) && result != Ok(2) {
+                wrong.push((steps, result));
+            }
+        }
+        assert_eq!(wrong, []);
     }
 
     #[test]
