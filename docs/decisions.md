@@ -4421,7 +4421,44 @@ How to read this record:
   refuses an empty list, keys out of order or equal, and a key of small order. Lost: the
   subject at its plain name, which takes that name from a channel or a connector and
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
-  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217). In a
+  file, a `subject` block has one attribute, `keys`: the line of an OpenSSH `.pub` file,
+  or a list of them, as `allow` takes one action or a list. `config` keeps the key, not
+  the comment. It reads the base64 with `base64ct`, which refuses text that is not
+  canonical, so one key has one text form. A string that holds `PRIVATE KEY` (the
+  OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a `.ppk` file) gives
+  `config.private-key`, whose message quotes none of the value. A `.pub` line whose
+  comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
+  more. `config::check` first looks at each string of each Document, in any block
+  (keywords, labels, keys, and values at any depth). When one holds a private key, it
+  gives only these alarms, one for each such string, and runs no other check, so no
+  other problem can quote the key. Lost: the alarm only in the `subject` block, which
+  misses a key in a connector config; the alarm with the other problems kept, because
+  each check must then not quote a value. Decided by `laptop.architect-2` at
+  2026-10-08T10:33:30Z
+  (https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6057957877). A PEM
+  or RFC 4716 public key gives `config.bad-public-key`. A message quotes at most the
+  first word of a value: an algorithm name from a closed table of OpenSSH key types,
+  with `{:?}`. The form of one line or a list, the first-word rule, and the marks
+  of a private key are from `laptop.architect-2` at 2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085), which
+  supersedes item 1 of
+  https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142
+  (`laptop.architect-2`, 2026-10-08T05:49:53Z). That ruling decided the PEM rule and
+  supersedes change 2 of
+  https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217
+  (2026-10-08T03:15:41Z). `config` refuses a `subject` at the name of a `connector`
+  (`config.subject-is-connector`)
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217), with a
+  note at the connector (`laptop.architect-2`, 2026-10-08T06:58:26Z,
+  https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054362063), in any
+  ASCII case (`laptop.architect-2`, 2026-10-08T07:02:08Z,
+  https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054428920). The read
+  moves to `ssh-key` if the person approves it
+  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
+  PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
+  2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085).
   `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
   that key from the hello's subject with `spec::definition::Kind::key`, so no caller
   builds it and only `spec` holds the key form. A subject that makes no key gives
@@ -5756,6 +5793,7 @@ Storage classes used in the table:
 | Reduction policy | Spec; selects data channels; deadband checked against the channel's unit | Files | Connector library component through `hub.spec()` | `spec`, `connector` |
 | Time policy | Spec; selects node names; lists candidate peer nodes (default: the region's voters) | Files | `clock` | `spec`, `clock` |
 | Access policy | Spec; `{ subjects, select, allow, authority }` | Files | `access`, called by the owners (`home`, `mesh`) | `spec`, `access` |
+| Subject | Files as `subject "<name>" { keys }`, then Spec as `spec::subject::Subject` at `<name>.@subject` | People, agents | `access::admit` (#1747), `plan` (#1082) | `spec` (definition), `config` (OpenSSH read) |
 | Secret store policy | Spec; selects secret names | Files | The secret resolver | `spec` |
 | Connector | Files, then Spec as `spec::connector::Connector { kind, node, config }`, keyed by its name | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
 | Kind config | Kind-owned: an opaque Document in the spec (canonical form, no source positions, so hashes stay stable) | Files | The kind's check at plan, `ctx.config()` at run | `connector-<kind>` |
