@@ -1,7 +1,9 @@
 //! A blob session: one blob stream from a requester to the server that holds the store.
 //! After the header, the requester sends [`get`] and [`Put`] messages, and the server
-//! sends [`Reply`] messages. A reply names its digest, so the order of replies is not
-//! a rule of the protocol.
+//! sends [`Reply`] messages. The server answers requests in order: the digests of a
+//! get in message order, and a put after its body. Each reply names its digest, and a
+//! reply that does not answer the oldest open request breaks the session. The caller
+//! keeps the open requests and checks this; the decoders do not.
 //!
 //! A body follows a [`Put`] and a [`Reply::Chunk`]: the bytes of the chunk, as stream
 //! messages back to back, with no prefix, each at most the peer's `message_bytes_max`.
@@ -13,8 +15,10 @@
 //! chunk at its head, and checks that a body holds exactly the bytes of its head. The
 //! receiver checks the digest over the whole chunk.
 //!
-//! A message that does not decode, comes from the wrong side, or breaks a rule of this
-//! module stops the stream with [`MALFORMED`](crate::header::MALFORMED).
+//! A chunk longer than the limit ([`Error::TooLarge`]) stops the stream with
+//! [`TOO_LARGE`]. Each other message that does not decode, comes from the wrong side,
+//! or breaks a rule of this module stops it with
+//! [`MALFORMED`](crate::header::MALFORMED).
 //!
 //! Fields are little-endian.
 //!
@@ -40,6 +44,12 @@ const STORED: u8 = 3;
 /// The bytes of a digest.
 const DIGEST_LEN: usize = 32;
 
+/// The bytes of a head with a digest and no length: kind and digest.
+const DIGEST_HEAD_LEN: usize = 1 + DIGEST_LEN;
+
+/// The bytes of a head with a digest and a length: kind, digest, and `u32`.
+const CHUNK_HEAD_LEN: usize = DIGEST_HEAD_LEN + 4;
+
 /// Stop code: the bytes of a chunk do not hash to its digest.
 pub const MISMATCH: u32 = 16;
 /// Stop code: a chunk is longer than the largest block of this node.
@@ -47,8 +57,8 @@ pub const TOO_LARGE: u32 = 17;
 /// Stop code: a put would leave the disk under the free floor of the store.
 pub const FULL: u32 = 18;
 
-/// A get from the requester: the digests it wants. The server answers each with a
-/// [`Reply::Chunk`] or a [`Reply::Absent`]. A get is one message, so a requester with
+/// A get from the requester: the digests it wants. The server answers each, in message
+/// order, with a [`Reply::Chunk`] or a [`Reply::Absent`]. A get is one message, so a requester with
 /// more digests than one message holds sends more gets.
 pub mod get {
     use std::slice;
@@ -57,7 +67,7 @@ pub mod get {
 
     use super::{DIGEST_LEN, Error, GET, Writer};
 
-    /// The bytes of a get of `digests` digests.
+    /// The bytes of a get of `digests` digests. A get has at least 1.
     #[must_use]
     pub fn encoded_len(digests: usize) -> usize {
         digests.saturating_mul(DIGEST_LEN).saturating_add(1)
@@ -116,7 +126,7 @@ pub struct Put {
 
 impl Put {
     /// The bytes of an encoded put.
-    pub const LEN: usize = 37;
+    pub const LEN: usize = CHUNK_HEAD_LEN;
 
     /// Writes the put into `out`.
     ///
@@ -168,8 +178,8 @@ impl Reply {
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         match self {
-            Self::Chunk { .. } => 37,
-            Self::Absent { .. } | Self::Stored { .. } => 33,
+            Self::Chunk { .. } => CHUNK_HEAD_LEN,
+            Self::Absent { .. } | Self::Stored { .. } => DIGEST_HEAD_LEN,
         }
     }
 
@@ -258,8 +268,9 @@ impl Server {
     /// The [`Error`] of a message that does not decode, or that breaks the session:
     /// [`Error::TooLarge`] for a put longer than the limit, and [`Error::Body`] for a
     /// message longer than the rest of the body. A message of a body has no kind, so a
-    /// message where the body continues is read as one. The session is then not valid
-    /// ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
+    /// message where the body continues is read as one. The caller then stops the
+    /// session with [`TOO_LARGE`] for [`Error::TooLarge`], and with
+    /// [`MALFORMED`](crate::header::MALFORMED) for each other error.
     pub fn decode<'m>(
         &mut self,
         message: &'m [u8],
@@ -296,7 +307,7 @@ pub struct Requester {
 }
 
 /// A message from the server, decoded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum FromServer<'m> {
     /// A reply. The body of a chunk follows, unless its `len` is 0.
     Reply(Reply),
@@ -326,8 +337,9 @@ impl Requester {
     /// The [`Error`] of a message that does not decode, or that breaks the session:
     /// [`Error::TooLarge`] for a chunk longer than the limit, and [`Error::Body`] for
     /// a message longer than the rest of the body. A message of a body has no kind, so
-    /// a message where the body continues is read as one. The session is then not
-    /// valid ([`MALFORMED`](crate::header::MALFORMED)), and the caller stops it.
+    /// a message where the body continues is read as one. The caller then stops the
+    /// session with [`TOO_LARGE`] for [`Error::TooLarge`], and with
+    /// [`MALFORMED`](crate::header::MALFORMED) for each other error.
     pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromServer<'m>, Error> {
         if self.transit.in_body() {
             let (bytes, last) = self.transit.part(message)?;
@@ -572,7 +584,7 @@ mod tests {
         #[test]
         fn pins_the_wire_values() {
             let digests = [digest(1), digest(2)];
-            let expected: Vec<u8> = [[GET].as_slice(), &[1; 32], &[2; 32]].concat();
+            let expected: Vec<u8> = [[1].as_slice(), &[1; 32], &[2; 32]].concat();
             assert_eq!(encode_get(&digests), expected);
             assert_eq!(get::encoded_len(2), 65);
         }
@@ -625,8 +637,7 @@ mod tests {
         #[test]
         fn pins_the_wire_values() {
             let bytes = encode_put(put(7, 0x0102_0304));
-            let expected: Vec<u8> =
-                [[PUT].as_slice(), &[7; 32], &[4, 3, 2, 1]].concat();
+            let expected: Vec<u8> = [[2].as_slice(), &[7; 32], &[4, 3, 2, 1]].concat();
             assert_eq!(bytes, expected);
             assert_eq!(bytes.len(), Put::LEN);
         }
@@ -772,14 +783,13 @@ mod tests {
 
         #[test]
         fn pins_the_wire_values() {
-            let expected: Vec<u8> =
-                [[CHUNK].as_slice(), &[7; 32], &[4, 3, 2, 1]].concat();
+            let expected: Vec<u8> = [[1].as_slice(), &[7; 32], &[4, 3, 2, 1]].concat();
             assert_eq!(encode_reply(chunk(7, 0x0102_0304)), expected);
             let absent = Reply::Absent { digest: digest(8) };
-            let expected: Vec<u8> = [[ABSENT].as_slice(), &[8; 32]].concat();
+            let expected: Vec<u8> = [[2].as_slice(), &[8; 32]].concat();
             assert_eq!(encode_reply(absent), expected);
             let stored = Reply::Stored { digest: digest(9) };
-            let expected: Vec<u8> = [[STORED].as_slice(), &[9; 32]].concat();
+            let expected: Vec<u8> = [[3].as_slice(), &[9; 32]].concat();
             assert_eq!(encode_reply(stored), expected);
         }
 
