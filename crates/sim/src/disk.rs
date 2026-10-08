@@ -268,7 +268,8 @@ impl Disk {
         }
     }
 
-    /// Unlinks the file at `path`. It stays while a hold remains.
+    /// Unlinks the file at `path`. It stays while a hold, a durable entry, or a change
+    /// in the log keeps it.
     pub(crate) fn remove(&mut self, path: &Path) -> Result<(), Cause> {
         let (segments, slashed) = (segments(path), slashed(path));
         let Some((name, parent)) = segments.split_last() else {
@@ -282,7 +283,6 @@ impl Disk {
             .ok_or(Cause::NotFound)?;
         self.named(inode, slashed)?.linked = false;
         self.edit(dir, vec![(name.into(), None)]);
-        self.collect(inode);
         Ok(())
     }
 
