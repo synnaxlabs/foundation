@@ -156,6 +156,7 @@ impl Lab {
             net: host.net(),
             listen: SocketAddr::new(host.addresses()[0], PORT),
             private_key: types::node::PrivateKey([key; 32]),
+            key: types::node::Key::from_u128(u128::from(key)),
             region: None,
         });
         self.members.push(Member {

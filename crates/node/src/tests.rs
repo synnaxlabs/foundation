@@ -20,8 +20,10 @@ struct Run {
 
 /// The port of [`config`].
 const PORT: u16 = 7000;
-/// The node's key in [`config`].
+/// The node's private key in [`config`].
 const KEY: PrivateKey = PrivateKey([2; 32]);
+/// The node's key in [`config`].
+const OWN: types::node::Key = types::node::Key::from_u128(1);
 
 /// A disk budget of two rings of 64 MiB, with their header blocks.
 const DISK: Size = Size::from_bytes(2 * (8192 + (64 << 20)));
@@ -52,7 +54,7 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
 }
 
 /// The seams of `host`, with a pool budget of `budget` from `memory`, a disk budget
-/// of [`DISK`], key [`KEY`], and the port at [`listen`].
+/// of [`DISK`], keys [`OWN`] and [`KEY`], and the port at [`listen`].
 fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block::Heap> {
     Config {
         shards: host.shards(),
@@ -72,6 +74,7 @@ fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block:
         net: host.net(),
         listen: listen(host),
         private_key: KEY,
+        key: OWN,
         region: None,
     }
 }
@@ -378,7 +381,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
              budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, \
-             listen: {listen:?}, region: None, .. }}",
+             listen: {listen:?}, key: {OWN:?}, region: None, .. }}",
             listen = config.listen,
         )
     );
@@ -2601,8 +2604,6 @@ mod port {
         use super::*;
         use crate::Region;
 
-        /// The key of the node with private key [`KEY`].
-        const OWN: types::node::Key = types::node::Key::from_u128(1);
         /// The key and private key of a second node.
         const OTHER: (types::node::Key, PrivateKey) =
             (types::node::Key::from_u128(2), PrivateKey([3; 32]));
@@ -2641,23 +2642,23 @@ mod port {
             }
         }
 
-        /// The region `plant` of node `key`, where each of `members` is a voter.
-        fn region(key: types::node::Key, members: &[Member]) -> Region {
+        /// The region `plant`, where each of `members` is a voter.
+        fn region(members: &[Member]) -> Region {
             Region {
-                key,
                 prefix: "plant".parse().unwrap(),
                 members: members.to_vec(),
                 voters: members.iter().map(|member| member.card.key()).collect(),
             }
         }
 
-        /// Starts a node on `host` with `private_key` and `region`.
+        /// Starts the node `key` on `host` with `private_key` and `region`.
         fn start(
             host: &sim::node::Node,
-            private_key: PrivateKey,
+            (key, private_key): (types::node::Key, PrivateKey),
             region: Region,
         ) -> Node {
             Node::start(Config {
+                key,
                 private_key,
                 region: Some(region),
                 ..config(host, Size::MEBIBYTE, Box::new(heap))
@@ -2666,7 +2667,7 @@ mod port {
 
         /// The node with key [`OWN`] on `host`, the one member and voter of its region.
         fn start_alone(host: &sim::node::Node) -> Node {
-            start(host, KEY, region(OWN, &[member(OWN, &KEY, host)]))
+            start(host, (OWN, KEY), region(&[member(OWN, &KEY, host)]))
         }
 
         /// Gives `node` a task that waits for a home of [`INDEX`], and gives what the
@@ -2696,8 +2697,8 @@ mod port {
                 member(OTHER.0, &OTHER.1, &hosts[1]),
             ];
             let nodes = [
-                start(&hosts[0], KEY, region(OWN, &members)),
-                start(&hosts[1], OTHER.1, region(OTHER.0, &members)),
+                start(&hosts[0], (OWN, KEY), region(&members)),
+                start(&hosts[1], OTHER, region(&members)),
             ];
             let set = Arc::new(Mutex::new(None));
             let out = Arc::clone(&set);
@@ -2794,7 +2795,7 @@ mod port {
             assert_eq!(node.join(), Err(Error::Mesh(error.clone())));
             assert_eq!(
                 Error::Mesh(error.clone()).to_string(),
-                format!("cannot open the node's mesh: {error}")
+                format!("the node's mesh did not open: {error}")
             );
         }
 

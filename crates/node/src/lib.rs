@@ -74,10 +74,16 @@ pub struct Config<M> {
     /// Where the node's one port binds: UDP, and TCP on the same port number once
     /// the port carries TCP (#77).
     pub listen: SocketAddr,
-    /// The node's key. Its transport proves the key to each peer.
+    /// The node's private key. Its transport proves the key to each peer.
     pub private_key: types::node::PrivateKey,
-    /// The region whose mesh the node opens, or `None` for no mesh. A patch until
-    /// the node reads its region from its data directory (#1660, #1732).
+    /// The node's key. It stays the same when the private key changes. A patch until
+    /// the node reads it from its data directory (#1660).
+    pub key: types::node::Key,
+    /// The region whose mesh the node opens, or `None` for no mesh. Give the same
+    /// value at each start: the node keeps no copy of it, and a log opened with other
+    /// founding voters checks proofs against the wrong set. A patch until the node
+    /// keeps its region in its data directory when it founds or joins one, and reads
+    /// it at each start (#1660, #1744).
     pub region: Option<Region>,
 }
 
@@ -91,6 +97,7 @@ impl<M> fmt::Debug for Config<M> {
             .field("entropy", &self.entropy)
             .field("disk", &self.disk)
             .field("listen", &self.listen)
+            .field("key", &self.key)
             .field("region", &self.region)
             .finish_non_exhaustive()
     }
@@ -99,13 +106,11 @@ impl<M> fmt::Debug for Config<M> {
 /// A region that a node is a member of, given with no ticket.
 #[derive(Clone, Debug)]
 pub struct Region {
-    /// This node's key, the key of one card in `members`.
-    pub key: types::node::Key,
     /// The prefix of the region's names, [`types::name::Prefix::ROOT`] for the root
     /// region.
     pub prefix: types::name::Prefix,
-    /// Each member of the region, this node included. The card of this node holds
-    /// the public half of [`Config::private_key`].
+    /// Each member of the region, this node included: one card has [`Config::key`],
+    /// and holds the public half of [`Config::private_key`].
     pub members: Vec<mesh::Member>,
     /// The voters before the first entry of the log, the same at each start. Each is
     /// a member.
@@ -202,6 +207,7 @@ impl Node {
         let endpoint = Endpoint {
             part: part.expect("invariant: a port splits into the parts asked for"),
             private_key: config.private_key.clone(),
+            key: config.key,
             clock: config.clock.clone(),
             entropy: config.entropy.clone(),
         };
@@ -622,6 +628,7 @@ struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
     private_key: types::node::PrivateKey,
+    key: types::node::Key,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }
@@ -671,7 +678,7 @@ impl Serve {
         let Some(interner) = self.interner.await else {
             return;
         };
-        let private_key = self.endpoint.private_key.clone();
+        let (key, private_key) = (self.endpoint.key, self.endpoint.private_key.clone());
         let (clock, entropy) =
             (self.endpoint.clock.clone(), self.endpoint.entropy.clone());
         let transport = Rc::new(self.endpoint.open(Rc::clone(&pool), tasks.clone()));
@@ -679,7 +686,7 @@ impl Serve {
             None => None,
             Some(region) => {
                 let config = mesh::Config {
-                    key: region.key,
+                    key,
                     private_key,
                     region: region.prefix,
                     members: region.members,
@@ -776,7 +783,7 @@ pub enum Error {
     /// The transport of the node's port stopped, as when the OS breaks its socket.
     /// The node stops.
     Transport(transport::Error),
-    /// The mesh of the node's region did not open. The node took no session.
+    /// The mesh did not open. The node took no session.
     Mesh(mesh::Error),
     /// The node's port did not bind. No shard started.
     Port {
@@ -814,7 +821,7 @@ impl fmt::Display for Error {
             Self::Transport(error) => {
                 write!(f, "the node's transport stopped: {error}")
             }
-            Self::Mesh(error) => write!(f, "cannot open the node's mesh: {error}"),
+            Self::Mesh(error) => write!(f, "the node's mesh did not open: {error}"),
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }

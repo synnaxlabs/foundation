@@ -4502,7 +4502,7 @@ How to read this record:
   after the header. The node reads no datagram until the first protocol that takes
   datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
   reads the key from its data directory (#1660). The node admits every peer that
-  completes the handshake until the mesh states its rule. At the stop, each session and
+  completes the handshake; the mesh checks each message of a mesh stream (NODE MESH). At the stop, each session and
   stream future drops, then the transport. The bound on the wait for a header is #1628.
   Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
@@ -4521,21 +4521,30 @@ How to read this record:
   Supersedes the deferral of
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048464411
   (2026-10-07 22:50 UTC), under which the node ran on with no port until #1647.
-- **NODE MESH (#585, 2026-10-08)** `Config::region: Option<Region>` gives the region
-  that the node is a member of: its key, its prefix, its members, and the voters before
-  the first entry of the log. It is a patch until the node reads its region from its
-  data directory (#1660, #1732); `None` opens no mesh. With a region, shard 0 opens
-  `mesh::Mesh` on the node's transport after the last shard has opened its buffer and
-  before it takes the first session. The mesh's log is the directory `log` of the data
-  directory. A mesh that does not open stops the node, and `Node::join` gives
-  `Error::Mesh`. Each `wire::Protocol::Mesh` stream of a peer that proved a node key
-  goes to `Mesh::serve`, which checks each message against the region, so the node
-  admits every such peer. A mesh stream of a client, or of a node with no region, is
-  rejected as NODE PORT says. Shard 0 sets no home yet (PR 4 of #585). A mesh that
-  stops does not stop the node until #1780, before PR 4 gives the mesh to the hub.
-  Lost: `Node::found(region)` at run time, which needs a second open path and a node
-  that runs with no region before it. Plan:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
+- **NODE MESH (#585, 2026-10-08)** `Config::key` is the node's key, beside
+  `Config::private_key`; both are patches until #1660 moves them to node-local disk.
+  `Config::region: Option<Region>` gives the region that the node is a member of: its
+  prefix, its members (one card has `Config::key`), and the voters before the first
+  entry of the log. The caller gives the same region at each start: the node keeps no
+  copy of it. `None` opens no mesh. The `Option` is a dark patch: the `None` stays in
+  `node`, and no lower crate gets an `Option` of the mesh. PR 4 of #585, which gives the
+  mesh to the hub, makes the region required, unless #1660 and #1744 have already taken
+  it out of `Config`. The long-term path takes it out of `Config`: the node keeps its
+  membership in its data directory when it founds or joins, and reads it at each start.
+  With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last
+  shard has opened its buffer and before it takes the first session. A mesh that does
+  not open stops the node, and `Node::join` gives `Error::Mesh`, ranked with
+  `Error::Buffer` and below `Error::Transport`. Each `wire::Protocol::Mesh` stream of a
+  peer that proved a node key goes to `Mesh::serve`, which checks each message against
+  the region; the error of `serve` ends only its stream. A mesh stream of a client, or
+  of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
+  4 of #585). A mesh that stops does not stop the node until #1780, before PR 4 gives
+  the mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second
+  open path and a node that runs with no region before it; the key in `Region`, because
+  a node's identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2` (2026-10-08 03:37 UTC):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
