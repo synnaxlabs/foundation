@@ -55,10 +55,12 @@ impl Rules {
                         rules.connectors.insert(name.clone());
                     }
                     Definition::Subject(subject) => {
-                        let label = Kind::Subject.label(name).expect(
-                            "invariant: a tree with no problem from region::check has \
-                             a label at each subject key",
-                        );
+                        let label = Kind::Subject.label(name).unwrap_or_else(|| {
+                            panic!(
+                                "invariant: a tree with no problem from region::check \
+                                 has a label at each subject key, not at {name}"
+                            )
+                        });
                         rules.subjects.insert(label, subject.clone());
                     }
                     Definition::Region(_)
