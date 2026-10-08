@@ -2,9 +2,11 @@
 //! method with a `todo!` waits on the issue it names.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use env::clock::Clock;
@@ -12,7 +14,8 @@ use types::time::Span;
 
 use crate::status::Connector;
 
-/// How long [`Rig::wait`] waits: longer than the 60 s cap of a restart backoff.
+/// How long [`Rig::wait`] and [`Rig::run`] wait: longer than the 60 s cap of a restart
+/// backoff.
 const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 
 /// The time between two checks of a wait.
@@ -63,13 +66,12 @@ impl Rig {
     }
 
     /// Runs `foundation` with `args` in [`Rig::dir`], with no input, and gives its
-    /// output when it exits.
+    /// output when it exits. When 90 s pass first, kills it and panics with the output
+    /// so far.
     pub(crate) fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_foundation"))
-            .args(args)
-            .current_dir(&self.dir)
-            .output()
-            .expect("run foundation")
+        let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+        command.args(args).current_dir(&self.dir);
+        run(&self.clock, PATIENCE, command)
     }
 
     /// Calls `check` until it gives `Ok`, and gives that value. When 90 s pass first,
@@ -116,6 +118,89 @@ fn wait<T>(
             reason = "a process test waits on another process in real time"
         )]
         std::thread::sleep(POLL);
+    }
+}
+
+/// [`Rig::run`] of `command`, with `limit` in place of 90 s.
+fn run(clock: &Clock, limit: Span, mut command: Command) -> Output {
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the command");
+    let mut running = Running(child);
+    let stdout = Pipe::new(running.0.stdout.take().expect("piped"));
+    let stderr = Pipe::new(running.0.stderr.take().expect("piped"));
+    let status = wait(clock, limit, "the command exits", || {
+        match running.0.try_wait().expect("check the command") {
+            Some(status) => Ok(status),
+            None => Err(format!(
+                "stdout:\n{}\nstderr:\n{}",
+                stdout.text(),
+                stderr.text()
+            )),
+        }
+    });
+    Output {
+        status,
+        stdout: stdout.end(),
+        stderr: stderr.end(),
+    }
+}
+
+/// A command that runs. Drop kills it, so a test that panics leaves no process.
+struct Running(Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        // `kill` gives `Ok` for a command that exited.
+        let killed = self.0.kill().and_then(|()| self.0.wait());
+        if !std::thread::panicking() {
+            killed.expect("kill the command");
+        }
+    }
+}
+
+/// One output of a command, which a thread reads as the command writes it.
+struct Pipe {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    reader: JoinHandle<()>,
+}
+
+impl Pipe {
+    fn new(mut from: impl Read + Send + 'static) -> Self {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let to = Arc::clone(&bytes);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a process test reads another process while it runs"
+        )]
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            loop {
+                match from.read(&mut chunk) {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        to.lock().expect("no panic").extend_from_slice(&chunk[..n]);
+                    }
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                    Err(error) => panic!("read the output: {error}"),
+                }
+            }
+        });
+        Self { bytes, reader }
+    }
+
+    /// The bytes read so far, as text.
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().expect("no panic")).into_owned()
+    }
+
+    /// Waits for the end of the output, and gives all of it.
+    fn end(self) -> Vec<u8> {
+        self.reader.join().expect("read the output");
+        std::mem::take(&mut *self.bytes.lock().expect("no panic"))
     }
 }
 
@@ -195,6 +280,30 @@ fn a_rig_runs_foundation_and_gives_its_output() {
             ""
         )
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_past_its_limit_kills_the_command_and_panics_with_its_output() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "echo $$; echo err >&2; exec sleep 60"]);
+    let limited =
+        std::panic::AssertUnwindSafe(|| run(&os::clock(), Span::SECOND, command));
+    let panic = std::panic::catch_unwind(limited).expect_err("the run panics");
+    let message = panic.downcast_ref::<String>().expect("a message");
+    let pid = message.lines().nth(2).expect("the PID");
+    assert_eq!(
+        message,
+        &format!(
+            "the command exits: not within 1s. The last check saw:\nstdout:\n{pid}\n\n\
+             stderr:\nerr\n"
+        )
+    );
+    let alive = Command::new("kill")
+        .args(["-0", pid])
+        .output()
+        .expect("kill -0");
+    assert_eq!(alive.status.code(), Some(1), "{pid} still runs");
 }
 
 #[test]
