@@ -80,6 +80,8 @@ pub struct StreamsState {
     pub(super) max_remote: [u64; 2],
     /// Value of `max_remote` most recently transmitted to the peer in a `MAX_STREAMS` frame
     sent_max_remote: [u64; 2],
+    /// Highest limit at which the peer reported in a `STREAMS_BLOCKED` frame that it waits
+    peer_blocked: [u64; 2],
     /// Number of streams the peer may open and which aren't fully closed.
     pub(super) allocated_remote_count: [u64; 2],
     /// Size of the desired stream flow control window. May be smaller than
@@ -160,6 +162,7 @@ impl StreamsState {
             max: [0, 0],
             max_remote: [max_remote_bi.into(), max_remote_uni.into()],
             sent_max_remote: [max_remote_bi.into(), max_remote_uni.into()],
+            peer_blocked: [0, 0],
             allocated_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
             max_concurrent_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
             flow_control_adjusted: false,
@@ -388,6 +391,11 @@ impl StreamsState {
                 }
             }
         }
+    }
+
+    /// Whether a `STREAMS_BLOCKED` frame waits to be queued
+    pub(crate) fn can_send_streams_blocked(&self) -> bool {
+        self.streams_blocked.iter().any(|&blocked| blocked)
     }
 
     /// Whether any stream data is queued, regardless of control frames
@@ -761,13 +769,20 @@ impl StreamsState {
         for dir in Dir::iter() {
             let diff = self.max_remote[dir as usize] - self.sent_max_remote[dir as usize];
             // To reduce traffic, only announce updates if at least 1/8 of the flow control window
-            // has been consumed.
-            if diff > self.max_concurrent_remote_count[dir as usize] / 8 {
+            // has been consumed, or if the peer waits at the limit we sent.
+            let blocked = self.peer_blocked[dir as usize] >= self.sent_max_remote[dir as usize];
+            if diff > self.max_concurrent_remote_count[dir as usize] / 8 || (diff > 0 && blocked) {
                 pending.max_stream_id[dir as usize] = true;
                 queued = true;
             }
         }
         queued
+    }
+
+    /// Records that the peer waits for a stream at `limit`
+    pub(crate) fn received_streams_blocked(&mut self, dir: Dir, limit: u64) {
+        let blocked = &mut self.peer_blocked[dir as usize];
+        *blocked = limit.max(*blocked);
     }
 
     /// Check for errors entailed by the peer's use of `id` as a send stream

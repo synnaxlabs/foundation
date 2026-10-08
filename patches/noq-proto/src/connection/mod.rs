@@ -5080,6 +5080,8 @@ impl Connection {
                         "peer claims to be blocked opening more than {} {} streams",
                         limit, dir
                     );
+                    // The `queue_max_stream_id` after the payload sends the credit.
+                    self.streams.received_streams_blocked(dir, limit);
                 }
                 Frame::StopSending(frame::StopSending { id, error_code }) => {
                     if id.initiator() != self.side.side() {
@@ -6960,6 +6962,7 @@ impl Connection {
 
         // Stream control frames are checked in PacketSpace::can_send, only check data here.
         let other = self.streams.can_send_stream_data()
+            || self.streams.can_send_streams_blocked()
             || self
                 .datagrams
                 .outgoing
