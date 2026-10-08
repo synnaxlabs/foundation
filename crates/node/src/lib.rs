@@ -724,18 +724,14 @@ impl Serve {
             let mut group = pin!(group);
             let mut guard = pin!(guard);
             let stop = poll_fn(|cx| {
-                if guard.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(());
-                }
+                let ended = end(
+                    guard.as_mut().poll(cx),
+                    port.as_mut().poll(cx),
+                    group.as_mut().poll(cx),
+                );
                 // Set before the tasks drop, so that `join` ranks it above a panic in
                 // a task's drop.
-                if let Poll::Ready(error) = port.as_mut().poll(cx) {
-                    fail(Error::Transport(error));
-                    return Poll::Ready(());
-                }
-                group.as_mut().poll(cx).map(|stopped| {
-                    fail(Error::Group(stopped));
-                })
+                ended.map(|error| error.map_or((), fail))
             });
             self.inbox.serve(hub, tasks, stop).await;
         }
@@ -743,6 +739,23 @@ impl Serve {
             ended.await;
         }
     }
+}
+
+/// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of
+/// the node (`guard`), which gives `None`, then a transport that stopped (`port`),
+/// then a group that stopped.
+fn end(
+    guard: Poll<()>,
+    port: Poll<transport::Error>,
+    group: Poll<mesh::Stopped>,
+) -> Poll<Option<Error>> {
+    if guard.is_ready() {
+        return Poll::Ready(None);
+    }
+    if let Poll::Ready(error) = port {
+        return Poll::Ready(Some(Error::Transport(error)));
+    }
+    group.map(|stopped| Some(Error::Group(stopped)))
 }
 
 /// Why a node failed.

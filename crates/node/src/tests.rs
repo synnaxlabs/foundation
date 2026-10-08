@@ -2936,19 +2936,6 @@ mod port {
             );
         }
 
-        /// A stop of the node at the instant its mesh's group stops is not a failure.
-        #[test]
-        fn a_stop_as_the_group_stops_gives_no_error() {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            let node = start_alone(&host);
-            assert_eq!(sim.run_for(OPEN), Ok(()));
-            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
-        }
-
         /// A task whose drop panics as the mesh's group stops: `join` ranks the
         /// group's stop above the panic.
         #[test]
@@ -2983,21 +2970,45 @@ mod port {
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
 
-        /// A transport that stops before the mesh's group: `join` gives the
-        /// transport's error, and the group's stop after it sets no second error.
+        /// A private call: the sim cannot make two causes ready at one poll, as a
+        /// fault that stops the group stops the node at the same instant.
         #[test]
-        fn a_transport_that_stops_before_the_group_gives_its_error() {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            let node = start_alone(&host);
-            assert_eq!(sim.run_for(OPEN), Ok(()));
-            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
-            host.fail_udp(listen(&host));
-            assert_eq!(sim.run(), Ok(()));
+        fn a_stop_of_the_node_ranks_first_then_the_transport() {
             let error = transport::Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
-            assert_eq!(node.join(), Err(Error::Transport(error)));
+            let port = Poll::Ready(error.clone());
+            let group = Poll::Ready(write_failed());
+            let cases = [
+                (
+                    Poll::Ready(()),
+                    port.clone(),
+                    group.clone(),
+                    Poll::Ready(None),
+                ),
+                (
+                    Poll::Ready(()),
+                    Poll::Pending,
+                    Poll::Pending,
+                    Poll::Ready(None),
+                ),
+                (
+                    Poll::Pending,
+                    port.clone(),
+                    group.clone(),
+                    Poll::Ready(Some(Error::Transport(error))),
+                ),
+                (
+                    Poll::Pending,
+                    Poll::Pending,
+                    group,
+                    Poll::Ready(Some(Error::Group(write_failed()))),
+                ),
+                (Poll::Pending, Poll::Pending, Poll::Pending, Poll::Pending),
+            ];
+            for (guard, port, group, ended) in cases {
+                assert_eq!(crate::end(guard, port, group), ended);
+            }
         }
 
         /// A chunk store that does not open stops the node, and `join` gives why.
