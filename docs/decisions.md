@@ -6059,10 +6059,12 @@ How to read this record:
   approved by `laptop.architect` at 15:26:10Z
   (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600).
   Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
-  of #336. A mesh that stops does not stop the node until #1780, before PR 4 gives the
-  mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second open
-  path and a node that runs with no region before it; the key in `node::Region`,
-  because a node's identity is not region data, and PR 4 needs it with no region.
+  of #336. A mesh whose group stops stops the node, and `Node::join` gives
+  `Error::Mesh` with `mesh::Error::Stopped`. Of a transport that stops and a group
+  that stops, `join` gives the first; at one poll, the transport's (#1780, APPROVAL).
+  Lost: `Node::found(region)` at run time, which needs a second open path and a node
+  that runs with no region before it; the key in `node::Region`, because a node's
+  identity is not region data, and PR 4 needs it with no region.
   Decided by `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.

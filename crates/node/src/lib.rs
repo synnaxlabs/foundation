@@ -155,7 +155,7 @@ impl Node {
     /// it is not there. The shards open their buffers one after another, in order of
     /// core. Once each buffer has opened, shard 0 opens the mesh of [`Config::region`]
     /// when it has one, then serves the port and admits every peer that proves its
-    /// key, until its transport stops, which stops the node.
+    /// key, until its transport or the mesh's group stops, which stops the node.
     /// Returns once each shard runs or one has failed to start. When the disk budget
     /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
     /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
@@ -299,7 +299,8 @@ impl Node {
     /// such as sessions; it sends its result back through a value it owns. Its future
     /// runs until it completes or shard 0 ends, which drops it. A panic in a task ends
     /// shard 0 and fails the node: [`Node::join`] gives [`Error::Panicked`], unless
-    /// the transport stopped first, which gives [`Error::Transport`].
+    /// the transport or the mesh's group stopped first, which gives
+    /// [`Error::Transport`] or [`Error::Mesh`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
         F: Future<Output = ()> + 'static,
@@ -324,10 +325,11 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, [`Error::Blob`] for a chunk store or
-    /// [`Error::Mesh`] for a mesh that did not open, or
-    /// [`Error::Transport`] for a transport that stopped, else [`Error::Panicked`] for
-    /// the first shard by core that panicked. Any failed shard stops the node.
+    /// whose buffer did not open, [`Error::Blob`] for a chunk store that did not open,
+    /// [`Error::Mesh`] for a mesh that did not open or whose group stopped, or
+    /// [`Error::Transport`] for a transport that stopped, the first of the last two,
+    /// and the transport's when both are seen at one poll, else [`Error::Panicked`]
+    /// for the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -667,8 +669,9 @@ impl Endpoint {
 
 impl Serve {
     /// Opens the endpoint, then runs each task given with a hub over `home`, and
-    /// serves the node's port, until `guard` completes or the transport stops. A
-    /// transport that stops goes into `failed` before any task drops. Then drops the
+    /// serves the node's port, until `guard` completes, the transport stops, or the
+    /// mesh's group stops. A transport or a group that stops goes into `failed`
+    /// before any task drops. Then drops the
     /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
     /// and waits for each task of the mesh to end, the last of which drops the
     /// transport. Runs no task and takes no session when a shard did not open, or when
@@ -701,9 +704,24 @@ impl Serve {
             tasks: tasks.clone(),
         });
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
+        // A watch of any index gives the stop of the group.
+        let watch = mesh
+            .as_ref()
+            .map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
+        let group = async move {
+            let Some(mut watch) = watch else {
+                return std::future::pending().await;
+            };
+            loop {
+                if let Err(stopped) = watch.next().await {
+                    return stopped;
+                }
+            }
+        };
         // The port's future holds the mesh, so it drops before the wait.
         {
             let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
+            let mut group = pin!(group);
             let mut guard = pin!(guard);
             let stop = poll_fn(|cx| {
                 if guard.as_mut().poll(cx).is_ready() {
@@ -711,9 +729,13 @@ impl Serve {
                 }
                 // Set before the tasks drop, so that `join` ranks it above a panic in
                 // a task's drop.
-                port.as_mut()
-                    .poll(cx)
-                    .map(|error| fail(Error::Transport(error)))
+                if let Poll::Ready(error) = port.as_mut().poll(cx) {
+                    fail(Error::Transport(error));
+                    return Poll::Ready(());
+                }
+                group.as_mut().poll(cx).map(|stopped| {
+                    fail(Error::Mesh(mesh::Error::Stopped(stopped)));
+                })
             });
             self.inbox.serve(hub, tasks, stop).await;
         }
@@ -769,7 +791,8 @@ pub enum Error {
     /// The transport of the node's port stopped, as when the OS breaks its socket.
     /// The node stops.
     Transport(transport::Error),
-    /// The mesh did not open. The node took no session.
+    /// The mesh did not open, and the node took no session, or its group stopped
+    /// ([`mesh::Error::Stopped`]), which stops the node.
     Mesh(mesh::Error),
     /// The chunk store did not open. The node took no session.
     Blob(blob::Error),
@@ -808,6 +831,9 @@ impl fmt::Display for Error {
             ),
             Self::Transport(error) => {
                 write!(f, "the node's transport stopped: {error}")
+            }
+            Self::Mesh(mesh::Error::Stopped(stopped)) => {
+                write!(f, "the node's mesh stopped: {stopped}")
             }
             Self::Mesh(error) => write!(f, "the node's mesh did not open: {error}"),
             Self::Blob(error) => {

@@ -2646,6 +2646,18 @@ mod port {
 
         /// The first file of the mesh's log.
         const LOG: &str = "mesh/log/log-0";
+        /// A time by which the mesh of a node opens, and before its first write after
+        /// the open.
+        const OPEN: Span = Span::from_nanos(10_000_000);
+
+        /// Why the group stops when a write of [`LOG`] fails.
+        fn write_failed() -> ::mesh::Stopped {
+            ::mesh::Stopped::Write(::mesh::log::Error::Files(env::files::Error::Io {
+                path: PathBuf::from(LOG),
+                operation: env::files::Operation::WriteAt,
+                code: 5,
+            }))
+        }
 
         /// The member `key` with `private_key`, whose node listens on `host`.
         fn member(
@@ -2906,6 +2918,53 @@ mod port {
                 Error::Mesh(error.clone()).to_string(),
                 format!("the node's mesh did not open: {error}")
             );
+        }
+
+        /// A mesh whose group stops stops the node, and `join` gives why.
+        #[test]
+        fn a_mesh_whose_group_stops_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run(), Ok(()));
+            let error = ::mesh::Error::Stopped(write_failed());
+            assert_eq!(node.join(), Err(Error::Mesh(error.clone())));
+            assert_eq!(
+                Error::Mesh(error).to_string(),
+                format!("the node's mesh stopped: {}", write_failed())
+            );
+        }
+
+        /// A stop of the node at the instant its mesh's group stops is not a failure.
+        #[test]
+        fn a_stop_as_the_group_stops_gives_no_error() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// A transport that stops before the mesh's group: `join` gives the
+        /// transport's error, and the group's stop after it sets no second error.
+        #[test]
+        fn a_transport_that_stops_before_the_group_gives_its_error() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            host.fail_udp(listen(&host));
+            assert_eq!(sim.run(), Ok(()));
+            let error = transport::Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(node.join(), Err(Error::Transport(error)));
         }
 
         /// A chunk store that does not open stops the node, and `join` gives why.
