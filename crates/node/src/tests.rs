@@ -3009,7 +3009,7 @@ mod port {
         /// A node started with a region with founding definitions puts the chunks of
         /// their tree in its chunk store.
         #[test]
-        fn the_mesh_opens_at_the_founding_definitions_of_its_region() {
+        fn the_chunk_store_holds_the_tree_of_the_founding_definitions() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
             let mut region = region(&[member(OWN, &KEY, &host)]);
