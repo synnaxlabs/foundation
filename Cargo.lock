@@ -417,6 +417,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-opcua"
+version = "0.0.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -846,6 +853,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "hub"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "block",
  "buffer",
  "clock",
@@ -854,7 +862,9 @@ dependencies = [
  "env",
  "home",
  "sim",
+ "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
@@ -1057,6 +1067,7 @@ dependencies = [
  "os",
  "proptest",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",
@@ -1194,10 +1205,12 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "counting",
  "divan",
  "env",
  "getrandom 0.4.3",
  "libc",
+ "os",
  "proptest",
  "rustix",
  "tokio",

@@ -156,6 +156,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "transport_certificate"
+path = "fuzz_targets/transport_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "transport_hello"
 path = "fuzz_targets/transport_hello.rs"
 test = false

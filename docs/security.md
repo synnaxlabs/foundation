@@ -345,8 +345,10 @@ state on `main`.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
 - The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
-- A local patch (`patches/`) is a path package, so `cargo deny` does not check it
-  against advisories (#1867).
+- A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
+  does not check against advisories. The `Advisories of each patched release` step of
+  the `deny` job checks its release (#1867). The open62541 copy in `patches/open62541/`
+  is C, not a crate: no check compares it with advisories until #1910.
 - A node fetches the signed binary of a release by hash from a nearby peer (C9d). The
   signing key and its check are not built.
 
@@ -364,8 +366,9 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
 | `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body message is where `body` says and no longer than the rest of the body; each refusal is the one the state gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
-| `wire_hub_client` | `wire::hub::client::Gateway::decode`, `Program::decode`, and the encoders of `Challenge`, `Signed`, `Request`, and `Response` | Each message encodes to the same bytes; each event comes in the order of a client stream, and each refusal is the one that the order gives; each body ends at its length; each valid message made from the input decodes to itself |
+| `wire_hub_client` | `wire::hub::client::Challenge::decode`, `Signed::decode`, `Request::decode`, `Response::decode`, `Body::take`, `Body::end`, and the encoders of each message | Each message encodes to the same bytes; each decoder refuses another kind with `Error::Kind`; each body ends at its length and nowhere else, and each refusal of a body is the one that its rest gives; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
+| `transport_certificate` | `transport::fuzzing::peer`: the client verifier and the peer of a node's server, for a dialer's chain of 0 to 3 certificates (feature `fuzzing`) | Gives the peer that a second reader of the rules gives: a client for no certificate, none for a chain of more than one or a certificate over 1024 bytes, and else none or the node whose key follows the Ed25519 key header in the certificate; a certificate that a node issues reads back to its key, and two of it are refused. Not reached: the handshake signature, which fuzzed bytes cannot make |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
 | `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
@@ -375,6 +378,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
+| `spec_tree` | `spec::tree::get`, `apply`, `diff`, and `spec::region::definitions` on chunks from a peer | `get` agrees with a whole `diff`; `apply` gives the entries with the changes; `definitions` gives the decode of the entries only when `spec::region::tree` of them has the same root |
 | `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
@@ -397,7 +401,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus:
-`transport::message` and `tls` (#55), the QUIC hello
+`transport::message` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and

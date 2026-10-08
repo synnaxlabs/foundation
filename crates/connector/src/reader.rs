@@ -4,7 +4,7 @@ use document::diagnostic::{Code, Diagnostic};
 use document::value::Value;
 use document::{Block, Document};
 use hub::reader::Mode;
-use types::name::{Name, Selector};
+use types::name::Selector;
 use types::time::Span;
 
 use crate::kind;
@@ -12,16 +12,13 @@ use crate::kind;
 const BAD_MODE: Code = Code::new("connector.bad-mode");
 const LATEST_HOLD: Code = Code::new("connector.latest-hold");
 
-const READER_KEYS: [&str; 3] = ["name", "mode", "hold"];
+const READER_KEYS: [&str; 2] = ["mode", "hold"];
 
-/// The reader settings of an out connector. The reader starts from now, with no
-/// maximum age.
+/// The reader settings of an out connector. The reader has its connector's name, starts
+/// from now, and has no maximum age.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Settings {
-    /// The reader's name. `None` is the connector's name, which
-    /// `kind::Context::reader` gives when it opens the reader.
-    pub name: Option<Name>,
     /// The channels it reads.
     pub select: Selector,
     /// Which frames it gets.
@@ -32,11 +29,10 @@ pub struct Settings {
 }
 
 /// Reads the `select` attribute of `config` and its one `reader` block, with the
-/// attributes `name`, `mode` (`"complete"` or `"latest"`, as a string or a
-/// reference), and `hold`. With no `reader` block, the reader has no name, is
-/// complete, and has no hold. `keys` and `blocks` are the kind's own attributes and
-/// blocks. Each other key of `config` that `read` does not read gives
-/// `document.unknown-attribute` or `document.unknown-block`.
+/// attributes `mode` (`"complete"` or `"latest"`, as a string or a reference) and
+/// `hold`. With no `reader` block, the reader is complete and has no hold. `keys` and
+/// `blocks` are the kind's own attributes and blocks. Each other key of `config` that
+/// `read` does not read gives `document.unknown-attribute` or `document.unknown-block`.
 ///
 /// # Errors
 ///
@@ -83,28 +79,20 @@ pub fn read(
         .blocks
         .iter()
         .find(|block| &*block.keyword == "reader");
-    let (name, mode, hold) = match first {
+    let (mode, hold) = match first {
         Some(first) => block(first, &mut diagnostics),
-        None => (None, Mode::Complete, Span::ZERO),
+        None => (Mode::Complete, Span::ZERO),
     };
     match select {
-        Some(select) if diagnostics.is_empty() => Ok(Settings {
-            name,
-            select,
-            mode,
-            hold,
-        }),
+        Some(select) if diagnostics.is_empty() => Ok(Settings { select, mode, hold }),
         _ => Err(diagnostics),
     }
 }
 
-/// The name, mode, and hold of the `reader` block. Each value that it reports gives
-/// its default.
-fn block(
-    block: &Block,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> (Option<Name>, Mode, Span) {
-    let fix = "Remove each label, and name the reader with a `name` attribute";
+/// The mode and hold of the `reader` block. Each value that it reports gives its
+/// default.
+fn block(block: &Block, diagnostics: &mut Vec<Diagnostic>) -> (Mode, Span) {
+    let fix = "Remove each label: the reader has its connector's name";
     keep(document::read::labels::<0>(block, fix.into()), diagnostics);
     diagnostics.extend(document::read::unknown(
         &block.body,
@@ -113,8 +101,6 @@ fn block(
         &[],
     ));
     let attribute = |key: &str| block.body.attributes.get(key);
-    let name = attribute("name")
-        .map(|name| keep(document::read::name(&name.value), diagnostics));
     let mode = attribute("mode").map(|mode| keep(self::mode(&mode.value), diagnostics));
     let hold = attribute("hold");
     let span = hold.map(|hold| keep(document::read::span(&hold.value), diagnostics));
@@ -129,7 +115,6 @@ fn block(
         ));
     }
     (
-        name.flatten(),
         mode.flatten().unwrap_or(Mode::Complete),
         span.flatten().unwrap_or(Span::ZERO),
     )

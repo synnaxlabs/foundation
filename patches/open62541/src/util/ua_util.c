@@ -652,7 +652,7 @@ UA_KeyValueMap_merge(UA_KeyValueMap *lhs, const UA_KeyValueMap *rhs) {
 /***************************/
 
 /* TODO is this safe for multithreading? */
-static pcg32_random_t UA_rng = PCG32_INITIALIZER;
+static UA_THREAD_LOCAL pcg32_random_t UA_rng = PCG32_INITIALIZER;
 
 void
 UA_random_seed(u64 seed) {
