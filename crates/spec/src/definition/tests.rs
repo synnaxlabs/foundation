@@ -863,6 +863,44 @@ fn round_trips_an_array_or_list_of_each_size_bound() {
     }
 }
 
+/// A matrix of `rows` arrays of `columns` elements.
+fn matrix(element: Scalar, rows: u16, columns: u16) -> DataType {
+    DataType::Sample(sample::Type::Matrix {
+        element,
+        sides: sample::Sides { rows, columns },
+    })
+}
+
+#[test]
+fn round_trips_a_matrix_of_each_size_bound() {
+    for element in [Scalar::F64, Scalar::Bool] {
+        let unit = (element == Scalar::F64).then_some("kPa");
+        for (rows, columns) in [(0, 0), (1, 3), (u16::MAX, u16::MAX)] {
+            let definition = data(matrix(element, rows, columns), unit);
+            assert_eq!(Definition::decode(&definition.encode()), Ok(definition));
+        }
+    }
+}
+
+#[test]
+fn refuses_a_matrix_that_ends_early() {
+    let bytes = data(matrix(Scalar::F32, 2, 3), None).encode();
+    let at = DATA_TYPE_AT + 16;
+    let cases = [
+        (at + 1, at + 1),
+        (at + 2, at + 2),
+        (at + 3, at + 2),
+        (at + 5, at + 4),
+    ];
+    for (end, truncated) in cases {
+        assert_eq!(
+            Definition::decode(&bytes[..end]),
+            Err(Error::Truncated { at: truncated }),
+            "{end}"
+        );
+    }
+}
+
 fn f64s(len: u32) -> DataType {
     DataType::Sample(sample::Type::Array {
         element: Scalar::F64,
@@ -913,6 +951,7 @@ fn writes_each_data_type_by_its_documented_bytes() {
         (DataType::Sample(sample::Type::String), &[3]),
         (DataType::Sample(sample::Type::Bytes), &[4]),
         (DataType::Quality, &[5]),
+        (matrix(Scalar::F32, 2, 0x0102), &[6, 9, 2, 0, 2, 1]),
     ] {
         let bytes = data(data_type, None).encode();
         // `data` has a quality key.
@@ -961,9 +1000,17 @@ fn refuses_an_unknown_data_type_or_scalar() {
     let scalar_at = at + 1;
     for (rest, error, message) in [
         (
-            &[6][..],
-            Error::DataType { at, found: 6 },
-            format!("the data type 6 at byte {at} is not a known type"),
+            &[7][..],
+            Error::DataType { at, found: 7 },
+            format!("the data type 7 at byte {at} is not a known type"),
+        ),
+        (
+            &[6, 14],
+            Error::Scalar {
+                at: scalar_at,
+                found: 14,
+            },
+            format!("the scalar 14 at byte {scalar_at} is not a known scalar"),
         ),
         (
             &[0, 14],
@@ -1210,9 +1257,11 @@ fn data_type_strategy() -> impl Strategy<Value = DataType> {
         (scalar.clone(), any::<u32>()).prop_map(|(element, len)| {
             DataType::Sample(sample::Type::Array { element, len })
         }),
-        (scalar, any::<u32>()).prop_map(|(element, max)| {
+        (scalar.clone(), any::<u32>()).prop_map(|(element, max)| {
             DataType::Sample(sample::Type::List { element, max })
         }),
+        (scalar, any::<u16>(), any::<u16>())
+            .prop_map(|(element, rows, columns)| { matrix(element, rows, columns) }),
         Just(DataType::Sample(sample::Type::String)),
         Just(DataType::Sample(sample::Type::Bytes)),
         Just(DataType::Quality),

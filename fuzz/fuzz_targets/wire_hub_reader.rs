@@ -4,7 +4,7 @@
 //! writes reads back. A latest and a complete session each read the input.
 //!
 //! Input: one byte, the places of the session less 1, then the messages from the home
-//! (`fuzz::hub::messages`).
+//! (`fuzz::messages`).
 
 #![no_main]
 
@@ -128,7 +128,7 @@ fn read(bytes: &[u8]) {
 fn read_session(places: u32, mode: Mode, rest: &[u8]) {
     let mut reader = reader(places, mode);
     let mut next = Next::Opened;
-    for message in fuzz::hub::messages(rest) {
+    for message in fuzz::messages(rest) {
         next = match (next, reader.decode(message)) {
             (Next::Opened, Ok(FromHome::Opened)) => {
                 assert_eq!(message, [kind(Reply::Opened)], "the opened changed");

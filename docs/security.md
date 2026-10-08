@@ -78,11 +78,14 @@ state on `main`.
   datagram with a short header for a connection of another shard signs a valid
   reset for it. The router is not built. #77 asks that it hands such a datagram
   only to the shard that the first byte names, and drops one that names no shard.
-- Open: #228 (a length prefix holds a whole block of the shard's pool before a body
-  byte arrives). A connection now holds at most its receive budget (#467), and a
-  size takes the budget of a size with no block in use (#270). A stream on another
-  connection reads while one connection holds its budget (RECV WAITS). Still open:
-  many connections before admission (#563).
+- #228 (a length prefix held a whole block of the shard's pool before a body byte
+  arrived): a prefix now takes no block. A reader keeps the bytes of a message that
+  waits for a block in one heap buffer, outside the shard's pool, and the receive
+  budget counts them (#1456). A connection holds at most its receive budget (#467),
+  and a size takes the budget of a size with no block in use (#270). A stream on
+  another connection reads while one connection holds its budget (RECV WAITS). Still
+  open: many connections before admission (#563), which also bounds the sum of
+  those heap buffers.
 - Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
   reset to each address it spoofs, with no limit), #620 (a stop after the peer's
   reset gives the peer the stream's window twice, so a peer grows the connection's

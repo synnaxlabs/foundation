@@ -5,6 +5,7 @@ use transport::stream::{Incoming, Receiver, Sender};
 use types::node::PublicKey;
 
 use super::Mesh;
+use crate::bytes::block;
 use crate::error::Error;
 use crate::message::Message;
 
@@ -14,9 +15,10 @@ const MALFORMED: Code = Code(wire::header::MALFORMED);
 const REFUSED: Code = Code(16);
 
 impl Mesh {
-    /// Serves one stream that `peer` opened, after `node` read its header. It returns
-    /// when the stream ends, or at the first message it refuses. A refused message
-    /// changes nothing, and the stream stops with code 16.
+    /// Serves one stream of a session whose peer proved the key `peer`. The caller
+    /// has read the header of the stream, which is its whole first message. `serve`
+    /// returns when the stream ends, or at the first message it refuses. A refused
+    /// message changes nothing, and the stream stops with code 16.
     ///
     /// # Errors
     ///
@@ -33,7 +35,7 @@ impl Mesh {
     /// - [`Error::Stream`] when the stream or its session fails.
     /// - [`Error::Stopped`] when the group stopped. On a stream that goes both ways,
     ///   the reply half then ends with no mesh code: the group can hold the entry.
-    pub(crate) async fn serve(
+    pub async fn serve(
         &self,
         peer: PublicKey,
         incoming: Incoming,
@@ -93,9 +95,8 @@ impl Mesh {
         };
         // The group can hold the entry of the proposal, so no error from here is a
         // refusal: a sender that drops ends the reply half with no code of the mesh.
-        let mut block = self.pool.alloc(answer.len()).map_err(Error::Pool)?;
-        block.copy_from_slice(&answer);
-        sender.send(block.freeze()).await?;
+        let answer = block(&self.pool, &answer).map_err(Error::Pool)?;
+        sender.send(answer).await?;
         sender.finish()?;
         // A reset takes back an answer that the peer does not have yet, so from here
         // only the receiver stops.
@@ -138,8 +139,6 @@ fn code(error: &Error) -> Option<Code> {
         | Error::NotMember(_)
         | Error::Member(_)
         | Error::WrongKey
-        | Error::Unsynced
-        | Error::Status(_)
         | Error::Pool(_)
         | Error::Stopped(_) => Some(REFUSED),
     }
