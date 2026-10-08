@@ -147,8 +147,8 @@ impl Mesh {
     ///
     /// - [`Error::Member`] when the region cannot hold one of
     ///   `config.founding.members`, or two name one node.
-    /// - [`Error::NotMember`] when `config.founding.members` lacks this node or a
-    ///   voter.
+    /// - [`Error::NotMember`] when `config.founding.members` lacks this node, a voter,
+    ///   or the node of a home.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.founding.members`.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
@@ -961,8 +961,8 @@ fn request(body: &Body) -> bool {
     }
 }
 
-// Checks that `own` and each of `voters` are members of `state`, and that
-// `private_key` is the key of `own`.
+// Checks that `own`, each of `voters`, and the node of each home are members of
+// `state`, and that `private_key` is the key of `own`.
 fn check_members(
     state: &region::State,
     own: node::Key,
@@ -976,8 +976,8 @@ fn check_members(
         }
         Some(_) => {}
     }
-    let mut voters = voters.iter();
-    if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
+    let mut others = voters.iter().copied().chain(state.homes());
+    if let Some(key) = others.find(|&key| state.member(key).is_none()) {
         return Err(Error::NotMember(key));
     }
     Ok(())
@@ -5215,6 +5215,55 @@ mod tests {
                 node.files().list(Path::new("")).await,
                 Ok(vec![BLOB.into()])
             );
+        });
+    }
+
+    #[test]
+    fn open_refuses_the_first_founding_home_at_a_node_that_is_not_a_member() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
+            config.founding.homes = BTreeMap::from([
+                (channel::Key::from_u128(4), key(2)),
+                (channel::Key::from_u128(5), key(9)),
+                (channel::Key::from_u128(6), key(8)),
+            ]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(9))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_voter_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[1, 2], &IDS).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(3))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_this_node_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[2, 3], &[2, 3]).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(1))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_wrong_private_key_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = Config {
+                key: key(1),
+                ..config(&node, &tasks, 2, &IDS, &[]).await
+            };
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
         });
     }
 

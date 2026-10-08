@@ -130,6 +130,11 @@ impl State {
         self.homes.get(&index).copied()
     }
 
+    /// The node of each home, in index key order.
+    pub(crate) fn homes(&self) -> impl Iterator<Item = node::Key> {
+        self.homes.values().copied()
+    }
+
     /// The spec pointer.
     pub(crate) fn pointer(&self) -> Pointer {
         self.pointer
