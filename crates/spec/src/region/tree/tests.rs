@@ -122,16 +122,6 @@ fn definitions_with_a_value_that_does_not_decode_give_its_key() {
 }
 
 #[test]
-fn definitions_of_a_chunk_that_is_not_a_tree_give_the_chunk() {
-    let mut chunks = Chunks::default();
-    let root = chunks.insert(vec![1]);
-    assert_eq!(
-        definitions(&chunks, root),
-        Err(Error::Tree(tree::Error::Corrupt(root)))
-    );
-}
-
-#[test]
 fn definitions_give_definitions_with_a_problem() {
     let defined = create_definitions(&[
         ("plant.pressure", data(2, 9)),
@@ -144,27 +134,49 @@ fn definitions_give_definitions_with_a_problem() {
 
 #[test]
 fn definitions_of_a_tree_cut_at_other_boundaries_give_its_root() {
-    let leaf = |key: &str, value: Vec<u8>| {
-        let mut bytes = vec![0, u8::try_from(key.len()).unwrap()];
-        bytes.extend_from_slice(key.as_bytes());
-        bytes.push(u8::try_from(value.len()).unwrap());
-        bytes.extend(value);
-        bytes
-    };
     let mut chunks = Chunks::default();
-    let a = chunks.insert(leaf("p.a", index(1).encode()));
-    let b = chunks.insert(leaf("p.b", index(2).encode()));
-    let mut root = vec![1, 3];
-    root.extend_from_slice(b"p.a");
-    root.extend_from_slice(&a.0);
-    root.push(3);
-    root.extend_from_slice(b"p.b");
-    root.extend_from_slice(&b.0);
-    let root = chunks.insert(root);
+    let a = chunks.insert(leaf(&[("p.a", index(1).encode())]));
+    let b = chunks.insert(leaf(&[("p.b", index(2).encode())]));
+    let root = chunks.insert(parent(&[("p.a", a), ("p.b", b)]));
     let corrupt = Error::Tree(tree::Error::Corrupt(root));
     assert_eq!(definitions(&chunks, root), Err(corrupt.clone()));
     assert_eq!(
         corrupt.to_string(),
         format!("chunk {root} is not a chunk of a spec tree")
+    );
+}
+
+/// A leaf of `entries`, each a tree key and a value, in the layout of `spec::tree`.
+fn leaf(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut bytes = vec![0];
+    for (key, value) in entries {
+        bytes.push(u8::try_from(key.len()).unwrap());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.push(u8::try_from(value.len()).unwrap());
+        bytes.extend_from_slice(value);
+    }
+    bytes
+}
+
+/// A root over `children`, each a tree key and a chunk, in the layout of `spec::tree`.
+fn parent(children: &[(&str, Digest)]) -> Vec<u8> {
+    let mut bytes = vec![1];
+    for (key, child) in children {
+        bytes.push(u8::try_from(key.len()).unwrap());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.extend_from_slice(&child.0);
+    }
+    bytes
+}
+
+#[test]
+fn definitions_of_a_tree_with_a_chunk_that_is_not_a_tree_give_the_chunk() {
+    let mut chunks = Chunks::default();
+    let a = chunks.insert(leaf(&[("p.a", index(1).encode())]));
+    let b = chunks.insert(vec![1]);
+    let root = chunks.insert(parent(&[("p.a", a), ("p.b", b)]));
+    assert_eq!(
+        definitions(&chunks, root),
+        Err(Error::Tree(tree::Error::Corrupt(b)))
     );
 }
