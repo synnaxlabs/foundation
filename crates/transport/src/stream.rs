@@ -2540,7 +2540,7 @@ mod tests {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), testing::address(&node));
             let transport = Transport::new(config, part).expect("a transport");
-            let server = crate::tls::public(&testing::SERVER);
+            let server = testing::SERVER.public();
             let ended = transport.dial(server, &at).await.expect("a session");
             let waiting = transport.dial(server, &at).await.expect("a session");
             let messages = [(&waiting, 0), (&waiting, 1), (&ended, 2)];
@@ -2690,7 +2690,7 @@ mod tests {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), testing::address(&node));
             let transport = Transport::new(config, part).expect("a transport");
-            let server = crate::tls::public(&testing::SERVER);
+            let server = testing::SERVER.public();
             let mut held = Vec::new();
             for _ in 0..sessions {
                 let session = transport.dial(server, &at).await.expect("a session");

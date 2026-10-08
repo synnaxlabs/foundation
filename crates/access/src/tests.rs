@@ -6,13 +6,13 @@ use proptest::prelude::*;
 use spec::channel::{Channel, Kind as ChannelKind};
 use spec::compression::{self, Mode};
 use spec::connector::Connector;
-use spec::definition::Kind;
 use spec::placement::{self, Nodes};
 use spec::region::Delegation;
 use spec::time::{self, Peers};
 use spec::{node_settings, retention};
 use types::byte::Size;
 use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Selector;
 use types::time::Span;
 
@@ -258,6 +258,12 @@ fn other_kinds() -> Tree {
         (
             Kind::Retention.key("site_a.k").unwrap(),
             Definition::Retention(retention::Policy::new(all(), Span::SECOND).unwrap()),
+        ),
+        (
+            Kind::Subject.key("site_a.k").unwrap(),
+            Definition::Subject(
+                Subject::new(vec![PublicKey::new([2; 32]).unwrap()]).unwrap(),
+            ),
         ),
     ])
 }

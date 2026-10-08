@@ -2,24 +2,17 @@
 
 #![cfg(test)]
 
+mod one_node;
+mod rig;
+mod status;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Output, Stdio};
 
-fn foundation(args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .expect("write");
-    child.wait_with_output().expect("wait")
+fn foundation(args: &[&str], input: &[u8]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+    command.args(args);
+    rig::run(&os::clock(), rig::PATIENCE, command, input)
 }
 
 fn text(bytes: &[u8]) -> &str {
@@ -28,7 +21,7 @@ fn text(bytes: &[u8]) -> &str {
 
 #[test]
 fn an_operation_prints_its_output_and_exits_0() {
-    let output = foundation(&["version"], "");
+    let output = rig::Rig::new().run(&["version"]);
     assert_eq!(
         (
             output.status.code(),
@@ -45,7 +38,7 @@ fn an_operation_prints_its_output_and_exits_0() {
 
 #[test]
 fn an_error_goes_to_standard_error_and_exits_2() {
-    let output = foundation(&["versoin"], "");
+    let output = foundation(&["versoin"], b"");
     assert_eq!(
         (
             output.status.code(),
@@ -71,7 +64,7 @@ fn mcp_answers_each_request_on_its_own_line_until_input_closes() {
         r#"{"jsonrpc":"2.0","id":"b","method":"nope"}"#,
         "\n",
     );
-    let output = foundation(&["mcp"], input);
+    let output = foundation(&["mcp"], input.as_bytes());
     assert_eq!(
         (
             output.status.code(),
@@ -117,25 +110,12 @@ fn mcp_replies_before_the_next_request_arrives() {
 
 #[test]
 fn mcp_answers_a_line_that_is_not_utf8_and_goes_on() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
     let input = [
         b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\"}\n".as_slice(),
         b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
     ]
     .concat();
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(&input)
-        .expect("write");
-    let output = child.wait_with_output().expect("wait");
+    let output = foundation(&["mcp"], &input);
     assert_eq!(
         (
             output.status.code(),
@@ -157,7 +137,7 @@ fn mcp_answers_a_line_that_is_not_utf8_and_goes_on() {
 
 #[test]
 fn help_lists_mcp() {
-    let output = foundation(&["--help"], "");
+    let output = foundation(&["--help"], b"");
     assert_eq!(output.status.code(), Some(0));
     assert!(
         text(&output.stdout)

@@ -25,6 +25,10 @@ proptest = { workspace = true }
 sim = { path = "../sim" }
 
 [[test]]
+name = "alloc"
+harness = false
+
+[[test]]
 name = "memory"
 harness = false
 
@@ -34,10 +38,6 @@ harness = false
 
 [[bench]]
 name = "recv"
-harness = false
-
-[[test]]
-name = "alloc"
 harness = false
 
 [lints]
