@@ -82,7 +82,9 @@ pub(crate) struct Output {
     pub(crate) base: Base,
     /// Each change: the adds and changes in file order, then the removals.
     pub(crate) changes: Vec<Change>,
-    /// The home node of each index that has none before the apply, by index name.
+    /// The home node of each index of the files, as the placements give it, by index
+    /// name. The apply gives this home only to an index with no home, so an index with
+    /// a home keeps it.
     pub(crate) homes: BTreeMap<String, String>,
     /// The count of changes with this action.
     pub(crate) added: usize,
