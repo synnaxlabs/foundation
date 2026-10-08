@@ -69,14 +69,15 @@ pub(crate) fn main() {
         (240_000, SECOND, 1),
         (220_000, LAST, 0),
     ];
-    for mode in [Mode::Recv, Mode::Into] {
-        check(&pattern, &cases, mode);
-    }
+    let recv = check(&pattern, &cases, Mode::Recv);
+    let into = check(&pattern, &cases, Mode::Into);
+    assert_eq!(into, recv, "a recv_into makes the allocations of a recv");
 }
 
 /// Runs each case of a message of `len` bytes with the pattern at `at`, whose read
-/// frees `copies` heap buffers, with reads in `mode`.
-fn check(pattern: &[u8], cases: &[(usize, usize, u64)], mode: Mode) {
+/// frees `copies` heap buffers, with reads in `mode`. Returns the allocations of
+/// each case's long read.
+fn check(pattern: &[u8], cases: &[(usize, usize, u64)], mode: Mode) -> Vec<u64> {
     let mut allocations = Vec::new();
     for &(len, at, copies) in cases {
         let [(read, freed, allocated), (next, _, next_allocated)] =
@@ -128,6 +129,7 @@ fn check(pattern: &[u8], cases: &[(usize, usize, u64)], mode: Mode) {
         "the copy of a full list allocates only its buffer"
     );
     assert_eq!(second, past, "a second copy allocates nothing");
+    allocations
 }
 
 /// The [`Out`] of the server's reads of a message of `len` bytes with `pattern` at
