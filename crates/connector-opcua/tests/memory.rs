@@ -1,6 +1,7 @@
-//! C allocates and frees through the global allocator of the binary, and a drop frees
-//! each block that C holds. As the global allocator, `held` covers every thread, so
-//! this binary has no test harness.
+//! C allocates and frees through the global allocator of the binary, each allocation
+//! function writes the size into the header that `free` reads, and a drop frees each
+//! block that C holds. As the global allocator, `held` covers every thread, so this
+//! binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 #![expect(unsafe_code, reason = "the test calls the C library")]
