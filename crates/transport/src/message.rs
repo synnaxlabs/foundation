@@ -315,9 +315,9 @@ fn pull(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::slice;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{iter, slice};
 
     use block::{Config, Heap, Pool};
     use proptest::prelude::*;
@@ -441,6 +441,44 @@ mod tests {
                 let mut reader = Reader::started(20_000, first);
                 let read = read_all(&mut reader, &pool, &mut source);
                 prop_assert_eq!(read, Ok(messages));
+            }
+
+            #[test]
+            fn when_stream_ends_inside_a_prefix_it_fails(
+                (bytes, split) in (1_u8..=3).prop_flat_map(|tag| {
+                    let len = 1_usize << tag;
+                    // `None` repeats the first byte.
+                    let byte = prop_oneof![
+                        Just(None),
+                        Just(Some(0)),
+                        Just(Some(0xFF)),
+                        any::<u8>().prop_map(Some),
+                    ];
+                    let tail = prop::collection::vec(byte, 7);
+                    (0_u8..64, tail, 1..len, 1..len).prop_map(
+                        move |(low, tail, cut, split)| {
+                            let first = (tag << 6) | low;
+                            let tail = tail.into_iter().map(|b| b.unwrap_or(first));
+                            let bytes = iter::once(first).chain(tail).take(cut);
+                            (bytes.collect::<Vec<_>>(), split)
+                        },
+                    )
+                }),
+            ) {
+                let pool = pool(1 << 16);
+                let mut source = Source::new(bytes, split);
+                let mut reader = Reader::new(16);
+                prop_assert_eq!(
+                    read_all(&mut reader, &pool, &mut source),
+                    Err(Error::Broken {
+                        reason: "the stream ended inside a message".to_owned()
+                    })
+                );
+                // Private: only a peer that misframes ends a stream inside a message,
+                // and no heap count is exact in a binary with a test harness.
+                prop_assert_eq!(reader.held.buffer.capacity(), 0);
+                let slots = reader.held.chunks.capacity();
+                prop_assert!(slots <= CHUNKS_MAX, "a list of {} slots", slots);
             }
         }
 
@@ -808,34 +846,6 @@ mod tests {
             assert_eq!(reader.held.buffer.capacity(), 0);
             let slots = reader.held.chunks.capacity();
             assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
-        }
-
-        #[test]
-        fn when_stream_ends_inside_a_prefix_it_fails() {
-            let pool = pool(1 << 16);
-            for message in [64, 16_384, 1 << 30] {
-                let whole = prefix(message).to_vec();
-                for cut in 1..whole.len() {
-                    for split in 1..whole.len() {
-                        let bytes = whole.get(..cut).expect("a cut").to_vec();
-                        let mut source = Source::new(bytes, split);
-                        let mut reader = Reader::new(16);
-                        assert_eq!(
-                            read_all(&mut reader, &pool, &mut source),
-                            Err(Error::Broken {
-                                reason: "the stream ended inside a message".to_owned()
-                            }),
-                            "{cut} bytes of the prefix of {message}, {split} per chunk"
-                        );
-                        // Private: only a peer that misframes ends a stream inside a
-                        // message, and no heap count is exact in a binary with a test
-                        // harness.
-                        assert_eq!(reader.held.buffer.capacity(), 0);
-                        let slots = reader.held.chunks.capacity();
-                        assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
-                    }
-                }
-            }
         }
 
         #[test]
