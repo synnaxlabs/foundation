@@ -4686,7 +4686,7 @@ mod tests {
             let late = pair.client.sent[held].2.clone();
             let before = announced(&mut pair);
             end(&mut pair, &mut senders[0], &mut incoming);
-            assert_eq!(announced(&mut pair), before + 1, "a free, and a resent wait");
+            assert_eq!(announced(&mut pair), before + 1, "a resent wait");
             assert!(open(&mut pair).is_some());
             assert!(open(&mut pair).is_none());
             pair.run(RUN);
@@ -4695,7 +4695,7 @@ mod tests {
             pair.server.endpoint.receive(now, &meta, &late);
             pair.run(RUN);
             end(&mut pair, &mut senders[1], &mut incoming);
-            assert_eq!(announced(&mut pair), before + 2, "a late wait for an old limit");
+            assert_eq!(announced(&mut pair), before + 2, "a late, old wait");
         });
     }
 
