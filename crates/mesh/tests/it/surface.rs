@@ -184,23 +184,24 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
-// This node is the middle one of three members and not a voter, so no key at an end
-// of the members or of the voters is its key.
+// The members and the voters are the same for each place, so no rule that reads only
+// them gives the key of each of the three nodes.
 #[test]
 fn key_gives_the_key_of_the_config() {
-    solo(|node, tasks| async move {
-        let own = || PrivateKey([2; 32]);
-        let last = node::Key::from_u128(3);
-        let mut config = create_config_on(&node, &tasks, own());
-        config.key = OTHER;
-        config.private_key = own();
-        config.members.push(create_member_of(OTHER, &own()));
-        config
-            .members
-            .push(create_member_of(last, &PrivateKey([3; 32])));
-        let mesh = Mesh::open(config).await.unwrap();
-        assert_eq!(mesh.key(), OTHER);
-    });
+    for place in [1, 2, 3] {
+        solo(move |node, tasks| async move {
+            let own = |id: u8| PrivateKey([id; 32]);
+            let key = |id: u8| node::Key::from_u128(u128::from(id));
+            let mut config = create_config_on(&node, &tasks, own(place));
+            config.key = key(place);
+            config.private_key = own(place);
+            config.members = [1, 2, 3]
+                .map(|id| create_member_of(key(id), &own(id)))
+                .into();
+            let mesh = Mesh::open(config).await.unwrap();
+            assert_eq!(mesh.key(), key(place));
+        });
+    }
 }
 
 #[test]

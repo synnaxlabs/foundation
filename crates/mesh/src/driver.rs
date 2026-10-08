@@ -3306,6 +3306,17 @@ mod tests {
     }
 
     #[test]
+    fn key_gives_this_node_while_another_node_leads() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
+            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            assert_eq!(term(&mesh), common::TERM);
+            assert_eq!(mesh.key(), key(1));
+        });
+    }
+
+    #[test]
     fn member_gives_the_record_of_a_member_and_none_for_another_node() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
