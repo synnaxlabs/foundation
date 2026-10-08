@@ -14,7 +14,8 @@ const PASSES: [&str; 2] = [
 ];
 
 /// Crates whose `unsafe` code only calls the OS or C, which Miri cannot run. Tests on
-/// the real OS check `os` (BLOCK MEMORY). The sanitizer run checks `connector-opcua`.
+/// the real OS check `os` (BLOCK MEMORY). A sanitizer run will check
+/// `connector-opcua` (#1912).
 pub(crate) const SKIPPED: [&str; 2] = ["os", "connector-opcua"];
 
 /// The workspace crates whose source names `unsafe_code`, the lint that each `unsafe`
