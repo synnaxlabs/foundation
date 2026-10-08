@@ -1006,16 +1006,21 @@ dependencies = [
  "buffer",
  "clock",
  "codec",
+ "counting",
+ "divan",
  "env",
  "estimate",
  "home",
  "hub",
  "loom",
+ "node",
  "ops",
  "os",
  "proptest",
  "sim",
+ "transport",
  "types",
+ "wire",
 ]
 
 [[package]]

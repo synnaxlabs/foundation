@@ -184,9 +184,7 @@ fn body(body: &Body, out: &mut Vec<u8>) {
             out.push(APPEND);
             put_position(*prev, out);
             out.extend(commit.to_le_bytes());
-            for entry in entries {
-                entry::encode(entry, out);
-            }
+            entry::encode(entries, out);
         }
         Body::AppendReply { last } => {
             out.push(APPEND_REPLY);
@@ -221,10 +219,7 @@ fn take_body(bytes: &mut &[u8]) -> Option<Body> {
         APPEND => {
             let prev = take_position(bytes)?;
             let commit = u64::from_le_bytes(take(bytes)?);
-            let mut entries = Vec::new();
-            while !bytes.is_empty() {
-                entries.push(entry::decode(bytes)?);
-            }
+            let entries = entry::decode(std::mem::take(bytes))?;
             Body::Append {
                 prev,
                 entries,

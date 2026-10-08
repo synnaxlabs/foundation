@@ -105,7 +105,8 @@ fn refused(next: Next, message: &[u8], error: Error) -> bool {
 }
 
 /// Each event of the session in `bytes` must encode to its message and come in the
-/// order of a session, and each refusal must be the one that the order gives.
+/// order of a session, and each refusal must be the one that the order or the mode
+/// gives.
 fn read(bytes: &[u8]) {
     let mut home = Home::default();
     let mut next = Next::Open;

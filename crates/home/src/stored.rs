@@ -130,7 +130,7 @@ pub(crate) struct Series<'a> {
 /// scalar, and on ends that do not fit the series bytes. Bytes from another node must
 /// be checked before they reach `read`.
 #[cfg_attr(
-    not(any(test, feature = "bench")),
+    not(any(test, feature = "sim")),
     expect(dead_code, reason = "catch-up from disk (#274) is the first user")
 )]
 pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
