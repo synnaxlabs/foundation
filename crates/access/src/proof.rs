@@ -110,7 +110,7 @@ impl Rules {
     /// # Errors
     ///
     /// The first that applies, in order: [`Error::Changed`] when `hello` names another
-    /// subject, key, `via`, or connection than `admitted`, then [`Error::Unsynced`],
+    /// value of a [`Field`] than `admitted`, then [`Error::Unsynced`],
     /// [`Error::Unknown`], [`Error::Unlisted`], [`Error::Signature`],
     /// [`Error::Expired`], [`Error::Capped`].
     pub fn renew(
@@ -121,12 +121,14 @@ impl Rules {
         signature: &[u8; 64],
     ) -> Result<Admitted, Error> {
         let first = &admitted.hello;
-        if hello.subject != first.subject
-            || hello.key != first.key
-            || hello.via != first.via
-            || hello.connection != first.connection
-        {
-            return Err(Error::Changed);
+        let changed = [
+            (hello.subject != first.subject, Field::Subject),
+            (hello.key != first.key, Field::Key),
+            (hello.via != first.via, Field::Via),
+            (hello.connection != first.connection, Field::Connection),
+        ];
+        if let Some(&(_, field)) = changed.iter().find(|(differs, _)| *differs) {
+            return Err(Error::Changed { field });
         }
         self.admit(now, first.via, hello, signature)
     }
@@ -230,9 +232,36 @@ pub enum Error {
         /// The latest expiry that the node takes: [`CAP`] past the earliest mesh time.
         cap: Stamp,
     },
-    /// A renewal names another subject, key, `via`, or connection than the hello it
-    /// renews.
-    Changed,
+    /// A renewal names another value of `field` than the hello it renews: the first
+    /// that differs, in the order of [`Field`].
+    Changed {
+        /// The field.
+        field: Field,
+    },
+}
+
+/// A field of a hello that a renewal must keep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    /// The subject.
+    Subject,
+    /// The key.
+    Key,
+    /// The node that the hello names as `via`.
+    Via,
+    /// The connection.
+    Connection,
+}
+
+impl fmt::Display for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Subject => "subject",
+            Self::Key => "key",
+            Self::Via => "`via` node",
+            Self::Connection => "connection",
+        })
+    }
 }
 
 impl Error {
@@ -251,7 +280,7 @@ impl Error {
             Self::Via { .. } => "Name the node that the program connects to as `via`",
             Self::Expired { .. } => "Send a new hello with a later expiry",
             Self::Capped { .. } => "Send a hello that expires within 15 minutes",
-            Self::Changed => {
+            Self::Changed { .. } => {
                 "Renew with the subject, key, `via`, and connection of the hello it \
                  renews"
             }
@@ -280,10 +309,12 @@ impl fmt::Display for Error {
             Self::Capped { expires, cap } => {
                 write!(f, "the hello expires at {expires}, after the cap {cap}")
             }
-            Self::Changed => f.write_str(
-                "the renewal names another subject, key, node, or connection than \
-                 the hello it renews",
-            ),
+            Self::Changed { field } => {
+                write!(
+                    f,
+                    "the renewal names another {field} than the hello it renews"
+                )
+            }
         }
     }
 }

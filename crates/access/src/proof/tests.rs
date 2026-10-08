@@ -529,10 +529,33 @@ mod renew {
             ..renewal()
         };
 
-        assert_eq!(renew(&rules, NOW, TEST_1, via), Err(Error::Changed));
-        assert_eq!(renew(&rules, NOW, TEST_1, subject), Err(Error::Changed));
-        assert_eq!(renew(&rules, NOW, TEST_1, connection), Err(Error::Changed));
-        assert_eq!(renew(&rules, NOW, TEST_2, key), Err(Error::Changed));
+        let changed = |field| Err(Error::Changed { field });
+        assert_eq!(renew(&rules, NOW, TEST_1, subject), changed(Field::Subject));
+        assert_eq!(renew(&rules, NOW, TEST_2, key), changed(Field::Key));
+        assert_eq!(renew(&rules, NOW, TEST_1, via), changed(Field::Via));
+        assert_eq!(
+            renew(&rules, NOW, TEST_1, connection),
+            changed(Field::Connection)
+        );
+    }
+
+    /// A renewal that changes more than one field names the first in the order of
+    /// `Field`.
+    #[test]
+    fn names_the_first_field_that_changed() {
+        let rules =
+            rules(&[("ops.ana", &[public(&pair(TEST_1)), public(&pair(TEST_2))])]);
+        let hello = Hello {
+            key: public(&pair(TEST_2)),
+            via: node::Key::from_u128(7),
+            connection: connection::Key([0xc5; 16]),
+            ..renewal()
+        };
+
+        assert_eq!(
+            renew(&rules, NOW, TEST_2, hello),
+            Err(Error::Changed { field: Field::Key })
+        );
     }
 
     #[test]
@@ -542,7 +565,12 @@ mod renew {
             ..renewal()
         };
 
-        assert_eq!(renew(&listed(), None, TEST_1, changed), Err(Error::Changed));
+        assert_eq!(
+            renew(&listed(), None, TEST_1, changed),
+            Err(Error::Changed {
+                field: Field::Subject
+            })
+        );
     }
 
     #[test]
@@ -796,16 +824,31 @@ fn names_each_refusal_and_its_fix() {
              1970-01-01T00:00:01.000000000Z",
             "Send a hello that expires within 15 minutes",
         ),
-        (
-            Error::Changed,
-            "the renewal names another subject, key, node, or connection than the \
-             hello it renews",
-            "Renew with the subject, key, `via`, and connection of the hello it renews",
-        ),
     ];
     for (error, message, fix) in cases {
         assert_eq!(error.to_string(), message);
         assert_eq!(error.fix(), fix);
+    }
+}
+
+#[test]
+fn names_each_changed_field() {
+    let cases = [
+        (Field::Subject, "subject"),
+        (Field::Key, "key"),
+        (Field::Via, "`via` node"),
+        (Field::Connection, "connection"),
+    ];
+    for (field, text) in cases {
+        let error = Error::Changed { field };
+        assert_eq!(
+            error.to_string(),
+            format!("the renewal names another {text} than the hello it renews")
+        );
+        assert_eq!(
+            error.fix(),
+            "Renew with the subject, key, `via`, and connection of the hello it renews"
+        );
     }
 }
 
