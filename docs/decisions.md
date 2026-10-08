@@ -4645,15 +4645,21 @@ How to read this record:
   the name of a connector (`Name::starts_with`) when the placement that wins for the
   index is not the one that wins for the connector: at the label of the index's
   placement, or of the connector's when no placement selects the index. A tie for the
-  index or the connector gives no `config.split-placement`. The region check and the
-  region of each key (REGION CHECK) come with #1029. Lost: a `Planned` with keys (A4), a
-  home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
-  and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
-  applied tree as an input, with which `ops` reads the tree a second time and a missing
-  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
-  checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
-  `config`, and no report for the `Unplaced` of a connector. Supersedes the `chunks`
-  input and its panic of
+  index or the connector gives no `config.split-placement`. An index under the names of
+  two connectors is checked against each, so it needs the placement of the outer
+  connector too, as BQ10 says (`laptop.architect-2`, #1901 round 1,
+  2026-10-08T15:04:38Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062797589). The
+  region check and the region of each key (REGION CHECK) come with #1029. Lost: a
+  `Planned` with keys (A4), a home on each change, a `config::Error` for a lazy fetch of
+  chunks, a provisional tree and `tree::diff`, which writes chunks that the plan drops,
+  and the chunks of the applied tree as an input, with which `ops` reads the tree a
+  second time and a missing chunk panics in `config`, though #1741 names that case
+  (`Cause::Tree`), and, for checks 2 and 3, a `spec::placement::check` over the whole
+  spec, a second text in `config`, no report for the `Unplaced` of a connector, and a
+  check against only the nearest connector, which lets the indexes of a connector under
+  the name of another have their own placement. Supersedes the `chunks` input and its
+  panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
