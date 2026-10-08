@@ -201,9 +201,9 @@ default, template, and system instruction.
   you build in its crate, or is an item of an open issue in its crate, not a PR of its
   own (`docs/coordination.md`, "Small changes", gives the exceptions).
 - Mechanical changes (renames, format runs, regenerated code) ship alone. A small one
-  is its own commit of a larger PR.
+  follows the bullet above, as its own commit.
 - A fix and the refactor it needs are two PRs. The refactor lands first. A small
-  refactor is its own commit, before the fix, in the fix's PR.
+  refactor follows the bullet above, as its own commit before the fix.
 - Prefer branches off `main` over stacks.
 - Unfinished features ship dark behind a cargo feature or a config flag.
 

@@ -111,8 +111,8 @@ queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHA
 - **Fold it in:** when the PR that you build changes its crate, put it there as its own
   commit. Do it before that PR's first review round where you can, so that it shares
   that round.
-- **Found by review:** a finding whose fix is a small change in a crate that the PR
-  changes is fixed in that PR, not deferred. Another one is an item, as below.
+- **Found by review:** a finding whose fix is a small change in a crate or a file that
+  the PR changes is fixed in that PR, not deferred. Another one is an item, as below.
 - **Else, an item:** a small change that you cannot fold in (from an audit, a weekly
   pass, or a crate that you do not build) is an item of an open issue in its crate: a
   comment that states the change, the test that pins it, and its source. Choose the
@@ -134,10 +134,11 @@ dependency:
 1. Open an issue labeled `interface` with the proposed signature and the reason. Send
    the link to the crate's architect (`docs/factory.md`).
 2. The architect decides. A change inside the locked decisions becomes a change from
-   the crate's builder ("Small changes"). A change to a locked decision, a contract, or
-   an oracle goes to the person first, with the architect's recommendation.
-3. After the merge, the architect files an issue for each crate that must follow the
-   change.
+   the crate's builder (a small one as "Small changes" says). A change to a locked
+   decision, a contract, or an oracle goes to the person first, with the architect's
+   recommendation.
+3. After the merge, the architect files the follow-up of each crate that must follow
+   the change, as "Small changes" says.
 
 A builder may change anything private inside the crates of its issue without asking.
 

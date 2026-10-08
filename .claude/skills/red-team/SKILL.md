@@ -24,9 +24,9 @@ gate, `/eb-review`, a draft PR), then goes to `laptop.director` for review. Neve
 Keep one PR open for your small changes (fuzz inputs, notes), and send it to the
 director at most once a day, or at once when other work waits on it
 (`docs/coordination.md`, "Small changes"). Every other finding whose fix is a small
-change is an item of an open issue in its crate, with the failing test. Each other one
-is an issue labeled `crate:<name>` (and `security` when it is one), with the failing
-test in its body. Send each link to `laptop.coordinator`. The crate's
+change is an item of an open issue in its crate when one fits, with the failing test.
+Each other one is an issue labeled `crate:<name>` (and `security` when it is one), with
+the failing test in its body. Send each link to `laptop.coordinator`. The crate's
 builder lands that test with the fix.
 
 Keep one open issue labeled `owner:$FACTORY_NAME` as your log: the last commit you
@@ -56,7 +56,7 @@ repro and the replay command.
 ## Night (`night`)
 
 Run the long machine work: simulation campaigns, fuzz, and `cargo mutants` on whole
-risk crates (the `tests` agent). Each failure becomes a day-lane issue.
+risk crates (the `tests` agent). Each failure becomes a finding (above).
 
 ## Rules
 
