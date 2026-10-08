@@ -36,7 +36,7 @@ fn the_count_holds_the_allocations_of_c() {
 fn a_run_allocates_nothing() {
     for timers in [1, 100, 10_000] {
         let (mut sim, clock) = sim();
-        let iteration = Iteration::new(clock, timers);
+        let mut iteration = Iteration::new(clock, timers);
         for at in 1..=2000 {
             sim.run_for(Span::MILLISECOND).expect("the run has no task");
             let ((), count) = ALLOCATOR.count(|| iteration.run());

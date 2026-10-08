@@ -32,7 +32,7 @@ impl Iteration {
         // SAFETY: the loop outlives the client, which `drop` deletes first.
         let client = unsafe { ffi::shim_client_new(events.raw()) };
         let client = NonNull::new(client).expect("open62541 refused the client");
-        let iteration = Self { client, events };
+        let mut iteration = Self { client, events };
         iteration.run();
         let events = &iteration.events;
         for _ in 0..timers {
@@ -59,7 +59,7 @@ impl Iteration {
     /// # Panics
     ///
     /// If open62541 gives a status other than `Good`, with its name.
-    pub fn run(&self) {
+    pub fn run(&mut self) {
         // SAFETY: the client and its loop live.
         let status =
             Status(unsafe { ffi::UA_Client_run_iterate(self.client.as_ptr(), 0) });
@@ -95,7 +95,7 @@ mod tests {
     fn a_run_runs_the_due_timers() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let clock = sim.node(sim::node::Config::default()).clock();
-        let iteration = Iteration::new(clock, 1);
+        let mut iteration = Iteration::new(clock, 1);
         let first = iteration.events.next().expect("a timer waits");
         sim.run_for(Span::MILLISECOND).expect("the run has no task");
         iteration.run();

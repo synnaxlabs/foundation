@@ -29,7 +29,7 @@ fn advance(bencher: Bencher<'_, '_>) {
 #[divan::bench(args = [1, 100, 10_000])]
 fn run(bencher: Bencher<'_, '_>, timers: usize) {
     let (mut sim, clock) = sim();
-    let iteration = Iteration::new(clock, timers);
+    let mut iteration = Iteration::new(clock, timers);
     bencher.bench_local(|| {
         sim.run_for(Span::MILLISECOND).expect("the run has no task");
         iteration.run();
