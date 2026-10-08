@@ -2117,9 +2117,10 @@ How to read this record:
   ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
   configuration removed a node: the configuration before the entries or a committed
   `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
-  ask it at a refusal (#1105, #1762). `Voters::contains` and `Voters::nodes` are
-  public. After compaction, a snapshot also carries the nodes that the configurations
-  it replaces held or removed, so the answer survives a trim (#253). Decided by
+  ask it at a refusal and keeps no copy of the configurations (#1105, #1762).
+  `Voters::contains` and `Voters::nodes` are public. After compaction, a snapshot also
+  carries the nodes that the configurations it replaces held or removed, so the answer
+  survives a trim (#253). Decided by
   `laptop.architect`, 2026-10-08T03:04:33Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777.
   Supersedes the place of `held` in `mesh` in part 2 of
