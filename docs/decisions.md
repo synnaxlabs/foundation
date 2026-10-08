@@ -1185,8 +1185,12 @@ How to read this record:
   and a `spec::channel::Channel` in one call, and defines the indexes first, so a data
   channel may come before its index. A known key or name panics. The hub keeps the
   key, the sample type, and the index of each, and reads no quality, error, or control
-  edge. Decided by `laptop.architect` (2026-10-08T16:41:41Z:
+  edge: the issue that first serves one of these edges reads it in `define`. The PR
+  that defines channels at each new spec decides what a known, renamed, or removed
+  channel does. Decided by `laptop.architect` (2026-10-08T16:41:41Z:
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575
+  in `Hub::define` and `hub::Channel`.
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
   it on drop, and the task ends at its first poll after that. Lost:
