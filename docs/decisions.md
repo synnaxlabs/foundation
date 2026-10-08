@@ -1163,7 +1163,12 @@ How to read this record:
   frame. The view borrows the reader, which releases the frame at the next call, not at
   its first poll, and grants credit for it there (CREDIT RULES): `next` is a plain `fn`
   that returns a future. A caller that keeps data copies it. A session that ends gives
-  `reader::Ended`. `Hub::define` stands.
+  `reader::Ended`. `Hub::define` takes each channel of a spec as a name and a
+  `spec::channel::Channel` in one call, and defines the indexes first, so a data
+  channel may come before its index. A known key or name panics. The hub keeps the
+  key, the sample type, and the index of each, and reads no quality, error, or control
+  edge. `laptop.architect` (2026-10-08, #1917,
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349).
   Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:

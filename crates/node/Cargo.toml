@@ -37,6 +37,7 @@ divan = { workspace = true }
 node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
+spec = { path = "../spec" }
 
 [[bench]]
 name = "scope"

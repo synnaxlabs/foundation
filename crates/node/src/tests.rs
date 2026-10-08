@@ -1786,9 +1786,11 @@ mod lock {
 }
 
 mod hub {
+    use ::hub::Hub;
     use ::hub::reader::{Mode, Received};
     use ::hub::writer::{self, Writer};
-    use ::hub::{Channel, Hub};
+    use spec::channel::{Channel, Data, Kind};
+    use spec::data_type::DataType;
     use types::authority::Authority;
     use types::channel::Key;
     use types::frame::key_set::KeySet;
@@ -1807,7 +1809,8 @@ mod hub {
         name.parse().expect("a valid name")
     }
 
-    /// Defines channel `key`, named `name`, of `data_type` on index `index`.
+    /// Defines channel `key`, named `name`: an index when `index` is `key`, else a data
+    /// channel of `data_type` on `index`.
     pub(super) fn define(
         hub: &Hub,
         key: u128,
@@ -1815,12 +1818,25 @@ mod hub {
         data_type: Type,
         index: u128,
     ) {
-        hub.define(Channel {
+        let kind = if key == index {
+            Kind::Index {
+                error: None,
+                control: None,
+            }
+        } else {
+            let data = Data::new(
+                Key::from_u128(index),
+                None,
+                DataType::Sample(data_type),
+                None,
+            );
+            Kind::Data(data.expect("no unit"))
+        };
+        let channel = Channel {
             key: Key::from_u128(key),
-            name: self::name(name),
-            data_type,
-            index: Key::from_u128(index),
-        });
+            kind,
+        };
+        hub.define([(&self::name(name), &channel)]);
     }
 
     /// A writer on `channels`, opened again each millisecond of `clock` until the node

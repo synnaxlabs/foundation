@@ -834,6 +834,7 @@ dependencies = [
  "env",
  "home",
  "sim",
+ "spec",
  "types",
 ]
 
@@ -1037,6 +1038,7 @@ dependencies = [
  "os",
  "proptest",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",

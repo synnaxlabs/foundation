@@ -10,11 +10,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::task::Waker;
 
+use spec::channel::Kind;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
+use types::sample::{Scalar, Type};
 
-pub use channel::Channel;
+use channel::Channel;
 use reader::Reader;
 use writer::Writer;
 
@@ -97,35 +99,25 @@ impl Hub {
         Self(state)
     }
 
-    /// Makes `channel` known to sessions. The home carries an index at once.
+    /// Makes each of `channels` known to sessions, the indexes first, so their order
+    /// does not matter. The home carries each index at once.
     ///
     /// # Panics
     ///
-    /// If a channel with the same key or name is known, or the index of a data
-    /// channel is not a known index.
-    pub fn define(&self, channel: Channel) {
+    /// When a channel has the key or name of a known channel or of another of
+    /// `channels`, or the index of a data channel is neither known nor an index of
+    /// `channels`.
+    pub fn define<'c>(
+        &self,
+        channels: impl IntoIterator<Item = (&'c Name, &'c spec::channel::Channel)>,
+    ) {
+        let (indexes, data): (Vec<_>, Vec<_>) = channels
+            .into_iter()
+            .partition(|(_, channel)| matches!(channel.kind, Kind::Index { .. }));
         let mut state = self.0.borrow_mut();
-        let state = &mut *state;
-        assert!(
-            !state.indexes.contains_key(&channel.key)
-                && !state.channels.contains_key(&channel.name),
-            "a channel with key {} or name {} is known already",
-            channel.key,
-            channel.name
-        );
-        if channel.index == channel.key {
-            let slot = state.interner.slots().assign(channel.key);
-            state.home.carry(slot);
-        } else {
-            assert!(
-                state.indexes.get(&channel.index) == Some(&channel.index),
-                "the index {} of channel {} is not a known index",
-                channel.index,
-                channel.name
-            );
+        for (name, channel) in indexes.into_iter().chain(data) {
+            state.define(name, channel);
         }
-        state.indexes.insert(channel.key, channel.index);
-        state.channels.insert(channel.name.clone(), channel);
     }
 
     /// Opens a writer session on `config.channels` and the index of each. It opens at
@@ -174,6 +166,38 @@ impl Hub {
 }
 
 impl State {
+    /// Makes `channel` known to sessions as `name`, with the panics of
+    /// [`Hub::define`].
+    fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
+        let key = channel.key;
+        assert!(
+            !self.indexes.contains_key(&key) && !self.channels.contains_key(name),
+            "a channel with key {key} or name {name} is known already"
+        );
+        let (data_type, index) = match &channel.kind {
+            Kind::Index { .. } => {
+                let slot = self.interner.slots().assign(key);
+                self.home.carry(slot);
+                (Type::Scalar(Scalar::Stamp), key)
+            }
+            Kind::Data(data) => {
+                let index = *data.index();
+                assert!(
+                    self.indexes.get(&index) == Some(&index),
+                    "the index {index} of channel {name} is not a known index"
+                );
+                (data.data_type().sample(), index)
+            }
+        };
+        self.indexes.insert(key, index);
+        let channel = Channel {
+            key,
+            data_type,
+            index,
+        };
+        self.channels.insert(name.clone(), channel);
+    }
+
     /// Wakes each reader that the home names as having a frame to take or a miss to
     /// report.
     fn wake(&mut self) {
