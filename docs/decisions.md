@@ -3897,9 +3897,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
-  After a bad `kind`, `check` checks the edges and gives `document.unknown-attribute`
-  for each attribute that no kind knows. It leaves each other attribute, since its
-  problem depends on the kind. Decided by `laptop.architect-2` (2026-10-08T02:41:50Z,
+  After a bad `kind`, `check` gives `document.unknown-attribute` for each attribute that
+  no kind knows, and leaves each other attribute, the edges too: each belongs to one
+  kind, so its problem depends on the kind. Decided by `laptop.architect-2`
+  (2026-10-08T05:54:24Z,
+  https://github.com/synnaxlabs/foundation/pull/1806#issuecomment-6053360334).
+  Supersedes clause 1 of the #1758 ruling, "the edges, as now" (2026-10-08T02:41:50Z,
   https://github.com/synnaxlabs/foundation/issues/1758).
 - **ACCESS BLOCK (2026-10-08)** `access "<name>" { subjects, select, allow, authority }`
   (C8) gives a `spec::access::Policy` at `<name>.@access`. `subjects` and `select` are
