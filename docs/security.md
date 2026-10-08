@@ -117,8 +117,11 @@ state on `main`.
   counts such a datagram. A client opens only hub streams; `node` refuses the other
   protocols from a client. A node with a region gives each `Mesh` stream of a peer
   that proved a node key to `Mesh::serve`, which checks each message (NODE MESH), and
-  rejects a client's. `node` stops and resets each other stream until its protocol has
-  a server. It reads no datagram yet (#1661), and admits every peer (#1628).
+  rejects a client's. It gives a `Hub` stream to the hub only when a member of its
+  region has the peer's public key, once, at the header (NODE PORT); it rejects a
+  client's until #1744. `node` stops and resets each other stream until its protocol
+  has a server. It reads no datagram yet (#1661), and admits every peer to a session
+  (#1628).
 
 ### Subject to owner
 

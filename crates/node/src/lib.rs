@@ -606,8 +606,7 @@ struct Serve {
     time: clock::Reader,
 }
 
-/// What shard 0 opens the node's transport and mesh from, but its files, pool, and
-/// tasks.
+/// What shard 0 opens the node's transport, mesh, and hub from.
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
@@ -750,7 +749,8 @@ impl Serve {
         };
         // The port's future holds the mesh, so it drops before the wait.
         {
-            let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
+            let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
+            let mut port = pin!(port);
             let mut group = pin!(group);
             let mut guard = pin!(guard);
             let stop = poll_fn(|cx| {
