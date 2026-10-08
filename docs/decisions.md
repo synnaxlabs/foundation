@@ -5014,7 +5014,9 @@ How to read this record:
   the first wrong byte, or of the field that the bytes cut. `decode` checks only the
   form. `definitions` refuses the cases below, and `spec::region::check` refuses each
   problem of the definitions after the plan. Neither checks `homes`, and neither refuses
-  a change whose new bytes equal the stored bytes.
+  a change whose new bytes equal the stored bytes. Such a change states nothing false
+  and changes nothing. #337 PR 2b, which applies the homes, checks each one: an index of
+  the definitions after the plan with no home before, on a member.
   `config::plan::Plan::definitions(applied, key)` gives those definitions with the key
   rule of PLAN SURFACE, and an edge to no channel gets a key from `key`, which the check
   refuses as dangling. Each call of `key` must give a key that no channel holds and that
@@ -5040,7 +5042,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179); so is one
   at a name that is not the tree key of its kind, with one predicate for `plan` and
   `definitions` (2026-10-08T19:27:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067449819).
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067449819);
+  `Mismatch` refuses only a false `old` or a change that a rule of `plan` forbids, and
+  PR 2b checks the homes (2026-10-08T19:40:40Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742).
   Supersedes the `Mismatch` Display text and case list of
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684.
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
