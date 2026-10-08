@@ -1,75 +1,36 @@
-//! A bench for process tests: one `foundation` node in a temporary directory, and the
-//! simulated servers that it reaches on loopback, served by the test process over
-//! `os`. Each method with a `todo!` waits on the issue it names.
+//! A bench for process tests: one `foundation` node in a temporary directory. Each
+//! method with a `todo!` waits on the issue it names.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::Output;
+use std::process::{Command, Output};
+use std::time::Duration;
 
-use types::quality::Quality;
-use types::time::Stamp;
+use env::clock::Clock;
+use types::time::Span;
 
-/// One `foundation` node in a temporary directory of its own, with a simulated OPC UA
-/// server and a simulated InfluxDB on loopback. Drop removes the directory, and keeps
-/// it when the test fails, so its files show what went wrong.
+use crate::status::Connector;
+
+/// How long [`Rig::wait`] waits: longer than the 60 s cap of a restart backoff.
+const PATIENCE: Span = Span::from_nanos(90_000_000_000);
+
+/// The time between two checks of a wait.
+const POLL: Duration = Duration::from_millis(100);
+
+/// One `foundation` node in a temporary directory of its own. Drop removes the
+/// directory.
 #[derive(Debug)]
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
     pub(crate) dir: PathBuf,
-    pub(crate) opcua: Opcua,
-    pub(crate) influx: Influx,
-}
-
-/// The simulated OPC UA server, with no security.
-#[derive(Debug, Default)]
-pub(crate) struct Opcua {
-    /// The address, once it serves.
-    address: Option<SocketAddr>,
-}
-
-/// The simulated InfluxDB, with the database `plant`.
-#[derive(Debug, Default)]
-pub(crate) struct Influx {
-    /// The address, once it served.
-    address: Option<SocketAddr>,
-}
-
-/// One sample of an OPC UA variable, as the server served it or as InfluxDB holds it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Sample {
-    pub(crate) time: Stamp,
-    pub(crate) value: f64,
-    /// The OPC UA status. `None` in InfluxDB for a channel with no quality channel.
-    pub(crate) quality: Option<Quality>,
-}
-
-/// One connector in `foundation status --json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Connector {
-    pub(crate) kind: String,
-    /// `running`, `restarting`, `stopped`, or `unknown`.
-    pub(crate) state: String,
-    pub(crate) address: String,
-    /// Each count that the kind names, such as `in` and `confirmed`.
-    pub(crate) counts: BTreeMap<String, u64>,
-    /// The last error, or `None` when the connector has none.
-    pub(crate) error: Option<Error>,
-}
-
-/// The last error of a connector in `foundation status --json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Error {
-    /// `config`, `device`, or `retry`.
-    pub(crate) class: String,
-    pub(crate) text: String,
+    clock: Clock,
 }
 
 impl Rig {
     /// Makes a temporary directory for the test on this thread, with a name that no
-    /// directory has: a failed run keeps its directory, and a later run can get the
-    /// same PID.
+    /// directory has: a run that was killed keeps its directory, and a later run can
+    /// get the same PID.
     pub(crate) fn new() -> Self {
         let thread = std::thread::current();
         let test = thread.name().expect("invariant: libtest names the thread");
@@ -86,21 +47,12 @@ impl Rig {
         };
         Self {
             dir,
-            opcua: Opcua::default(),
-            influx: Influx::default(),
+            clock: os::clock(),
         }
     }
 
-    /// Writes `hcl` to `plant.hcl`, with the address of each server that served in
-    /// place of `localhost:50000` for OPC UA and `localhost:8086` for InfluxDB.
+    /// Writes `hcl` to `plant.hcl`.
     pub(crate) fn config(&self, hcl: &str) {
-        let mut hcl = hcl.to_owned();
-        if let Some(opcua) = self.opcua.address {
-            hcl = hcl.replace("localhost:50000", &opcua.to_string());
-        }
-        if let Some(influx) = self.influx.address {
-            hcl = hcl.replace("localhost:8086", &influx.to_string());
-        }
         std::fs::write(self.dir.join("plant.hcl"), hcl).expect("write plant.hcl");
     }
 
@@ -110,20 +62,24 @@ impl Rig {
         todo!("waits on #1732")
     }
 
-    /// Runs `foundation` with `args`, and gives its output when it exits.
-    pub(crate) fn run(&self, _args: &[&str]) -> Output {
-        todo!("waits on #1732")
+    /// Runs `foundation` with `args` in [`Rig::dir`], with no input, and gives its
+    /// output when it exits.
+    pub(crate) fn run(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_foundation"))
+            .args(args)
+            .current_dir(&self.dir)
+            .output()
+            .expect("run foundation")
     }
 
     /// Calls `check` until it gives `Ok`, and gives that value. When 90 s pass first,
-    /// longer than the 60 s cap of a restart backoff, panics with `what` and the last
-    /// `Err`: the state that `check` saw.
+    /// panics with `what` and the last `Err`: the state that `check` saw.
     pub(crate) fn wait<T>(
         &self,
-        _what: &str,
-        _check: impl FnMut(&Self) -> Result<T, String>,
+        what: &str,
+        check: impl FnMut() -> Result<T, String>,
     ) -> T {
-        todo!("waits on #1732")
+        wait(&self.clock, PATIENCE, what, check)
     }
 
     /// Plans `plant.hcl` into `plant.plan`, and applies that plan. Panics when either
@@ -138,47 +94,37 @@ impl Rig {
     }
 }
 
-impl Opcua {
-    /// Serves on a free loopback port: `ns=3;s=SpikeData`, `ns=3;s=DipData`, and
-    /// `ns=3;s=PositiveTrendData`, each at a first value until [`Opcua::change`].
-    pub(crate) fn serve(&mut self) {
-        todo!("waits on #120, #435")
-    }
-
-    /// Changes each variable `ticks` times at 10 Hz, each change with the status
-    /// `quality`, and returns after the last change.
-    pub(crate) fn change(&self, _ticks: u32, _quality: Quality) {
-        todo!("waits on #435")
-    }
-
-    /// Each sample served, by node id, in order: the first value, then each change.
-    pub(crate) fn served(&self) -> BTreeMap<String, Vec<Sample>> {
-        todo!("waits on #435")
-    }
-}
-
-impl Influx {
-    /// Serves, and gives the address: a free loopback port at the first call, and the
-    /// same port after [`Influx::stop`]. What it stored stays across a stop.
-    pub(crate) fn serve(&mut self) -> SocketAddr {
-        todo!("waits on #120")
-    }
-
-    /// Stops, so nothing listens on the port.
-    pub(crate) fn stop(&mut self) {
-        todo!("waits on #120")
-    }
-
-    /// Each sample stored, by data channel, in time order.
-    pub(crate) fn stored(&self) -> BTreeMap<String, Vec<Sample>> {
-        todo!("waits on #1734")
+/// [`Rig::wait`], with `limit` in place of 90 s.
+fn wait<T>(
+    clock: &Clock,
+    limit: Span,
+    what: &str,
+    mut check: impl FnMut() -> Result<T, String>,
+) -> T {
+    let deadline = clock.now() + limit;
+    loop {
+        let seen = match check() {
+            Ok(value) => return value,
+            Err(seen) => seen,
+        };
+        assert!(
+            clock.now() < deadline,
+            "{what}: not within {limit}. The last check saw:\n{seen}"
+        );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a process test waits on another process in real time"
+        )]
+        std::thread::sleep(POLL);
     }
 }
 
 impl Drop for Rig {
     fn drop(&mut self) {
+        let removed = std::fs::remove_dir_all(&self.dir);
+        // A second panic aborts the test binary.
         if !std::thread::panicking() {
-            std::fs::remove_dir_all(&self.dir).expect("remove the directory");
+            removed.expect("remove the directory");
         }
     }
 }
@@ -188,4 +134,69 @@ fn a_rig_takes_a_new_directory_when_its_name_is_in_use() {
     let kept = Rig::new();
     let rig = Rig::new();
     assert_ne!(rig.dir, kept.dir);
+}
+
+#[test]
+fn a_rig_writes_the_config_as_given() {
+    let rig = Rig::new();
+    rig.config("node \"edge\" {}\n");
+    assert_eq!(
+        std::fs::read_to_string(rig.dir.join("plant.hcl")).expect("read plant.hcl"),
+        "node \"edge\" {}\n"
+    );
+}
+
+#[test]
+fn a_rig_removes_its_directory_with_its_files() {
+    let rig = Rig::new();
+    rig.config("");
+    let dir = rig.dir.clone();
+    drop(rig);
+    assert!(!dir.exists(), "{} is still there", dir.display());
+}
+
+#[test]
+fn a_rig_runs_foundation_and_gives_its_output() {
+    let rig = Rig::new();
+    let output = rig.run(&["version"]);
+    assert_eq!(
+        (
+            output.status.code(),
+            crate::text(&output.stdout),
+            crate::text(&output.stderr)
+        ),
+        (
+            Some(0),
+            format!("{}\n", env!("CARGO_PKG_VERSION")).as_str(),
+            ""
+        )
+    );
+}
+
+#[test]
+fn a_wait_gives_the_first_ok() {
+    let mut calls = 0;
+    let value = wait(&os::clock(), PATIENCE, "the third call", || {
+        calls += 1;
+        if calls == 3 {
+            Ok(calls)
+        } else {
+            Err(format!("call {calls}"))
+        }
+    });
+    assert_eq!(value, 3);
+}
+
+#[test]
+fn a_wait_past_its_limit_panics_with_the_last_state() {
+    let panic = std::panic::catch_unwind(|| {
+        wait(&os::clock(), Span::ZERO, "the node runs", || {
+            Err::<(), _>("state: stopped".to_owned())
+        });
+    })
+    .expect_err("the wait panics");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some("the node runs: not within 0s. The last check saw:\nstate: stopped")
+    );
 }
