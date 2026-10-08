@@ -1917,13 +1917,43 @@ mod tests {
         assert_eq!(ends, [(0, max), (1, max)]);
     }
 
+    #[test]
+    fn pads_an_end_at_and_around_the_saturation_bound() {
+        let max = usize::MAX;
+        for (end, start) in [
+            (max - 8, max - 7),
+            (max - 7, max - 7),
+            (max - 6, max),
+            (max, max),
+        ] {
+            let ends: Vec<_> = super::ends([(0, end), (1, 0)]).collect();
+            assert_eq!(ends, [(0, end), (1, start)], "{end}");
+        }
+        let set = one_group(&mut interner());
+        let ends = [(0, max - 7), (2, max - 7)];
+        assert_eq!(Layout::from_ends(&set, &ends).unwrap().body_len(), max - 7);
+        let error = Layout::from_ends(&set, &[(0, max - 6), (2, max - 1)]).unwrap_err();
+        assert_eq!(
+            error,
+            Error::End(BadEnd::Before {
+                end: max - 1,
+                start: max
+            })
+        );
+    }
+
     proptest! {
         #[test]
         fn pads_an_end_to_a_multiple_of_8_or_saturates(
-            end in prop_oneof![any::<usize>(), usize::MAX - 16..=usize::MAX, 0..17_usize],
+            end in prop_oneof![
+                any::<usize>(),
+                usize::MAX - 16..=usize::MAX,
+                0..17_usize,
+            ],
         ) {
-            let expected = end.checked_next_multiple_of(SERIES_ALIGN);
-            prop_assert_eq!(padded(end), expected.unwrap_or(usize::MAX));
+            let start = end.checked_next_multiple_of(SERIES_ALIGN);
+            let start = start.unwrap_or(usize::MAX);
+            prop_assert_eq!(super::ends([(0, end), (1, 0)]).nth(1), Some((1, start)));
         }
     }
 
