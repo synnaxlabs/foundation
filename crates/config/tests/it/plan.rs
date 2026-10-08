@@ -466,28 +466,26 @@ connector \"e\" {
     let expected = [
         unplaced(
             "b.time",
-            "no placement selects the index `b.time`, and no connector writes it",
+            "no placement selects the index, and no connector writes it",
             "Select the index with a placement that names a `home`, or write it with a \
              connector",
         ),
         unplaced(
             "c.time",
-            "the placement `c` wins for the index `c.time` and names no home, and no \
-             connector writes the index",
-            "Name a `home` in `c`, or write the index with a connector",
+            "the placement `c` wins for the index and names no home, and no connector \
+             writes the index",
+            "Name a `home` in the placement, or write the index with a connector",
         ),
         unplaced(
             "d.time",
-            "the placements `d_1` and `d_2` select the index `d.time` with the same \
-             specificity",
-            "Change the `select` of `d_1` or `d_2`, so that one selects the index more \
-             specifically",
+            "the placements `d_1` and `d_2` select the index with the same specificity",
+            "Change the `select` of one of the two placements, so that one selects the \
+             index more specifically",
         ),
         unplaced(
             "e.time",
-            "the node `n` writes the index `e.time` and has another role in the \
-             placement `e`",
-            "Name a `home` in `e`, or remove `n` from it",
+            "the node `n` writes the index and has another role in the placement `e`",
+            "Name a `home` in the placement, or remove the node from it",
         ),
     ];
     assert_eq!(found, expected);

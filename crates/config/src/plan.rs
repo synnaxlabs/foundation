@@ -4,8 +4,8 @@ use ::connector::kind::Table;
 use document::Document;
 use document::diagnostic::{Code, Diagnostic};
 use spec::channel::{Channel, Problem};
-use spec::definition::{self, Kind};
-use spec::placement::{Policy, Unplaced, place};
+use spec::definition;
+use spec::placement::{Policy, place};
 use spec::tree::{self, Chunks};
 use types::channel::Key;
 use types::digest::Digest;
@@ -230,15 +230,12 @@ fn homes(
                     homes.insert(index.clone(), placed.home.clone());
                 }
             }
-            Err(unplaced) => {
-                let (message, fix) = unplaced_text(index, &unplaced);
-                diagnostics.push(Diagnostic::new(
-                    UNPLACED,
-                    entry.label_span,
-                    message,
-                    fix,
-                ));
-            }
+            Err(unplaced) => diagnostics.push(Diagnostic::new(
+                UNPLACED,
+                entry.label_span,
+                unplaced.to_string(),
+                unplaced.fix().into(),
+            )),
         }
     }
     homes
@@ -275,63 +272,6 @@ fn writer<'f>(
         ));
     }
     Some(&first.node)
-}
-
-/// The message and the fix for `index`, which [`place`] cannot place, with each
-/// placement by its label.
-fn unplaced_text(index: &Name, unplaced: &Unplaced) -> (String, String) {
-    let label = |key: &Name| {
-        let label = Kind::Placement.label(key);
-        label.expect("invariant: a placement's tree key has its label")
-    };
-    match unplaced {
-        Unplaced::Tie { first, second } => {
-            let (first, second) = (label(first), label(second));
-            (
-                format!(
-                    "the placements `{first}` and `{second}` select the index \
-                     `{index}` with the same specificity"
-                ),
-                format!(
-                    "Change the `select` of `{first}` or `{second}`, so that one \
-                     selects the index more specifically"
-                ),
-            )
-        }
-        Unplaced::NoHome {
-            placement: Some(placement),
-        } => {
-            let placement = label(placement);
-            (
-                format!(
-                    "the placement `{placement}` wins for the index `{index}` and \
-                     names no home, and no connector writes the index"
-                ),
-                format!(
-                    "Name a `home` in `{placement}`, or write the index with a \
-                     connector"
-                ),
-            )
-        }
-        Unplaced::NoHome { placement: None } => (
-            format!(
-                "no placement selects the index `{index}`, and no connector writes it"
-            ),
-            "Select the index with a placement that names a `home`, or write it with a \
-             connector"
-                .into(),
-        ),
-        Unplaced::Overlap { node, placement } => {
-            let placement = label(placement);
-            (
-                format!(
-                    "the node `{node}` writes the index `{index}` and has another \
-                     role in the placement `{placement}`"
-                ),
-                format!("Name a `home` in `{placement}`, or remove `{node}` from it"),
-            )
-        }
-    }
 }
 
 /// Reports `config.unknown-node` at each node that a connector or a placement names and

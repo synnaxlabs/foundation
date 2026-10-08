@@ -5,6 +5,7 @@ use std::fmt;
 use types::name::Name;
 
 use super::Policy;
+use crate::definition::Kind;
 use crate::resolve::{Tie, resolve};
 
 /// Where one index lives: its home, and the standby and copies of the placement that
@@ -75,7 +76,8 @@ pub fn place<'a>(
     })
 }
 
-/// An index that [`place`] cannot place.
+/// An index that [`place`] cannot place. Its `Display` names each placement by its
+/// label, and the index as "the index", for a message at the index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unplaced {
     /// The two placements, the first two in name order of those tied, select the index
@@ -102,19 +104,46 @@ pub enum Unplaced {
     },
 }
 
+impl Unplaced {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        match self {
+            Self::Tie { .. } => {
+                "Change the `select` of one of the two placements, so that one selects \
+                 the index more specifically"
+            }
+            Self::NoHome { placement: Some(_) } => {
+                "Name a `home` in the placement, or write the index with a connector"
+            }
+            Self::NoHome { placement: None } => {
+                "Select the index with a placement that names a `home`, or write it with \
+                 a connector"
+            }
+            Self::Overlap { .. } => {
+                "Name a `home` in the placement, or remove the node from it"
+            }
+        }
+    }
+}
+
 impl fmt::Display for Unplaced {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tie { first, second } => write!(
                 f,
-                "{first} and {second} select the index with the same specificity"
+                "the placements `{}` and `{}` select the index with the same \
+                 specificity",
+                label(first),
+                label(second)
             ),
             Self::NoHome {
                 placement: Some(placement),
             } => write!(
                 f,
-                "{placement} wins for the index and names no home, and no connector \
-                 writes the index"
+                "the placement `{}` wins for the index and names no home, and no \
+                 connector writes the index",
+                label(placement)
             ),
             Self::NoHome { placement: None } => write!(
                 f,
@@ -122,10 +151,17 @@ impl fmt::Display for Unplaced {
             ),
             Self::Overlap { node, placement } => write!(
                 f,
-                "node {node} writes the index and has another role in {placement}"
+                "the node `{node}` writes the index and has another role in the \
+                 placement `{}`",
+                label(placement)
             ),
         }
     }
+}
+
+/// The label of the placement at tree key `key`, or `key` when it has no label form.
+fn label(key: &Name) -> Name {
+    Kind::Placement.label(key).unwrap_or_else(|| key.clone())
 }
 
 impl std::error::Error for Unplaced {}
@@ -250,6 +286,11 @@ mod tests {
             none.to_string(),
             "no placement selects the index, and no connector writes it"
         );
+        assert_eq!(
+            none.fix(),
+            "Select the index with a placement that names a `home`, or write it with a \
+             connector"
+        );
     }
 
     #[test]
@@ -264,8 +305,12 @@ mod tests {
         assert_eq!(check("a.time", &placements, None), Err(hidden.clone()));
         assert_eq!(
             hidden.to_string(),
-            "narrow.@placement wins for the index and names no home, and no \
+            "the placement `narrow` wins for the index and names no home, and no \
              connector writes the index"
+        );
+        assert_eq!(
+            hidden.fix(),
+            "Name a `home` in the placement, or write the index with a connector"
         );
     }
 
@@ -284,8 +329,21 @@ mod tests {
         assert_eq!(check("a.time", &placements, None), Err(tie.clone()));
         assert_eq!(
             tie.to_string(),
-            "p_1.@placement and p_2.@placement select the index with the same \
-             specificity"
+            "the placements `p_1` and `p_2` select the index with the same specificity"
+        );
+        let keyless = Unplaced::Tie {
+            first: name("p_1"),
+            second: key("p_2"),
+        };
+        assert_eq!(
+            keyless.to_string(),
+            "the placements `p_1` and `p_2` select the index with the same specificity",
+            "a name with no label form shows as given"
+        );
+        assert_eq!(
+            tie.fix(),
+            "Change the `select` of one of the two placements, so that one selects the \
+             index more specifically"
         );
     }
 
@@ -325,7 +383,11 @@ mod tests {
         };
         assert_eq!(
             overlap.to_string(),
-            "node n_1 writes the index and has another role in p.@placement"
+            "the node `n_1` writes the index and has another role in the placement `p`"
+        );
+        assert_eq!(
+            overlap.fix(),
+            "Name a `home` in the placement, or remove the node from it"
         );
     }
 
