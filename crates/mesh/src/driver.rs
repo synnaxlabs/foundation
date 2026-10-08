@@ -100,9 +100,10 @@ pub struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory gives [`Error::Log`]. Each task that sends ends at its
-/// next poll: a dial or a send in progress stops, and does not wait for its timeout.
-/// [`Mesh::ended`] tells when each task has ended.
+/// open of the same directory gives [`Error::Log`]. Once the group stops or the
+/// last clone drops, each task that sends ends at once: a dial or a send in
+/// progress stops, and does not wait for its timeout. [`Mesh::ended`] tells when
+/// each task has ended.
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
@@ -1707,7 +1708,18 @@ mod tests {
     fn solo<F: Future<Output = ()> + 'static>(
         body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
     ) {
-        let mut sim = Sim::new(sim::Config::default());
+        solo_at(0, body);
+    }
+
+    /// As [`solo`], in the run of `seed`.
+    fn solo_at<F: Future<Output = ()> + 'static>(
+        seed: u64,
+        body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+    ) {
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
         let node = sim.node(sim::node::Config::default());
         sim.run_on(&node, body).unwrap();
     }
@@ -1949,6 +1961,17 @@ mod tests {
             assert_eq!(format!("{mesh:?}"), "Mesh { .. }");
             let watch = mesh.watch(INDEX);
             assert_eq!(format!("{watch:?}"), "Watch { index: Key(7), .. }");
+        });
+    }
+
+    #[test]
+    fn the_debug_text_of_ended_holds_nothing() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut ended = mesh.ended();
+            let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut ended).poll(cx))).await;
+            assert_eq!(polled, Poll::Pending);
+            assert_eq!(format!("{ended:?}"), "Ended { .. }");
         });
     }
 
@@ -4820,10 +4843,19 @@ mod tests {
         });
     }
 
+    /// The config of node 1 of `IDS`, through `Mesh::open`. No node serves the
+    /// address of another member, so each dial waits for [`IDLE`].
+    fn dialing(node: &sim::node::Node, tasks: &Tasks) -> Config {
+        Config {
+            members: IDS.iter().map(|&id| create_voter(id)).collect(),
+            ..config(node, tasks, 1, &IDS, &IDS)
+        }
+    }
+
     #[test]
     fn ended_waits_for_the_last_mesh_and_the_log() {
         solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mesh = Mesh::open(dialing(&node, &tasks)).await.unwrap();
             let (mut first, second) = (mesh.ended(), mesh.ended());
             node.clock().sleep(Span::SECOND).await;
             let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut first).poll(cx))).await;
@@ -4831,7 +4863,7 @@ mod tests {
             drop(mesh);
             first.await;
             second.await;
-            assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
+            assert_eq!(Mesh::open(dialing(&node, &tasks)).await.err(), None);
         });
     }
 
@@ -4854,31 +4886,36 @@ mod tests {
         });
     }
 
-    /// The other members never answer, so each dial waits for [`IDLE`]. The drop of
-    /// the last mesh stops each dial, and `ended` does not wait for it.
+    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
     #[test]
     fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
-        solo(|node, tasks| async move {
-            let config = config(&node, &tasks, 1, &IDS, &IDS);
-            let transport = Rc::clone(&config.transport);
-            let mesh = Mesh::open(config).await.unwrap();
-            let clock = node.clock();
-            clock.sleep(seconds(5)).await;
-            assert!(Rc::strong_count(&transport) > 2);
-            let ended = mesh.ended();
-            let dropped = clock.now();
-            drop(mesh);
-            ended.await;
-            let waited = clock.now() - dropped;
-            assert!(waited <= TICK, "it ended after {waited}");
-            assert_eq!(Rc::strong_count(&transport), 1);
-        });
+        for seed in 0..32 {
+            solo_at(seed, move |node, tasks| async move {
+                let config = dialing(&node, &tasks);
+                let transport = Rc::clone(&config.transport);
+                let mesh = Mesh::open(config).await.unwrap();
+                let clock = node.clock();
+                clock.sleep(seconds(5)).await;
+                assert!(Rc::strong_count(&transport) > 2);
+                let ended = mesh.ended();
+                let dropped = clock.now();
+                drop(mesh);
+                ended.await;
+                let waited = clock.now() - dropped;
+                assert!(waited <= TICK, "it ended after {waited}");
+                assert_eq!(Rc::strong_count(&transport), 1, "seed {seed}");
+            });
+        }
     }
 
     #[test]
     fn ended_resolves_when_the_group_stops() {
         solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let config = Config {
+                voters: [key(1)].into_iter().collect(),
+                ..dialing(&node, &tasks)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
             let cause = fail_sync(&node);
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(None));
@@ -4889,28 +4926,67 @@ mod tests {
 
     #[test]
     fn a_power_cut_right_after_the_open_keeps_the_directory_and_its_log() {
-        let mut sim = Sim::new(sim::Config::default());
-        let node = sim.node(sim::node::Config::default());
-        sim.run_on(&node, |node, tasks| async move {
+        let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
+        for seed in 0..32 {
+            let mut sim = Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let node = sim.node(sim::node::Config::default());
+            sim.run_on(&node, |node, tasks| async move {
+                let config = Config {
+                    dir: "region".into(),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                Mesh::start(config).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            let listed = sim
+                .run_on(&node, |node, _| async move {
+                    let files = node.files();
+                    (
+                        files.list(Path::new("")).await,
+                        files.list(Path::new("region")).await,
+                    )
+                })
+                .unwrap();
+            let kept = (names(&["region"]), names(&[LOG]));
+            assert_eq!(listed, kept, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn an_open_gives_a_failed_sync_of_the_parent_of_its_directory() {
+        solo(|node, tasks| async move {
+            node.fail_file(Path::new(""), Operation::SyncDir);
             let config = Config {
                 dir: "region".into(),
                 ..config(&node, &tasks, 1, &[1], &[1])
             };
-            Mesh::start(config).await.unwrap();
-        })
-        .unwrap();
-        sim.crash(&node, Crash::Power);
-        let listed = sim
-            .run_on(&node, |node, _| async move {
-                let files = node.files();
-                (
-                    files.list(Path::new("")).await,
-                    files.list(Path::new("region")).await,
-                )
-            })
-            .unwrap();
-        let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
-        assert_eq!(listed, (names(&["region"]), names(&[LOG])));
+            let cause = files::Error::Io {
+                path: "".into(),
+                operation: Operation::SyncDir,
+                code: 5,
+            };
+            let failed = Error::Log(log::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
+        });
+    }
+
+    #[test]
+    fn an_open_fails_when_the_parent_of_its_directory_is_not_there() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                dir: "gone/region".into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let cause = files::Error::NotFound {
+                path: "gone/region".into(),
+            };
+            let failed = Error::Log(log::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
+        });
     }
 
     #[test]
@@ -4936,6 +5012,23 @@ mod tests {
     #[expect(clippy::manual_noop_waker, reason = "a test counts its clones")]
     impl Wake for Idle {
         fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn an_ended_polled_twice_holds_one_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut ended = mesh.ended();
+            for _ in 0..2 {
+                assert!(Pin::new(&mut ended).poll(&mut cx).is_pending());
+            }
+            drop(waker);
+            assert_eq!(Arc::strong_count(&held), 2);
+            drop(mesh);
+        });
     }
 
     #[test]

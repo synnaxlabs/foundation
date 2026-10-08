@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
@@ -42,7 +43,7 @@ impl Spawner {
 }
 
 // The tasks of one mesh that have not ended.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Count {
     tasks: Cell<usize>,
     // The waker of each `Ended` that waits, by its slot.
@@ -73,10 +74,15 @@ impl Drop for Live {
 
 /// Resolves once each task of a [`Mesh`](super::Mesh) has ended.
 /// [`Mesh::ended`](super::Mesh::ended) gives it.
-#[derive(Debug)]
 pub struct Ended {
     count: Rc<Count>,
     slot: u64,
+}
+
+impl fmt::Debug for Ended {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ended").finish_non_exhaustive()
+    }
 }
 
 impl Future for Ended {
