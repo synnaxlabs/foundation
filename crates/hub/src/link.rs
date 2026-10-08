@@ -66,9 +66,9 @@ impl Link {
     /// it serves a reader session. From a client, the first stream given to `serve` is
     /// its hello stream, which lives as long as the session and closes it when it
     /// ends. Each later stream is a request stream, which gives [`Served::Request`]
-    /// once its body is read and verified. A program opens no request stream before
-    /// the challenge after its hello, so the hello stream comes first in any order of
-    /// the headers.
+    /// once its body is read and verified. A program sends the header of a request
+    /// stream only after the challenge after its hello, so the hello stream comes
+    /// first in any order of the headers.
     ///
     /// # Errors
     ///

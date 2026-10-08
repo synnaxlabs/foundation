@@ -5320,10 +5320,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
   Supersedes the name `Hub::rules` of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140.
-  A rule of the client wire, which each SDK follows: a program opens its first request
-  stream once the challenge after its hello comes. The node sends it only after it
-  admits the hello, so this rule also makes the hello stream the first that
-  `Link::serve` gets, in any order of the headers. A program that breaks it gets
+  A rule of the client wire, which each SDK follows: a program sends the header of its
+  first request stream once the challenge after its hello comes. The node sends it
+  only after it admits the hello, so this rule also makes the hello stream the first
+  that `Link::serve` gets, in any order of the headers. A program that breaks it gets
   `Unadmitted` or `Message` with `Kind`, also when it sends its request after that
   challenge. Lost: a node that holds each request stream until it admits a hello,
   which adds a queue, its bound, and its timeout to `hub` to save one round trip for
@@ -5331,10 +5331,11 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520). The
   sentence on the hello stream is by `laptop.architect` (2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418),
-  and supersedes the `Session::accept` sentence of that comment. The rule by the open
-  of the first request stream, in place of the send of the first request, is by
-  `laptop.architect` (2026-10-08T19:09:37Z,
-  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067132090).
+  and supersedes the `Session::accept` sentence of that comment. The rule by the
+  header of the first request stream is by `laptop.architect` (2026-10-08T19:14:04Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067215617).
+  Supersedes the rule by the send of the first request of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520.
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
   transport and the mesh, and never a zero key. #1660 changes only where `node` gets
   the key. The test waits on #1744, whose client hello is the first that a `node` test
