@@ -3766,6 +3766,50 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052684931,
   2026-10-08 05:03 UTC). Supersedes the `Host` and `Port` fields and messages of
   https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253.
+- **OPEN62541 SOURCE (#435)** We copy the upstream source files of open62541, not the
+  amalgamation: the amalgamation adds the POSIX clock and event loop even with
+  `UA_ARCHITECTURE=none`. The 3 global clock functions give a fixed time. That is
+  acceptable only with a closed list of the (file, enclosing function) pairs that may
+  call one; a list per file would pass a new call in a listed file. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
+  2026-10-08 02:27 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
+  `connector-opcua` reads its `sources.txt`. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057244538,
+  2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy. Each file from
+  the release is byte for byte the file at the tag. Every other file (`src_generated/`,
+  `sources.txt`, `flags.txt`, `VERSION`) is the output of that command alone, never
+  edited by hand. Our change edits only release files. `cargo xtask open62541` is the
+  clock check. It builds the copy from its own files with `-g -O0` and reads the call
+  relocations against the closed list. It fails on a call outside the list, a listed
+  pair with no call, a clock address in any section that is not code, each
+  `DW_TAG_inlined_subroutine`, and a header outside the copy. It runs on the staged
+  copy before `<tag>` replaces anything, and on the committed copy with no tag. A test
+  in `cargo test -p xtask` runs it on the committed copy. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
+  2026-10-08 10:08 UTC). PR 2 of #435 adds that test with the copy. Approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058025302,
+  2026-10-08 10:37 UTC). #1860 makes CI run it on a PR that changes only `patches/`.
+  The C library and the POSIX headers of the plugins are a closed list of system
+  headers (`SYSTEM_HEADERS`) that the copy may include, each found in a system
+  directory as `cc` finds it. The list holds no clock header (`time.h`,
+  `sys/time.h`): a PR that adds one needs the OK of the `connector` architect. The
+  check fails on every reference to a clock function that is not a call, also one in
+  code. A call relocation counts as a call only in a section that `objdump -d`
+  disassembles. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,
+  2026-10-08 11:03 UTC). Supersedes the clock address rule of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. The
+  check stands against a clock reference that the compiler makes from C in the copy,
+  from a new tag or from our patch. It does not stand against an edit made to hide
+  from it, such as assembly that stores a function's address: review of each copy PR
+  covers that. A `#line` directive or a line marker in a copy file fails the check,
+  because it moves the file that the include check reads. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058103514,
+  2026-10-08 10:42 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
@@ -5774,7 +5818,12 @@ How to read this record:
   and the change is reviewed outside this one); for the first patch, a workaround in
   `transport` that never stops a stream (the peer sends the rest of the stream, and a
   cancel no longer reaches the sender, against STREAM WIRE). The person decided on
-  2026-10-05 ("Ok I guess we need to do #2"), #620.
+  2026-10-05 ("Ok I guess we need to do #2"), #620. A C library that we patch
+  (open62541) is copied by one command: each release file that our build compiles or
+  includes, unchanged, plus the files that its build generates. Its `build.rs` reads
+  the copy, with no `[patch.crates-io]`. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
+  2026-10-08 10:08 UTC).
 
 ### 1.16 Retired entries
 
