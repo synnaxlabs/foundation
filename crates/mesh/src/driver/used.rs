@@ -48,7 +48,7 @@ pub(super) struct Newest {
     // The chunks that its change listed, until a read takes them.
     listed: BTreeSet<Digest>,
     // Each chunk of its tree that a read got from the store.
-    got: Vec<Vec<u8>>,
+    pub(super) got: Vec<Vec<u8>>,
     step: Step,
 }
 
@@ -255,10 +255,10 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
     }
     named.sort_by_key(|(pointer, _)| pointer.version);
     let file = named.pop();
+    // A power cut can undo a removal, which the next open makes again.
     for (_, path) in &named {
         files.remove(path).await.map_err(Error::Files)?;
     }
-    files.sync_dir(&held).await.map_err(Error::Files)?;
     let Some((pointer, _)) = file else {
         let problems = spec::region::check(prefix, &definitions);
         if problems.is_empty() {
@@ -441,9 +441,6 @@ fn pointer(name: &Path) -> Option<Pointer> {
     let name = name.to_str()?;
     let (version, root) = name.split_once('-')?;
     let version = version.parse().ok()?;
-    if root.len() != 64 {
-        return None;
-    }
     let mut bytes = [0; 32];
     for (byte, pair) in bytes.iter_mut().zip(root.as_bytes().chunks(2)) {
         *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
