@@ -13,11 +13,16 @@ types = { path = "../types" }
 
 [dev-dependencies]
 counting = { path = "../counting" }
+divan = { workspace = true }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
 [[test]]
 name = "alloc"
+harness = false
+
+[[bench]]
+name = "entry"
 harness = false
 
 [lints]
