@@ -4630,11 +4630,13 @@ How to read this record:
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
   `config.writer-nodes` is at the `node` of the first connector on a second node that
-  writes one index. The first writer, the earlier of two names, and the first connector
-  of a name come first by `Source`, then in source order, so the order of `documents`
-  changes no problem. Only a tie, with no span or with one `Source` in two Documents,
-  keeps the order of `documents` (#1886 round 2, 2026-10-08T14:14:16Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). The
+  writes one index. The first writer, the first of the names of one key, and the first
+  connector of a name come first by `Source`, then in source order, so the order of
+  `documents` changes no problem (#1886 round 2, 2026-10-08T14:14:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). A tie,
+  with no span or with one `Source` in two Documents, has no defined choice (#1886 round
+  3, 2026-10-08T14:26:34Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062050321). The
   problems come in `Source` order, then in source order, as the problems of `check` do.
   `config.connector-home` (X22) and `config.split-placement` (BQ10) follow in a second
   PR of #1082. The region check and the region of each key (REGION CHECK) come with
