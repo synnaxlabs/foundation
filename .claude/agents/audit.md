@@ -24,8 +24,8 @@ code (a revert), with Write or Edit, never with a heredoc, `sed -i`, `perl -pi`,
 another edit in place in Bash: auto mode blocks some of those, and three blocks in a row
 stop the session.
 
-Read `CLAUDE.md`, the section of `docs/decisions.md` for the crates
-(`grep -n '^#' docs/decisions.md`, then that range), `docs/claude/testing.md`,
+Read `CLAUDE.md`, the records of `docs/decisions/` for the crates (the folder of their
+topic, and `grep -rl` for each crate name), `docs/claude/testing.md`,
 `docs/claude/performance.md`, and `docs/claude/design.md`. For the review trail, use
 `gh pr view <n> --comments`, `gh pr diff <n>`, `gh api
 repos/synnaxlabs/foundation/pulls/<n>/reviews` and `.../pulls/<n>/comments`, and the
