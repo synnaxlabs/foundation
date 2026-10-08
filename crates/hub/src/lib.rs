@@ -200,7 +200,7 @@ impl Hub {
     }
 
     /// The hub's part of `session`. Give to [`Link::serve`] each hub stream of the
-    /// session that the caller admits.
+    /// session that the caller does not reject.
     #[must_use]
     pub fn link(&self, session: transport::Session) -> Link {
         Link::new(Rc::clone(&self.0), session)
