@@ -5,8 +5,11 @@ mod access;
 mod channel;
 mod connector;
 mod node_settings;
+mod openssh;
 mod placement;
+mod private_key;
 mod retention;
+mod subject;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
@@ -27,13 +30,14 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
-const KINDS: [(Kind, Check); 6] = [
+const KINDS: [(Kind, Check); 7] = [
     (Kind::Access, access::check),
     (Kind::Channel, channel::check),
     (Kind::Connector, connector::check),
     (Kind::NodeSettings, node_settings::check),
     (Kind::Placement, placement::check),
     (Kind::Retention, retention::check),
+    (Kind::Subject, subject::check),
 ];
 
 /// What one block defines. A channel's edges are names until `plan` gives each
@@ -59,18 +63,22 @@ pub struct Entry {
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
 /// gives each by its tree key: the name of a channel or a connector, or
-/// `<label>.@<kind>` for a policy. The kind in `kinds` that a `connector` block names
-/// checks its config. Each order of `documents` gives the same entries, or each gives
-/// problems.
+/// `<label>.@<kind>` for each other block. The kind in `kinds` that a `connector`
+/// block names checks its config. Each order of `documents` gives the same entries,
+/// or each gives problems.
 ///
 /// # Errors
 ///
-/// Every problem in the Documents, in the order of `documents`, then in source order.
+/// A private key anywhere in the Documents gives only `config.private-key`, once for
+/// each string that holds one.
+/// Each other problem in the Documents, in the order of `documents`, then in source
+/// order.
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there. A block inside a policy does not stop
-/// that check: a policy holds no block, so each block inside one is a separate problem.
+/// and reads, and the ones it needs are there. A block inside a policy or a subject
+/// does not stop that check: neither holds a block, so each block inside one is a
+/// separate problem.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
 /// channel knows. A `kind` of connector that is missing, is not a name, or is not in
 /// `kinds` hides each problem of the connector's config, and so does a config nested
@@ -79,13 +87,24 @@ pub fn check(
     documents: &[Document],
     kinds: &Table,
 ) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+    let alarms = private_key::alarms(documents);
+    if !alarms.is_empty() {
+        return Err(alarms);
+    }
     let mut found = Found {
         entries: BTreeMap::new(),
         diagnostics: Vec::new(),
         labels: BTreeMap::new(),
-        channels: channels(documents),
+        channels: names(documents, Kind::Channel)
+            .map(|(name, _)| name)
+            .collect(),
+        connectors: BTreeMap::new(),
         kinds,
     };
+    for (name, label) in names(documents, Kind::Connector) {
+        let lower = name.as_str().to_ascii_lowercase().into();
+        found.connectors.entry(lower).or_insert(label);
+    }
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
@@ -120,21 +139,20 @@ pub fn check(
     }
 }
 
-/// The name of each `channel` block in `documents` whose one label reads as a name.
-/// `check` reports each other label.
-fn channels(documents: &[Document]) -> BTreeSet<Name> {
+/// The name and the label of each block of `kind` in `documents` whose one label
+/// reads as a name. `check` reports each other label.
+fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Label)> {
     let blocks = documents.iter().flat_map(|document| &document.blocks);
     blocks
-        .filter(|block| &*block.keyword == Kind::Channel.as_str())
+        .filter(move |block| &*block.keyword == kind.as_str())
         .filter_map(|block| match block.labels.as_slice() {
-            [label] => read::label(label).ok(),
+            [label] => Some((read::label(label).ok()?, label)),
             _ => None,
         })
-        .collect()
 }
 
-/// The channel names of the Documents, the connector kinds, and what `check` has
-/// found so far.
+/// The channel and connector names of the Documents, the connector kinds, and what
+/// `check` has found so far.
 #[derive(Debug)]
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
@@ -144,6 +162,9 @@ struct Found<'a> {
     labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
+    /// The label of the first connector that a `connector` block in any Document
+    /// defines at each name, by the name in lowercase.
+    connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
 }
@@ -516,7 +537,7 @@ mod tests {
                 at(0, 0),
                 "a file cannot hold the `nodes` block",
                 "Use `access`, `channel`, `connector`, `node_settings`, `placement`, \
-                 or `retention`, or remove it",
+                 `retention`, or `subject`, or remove it",
             )])
         );
     }
@@ -542,7 +563,8 @@ mod tests {
                 at(0, 3),
                 "`disk` is not an attribute of a file",
                 "Move it into the `access`, `channel`, `connector`, `node_settings`, \
-                 `placement`, or `retention` block that it sets, or remove it",
+                 `placement`, `retention`, or `subject` block that it sets, or remove \
+                 it",
             )])
         );
     }
@@ -2709,6 +2731,398 @@ mod tests {
                     ),
                 ])
             );
+        }
+    }
+
+    mod subjects {
+        use base64ct::{Base64, Encoding};
+        use spec::subject::Subject;
+        use types::ed25519::PublicKey;
+
+        use super::*;
+
+        /// A line that `ssh-keygen -t ed25519` wrote.
+        const ALICE: &str = concat!(
+            "ssh-ed25519 ",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg",
+            " alice@laptop",
+        );
+        const ALICE_KEY: [u8; 32] = [
+            0x65, 0x55, 0xb8, 0xe4, 0x7c, 0x24, 0xa6, 0x29, 0x01, 0xc5, 0x8b, 0x31,
+            0x4b, 0xde, 0x69, 0xd9, 0x89, 0xd7, 0x05, 0x00, 0x99, 0x81, 0xa0, 0x20,
+            0x3b, 0x6a, 0x96, 0x11, 0x5e, 0xed, 0x88, 0x60,
+        ];
+        const BAD_FIX: &str = "Use the one line of a `.pub` file, such as \
+                               `ssh-ed25519 AAAA... alice@laptop`";
+        const NOT_A_LINE: &str = "the public key is not the line of a `.pub` file";
+        const NOT_ED25519: &str = "the base64 of the public key is not an Ed25519 key";
+
+        /// A `subject` block in file 0 at offset 0, labeled `alice`.
+        fn subject(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(
+                0,
+                0,
+                "subject",
+                &["alice"],
+                attributes,
+            )])]
+        }
+
+        /// A list of `items`, the item `i` at offset `50 + i`.
+        fn list(items: &[Kind]) -> Kind {
+            let items = (50..).zip(items).map(|(offset, kind)| Value {
+                kind: kind.clone(),
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        /// The one entry of a subject labeled `alice` with `keys`.
+        fn keyed(keys: &[[u8; 32]]) -> BTreeMap<Name, Entry> {
+            let keys = keys.iter().map(|&key| PublicKey::new(key).unwrap());
+            let subject = Subject::new(keys.collect()).unwrap();
+            let entry = Entry {
+                definition: Definition::Spec(definition::Definition::Subject(subject)),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("alice.@subject"), entry)])
+        }
+
+        /// A `.pub` line of `algorithm` whose base64 holds `blob`.
+        fn line(algorithm: &str, blob: &[u8]) -> String {
+            let mut text = [0; 128];
+            let encoded = Base64::encode(blob, &mut text).unwrap();
+            format!("{algorithm} {encoded} bob@site_a")
+        }
+
+        /// The `.pub` line of the Ed25519 key `key`.
+        fn ed25519(key: [u8; 32]) -> String {
+            line(
+                "ssh-ed25519",
+                &[&b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..], &key].concat(),
+            )
+        }
+
+        fn bad(span: Option<Span>, message: &str) -> Diagnostic {
+            refused("config.bad-public-key", span, message, BAD_FIX)
+        }
+
+        #[test]
+        fn reads_the_line_of_a_pub_file() {
+            let bare = ALICE.trim_end_matches(" alice@laptop");
+            let cases = [
+                string(ALICE),
+                string(bare),
+                string(&format!("  {ALICE}\n")),
+                string(&format!("{bare} a comment with words")),
+                list(&[string(ALICE)]),
+            ];
+            for keys in cases {
+                let documents = subject(&[("keys", keys.clone())]);
+                assert_eq!(check(&documents), Ok(keyed(&[ALICE_KEY])), "{keys:?}");
+            }
+            assert_eq!(ed25519(ALICE_KEY).split(' ').nth(1), bare.split(' ').nth(1));
+        }
+
+        #[test]
+        fn reads_a_list_of_keys_in_byte_order() {
+            let keys = list(&[string(&ed25519([9; 32])), string(ALICE)]);
+            assert_eq!(
+                check(&subject(&[("keys", keys)])),
+                Ok(keyed(&[[9; 32], ALICE_KEY]))
+            );
+        }
+
+        #[test]
+        fn refuses_a_subject_without_keys() {
+            assert_eq!(
+                check(&subject(&[])),
+                Err(vec![refused(
+                    "document.missing-attribute",
+                    at(0, 0),
+                    "the `subject` block has no `keys`",
+                    "Add a `keys` attribute with the line of a `.pub` file, such as \
+                     \"ssh-ed25519 AAAA... alice@laptop\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_empty_list_at_the_list() {
+            assert_eq!(
+                check(&subject(&[("keys", Kind::List(Vec::new()))])),
+                Err(vec![refused(
+                    "config.no-public-keys",
+                    at(0, 11),
+                    "the subject has no public key",
+                    "Add at least one public key",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_repeated_key_at_its_second_copy() {
+            let again = ALICE.replace("alice@laptop", "alice@desk");
+            let keys =
+                list(&[string(ALICE), string(&ed25519([9; 32])), string(&again)]);
+            let mut twice = refused(
+                "config.duplicate-public-key",
+                at(0, 52),
+                "a public key repeats an earlier one",
+                "Remove the second copy of the key",
+            );
+            twice.notes.push(Note {
+                span: at(0, 50).unwrap(),
+                text: "the earlier key".into(),
+            });
+            assert_eq!(check(&subject(&[("keys", keys)])), Err(vec![twice]));
+        }
+
+        #[test]
+        fn refuses_a_private_key_and_quotes_none_of_it() {
+            let openssh = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+                           b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMw\n\
+                           -----END OPENSSH PRIVATE KEY-----\n";
+            let rsa = "  -----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n";
+            let ssh2 = "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\n\
+                        Comment: \"rsa-key-20261008\"\nP2/56wAAA+wAAAA3aWYtbW9kbntz\n";
+            let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n\
+                       Comment: alice@laptop\nPublic-Lines: 2\n";
+            let comment = format!("{ALICE} PRIVATE KEY");
+            let cases = [
+                (string(openssh), at(0, 11)),
+                (string(rsa), at(0, 11)),
+                (string(ssh2), at(0, 11)),
+                (string(ppk), at(0, 11)),
+                (string(&comment), at(0, 11)),
+                (list(&[string(ALICE), string(openssh)]), at(0, 51)),
+                (list(&[Kind::Integer(7), string(openssh)]), at(0, 51)),
+            ];
+            for (keys, span) in cases {
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![refused(
+                        "config.private-key",
+                        span,
+                        "the value is a private key, which must never be in a file",
+                        "Remove the private key from this file now, and use the one \
+                         line of its `.pub` file",
+                    )]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_private_key_at_any_depth() {
+            let private = Value {
+                kind: string("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"),
+                span: at(0, 70),
+            };
+            let call = Kind::Call(document::value::Call {
+                function: "secret".into(),
+                function_span: at(0, 60),
+                arguments: vec![private.clone()],
+            });
+            let map = Map::new(vec![Attribute {
+                key: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n".into(),
+                key_span: at(0, 70),
+                value: Value {
+                    kind: Kind::Integer(1),
+                    span: at(0, 80),
+                },
+            }])
+            .unwrap();
+            let in_value = Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: at(0, 60),
+                value: private.clone(),
+            }])
+            .unwrap();
+            let cases = [
+                list(&[Kind::List(vec![private])]),
+                list(&[string(ALICE), call]),
+                Kind::Map(map.clone()),
+                list(&[Kind::Map(map)]),
+                Kind::Map(in_value),
+            ];
+            for keys in cases {
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![refused(
+                        "config.private-key",
+                        at(0, 70),
+                        "the value is a private key, which must never be in a file",
+                        "Remove the private key from this file now, and use the one \
+                         line of its `.pub` file",
+                    )]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_key_of_another_algorithm_by_its_name() {
+            let cases = [
+                "ssh-rsa",
+                "ssh-dss",
+                "ecdsa-sha2-nistp256",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521",
+                "sk-ecdsa-sha2-nistp256@openssh.com",
+                "sk-ssh-ed25519@openssh.com",
+                "ssh-rsa-cert-v01@openssh.com",
+                "ssh-dss-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+                "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
+                "ssh-ed25519-cert-v01@openssh.com",
+                "sk-ssh-ed25519-cert-v01@openssh.com",
+                "ssh-xmss@openssh.com",
+                "ssh-xmss-cert-v01@openssh.com",
+            ];
+            for algorithm in cases {
+                let keys = string(&line(algorithm, &[0; 51]));
+                assert_eq!(
+                    check(&subject(&[("keys", keys)])),
+                    Err(vec![refused(
+                        "config.public-key-algorithm",
+                        at(0, 11),
+                        &format!(
+                            "the public key is \"{algorithm}\", and a subject takes \
+                             only `ssh-ed25519`"
+                        ),
+                        "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the \
+                         line of its `.pub` file",
+                    )]),
+                    "{algorithm}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_value_that_is_not_the_line_of_an_ed25519_key() {
+            let start = &b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..];
+            let mut identity = [0; 32];
+            identity[0] = 1;
+            let cases = [
+                (Kind::Integer(7), "a public key is a string, not an integer"),
+                (string(""), NOT_A_LINE),
+                (string("ssh-ed25519"), NOT_A_LINE),
+                (string("ssh-\x1b[2Jok AAAA"), NOT_A_LINE),
+                (string("sk-proj-0123456789abcdef AAAA"), NOT_A_LINE),
+                (string("ssh-rsa2 AAAA"), NOT_A_LINE),
+                (string(&ALICE[12..]), NOT_A_LINE),
+                (
+                    string("-----BEGIN PUBLIC KEY----- MCowBQYDK2VwAyEA"),
+                    NOT_A_LINE,
+                ),
+                (
+                    string("---- BEGIN SSH2 PUBLIC KEY ----\nAAAAC3NzaC1lZDI1NTE5"),
+                    NOT_A_LINE,
+                ),
+                (string("ssh-ed25519 !!!!"), NOT_ED25519),
+                (string(&ALICE.replace(" alice", "= alice")), NOT_ED25519),
+                (
+                    string(&line("ssh-ed25519", &[start, &[9; 31]].concat())),
+                    NOT_ED25519,
+                ),
+                (
+                    string(&line("ssh-ed25519", &[start, &[9; 33]].concat())),
+                    NOT_ED25519,
+                ),
+                (
+                    string(&line("ssh-ed25519", &[&start[..18], &[9; 33]].concat())),
+                    NOT_ED25519,
+                ),
+                (string(&line("ssh-ed25519", &[9; 51])), NOT_ED25519),
+                (
+                    string(&ed25519(identity)),
+                    "the public key is a point of small order",
+                ),
+            ];
+            for (keys, message) in cases {
+                let documents = subject(&[("keys", keys.clone())]);
+                assert_eq!(
+                    check(&documents),
+                    Err(vec![bad(at(0, 11), message)]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_two_lines_split_by_any_line_break() {
+            for split in ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}']
+            {
+                let keys = string(&format!("{ALICE}{split}{}", ed25519([9; 32])));
+                assert_eq!(
+                    check(&subject(&[("keys", keys)])),
+                    Err(vec![bad(at(0, 11), "the public key is more than one line")]),
+                    "{split:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_the_first_bad_item_of_a_list_at_the_item() {
+            let keys = list(&[string(ALICE), Kind::Integer(7), string("ssh-ed25519")]);
+            assert_eq!(
+                check(&subject(&[("keys", keys)])),
+                Err(vec![bad(
+                    at(0, 51),
+                    "a public key is a string, not an integer"
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_that_a_subject_does_not_have() {
+            let documents =
+                subject(&[("keys", string(ALICE)), ("name", string("Alice"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.unknown-attribute",
+                    at(0, 12),
+                    "`name` is not an attribute of the `subject` block",
+                    "Use `keys`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_subject_with_any_attributes() {
+            let cases = [
+                vec![("keys", string(ALICE))],
+                vec![],
+                vec![("keys", Kind::List(Vec::new()))],
+                vec![("keys", string("ssh-rsa AAAA"))],
+                vec![("keys", string(ALICE)), ("name", string("Alice"))],
+            ];
+            for attributes in cases {
+                assert_inner_blocks_refused("subject", &attributes);
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn reads_distinct_keys_in_any_order(
+                (sorted, keys) in prop::collection::btree_set(any::<[u8; 32]>(), 1..6)
+                    .prop_filter_map("a key of small order", |keys| {
+                        let valid = keys.iter().all(|&key| PublicKey::new(key).is_ok());
+                        valid.then(|| keys.into_iter().collect::<Vec<_>>())
+                    })
+                    .prop_flat_map(|sorted| {
+                        (Just(sorted.clone()), Just(sorted).prop_shuffle())
+                    }),
+            ) {
+                let items: Vec<_> =
+                    keys.iter().map(|&key| string(&ed25519(key))).collect();
+                let documents = subject(&[("keys", list(&items))]);
+                prop_assert_eq!(check(&documents), Ok(keyed(&sorted)));
+            }
         }
     }
 }

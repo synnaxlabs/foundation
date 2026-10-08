@@ -17,7 +17,7 @@ impl Cluster {
 
     /// Starts a cluster in which each node proposed itself as the home for 5 s, and
     /// gives the leader, a follower, and the position of the entry of that home.
-    fn led(run: u64) -> (Self, u8, u8, Position) {
+    pub(super) fn led(run: u64) -> (Self, u8, u8, Position) {
         let mut cluster = Self::new(run);
         cluster.script(home);
         cluster.start();
@@ -31,7 +31,7 @@ impl Cluster {
     }
 
     /// Sets the chance that a datagram between `node` and each other node is lost.
-    fn link_each(&mut self, node: u8, loss: f64) {
+    pub(super) fn link_each(&mut self, node: u8, loss: f64) {
         for other in IDS.into_iter().filter(|&id| id != node) {
             self.link(node, other, loss);
         }
