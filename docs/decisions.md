@@ -3852,8 +3852,10 @@ How to read this record:
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
   The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
   `@node_settings`, `@compression` (compression section), `@placement` (S12),
-  `@retention` (#895), `@subject` (#1755), and `@time`. No time keyword was on record
-  (C6 shows `[[time]]`, and X36 replaced its content), so the architect decided `time`.
+  `@retention` (#895), `@subject` (`laptop.architect-2`, 2026-10-08T03:15:41Z,
+  https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217), and
+  `@time`. No time keyword was on record (C6 shows `[[time]]`, and X36 replaced its
+  content), so the architect decided `time`.
   A connector has no segment: it is at its own name, and its channels are its children
   (#758, 2.2, C8). A channel has no segment either: it is at its own name (#756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
@@ -3940,13 +3942,13 @@ How to read this record:
   `spec::subject::Subject` at `<name>.@subject`, which holds its Ed25519 public keys
   (`types::ed25519::PublicKey`): at least one, each distinct, sorted by their bytes so
   the order of a file does not change the definition. The `subjects` selector of an
-  access policy matches `<name>`, not the tree key. A connector has no subject
-  definition: it stays at its own name with no keys. The encoding is tag 10, a count,
-  and 32 bytes for each key in ascending order; `decode` checks the count against the
-  bytes left before it allocates, and refuses an empty list, keys out of order or
-  equal, and a key of small order. Lost: the subject at its plain name, which takes
-  that name from a channel or a connector and allows no children. Decided by
-  `laptop.architect-2` at 2026-10-08T03:15:41Z
+  access policy matches `<name>`, not the tree key, and #1747 makes `access::admit` read
+  `<name>.@subject`. A connector has no subject definition: it stays at its own name
+  with no keys. The encoding is tag 10, a count, and 32 bytes for each key in ascending
+  order; `decode` checks the count against the bytes left before it allocates, and
+  refuses an empty list, keys out of order or equal, and a key of small order. Lost: the
+  subject at its plain name, which takes that name from a channel or a connector and
+  allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
