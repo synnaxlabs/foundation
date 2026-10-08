@@ -2330,11 +2330,11 @@ How to read this record:
   never crosses a `SECTOR`: a record whose header would cross one starts at the next
   sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
   whole or absent. At a restart, zeros where a record should start, or a good header
-  with a torn body, are the end of the log. Anything else, or a record after a torn one,
-  is `Error::Corrupt`, and the node does not start. The error is at the torn record,
-  whatever the version of the record after it, in its file or the next. A record of
-  another version that is the first defect in file order is `Error::Version` (#1784,
-  approved by the architect, 2026-10-08T04:26:06Z:
+  with a torn body, are the end of the log. Anything else is `Error::Corrupt`, and the
+  node does not start. So is a record that starts right after a torn one, or at the
+  start of the next file: the error is at the torn record, whatever the version of the
+  record after it. A record of another version that is the first defect in file order
+  is `Error::Version` (#1784, approved by the architect, 2026-10-08T04:26:06Z:
   https://github.com/synnaxlabs/foundation/pull/1776#issuecomment-6052206016). Open
   writes again, whole, the end file that it finds: the records as it read them, then
   zeros to the end of the file. So a torn record leaves nothing that a later open reads

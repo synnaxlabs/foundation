@@ -175,9 +175,9 @@ impl Log {
     /// - [`Error::Pool`] when the largest block of `pool` is less than one sector of
     ///   512 bytes, or `pool` has no block for a read or a write.
     /// - [`Error::Corrupt`] when a record is not valid and is not a torn end.
-    /// - [`Error::Version`] when a record has another format version. A record after a
-    ///   torn one, in its file or the next, gives [`Error::Corrupt`] at the torn one,
-    ///   whatever its version.
+    /// - [`Error::Version`] when a record has another format version. A record that
+    ///   starts right after a torn one, or at the start of the next file, gives
+    ///   [`Error::Corrupt`] at the torn one, whatever its version.
     /// - [`Error::Stray`] when `dir` holds a file that is not the next log file.
     pub(crate) async fn open(
         files: Files,
@@ -462,8 +462,8 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             Some(At::Header(ref head)) if head.version == VERSION => Some(head.number),
             _ => None,
         };
-        // A record after a torn one, in its file or the next, was written after the
-        // torn one was durable: the torn one is damaged.
+        // A record right after a torn one, or at the start of the next file, was
+        // written after the torn one was durable: the torn one is damaged.
         let follows = |claimed: usize| {
             bytes
                 .get(start(claimed)..)
