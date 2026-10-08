@@ -1885,6 +1885,13 @@ How to read this record:
   UTC: https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
   2026-10-07 20:44 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911).
+  `send` and `try_send` write one part, the whole block, through the same write. One
+  whole part with no zeros skips the sum and the walk of the parts, and keeps the same
+  cut, list, wait, and reset. `send` and `send_parts` poll the carrier through one
+  private future, not one through the other. Lost: a second write path for `send`,
+  because two paths must stay in step on budget, turns, and resume. Decided by
+  `laptop.architect-2` (#68, 2026-10-08 06:32 UTC:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6053922488).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
