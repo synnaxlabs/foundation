@@ -254,7 +254,6 @@ pub fn unknown(
 /// When `keys` is empty: the caller's list is internal.
 #[must_use]
 pub fn missing(of: &str, at: Option<Span>, keys: &[&str], fix: String) -> Diagnostic {
-    assert!(!keys.is_empty(), "`missing` needs at least one key");
     Diagnostic::new(
         MISSING_ATTRIBUTE,
         at,
@@ -1229,7 +1228,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "`missing` needs at least one key")]
+        #[should_panic(expected = "`one_of` needs at least one word")]
         fn refuses_to_name_no_missing_key() {
             drop(missing(
                 "the `retention` block",
