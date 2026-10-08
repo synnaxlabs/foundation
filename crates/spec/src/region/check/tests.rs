@@ -274,6 +274,40 @@ fn finds_no_problem_in_the_founding_definitions_at_a_reserved_label() {
 }
 
 #[test]
+fn finds_a_subject_and_a_policy_at_another_reserved_label_misplaced() {
+    let definitions = create_definitions(&[
+        ("ops.@admin.@subject", subject()),
+        ("ops.@x.@access", access()),
+        ("ops.@x.@subject", subject()),
+    ]);
+    assert_eq!(
+        check(&prefix("ops"), &definitions),
+        [
+            Problem::Misplaced {
+                name: name("ops.@admin.@subject"),
+                kind: Kind::Subject,
+            },
+            Problem::Misplaced {
+                name: name("ops.@x.@access"),
+                kind: Kind::Access,
+            },
+            Problem::Misplaced {
+                name: name("ops.@x.@subject"),
+                kind: Kind::Subject,
+            },
+        ]
+    );
+    let definitions = create_definitions(&[("@x.@subject", subject())]);
+    assert_eq!(
+        check(&Prefix::ROOT, &definitions),
+        [Problem::Misplaced {
+            name: name("@x.@subject"),
+            kind: Kind::Subject,
+        }]
+    );
+}
+
+#[test]
 fn finds_a_channel_at_a_reserved_key_misplaced() {
     let definitions = create_definitions(&[("@admin.@subject", index(1))]);
     assert_eq!(
@@ -358,11 +392,10 @@ proptest! {
         let key = name(&key);
         let definitions = BTreeMap::from([(key.clone(), definition)]);
         let problems = check(&Prefix::ROOT, &definitions);
-        let misplaced = match kind {
-            Kind::Subject | Kind::Access => None,
-            _ => Some(&Problem::Misplaced { name: key, kind }),
-        };
-        prop_assert_eq!(problems.first(), misplaced);
+        let admin = types::ed25519::PublicKey::new([7; 32]).unwrap();
+        let founding = crate::founding::create(admin).contains_key(&key);
+        let misplaced = (!founding).then_some(Problem::Misplaced { name: key, kind });
+        prop_assert_eq!(problems.first(), misplaced.as_ref());
     }
 
     #[test]

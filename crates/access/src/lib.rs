@@ -6,7 +6,7 @@
 pub mod proof;
 
 use spec::access::{Action, Actions, Policy};
-use spec::definition::Definition;
+use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use types::authority::Authority;
 use types::hash::{Map, Set};
@@ -27,6 +27,15 @@ impl Rules {
     /// prefix of a region, with [`Prefix::ROOT`] for the root region, and the
     /// definitions of its tree by name. Access keeps the access policies, the
     /// connectors, and the subjects, and ignores each other kind.
+    ///
+    /// Each tree must have no problem from [`spec::region::check`] at its prefix, as
+    /// the tree of the spec that a region uses has. Given another tree, a subject can
+    /// take the label of a subject of another region.
+    ///
+    /// # Panics
+    ///
+    /// When a subject definition is at a key that gives no label. A tree with no
+    /// problem from [`spec::region::check`] has none.
     pub fn new<'a, T>(trees: impl IntoIterator<Item = (Prefix, T)>) -> Self
     where
         T: IntoIterator<Item = (&'a Name, &'a Definition)>,
@@ -46,7 +55,13 @@ impl Rules {
                         rules.connectors.insert(name.clone());
                     }
                     Definition::Subject(subject) => {
-                        rules.subjects.insert(name.clone(), subject.clone());
+                        let label = Kind::Subject.label(name).unwrap_or_else(|| {
+                            panic!(
+                                "invariant: a tree with no problem from region::check \
+                                 has a label at each subject key, not at {name}"
+                            )
+                        });
+                        rules.subjects.insert(label, subject.clone());
                     }
                     Definition::Region(_)
                     | Definition::NodeSettings(_)

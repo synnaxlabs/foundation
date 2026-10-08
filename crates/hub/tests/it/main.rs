@@ -955,6 +955,51 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
 }
 
 #[test]
+fn refuses_a_string_sample_that_is_not_utf8() {
+    run(19, |test| async move {
+        test.hub.define(Channel {
+            key: channel::Key::from_u128(6),
+            name: name("text"),
+            data_type: Type::String,
+            index: channel::Key::from_u128(1),
+        });
+        let mut writer = test.writer("a", &["text"]).await;
+        let now = test.now();
+        let set = Arc::clone(writer.set());
+        let (index, text) = (entry(&set, 1), entry(&set, 6));
+        let raw = [&2_u32.to_le_bytes()[..], &[0xff, 0xfe]].concat();
+        let series = [(index, 8), (text, raw.len())];
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        draft
+            .series_mut(index)
+            .expect("the index")
+            .copy_from_slice(&now.to_le_bytes());
+        draft
+            .series_mut(text)
+            .expect("the text")
+            .copy_from_slice(&raw);
+        draft.set_count(0, 1);
+        let written = writer
+            .write(LIVE, draft)
+            .expect("the home takes it")
+            .to_vec();
+        let refusal = Refusal::Codec {
+            channel: channel::Key::from_u128(6),
+            error: codec::Error::Utf8 { sample: 0 },
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "channel 00000000-0000-0000-0000-000000000006: sample 0 is not UTF-8"
+        );
+        let refused = Outcome::Refused {
+            slot: Slot::new(0),
+            refusal,
+        };
+        assert_eq!(written, [refused], "A9: a string is UTF-8");
+    });
+}
+
+#[test]
 fn opens_a_writer_on_each_channel_once_with_its_index() {
     run(12, |test| async move {
         let channels = ["value", "time", "value", "value-b"];

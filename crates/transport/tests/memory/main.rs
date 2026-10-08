@@ -10,6 +10,7 @@ mod failed;
 mod held;
 mod kept;
 mod opened;
+mod stretch;
 
 use block::{Pool, Unique};
 
@@ -21,6 +22,7 @@ fn main() {
     kept::main();
     opened::main();
     failed::main();
+    stretch::main();
 }
 
 /// Takes every block of `pool` that could hold a message of `len` bytes.

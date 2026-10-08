@@ -5,8 +5,10 @@ use std::mem;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use block::Block;
 use bytes::{Bytes, BytesMut};
 use env::net::udp::{Meta, TRANSMIT_BYTES_MAX};
 use noq_proto::{
@@ -17,9 +19,11 @@ use types::ed25519::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
 use super::settings::{MTU_MIN, Settings};
+use super::stream::Sender;
 use super::{Endpoint, Event, SERVER_NAME, cid, connection, find, queue};
-use crate::Config;
-use crate::testing::Shard;
+use crate::stream::Part;
+use crate::testing::{self, Shard};
+use crate::{Config, Error};
 
 /// The client's address. The server's is [`SERVER`].
 pub(super) const CLIENT: SocketAddr =
@@ -76,6 +80,28 @@ pub(super) fn connection(
     let connection = find(&mut endpoint.connections, key).expect("a connection");
     queue(&mut endpoint.ready, connection);
     &mut connection.inner
+}
+
+/// [`Endpoint::write`] of all of `message`.
+pub(super) fn write(
+    endpoint: &mut Endpoint,
+    now: Monotonic,
+    sender: &Sender,
+    message: &mut Option<Block>,
+) -> Result<Poll<()>, Error> {
+    let whole = message.as_ref().map(Part::whole);
+    endpoint.write(now, sender, message, whole.as_slice())
+}
+
+/// [`Endpoint::try_write`] of all of `message`.
+pub(super) fn try_write(
+    endpoint: &mut Endpoint,
+    now: Monotonic,
+    sender: &Sender,
+    message: Block,
+) -> Result<Option<Block>, Error> {
+    let whole = Part::whole(&message);
+    endpoint.try_write(now, sender, message, &[whole])
 }
 
 /// The time `elapsed` after the start of a run.
@@ -139,10 +165,12 @@ impl Pair {
     ) -> Self {
         let mut config = shard.config(CLIENT_KEY, idle);
         change(&mut config);
-        let client = Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
+        let client =
+            Endpoint::new(&testing::setup(&config), CLIENT_SHARD, NonZeroUsize::MIN);
         let mut config = shard.config(SERVER_KEY, idle);
         change(&mut config);
-        let server = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+        let server =
+            Endpoint::new(&testing::setup(&config), SERVER_SHARD, NonZeroUsize::MIN);
         Self {
             now: Duration::ZERO,
             delay,
@@ -203,7 +231,8 @@ impl Pair {
     /// shard, as a restart does. The old connection is gone.
     pub(super) fn restart(&mut self, shard: &Shard) {
         let config = shard.config(SERVER_KEY, self.idle);
-        self.server.endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+        self.server.endpoint =
+            Endpoint::new(&testing::setup(&config), SERVER_SHARD, NonZeroUsize::MIN);
         self.server.key = None;
     }
 
@@ -331,7 +360,8 @@ impl Foreign {
         change: impl FnOnce(&mut TransportConfig),
     ) -> Self {
         let config = shard.config(FOREIGN_KEY, Span::SECOND);
-        let (settings, endpoint) = Settings::foreign(&config, FOREIGN_SHARD, change);
+        let (settings, endpoint) =
+            Settings::foreign(&testing::setup(&config), FOREIGN_SHARD, change);
         Self {
             epoch: config.clock.epoch(),
             settings,
