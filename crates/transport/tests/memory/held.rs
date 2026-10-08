@@ -17,9 +17,8 @@ use sim::node::Node;
 use transport::{Address, Class, Code, Error, Transport};
 use types::time::Span;
 
-use crate::ALLOCATOR;
 use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
-use crate::fill;
+use crate::{ALLOCATOR, fill};
 
 /// A message that the read takes over many polls.
 const LEN: usize = 60_000;
