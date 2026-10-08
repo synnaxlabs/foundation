@@ -2,9 +2,9 @@
 //! method with a `todo!` waits on the issue it names.
 
 use std::collections::BTreeMap;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::status::Connector;
 
 /// How long [`Rig::wait`] and [`Rig::run`] wait: longer than the 60 s cap of a restart
 /// backoff.
-const PATIENCE: Span = Span::from_nanos(90_000_000_000);
+pub(crate) const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 
 /// The time between two checks of a wait.
 const POLL: Duration = Duration::from_millis(100);
@@ -66,12 +66,12 @@ impl Rig {
     }
 
     /// Runs `foundation` with `args` in [`Rig::dir`], with no input, and gives its
-    /// output when it exits. When 90 s pass first, kills it and panics with the output
-    /// so far.
+    /// output when it exits and closes its pipes. When 90 s pass first, kills it and
+    /// panics with the output so far.
     pub(crate) fn run(&self, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
         command.args(args).current_dir(&self.dir);
-        run(&self.clock, PATIENCE, command)
+        run(&self.clock, PATIENCE, command, &[])
     }
 
     /// Calls `check` until it gives `Ok`, and gives that value. When 90 s pass first,
@@ -121,54 +121,110 @@ fn wait<T>(
     }
 }
 
-/// [`Rig::run`] of `command`, with `limit` in place of 90 s.
-fn run(clock: &Clock, limit: Span, mut command: Command) -> Output {
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the command");
-    let mut running = Running(child);
-    let stdout = Pipe::new(running.0.stdout.take().expect("piped"));
-    let stderr = Pipe::new(running.0.stderr.take().expect("piped"));
-    let status = wait(clock, limit, "the command exits", || {
-        match running.0.try_wait().expect("check the command") {
-            Some(status) => Ok(status),
-            None => Err(format!(
-                "stdout:\n{}\nstderr:\n{}",
-                stdout.text(),
-                stderr.text()
-            )),
+/// Runs `command` with `input` on its standard input, and gives its output when it
+/// exits and closes its pipes. When `limit` passes first, kills it and panics with the
+/// output so far.
+pub(crate) fn run(
+    clock: &Clock,
+    limit: Span,
+    command: Command,
+    input: &[u8],
+) -> Output {
+    let mut running = Running::new(command, input);
+    let status = wait(
+        clock,
+        limit,
+        "the command exits and closes its pipes",
+        || running.ended().ok_or_else(|| running.seen()),
+    );
+    running.output(status)
+}
+
+/// A command that runs, with a thread for each of its pipes.
+struct Running {
+    process: Process,
+    input: JoinHandle<()>,
+    stdout: Capture,
+    stderr: Capture,
+}
+
+impl Running {
+    /// Starts `command`, and writes `input` to it from a thread that then closes its
+    /// standard input.
+    fn new(mut command: Command, input: &[u8]) -> Self {
+        let child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the command");
+        let mut process = Process(child);
+        let mut stdin = process.0.stdin.take().expect("piped");
+        let input = input.to_vec();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a process test writes to another process while it runs"
+        )]
+        let input = std::thread::spawn(move || {
+            stdin.write_all(&input).expect("write the input");
+        });
+        Self {
+            input,
+            stdout: Capture::new(process.0.stdout.take().expect("piped")),
+            stderr: Capture::new(process.0.stderr.take().expect("piped")),
+            process,
         }
-    });
-    Output {
-        status,
-        stdout: stdout.end(),
-        stderr: stderr.end(),
+    }
+
+    /// The exit status, once the command has exited and each of its pipes has closed.
+    fn ended(&mut self) -> Option<ExitStatus> {
+        let status = self.process.0.try_wait().expect("check the command")?;
+        let closed =
+            self.input.is_finished() && self.stdout.ended() && self.stderr.ended();
+        closed.then_some(status)
+    }
+
+    /// What the command has written so far.
+    fn seen(&self) -> String {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            self.stdout.text(),
+            self.stderr.text()
+        )
+    }
+
+    /// The output of a command that [`Running::ended`] with `status`.
+    fn output(self, status: ExitStatus) -> Output {
+        self.input.join().expect("write the input");
+        Output {
+            status,
+            stdout: self.stdout.end(),
+            stderr: self.stderr.end(),
+        }
     }
 }
 
-/// A command that runs. Drop kills it, so a test that panics leaves no process.
-struct Running(Child);
+/// The process of a command. Drop kills it, so a test that panics leaves no
+/// `foundation` process. A process that it starts lives on: `foundation` starts none.
+struct Process(Child);
 
-impl Drop for Running {
+impl Drop for Process {
     fn drop(&mut self) {
         // `kill` gives `Ok` for a command that exited.
-        let killed = self.0.kill().and_then(|()| self.0.wait());
-        if !std::thread::panicking() {
-            killed.expect("kill the command");
-        }
+        self.0
+            .kill()
+            .and_then(|()| self.0.wait())
+            .expect("kill the command");
     }
 }
 
 /// One output of a command, which a thread reads as the command writes it.
-struct Pipe {
+struct Capture {
     bytes: Arc<Mutex<Vec<u8>>>,
     reader: JoinHandle<()>,
 }
 
-impl Pipe {
+impl Capture {
     fn new(mut from: impl Read + Send + 'static) -> Self {
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let to = Arc::clone(&bytes);
@@ -197,7 +253,12 @@ impl Pipe {
         String::from_utf8_lossy(&self.bytes.lock().expect("no panic")).into_owned()
     }
 
-    /// Waits for the end of the output, and gives all of it.
+    /// Whether the output has ended.
+    fn ended(&self) -> bool {
+        self.reader.is_finished()
+    }
+
+    /// All of the output. Blocks until it ends.
     fn end(self) -> Vec<u8> {
         self.reader.join().expect("read the output");
         std::mem::take(&mut *self.bytes.lock().expect("no panic"))
@@ -265,45 +326,74 @@ fn a_failed_test_keeps_its_panic_when_the_directory_is_gone() {
 }
 
 #[test]
-fn a_rig_runs_foundation_and_gives_its_output() {
-    let rig = Rig::new();
-    let output = rig.run(&["version"]);
-    assert_eq!(
-        (
-            output.status.code(),
-            crate::text(&output.stdout),
-            crate::text(&output.stderr)
-        ),
-        (
-            Some(0),
-            format!("{}\n", env!("CARGO_PKG_VERSION")).as_str(),
-            ""
-        )
-    );
-}
-
-#[test]
 #[cfg(unix)]
 fn a_run_past_its_limit_kills_the_command_and_panics_with_its_output() {
     let mut command = Command::new("sh");
     command.args(["-c", "echo $$; echo err >&2; exec sleep 60"]);
+    let clock = os::clock();
+    let started = clock.now();
     let limited =
-        std::panic::AssertUnwindSafe(|| run(&os::clock(), Span::SECOND, command));
+        std::panic::AssertUnwindSafe(|| run(&clock, Span::SECOND, command, &[]));
     let panic = std::panic::catch_unwind(limited).expect_err("the run panics");
+    let took = clock.now() - started;
     let message = panic.downcast_ref::<String>().expect("a message");
     let pid = message.lines().nth(2).expect("the PID");
     assert_eq!(
         message,
         &format!(
-            "the command exits: not within 1s. The last check saw:\nstdout:\n{pid}\n\n\
-             stderr:\nerr\n"
+            "the command exits and closes its pipes: not within 1s. The last check \
+             saw:\nstdout:\n{pid}\n\nstderr:\nerr\n"
         )
+    );
+    assert!(
+        took < Span::from_nanos(30_000_000_000),
+        "the kill took {took}"
     );
     let alive = Command::new("kill")
         .args(["-0", pid])
         .output()
         .expect("kill -0");
     assert_eq!(alive.status.code(), Some(1), "{pid} still runs");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_ends_at_its_limit_when_a_process_of_the_command_keeps_a_pipe() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "sleep 60 & echo $!"]);
+    let limited =
+        std::panic::AssertUnwindSafe(|| run(&os::clock(), Span::SECOND, command, &[]));
+    let panic = std::panic::catch_unwind(limited).expect_err("the run panics");
+    let message = panic.downcast_ref::<String>().expect("a message");
+    let pid = message.lines().nth(2).expect("the PID");
+    let killed = Command::new("kill").arg(pid).status().expect("kill");
+    assert_eq!(
+        message,
+        &format!(
+            "the command exits and closes its pipes: not within 1s. The last check \
+             saw:\nstdout:\n{pid}\n\nstderr:\n"
+        )
+    );
+    assert!(killed.success(), "{pid} was gone");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_ends_at_its_limit_when_the_command_reads_none_of_its_input() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 60"]);
+    let input = vec![0; 1 << 20];
+    let limited = std::panic::AssertUnwindSafe(|| {
+        run(&os::clock(), Span::SECOND, command, &input)
+    });
+    let panic = std::panic::catch_unwind(limited).expect_err("the run panics");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some(
+            "the command exits and closes its pipes: not within 1s. The last check \
+             saw:\nstdout:\n\nstderr:\n"
+        )
+    );
 }
 
 #[test]
