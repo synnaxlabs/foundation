@@ -18,7 +18,6 @@ cc = { workspace = true, optional = true }
 [dev-dependencies]
 cc = { workspace = true }
 env = { path = "../env" }
-proptest.workspace = true
 sim = { path = "../sim" }
 types = { path = "../types" }
 
