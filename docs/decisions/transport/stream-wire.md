@@ -28,8 +28,13 @@
   makes no debt and no credit, and pays off what it owes or is owed. While both
   classes wait, a class is owed at most one peer window of `Latest` bytes, so the
   credit of a whole message is never lost. A class that does not wait keeps no credit
-  past one peer window of its own bytes, so a class that starts again goes ahead of
-  the other by at most about one window. A class that holds less than its share when
+  past one peer window of its own bytes once the other class sent one peer window alone.
+  So a class that starts again after the other sent alone goes ahead of it by at most
+  about one window. After a pause in which neither class sends, each keeps the credit of
+  the time both waited, at most one peer window of `Latest` bytes, because no byte moves
+  in the pause and the share has no clock. When a simulation of a deployed load shows
+  `Latest` behind `Complete` by more than one window after such a pause, the share gets
+  a signal of the pause. A class that holds less than its share when
   QUIC gives room sends what it holds first, and the core holds no QUIC room for its
   later messages. So one `Latest` stream on `try_send` sends at most one message for
   each step of credit. Room that a stream got and its caller has not taken counts for
@@ -53,8 +58,8 @@
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069398776. Decided
   by architect-2 (#1998, 2026-10-08 21:44 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069633568. The cut
-  of the credit of a class that does not wait: architect-2 (#1998, 2026-10-08 22:18
-  UTC): https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070164489. Who
+  of the credit of a class that does not wait: architect-2 (#1998, 2026-10-08 22:51
+  UTC): https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279. Who
   writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
   admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC, and #1998,
