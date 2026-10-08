@@ -3654,8 +3654,9 @@ mod tests {
     }
 
     /// Gives node 1 a probe of leader 2 that it rejects, then `heartbeats`
-    /// heartbeats, with no read of a reply between them. Gives each reply to node 2.
-    async fn replies(mesh: &Mesh, clock: &Clock, heartbeats: usize) -> Vec<Body> {
+    /// heartbeats, with no read of a reply between them. Gives each reply that the
+    /// queue for node 2 then holds.
+    async fn queued(mesh: &Mesh, clock: &Clock, heartbeats: usize) -> Vec<Body> {
         let probe = Body::Append {
             prev: Position {
                 term: common::TERM,
@@ -3670,13 +3671,13 @@ mod tests {
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
         }
         clock.sleep(TICK).await;
-        let mut replies = Vec::new();
+        let mut queued = Vec::new();
         while let Poll::Ready(reply) = now(pin!(mesh.outgoing(key(2)))).await {
             let reply = reply.unwrap();
             assert_eq!(reply, message(1, 2, reply.body.clone()));
-            replies.push(reply.body);
+            queued.push(reply.body);
         }
-        replies
+        queued
     }
 
     #[test]
@@ -3685,7 +3686,7 @@ mod tests {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
             let mut expected = vec![Body::AppendReject { hint: 0 }];
             expected.resize(64, Body::HeartbeatReply);
-            assert_eq!(replies(&mesh, &node.clock(), 63).await, expected);
+            assert_eq!(queued(&mesh, &node.clock(), 63).await, expected);
         });
     }
 
@@ -3693,8 +3694,8 @@ mod tests {
     fn a_full_queue_drops_its_oldest_message() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let replies = replies(&mesh, &node.clock(), 64).await;
-            assert_eq!(replies, vec![Body::HeartbeatReply; 64]);
+            let queued = queued(&mesh, &node.clock(), 64).await;
+            assert_eq!(queued, vec![Body::HeartbeatReply; 64]);
         });
     }
 }
