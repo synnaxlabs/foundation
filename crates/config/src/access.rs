@@ -7,7 +7,7 @@ use spec::access::{Action, Actions, Policy};
 use spec::definition;
 use types::authority::Authority;
 
-use crate::{Definition, Found, one_of};
+use crate::{Definition, Found, one_of, written};
 
 const BAD_ACTION: Code = Code::new("config.bad-action");
 const EMPTY_ALLOW: Code = Code::new("config.empty-allow");
@@ -70,16 +70,12 @@ fn action(value: &Value) -> Result<Action, Diagnostic> {
         let fix = format!("Use {}", one_of(&words));
         Diagnostic::new(BAD_ACTION, value.span, message, fix)
     };
-    let word = match &value.kind {
-        Kind::String(text) => &**text,
-        Kind::Reference(name) => name.as_str(),
-        kind => {
-            return Err(refuse(format!(
-                "an action is a string or a reference, not {}",
-                kind.noun()
-            )));
-        }
-    };
+    let word = written(value).ok_or_else(|| {
+        refuse(format!(
+            "an action is a string or a reference, not {}",
+            value.kind.noun()
+        ))
+    })?;
     ACTIONS
         .iter()
         .find(|(known, _)| *known == word)

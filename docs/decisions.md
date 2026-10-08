@@ -3801,7 +3801,8 @@ How to read this record:
   the least, as default deny gives the least. Such a writer still takes control when no
   writer holds it (GATE RULES). An `authority` with no `write` is silent:
   `Policy::new` sets it to zero. Lost: an `authority` that `write` makes required, a
-  rule that C8 does not have. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  rule that C8 does not have. The action words are a table in `config` until a second
+  reader needs them; then `spec::access::Action` gets `FromStr` and `Display`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
 
 ### 1.12 Access, identity, and secrets

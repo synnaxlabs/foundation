@@ -137,6 +137,15 @@ fn channels(documents: &[Document]) -> BTreeSet<Name> {
         .collect()
 }
 
+/// The text of a string or a reference, as the file wrote it.
+fn written(value: &Value) -> Option<&str> {
+    match &value.kind {
+        document::value::Kind::String(text) => Some(text),
+        document::value::Kind::Reference(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 /// `words` in backticks, as a list that ends with "or".
 fn one_of(words: &[&str]) -> String {
     match words {
@@ -1725,7 +1734,11 @@ mod tests {
                 (list(vec![string("read"), string("write")]), &both[..]),
                 (list(vec![reference("read"), reference("write")]), &both[..]),
                 (list(vec![string("write"), reference("read")]), &both[..]),
+                (string("read"), &[Action::Read][..]),
                 (string("write"), &[Action::Write][..]),
+                (string("plan"), &[Action::Plan][..]),
+                (reference("apply"), &[Action::Apply][..]),
+                (string("secret"), &[Action::Secret][..]),
                 (reference("admin"), &[Action::Admin][..]),
                 (
                     list(vec![string("read"), reference("read")]),
@@ -1757,6 +1770,8 @@ mod tests {
             let read = check(&access(&attributes(string("write"), None))).unwrap();
             assert_eq!(read, allowed(&[Action::Write], 0));
             assert_eq!(policy(&read).authority(), Some(Authority(0)));
+            let zero = check(&access(&attributes(string("write"), Some(0)))).unwrap();
+            assert_eq!(zero, read);
         }
 
         #[test]
