@@ -4089,7 +4089,11 @@ How to read this record:
   by `laptop.architect-2`, #1604, 2026-10-07T20:24:12Z
   (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932). The
   caller sentence: `laptop.architect`, 2026-10-08T02:36:07Z
-  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051016964).
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051016964). The drop
+  sentence: `laptop.architect-2`, 2026-10-08T02:32:41Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
+  `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that

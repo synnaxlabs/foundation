@@ -258,9 +258,9 @@ pub enum Mode {
 }
 
 /// One open file. Its length does not change, and every read and write stays inside
-/// it. A failed or dropped [`File::sync`] poisons the file: every later call fails
-/// with [`Error::Poisoned`], because a second sync can report success for lost data.
-/// Close the file, then reopen it and recover.
+/// it. A failed or dropped [`File::sync`], or a dropped [`File::rename`], poisons the
+/// file: every later call fails with [`Error::Poisoned`], because a second sync can
+/// report success for lost data. Close the file, then reopen it and recover.
 ///
 /// Calls may overlap in time. A [`File::sync`] covers the writes that ended before it
 /// started. Where the ranges of calls in flight at the same time overlap, the bytes
@@ -618,8 +618,8 @@ pub enum Error {
         /// The path of the call.
         path: PathBuf,
     },
-    /// A sync of this file failed or was dropped earlier. Close it, then reopen it and
-    /// recover.
+    /// A sync of this file failed or was dropped earlier, or a rename of it was
+    /// dropped. Close it, then reopen it and recover.
     Poisoned {
         /// The path of the file.
         path: PathBuf,
