@@ -5631,6 +5631,71 @@ mod tests {
         }
 
         #[test]
+        fn a_latest_try_write_gives_back_while_complete_is_owed_and_waits() {
+            testing::run(1, |shard| {
+                let mut pair = connected(shard);
+                let mut complete = open_sender(&mut pair, Class::Complete);
+                fill(&mut pair, shard, &mut complete);
+                let owing = open_sender(&mut pair, Class::Latest);
+                let now = pair.now();
+                let message = shard.block(&[1; BULK]);
+                let written =
+                    pair.client.endpoint.write(now, &owing, &mut Some(message));
+                assert_eq!(written, Ok(Poll::Pending));
+                free(&mut pair);
+                let now = pair.now();
+                let flushed = pair.client.endpoint.write(now, &owing, &mut None);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                assert!(owed(&mut pair) > 0);
+                let mut late = open_sender(&mut pair, Class::Latest);
+                let now = pair.now();
+                let given =
+                    try_write(&mut pair.client, now, &mut late, shard.block(b"l"));
+                assert_eq!(given, Ok(Some(b"l".to_vec())));
+            });
+        }
+
+        #[test]
+        fn a_latest_try_write_gives_back_while_an_owed_complete_waits_for_room() {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let mut first = open_sender(&mut pair, Class::Complete);
+                fill(&mut pair, shard, &mut first);
+                let owing = open_sender(&mut pair, Class::Latest);
+                let now = pair.now();
+                let message = shard.block(&vec![1; MESSAGE_MAX - 1]);
+                let written =
+                    pair.client.endpoint.write(now, &owing, &mut Some(message));
+                assert_eq!(written, Ok(Poll::Pending));
+                let mut waiting =
+                    [Class::Complete; 3].map(|class| open_sender(&mut pair, class));
+                for (at, sender) in waiting.iter_mut().enumerate() {
+                    let len = if at == 0 {
+                        MESSAGE_MAX - 10
+                    } else {
+                        MESSAGE_MAX
+                    };
+                    let message = shard.block(&vec![2; len]);
+                    let written =
+                        pair.client.endpoint.write(now, sender, &mut Some(message));
+                    assert_eq!(written, Ok(Poll::Pending));
+                }
+                free(&mut pair);
+                let now = pair.now();
+                let flushed = pair.client.endpoint.write(now, &owing, &mut None);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                let flushed = pair.client.endpoint.write(now, &first, &mut None);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                assert!(owed(&mut pair) > 0);
+                let mut late = open_sender(&mut pair, Class::Latest);
+                let now = pair.now();
+                let given =
+                    try_write(&mut pair.client, now, &mut late, shard.block(b"l"));
+                assert_eq!(given, Ok(Some(b"l".to_vec())));
+            });
+        }
+
+        #[test]
         fn room_goes_to_complete_while_it_is_owed_bytes() {
             testing::run(1, |shard| {
                 let mut pair = narrow(shard);
