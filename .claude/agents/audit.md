@@ -24,8 +24,8 @@ code (a revert), with Write or Edit, never with a heredoc, `sed -i`, `perl -pi`,
 another edit in place in Bash: auto mode blocks some of those, and three blocks in a row
 stop the session.
 
-Read `CLAUDE.md`, the section of `docs/decisions.md` for the crates
-(`grep -n '^#' docs/decisions.md`, then that range), `docs/claude/testing.md`,
+Read `CLAUDE.md`, the records of `docs/decisions/` for the crates (the folder of their
+topic, and `grep -rl` for each crate name), `docs/claude/testing.md`,
 `docs/claude/performance.md`, and `docs/claude/design.md`. For the review trail, use
 `gh pr view <n> --comments`, `gh pr diff <n>`, `gh api
 repos/synnaxlabs/foundation/pulls/<n>/reviews` and `.../pulls/<n>/comments`, and the
@@ -42,10 +42,11 @@ Check, with file and line at the merge commit:
    the background, under `lockf -k ~/.cache/foundation-heavy.lock`, because it waits
    for the lock (`docs/coordination.md`, "Heavy runs on the laptop"). A bench starts
    only when `uptime` shows a load under 8, and the verdict names the load. Tests
-   check behavior through public calls, not a private field or the `Debug` string of
-   the type under test, unless a written reason holds and the assertion is not the
-   only kill of a mutant (`docs/claude/testing.md`). They cover the failure paths, and
-   each error is asserted by variant and message.
+   check behavior through public calls, not a private field or the `Debug` string of the
+   type under test (the test of a hand-written `Debug` impl itself excepted), unless a
+   written reason holds and the assertion is not the only kill of a mutant
+   (`docs/claude/testing.md`). They cover the failure paths, and each error is asserted
+   by variant and message.
 2. **Review trail.** List each round: its reviewers, its range, and its end time. Each
    round ended before the merge. The trail meets "Done" in
    `.claude/skills/review/SKILL.md`. Each finding was fixed, or answered or deferred

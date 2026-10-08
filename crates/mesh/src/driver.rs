@@ -131,9 +131,13 @@ impl fmt::Debug for Mesh {
 
 impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
-    /// its task on `config.tasks`. Homes are known again when this node applies the
-    /// log, after it hears the leader. It puts each chunk of the founding tree in
+    /// its task on `config.tasks`. It puts each chunk of the founding tree in
     /// `config.store`.
+    ///
+    /// At each open, its state starts at the founding: `pointer` gives version 0, and a
+    /// watch gives each home of `config.founding.homes`. The state moves on when this
+    /// node applies the log, after it hears the leader. Until then, a watch can give a
+    /// founding home that the log moved, as at a follower behind the leader.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the
@@ -581,9 +585,9 @@ impl fmt::Debug for Watch {
 impl Watch {
     /// The first call returns the home of the index at once. Each later call waits
     /// until the home differs from the one it last returned, and returns the newest:
-    /// two changes between calls give one result. `None` means that no applied entry
-    /// set a home for the index. It is never `None` after a home, because no change
-    /// clears a home.
+    /// two changes between calls give one result. `None` means that the index has no
+    /// home in this node's state: no founding home and no applied entry gives one. It
+    /// is never `None` after a home, because no change clears a home.
     ///
     /// # Errors
     ///

@@ -1,4 +1,4 @@
-//! The crate map. It must match section 4 of `docs/decisions.md`.
+//! The crate map. It must match `docs/decisions/crate-map.md`.
 
 /// One crate in the map.
 pub(crate) struct Crate {
@@ -176,6 +176,7 @@ pub(crate) const CRATES: &[Crate] = &[
         name: "hub",
         layer: 2,
         deps: Deps::Only(&[
+            "access",
             "env",
             "types",
             "block",

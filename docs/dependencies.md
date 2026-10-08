@@ -38,7 +38,7 @@ approval; pin the version you build against there.
 | `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.1.0 | 2026-10-06 |
 | `rustc-hash` | `types` (`types::hash::Map` and `Set`) | The fixed, fast hasher of every hash map (R16-7, #1321): SipHash cost 8.5 ns of 131 ns per 64 B `transport` write (#1308, #1399). Already in the build through `noq-proto`. The person: "Yeah I approve" (https://github.com/synnaxlabs/foundation/issues/1321#issuecomment-6039851114) | MIT or Apache-2.0 | 2.1.3 | 2026-10-07 |
 | `cc` | `connector-opcua` (build dependency, feature `open62541`; dev-dependency, the tests of `build/compiler.rs`) | Compiles the open62541 copy and `shim.c` in `build.rs`, with no CMake (#435). Already in the build through `aws-lc-sys`. The person: "Yes" (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544). Dev-dependency approved by `laptop.architect-2` (https://github.com/synnaxlabs/foundation/pull/1915#issuecomment-6064248826, 2026-10-08 16:20 UTC) | MIT or Apache-2.0 | 1.6.0 | 2026-10-08 |
-| `open62541` (C library, the upstream source files in `patches/open62541/`, not a crate) | `connector-opcua` (feature `open62541`) | The OPC UA client, with a passive event loop that Rust drives under `sim` (#435). `cargo deny` checks only crates, so `deny.toml` has no entry for it | MPL-2.0; CC0-1.0 in `plugins/`; in `deps/`, MIT (`itoa`, `libc_time`, `mp_printf`, `musl_inet_pton`, `parse_num`), BSL-1.0 (`dtoa`), BSD (`base64`, `open62541_queue.h`), and Apache-2.0 (`pcg_basic`) | 1.5.9 | 2026-10-08 (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544) |
+| `open62541` (C library, the upstream source files in `patches/open62541/`, not a crate) | `connector-opcua` (feature `open62541`) | The OPC UA client, with a passive event loop that Rust drives under `sim` (#435). `cargo deny` checks only crates, so `deny.toml` has no entry for it | MPL-2.0; CC0-1.0 in `plugins/`; in `deps/`, MIT (`itoa`, `libc_time`, `mp_printf`, `musl_inet_pton`, `parse_num`), BSL-1.0 (`dtoa`), BSD (`base64`, `open62541_queue.h`), and Apache-2.0 (`pcg_basic`). The person approved the licences other than MPL-2.0: "Yes" (2026-10-08T16:55Z, relayed by `laptop.monitor`, https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6064860782) | 1.5.9 | 2026-10-08 (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544) |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
@@ -52,11 +52,11 @@ exception when the patch lands (#55).
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 `fuzz/Cargo.toml`, keep the change small, and list it here with its reason. The
-patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`). A C
-library that we patch (open62541) has no `[patch.crates-io]`: its `build.rs` reads
-`patches/open62541/`. Searches skip `patches/` (`.ignore`): to search a copy, give its
-path or use `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables
-equal (#1867).
+patched copy lives in `patches/<crate>/` (LOCAL PATCHES in
+`docs/decisions/releases/local-patches.md`). A C library that we patch (open62541) has
+no `[patch.crates-io]`: its `build.rs` reads `patches/open62541/`. Searches skip
+`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`. No
+check yet keeps the two `[patch.crates-io]` tables equal (#1867).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
@@ -91,6 +91,7 @@ so the `Advisories of each patched release` step of the `deny` job in
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `noq-udp` | 1.3.0 | None yet | One send that gets `EIO` or `EINVAL` turns off GSO for the life of the socket, and one that gets `EINVAL` also turns off the IPv4 ECN mark, also when the cause is a bad source or port 0 of that one transmit (#1972) |
 | `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`), and a draw on a thread with no start value aborts | With one state per process, the values of a test server depend on the draws of other threads; a thread with no start value draws the same values as each other such thread (#435) |
 
 ## Tests, benchmarks, and tools

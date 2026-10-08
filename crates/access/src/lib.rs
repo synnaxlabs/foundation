@@ -14,8 +14,9 @@ use types::name::{Name, Prefix};
 
 /// The access rules of a mesh: its access policies, its connectors, and the keys of
 /// its subjects. Owners build one from the spec they read and ask it for each
-/// decision.
-#[derive(Clone, Debug)]
+/// decision. The default has no subject, policy, or connector, so [`Rules::admit`]
+/// refuses each hello that has mesh time with [`proof::Error::Unknown`].
+#[derive(Clone, Debug, Default)]
 pub struct Rules {
     policies: Vec<(Prefix, Policy)>,
     connectors: Set<Name>,
@@ -40,11 +41,7 @@ impl Rules {
     where
         T: IntoIterator<Item = (&'a Name, &'a Definition)>,
     {
-        let mut rules = Self {
-            policies: Vec::new(),
-            connectors: Set::default(),
-            subjects: Map::default(),
-        };
+        let mut rules = Self::default();
         for (region, tree) in trees {
             for (name, definition) in tree {
                 match definition {

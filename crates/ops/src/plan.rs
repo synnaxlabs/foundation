@@ -21,7 +21,7 @@ mod tests;
 /// # Errors
 ///
 /// [`Error::Config`] with each problem of [`front_end::read`], else with each problem
-/// of [`config::plan`].
+/// of [`config::plan::plan`].
 ///
 /// # Panics
 ///
@@ -43,12 +43,12 @@ pub(crate) fn plan(
         Error::Config(problems)
     };
     let documents = front_end::read(files, front_ends).map_err(failed)?;
-    let plan =
-        config::plan(&documents, base, applied, members, kinds).map_err(failed)?;
+    let plan = config::plan::plan(&documents, base, applied, members, kinds)
+        .map_err(failed)?;
     let mut changes: Vec<(Order, Change)> = plan
         .changes
         .iter()
-        .map(|change| Change::of(change, applied, &paths))
+        .map(|(name, change)| Change::of(name, change, applied, &paths))
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
@@ -143,7 +143,8 @@ type Order = (bool, Option<(Source, u32)>, Name);
 
 impl Change {
     fn of(
-        change: &config::Change,
+        name: &Name,
+        change: &config::plan::Change,
         applied: &BTreeMap<Name, Definition>,
         paths: &[PathBuf],
     ) -> (Order, Self) {
@@ -161,15 +162,15 @@ impl Change {
             (action, kind, entry.label_span)
         } else {
             let stored = applied
-                .get(&change.name)
+                .get(name)
                 .expect("invariant: a removal is of an applied definition");
             (Action::Remove, stored.kind(), None)
         };
         let label = kind
-            .label(&change.name)
+            .label(name)
             .expect("invariant: a planned change is at a tree key of its kind");
         let at = span.map(|span| (span.source(), span.start().offset));
-        let order = (at.is_none(), at, change.name.clone());
+        let order = (at.is_none(), at, name.clone());
         let change = Self {
             action,
             kind: kind.as_str().to_owned(),
@@ -206,7 +207,10 @@ fn place(span: Span, paths: &[PathBuf]) -> Place {
         .expect("invariant: a span is in a file of the plan");
     let start = span.start();
     Place {
-        file: path.display().to_string(),
+        file: path
+            .to_str()
+            .expect("invariant: `read` refuses a path that is not UTF-8")
+            .to_owned(),
         line: start.line + 1,
         column: start.column + 1,
     }

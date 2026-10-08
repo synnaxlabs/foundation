@@ -1800,9 +1800,9 @@ mod hub {
 
     use super::*;
 
-    const I64: Type = Type::Scalar(Scalar::I64);
+    pub(super) const I64: Type = Type::Scalar(Scalar::I64);
     /// The wall time when a host is added, which is before the node's mesh time.
-    const WALL: i64 = 1_767_225_600_000_000_000;
+    pub(super) const WALL: i64 = 1_767_225_600_000_000_000;
 
     fn name(name: &str) -> Name {
         name.parse().expect("a valid name")
@@ -1820,7 +1820,7 @@ mod hub {
     }
 
     /// The data channel `key` of `data_type` on the index `index`.
-    fn data(key: u128, data_type: Type, index: u128) -> Channel {
+    pub(super) fn data(key: u128, data_type: Type, index: u128) -> Channel {
         let index = Key::from_u128(index);
         let data = Data::new(index, None, DataType::Sample(data_type), None);
         Channel {
@@ -1866,7 +1866,7 @@ mod hub {
     }
 
     /// Writes one sample at `stamp` to `time` and `value` to `value`.
-    fn write(writer: &mut Writer, stamp: i64, value: i64) {
+    pub(super) fn write(writer: &mut Writer, stamp: i64, value: i64) {
         let set = writer.set();
         let (time, data) = (entry(set, 1), entry(set, 2));
         let group = set.entries()[time].group;
@@ -1883,7 +1883,7 @@ mod hub {
     }
 
     /// The samples of channel `key` in `received`.
-    fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
+    pub(super) fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
         let entry = entry(received.set, key);
         let entries = received.set.entries();
         let range = received.view.range(entries[entry].group).expect("a range");
@@ -2093,9 +2093,10 @@ mod hub {
         let host = host(&mut sim, 1);
         let opened = sim.run_on(&host, move |host, tasks| async move {
             let stop = Stop::default();
-            let (open, pool, next, _) =
+            let (open, pool, next, time) =
                 super::home::create_open(&host, &tasks, 0, stop.clone());
             let monotonic = host.clock();
+            let entropy = host.entropy();
             let spawn = tasks.clone();
             let hold = async move |home, guard| {
                 let interner = next.await.expect("the open gives the interner");
@@ -2103,6 +2104,9 @@ mod hub {
                     home,
                     interner,
                     tasks: spawn,
+                    node: types::node::Key::from_u128(1),
+                    time,
+                    entropy,
                 });
                 define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;
@@ -2623,6 +2627,7 @@ mod port {
 
     mod mesh {
         use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         use ::mesh::card::addresses::Addresses;
         use ::mesh::card::{self, Card};
@@ -2656,6 +2661,21 @@ mod port {
 
         /// The first file of the mesh's log.
         const LOG: &str = "mesh/log/log-0";
+        /// A time by which the mesh of a node opens, and before its first write after
+        /// the open.
+        const OPEN: Span = Span::from_nanos(10_000_000);
+        /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
+        /// fails from [`OPEN`] stops the group in the sim.
+        const WRITE: i64 = 1_792_298_042;
+
+        /// Why the group stops when a write of [`LOG`] fails.
+        fn write_failed() -> ::mesh::Stopped {
+            ::mesh::Stopped::Write(::mesh::log::Error::Files(env::files::Error::Io {
+                path: PathBuf::from(LOG),
+                operation: env::files::Operation::WriteAt,
+                code: 5,
+            }))
+        }
 
         /// The member `key` with `private_key`, whose node listens on `host`.
         fn member(
@@ -2701,6 +2721,110 @@ mod port {
                 region: Some(region),
                 ..config(host, Size::MEBIBYTE, Box::new(heap))
             })
+        }
+
+        /// The region of the node [`OWN`] on `host` alone, whose founding spec holds
+        /// the index `plant.time` (key 1) and the data channel `plant.value` (key 2).
+        fn founded(host: &sim::node::Node) -> Founding {
+            use super::super::hub::{I64, data, index};
+            let mut founding = region(&[member(OWN, &KEY, host)]);
+            let channels = [("plant.time", index(1)), ("plant.value", data(2, I64, 1))];
+            for (name, channel) in channels {
+                let name = name.parse().unwrap();
+                founding
+                    .definitions
+                    .insert(name, Definition::Channel(channel));
+            }
+            founding
+        }
+
+        /// Starts the node [`OWN`] on `host` with the region [`founded`], and gives
+        /// what a task reads back after it writes 7 at `stamp` to `plant.value`, by
+        /// name: the samples of keys 1 and 2.
+        fn round_trip(
+            sim: &mut sim::Sim,
+            host: &sim::node::Node,
+            stamp: i64,
+        ) -> Option<(Vec<i64>, Vec<i64>)> {
+            use super::super::hub::{samples, write, writer};
+            let node = start(host, (OWN, KEY), founded(host));
+            let read = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&read);
+            let clock = host.clock();
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mut reader = reader.expect("the reader opens");
+                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                write(&mut writer, stamp, 7);
+                let received = reader.next().await.expect("a frame");
+                *out.lock().unwrap() =
+                    Some((samples(&received, 1), samples(&received, 2)));
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            read.lock().unwrap().take()
+        }
+
+        /// The hub knows each channel of the founding spec, so a task opens a writer
+        /// and a reader on them by name.
+        #[test]
+        fn a_task_opens_sessions_on_the_channels_of_the_founding_spec() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let stamp = super::super::hub::WALL;
+            let read = round_trip(&mut sim, &host, stamp);
+            assert_eq!(read, Some((vec![stamp], vec![7])));
+        }
+
+        /// A founding with a data channel whose index the spec does not hold fails the
+        /// node at its first open.
+        #[test]
+        fn a_founding_with_a_dangling_index_fails_the_node() {
+            use super::super::hub::{I64, data};
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let mut founding = region(&[member(OWN, &KEY, &host)]);
+            let name = "plant.value".parse().unwrap();
+            let channel = Definition::Channel(data(2, I64, 1));
+            founding.definitions.insert(name, channel);
+            let node = start(&host, (OWN, KEY), founding);
+            let index = types::channel::Key::from_u128(1);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: format!(
+                        "the index {index} of channel plant.value is not a known index"
+                    ),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(
+                node.join(),
+                Err(Error::Panicked(thread::Panicked {
+                    name: "shard-0".into()
+                }))
+            );
+        }
+
+        /// The node defines the founding channels at each open, not only at the
+        /// first.
+        #[test]
+        fn a_node_that_opens_again_knows_the_founding_channels() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let stamp = super::super::hub::WALL;
+            assert!(
+                round_trip(&mut sim, &host, stamp).is_some(),
+                "the first open"
+            );
+            let later = stamp + TEN.nanos();
+            let read = round_trip(&mut sim, &host, later);
+            assert_eq!(read, Some((vec![later], vec![7])));
         }
 
         /// The node with key [`OWN`] on `host`, the one member and voter of its region.
@@ -2917,6 +3041,169 @@ mod port {
                 Error::Mesh(error.clone()).to_string(),
                 format!("the node's mesh did not open: {error}")
             );
+        }
+
+        /// A mesh whose group stops stops the node, and `join` gives why.
+        #[test]
+        fn a_mesh_whose_group_stops_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Err(Error::Group(write_failed())));
+            assert_eq!(
+                Error::Group(write_failed()).to_string(),
+                format!("the group of the node's mesh stopped: {}", write_failed())
+            );
+        }
+
+        /// A task whose drop panics as the mesh's group stops: `join` ranks the
+        /// group's stop above the panic.
+        #[test]
+        fn a_panic_as_the_group_stops_gives_the_group_error() {
+            struct Panics;
+            impl Drop for Panics {
+                fn drop(&mut self) {
+                    panic!("a task's drop panics");
+                }
+            }
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            node.spawn(|_| {
+                let panics = Panics;
+                async move {
+                    std::future::pending::<()>().await;
+                    drop(panics);
+                }
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: "a task's drop panics".into(),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Err(Error::Group(write_failed())));
+        }
+
+        /// A task that wakes as the group stops, and panics after three yields, when
+        /// the group has stopped but the node has not seen it: `join` gives the panic.
+        #[test]
+        fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let at =
+                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            let own = host.clone();
+            node.spawn(move |_| async move {
+                own.clock().sleep_until(at).await;
+                for _ in 0..3 {
+                    let mut yielded = false;
+                    poll_fn(|cx| {
+                        if yielded {
+                            return Poll::Ready(());
+                        }
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    })
+                    .await;
+                }
+                panic!("a task panics");
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: "a task panics".into(),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(
+                node.join(),
+                Err(Error::Panicked(thread::Panicked {
+                    name: "shard-0".into()
+                }))
+            );
+        }
+
+        /// Breaks the node's UDP socket from a task on shard 0 at `OPEN + after`, with
+        /// each write of the log failing from `OPEN`. Gives whether the task ran, and
+        /// the node's `join`.
+        fn udp_fault_at(after: Span) -> (bool, Result<(), Error>) {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let at = sim::node::Config::default().monotonic + OPEN + after;
+            let ran = Arc::new(AtomicBool::new(false));
+            let (own, done) = (host.clone(), Arc::clone(&ran));
+            node.spawn(move |_| async move {
+                own.clock().sleep_until(at).await;
+                own.fail_udp(listen(&own));
+                done.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run(), Ok(()));
+            (ran.load(Ordering::SeqCst), node.join())
+        }
+
+        /// Of a transport and a group that stop, `join` gives the one that the node
+        /// sees first, which at one instant can be either. A transport that stops
+        /// drops the mesh, so the node sees the group's `Dropped` at the same poll.
+        #[test]
+        fn join_gives_the_stop_that_the_node_sees_first() {
+            let error = transport::Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(
+                udp_fault_at(Span::from_nanos(WRITE - 1)),
+                (true, Err(Error::Transport(error)))
+            );
+            assert_eq!(
+                udp_fault_at(Span::from_nanos(WRITE)),
+                (true, Err(Error::Group(write_failed())))
+            );
+            assert_eq!(
+                udp_fault_at(Span::from_nanos(WRITE + 1)),
+                (false, Err(Error::Group(write_failed())))
+            );
+        }
+
+        /// A stop of the node from a task on shard 0, at the instant the group stops:
+        /// the node sees both at one poll, and its stop ranks first.
+        #[test]
+        fn a_stop_as_the_group_stops_gives_no_error() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = Arc::new(std::sync::Mutex::new(start_alone(&host)));
+            let at =
+                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            let (own, stops) = (host.clone(), Arc::clone(&node));
+            node.lock()
+                .expect("no panic holds the lock")
+                .spawn(move |_| async move {
+                    own.clock().sleep_until(at).await;
+                    stops.lock().expect("no panic holds the lock").stop();
+                });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(sim.run(), Ok(()));
+            let node = Arc::into_inner(node).expect("shard 0 dropped the task");
+            let node = node.into_inner().expect("no panic holds the lock");
+            assert_eq!(node.join(), Ok(()));
         }
 
         /// A chunk store that does not open stops the node, and `join` gives why.
