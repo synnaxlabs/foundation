@@ -1,7 +1,9 @@
 //! `get`, `apply`, and `diff` of `spec::tree` never panic on chunks from a peer. On a
 //! tree that a `diff` from the empty tree reads whole, that `diff` lists the entries
 //! in name order, `get` agrees with it on each name, and `apply` gives a tree whose
-//! entries are those entries with the changes.
+//! entries are those entries with the changes. `spec::region::definitions` gives the
+//! error of that `diff`, the first entry in name order that is not a definition, or
+//! the decoded entries exactly when `spec::region::tree` of them has the same root.
 //!
 //! Input: a count of chunks, each a count of pieces, each a length, bytes, and a
 //! link; then changes to the end, each a length, a name, and a length and value, where
@@ -14,6 +16,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use libfuzzer_sys::fuzz_target;
+use spec::definition::Definition;
+use spec::region;
 use spec::tree::{self, Change, Chunks, Diff, Error};
 use types::digest::Digest;
 use types::name::Name;
@@ -84,6 +88,7 @@ fn check(
     {
         named(chunks, error);
     }
+    read(chunks, root, &whole);
     let applied = tree::apply(chunks, root, changes.iter().cloned());
     if let Err(error) = &applied {
         named(chunks, error);
@@ -119,6 +124,34 @@ fn check(
         made,
         Ok(update.chunks),
         "the update does not list the chunks it made"
+    );
+}
+
+/// `region::definitions` of the tree at `root`, where `whole` is its `diff` from the
+/// empty tree.
+fn read(chunks: &Chunks, root: Digest, whole: &Result<Vec<(Name, Vec<u8>)>, Error>) {
+    let expected = whole
+        .clone()
+        .map_err(region::Error::Tree)
+        .and_then(|entries| {
+            let definitions = entries
+                .into_iter()
+                .map(|(key, bytes)| match Definition::decode(&bytes) {
+                    Ok(definition) => Ok((key, definition)),
+                    Err(error) => Err(region::Error::Definition { key, error }),
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            let rebuilt = region::tree(&mut Chunks::default(), &definitions).root;
+            if rebuilt == root {
+                Ok(definitions)
+            } else {
+                Err(region::Error::Tree(Error::Corrupt(root)))
+            }
+        });
+    assert_eq!(
+        region::definitions(chunks, root),
+        expected,
+        "definitions is not the decode of the tree"
     );
 }
 
