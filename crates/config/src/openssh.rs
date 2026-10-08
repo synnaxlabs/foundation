@@ -1,6 +1,9 @@
+//! The OpenSSH form of an Ed25519 public key.
+
 use std::fmt;
 
-use base64ct::{Base64, Encoding};
+use ssh_key::HashAlg;
+use ssh_key::public::Ed25519PublicKey;
 use types::ed25519::PublicKey;
 
 const ALGORITHM: &str = "ssh-ed25519";
@@ -28,11 +31,6 @@ const OTHER_ALGORITHMS: [&str; 17] = [
 /// Each Unicode line break.
 const LINE_BREAKS: [char; 7] =
     ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
-/// The decoded key of an Ed25519 line starts with the length and the name of its
-/// algorithm, then the length of the key.
-const BLOB_START: &[u8; 19] = b"\0\0\0\x0bssh-ed25519\0\0\0\x20";
-/// The length of the decoded key of an Ed25519 line: [`BLOB_START`] and the key.
-const BLOB_BYTES: usize = 51;
 
 /// Why a text is not the line of an OpenSSH `.pub` file of an Ed25519 key. Its message
 /// quotes no part of the text after the first word, since that part can be a secret.
@@ -84,11 +82,29 @@ pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
     if text.trim().contains(LINE_BREAKS) {
         return Err(Error::Lines);
     }
-    let mut blob = [0; BLOB_BYTES];
-    let bytes = Base64::decode(encoded, &mut blob)
-        .ok()
-        .and_then(|blob| blob.strip_prefix(BLOB_START))
-        .and_then(|key| <[u8; 32]>::try_from(key).ok())
-        .ok_or(Error::NotEd25519)?;
+    // `ssh-key` splits the words only at one space, and OpenSSH at any run of spaces
+    // and tabs. `from_openssh` accepts a key length field over 32 when 32 bytes
+    // follow, so the key must write back to the same line.
+    let line = format!("{ALGORITHM} {encoded}");
+    let key = ssh_key::PublicKey::from_openssh(&line).or(Err(Error::NotEd25519))?;
+    let written = key.to_openssh().unwrap_or_else(|_| {
+        unreachable!("invariant: `ssh-key` writes each Ed25519 key that it reads")
+    });
+    if written != line {
+        return Err(Error::NotEd25519);
+    }
+    let Some(&Ed25519PublicKey(bytes)) = key.key_data().ed25519() else {
+        unreachable!(
+            "invariant: `ssh-key` refuses a key of another algorithm than the text"
+        );
+    };
     PublicKey::new(bytes).map_err(Error::SmallOrder)
+}
+
+/// The `SHA256:` fingerprint of `key`, as `ssh-keygen -l` writes it.
+#[must_use]
+pub fn fingerprint(key: PublicKey) -> String {
+    ssh_key::PublicKey::from(Ed25519PublicKey(key.to_bytes()))
+        .fingerprint(HashAlg::Sha256)
+        .to_string()
 }

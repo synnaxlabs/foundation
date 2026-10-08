@@ -694,7 +694,7 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
         for (key, name) in KEYS.zip(&names) {
             test.hub.define([(
                 &super::name(name),
-                &super::spec_channel(key, DataType::Sample(I64), 1),
+                &super::definition(key, DataType::Sample(I64), 1),
             )]);
         }
         let names: Vec<_> = names.iter().map(String::as_str).collect();
@@ -744,7 +744,7 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let home = |test: Test, link: Link, incoming| async move {
         test.hub.define([(
             &super::name("text"),
-            &super::spec_channel(6, DataType::Sample(Type::String), 1),
+            &super::definition(6, DataType::Sample(Type::String), 1),
         )]);
         let mut writer = test.writer("a", &["text", "value"]).await;
         let (clock, now) = (test.clock.clone(), test.now());
@@ -812,7 +812,7 @@ fn sends_no_message_for_a_last_series_of_no_bytes() {
         for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
             test.hub.define([(
                 &super::name(name),
-                &super::spec_channel(key, DataType::Sample(data_type), 1),
+                &super::definition(key, DataType::Sample(data_type), 1),
             )]);
         }
         let names: Vec<_> = names.iter().map(String::as_str).collect();
@@ -1042,7 +1042,7 @@ fn stops_a_session_whose_ends_find_the_pool_empty_with_busy() {
         for (&key, name) in WIDE[3..].iter().zip(&names[2..]) {
             test.hub.define([(
                 &super::name(name),
-                &super::spec_channel(key, DataType::Sample(I64), 1),
+                &super::definition(key, DataType::Sample(I64), 1),
             )]);
         }
         let names = [
