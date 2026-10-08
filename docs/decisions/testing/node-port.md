@@ -54,4 +54,6 @@
   waits for each task of the mesh to end, and the transport drops with the last of the
   port's future and the tasks of the mesh. This holds also when the mesh stops before
   the node, which then keeps serving until #1780 stops it:
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010.
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Supersedes
+  the drop of the transport of
+  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
