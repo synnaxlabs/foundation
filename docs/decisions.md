@@ -4054,11 +4054,14 @@ How to read this record:
   three spaces, opens it, and a like fence closes it, or it runs to the end of the
   comment. It does not see an HTML block or HTML comment, or a fence after a list marker
   or a quote mark. In an old round, it does not see a `Reviewers:` or `Hot path:` line
-  with four or more spaces of indent that continues a paragraph or is a paragraph in a
-  list item, which GitHub shows as text; such a `Hot path:` line does not ask for
-  `performance`. On 2026-10-08, no old round of the 28 open PRs hit either case
-  (58 rounds read). Decided by the director at 2026-10-08T05:13:45Z
-  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147).
+  with four or more spaces of indent, or a tab in its indent, that continues a
+  paragraph or is a paragraph in a list item, which GitHub shows as text; such a
+  `Hot path:` line does not ask for `performance`. On 2026-10-08, no old round of the
+  28 open PRs hit any of these cases (58 rounds read). Decided by the director at
+  2026-10-08T05:13:45Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147) and
+  2026-10-08T05:31:31Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328).
   https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
   does. A round comment posted before the cutoff `CUTOFF` in
   `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
@@ -4072,7 +4075,7 @@ How to read this record:
   `performance` in its `Reviewers:` field, read as before. One that does not parse
   names it in any `Reviewers:` line of its text. A `Hot path:` line counts anywhere in
   its text. Each `Reviewers:` line of a round that does not parse, and each `Hot path:`
-  line, has at most three spaces of indent. Decided by the director at
+  line, has at most three spaces of indent and no tab. Decided by the director at
   2026-10-08T04:42:33Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062).
   The last round finds none and ends at the head, or at a commit that reaches the head
