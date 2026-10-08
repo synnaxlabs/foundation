@@ -65,6 +65,11 @@ impl State {
         Ok(state)
     }
 
+    /// The prefix of the region.
+    pub(crate) fn prefix(&self) -> &Prefix {
+        &self.region
+    }
+
     /// The member with `key`, or `None` when the region has no such member.
     pub(crate) fn member(&self, key: node::Key) -> Option<&Member> {
         self.members.get(&key)
@@ -123,11 +128,7 @@ impl State {
                 pointer: self.pointer,
             });
         }
-        let version = base
-            .version
-            .checked_add(1)
-            .expect("invariant: fewer than 2^64 spec changes apply");
-        self.pointer = Pointer { version, root };
+        self.pointer = base.next(root);
         Ok(())
     }
 
