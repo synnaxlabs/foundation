@@ -4241,7 +4241,9 @@ How to read this record:
   `verify` of any `&Hello`, which accepts a key that the program picked when a caller
   skips `admit`; and `Error::Connection`, which the signature makes needless. `admit`
   does not check `nonce`: the node that `via` names checks that it is the challenge
-  that it sent (#1748). A hosted proof waits on #1832. Decided by `laptop.architect` at
+  that it sent (#1748; `laptop.architect`, 2026-10-08T08:10:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). A
+  hosted proof waits on #1832. Decided by `laptop.architect` at
   2026-10-08T07:35:46Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
@@ -4253,6 +4255,8 @@ How to read this record:
   applied in #1402. The trees in place of the policies: `laptop.architect`,
   2026-10-08T03:01:36Z
   ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
+  The subjects: `laptop.architect`, 2026-10-08T08:10:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
