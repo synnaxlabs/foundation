@@ -4681,6 +4681,8 @@ How to read this record:
   for a result from `spawn`. `Error::Transport` over a panic after the transport stopped
   decided by `laptop.architect-2` (2026-10-08T03:21:42Z):
   https://github.com/synnaxlabs/foundation/pull/1769#issuecomment-6051497737.
+  Supersedes the panic error of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
 - **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
   on `Config::net` before any shard starts; a failed bind starts no shard, and
   `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which

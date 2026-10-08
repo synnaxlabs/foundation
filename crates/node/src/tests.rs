@@ -491,6 +491,22 @@ fn fate(fate: &Mutex<Fate>) -> Fate {
     *fate.lock().unwrap()
 }
 
+/// A private call: in `sim` a shard panics before its open or after each open, so no
+/// run gives this order. On real threads, the mesh clock of shard 0 can panic while a
+/// later shard opens.
+#[test]
+fn join_gives_a_later_shard_error_over_an_earlier_panic() {
+    let panicked = thread::Panicked {
+        name: "shard-0".to_owned(),
+    };
+    let shards = Error::Shards {
+        stored: 2,
+        cores: 3,
+    };
+    let all = vec![(Err(panicked), None), (Ok(()), Some(shards.clone()))];
+    assert_eq!(crate::error(None, all), Err(shards));
+}
+
 mod buffer {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -863,20 +879,21 @@ mod buffer {
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
-            // Before the restart, which would make a ring that a stop cut.
+            // A smaller budget makes a ring with no checkpoint again at its new part,
+            // so only a whole ring keeps its size.
+            let restart = run_on_disk(&mut sim, &host, 3 * RING);
+            assert_eq!(restart, Ok(()), "at {after:?}");
             for core in 0..3 {
-                let dir = format!("shard-{core}");
-                if !listed.contains(&PathBuf::from(&dir)) {
-                    continue;
-                }
-                let ring = [PathBuf::from("ring")];
-                let files = super::listed(&mut sim, &host, &dir);
-                assert_eq!(files, ring, "{dir} at {after:?}");
+                let dir = PathBuf::from(format!("shard-{core}"));
                 // `DISK` splits into three whole parts, with no remainder.
-                let len = ring_len(&mut sim, &host, core);
-                assert_eq!(len, DISK.bytes() / 3, "{dir} at {after:?}");
+                let len = if listed.contains(&dir) {
+                    DISK.bytes() / 3
+                } else {
+                    RING
+                };
+                let ring = ring_len(&mut sim, &host, core);
+                assert_eq!(ring, len, "{dir:?} at {after:?}");
             }
-            assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
         }
         assert_eq!(seen[2..], [true; 4], "a stop after each step");
     }
@@ -1421,14 +1438,10 @@ mod directory {
             });
             let node = Node::start(config(&host, Size::MEBIBYTE, memory));
             assert_eq!(sim.borrow_mut().run(), Ok(()), "seed {seed}");
-            // A private read: `join` gives one error, so no public call shows the
-            // claim's.
-            let claimed = node.shards[0].failed.get().cloned();
-            let shards = Error::Shards {
-                stored: 2,
-                cores: 3,
-            };
-            assert_eq!(claimed, Some(shards), "seed {seed}");
+            // The claim took the lock, then refused the count: no `shards-3`.
+            let claimed = listed(&mut sim.borrow_mut(), &host, "");
+            let made = ["lock", "shards-2"].map(PathBuf::from);
+            assert_eq!(claimed, made, "seed {seed}");
             let memory = Error::Memory { core: 2, error };
             assert_eq!(node.join(), Err(memory), "seed {seed}");
         }
