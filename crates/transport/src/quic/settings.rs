@@ -1,7 +1,8 @@
-//! What noq-proto gets from a [`Config`]. Every option that changes behavior is set
+//! What noq-proto gets from a [`Setup`]. Every option that changes behavior is set
 //! by name, and every random value outside TLS comes from `Entropy`.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -21,7 +22,7 @@ use types::time::Span;
 
 use super::{cid, hello};
 use crate::tls::{Epoch, Tls};
-use crate::{Config, MESSAGE_BYTES_MIN, PAYLOAD_IPV4};
+use crate::{MESSAGE_BYTES_MIN, PAYLOAD_IPV4};
 
 const QUIC_V1: u32 = 1;
 
@@ -58,6 +59,33 @@ const _: () = assert!(
     "a stream window of at least message_bytes_max must take the peer's whole hello"
 );
 
+/// What an endpoint is made from: a node's [`Config`](crate::Config) or a program's
+/// [`client::Config`](crate::client::Config), with each limit checked.
+pub(crate) struct Setup {
+    pub(crate) role: Role,
+    /// The largest message this side takes: at least 1472, at most `pool.largest()`.
+    pub(crate) message_bytes_max: usize,
+    /// At least `message_bytes_max`.
+    pub(crate) window_bytes: usize,
+    pub(crate) streams_max: NonZeroU32,
+    /// Positive.
+    pub(crate) idle: Span,
+    pub(crate) clock: env::clock::Clock,
+    pub(crate) entropy: Entropy,
+    pub(crate) tasks: env::tasks::Tasks,
+    pub(crate) pool: Rc<block::Pool>,
+}
+
+/// Who an endpoint is to its peers.
+pub(crate) enum Role {
+    /// A node: it proves its key, accepts dials, and derives its connection ID and
+    /// stateless reset keys from its key.
+    Node(PrivateKey),
+    /// A program: it sends no certificate, accepts no dial, and draws those keys from
+    /// entropy.
+    Program,
+}
+
 /// What each dial from one shard needs.
 pub(super) struct Settings {
     transport: Arc<TransportConfig>,
@@ -66,45 +94,40 @@ pub(super) struct Settings {
 }
 
 impl Settings {
-    /// The settings of `shard`, and its endpoint, which accepts connections. Every
-    /// connection ID the endpoint issues starts with `shard`.
-    ///
-    /// # Panics
-    ///
-    /// When `config.idle` is not positive.
-    pub(super) fn new(config: &Config, shard: u8) -> (Self, Endpoint) {
-        Self::with(config, shard, transport(config))
+    /// The settings of `shard`, and its endpoint, which accepts connections when
+    /// `setup` is a node's. Every connection ID the endpoint issues starts with
+    /// `shard`.
+    pub(super) fn new(setup: &Setup, shard: u8) -> (Self, Endpoint) {
+        Self::with(setup, shard, transport(setup))
     }
 
     /// As [`Settings::new`], with `change` made to the transport parameters, for a
     /// peer that is not a Foundation node.
     #[cfg(test)]
     pub(super) fn foreign(
-        config: &Config,
+        setup: &Setup,
         shard: u8,
         change: impl FnOnce(&mut TransportConfig),
     ) -> (Self, Endpoint) {
-        let mut transport = transport(config);
+        let mut transport = transport(setup);
         change(&mut transport);
-        Self::with(config, shard, transport)
+        Self::with(setup, shard, transport)
     }
 
-    fn with(
-        config: &Config,
-        shard: u8,
-        transport: TransportConfig,
-    ) -> (Self, Endpoint) {
+    fn with(setup: &Setup, shard: u8, transport: TransportConfig) -> (Self, Endpoint) {
         let transport = Arc::new(transport);
-        let tls = Tls::new(&config.private_key);
-        let server = Arc::new(server(&tls, Arc::clone(&transport)));
+        let tls = match &setup.role {
+            Role::Node(private_key) => Tls::new(private_key),
+            Role::Program => Tls::program(),
+        };
+        let server = tls.server().map(|tls| Arc::new(server(tls, &transport)));
         // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
         #[expect(clippy::disallowed_methods, reason = "the config sets rng_seed")]
-        let endpoint =
-            Endpoint::new(Arc::new(endpoint(config, shard)), Some(server), true);
+        let endpoint = Endpoint::new(Arc::new(endpoint(setup, shard)), server, true);
         let settings = Self {
             transport,
             tls,
-            entropy: config.entropy.clone(),
+            entropy: setup.entropy.clone(),
         };
         (settings, endpoint)
     }
@@ -137,20 +160,27 @@ impl Settings {
     }
 }
 
-fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
+fn endpoint(setup: &Setup, shard: u8) -> EndpointConfig {
     let mut rng = [0; 32];
-    config.entropy.fill(&mut rng);
+    setup.entropy.fill(&mut rng);
+    let secret = match &setup.role {
+        Role::Node(private_key) => private_key.0,
+        Role::Program => {
+            let mut secret = [0; 32];
+            setup.entropy.fill(&mut secret);
+            secret
+        }
+    };
     let issuer = cid::Issuer {
         shard,
-        key: key(&config.private_key, b"connection id"),
-        entropy: config.entropy.clone(),
+        key: key(&secret, b"connection id"),
+        entropy: setup.entropy.clone(),
     };
     #[expect(
         clippy::disallowed_methods,
         reason = "the config sets the ID generator and rng_seed"
     )]
-    let mut endpoint =
-        EndpointConfig::new(Arc::new(key(&config.private_key, b"stateless reset")));
+    let mut endpoint = EndpointConfig::new(Arc::new(key(&secret, b"stateless reset")));
     endpoint
         .max_udp_payload_size(PAYLOAD_IPV4)
         .expect("invariant: QUIC allows 1200 to 65527")
@@ -166,8 +196,11 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
     endpoint
 }
 
-fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
-    let crypto = QuicServerConfig::try_from(tls.server())
+fn server(
+    tls: Arc<rustls::ServerConfig>,
+    transport: &Arc<TransportConfig>,
+) -> ServerConfig {
+    let crypto = QuicServerConfig::try_from(tls)
         .expect("invariant: the TLS suites include AES-128-GCM");
     let mut tokens = ValidationTokenConfig::default();
     tokens.sent(0).log(Arc::new(NoneTokenLog));
@@ -176,7 +209,7 @@ fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
     // Each `Incoming` is accepted when it arrives, so none waits and none buffers a
     // datagram.
     server
-        .transport_config(transport)
+        .transport_config(Arc::clone(transport))
         .validation_token_config(tokens)
         .migration(true)
         .preferred_address_v4(None)
@@ -188,16 +221,16 @@ fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
     server
 }
 
-fn transport(config: &Config) -> TransportConfig {
-    let idle_ms = idle_ms(config.idle);
-    let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
+fn transport(setup: &Setup) -> TransportConfig {
+    let idle_ms = idle_ms(setup.idle);
+    let window = VarInt::try_from(setup.window_bytes).unwrap_or(VarInt::MAX);
     // noq-proto gives credit back in steps of 1/8 of a window, so a stream with the
     // connection's credit can run out while the connection has room.
-    let stream_window = config.window_bytes.saturating_mul(2);
+    let stream_window = setup.window_bytes.saturating_mul(2);
     let stream_window = VarInt::try_from(stream_window).unwrap_or(VarInt::MAX);
-    let streams = VarInt::from_u32(config.streams_max.get());
+    let streams = VarInt::from_u32(setup.streams_max.get());
     // One more for the peer's hello, whose credit does not come back when it ends.
-    let uni = u64::from(config.streams_max.get()) + 1;
+    let uni = u64::from(setup.streams_max.get()) + 1;
     let uni = VarInt::from_u64(uni).expect("invariant: a u32 and one fit a varint");
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(PAYLOAD_IPV6)
@@ -229,7 +262,7 @@ fn transport(config: &Config) -> TransportConfig {
         .max_outgoing_bytes_per_second(None)
         .crypto_buffer_size(16 << 10)
         .allow_spin(false)
-        .datagram_receive_buffer_size(Some(config.message_bytes_max.get()))
+        .datagram_receive_buffer_size(Some(setup.message_bytes_max))
         .datagram_send_buffer_size(DATAGRAM_QUEUE_BYTES_MAX)
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
@@ -247,16 +280,16 @@ fn idle_ms(idle: Span) -> u64 {
     let nanos = u64::try_from(idle.nanos())
         .ok()
         .filter(|&nanos| nanos > 0)
-        .expect("invariant: `Config::check` refuses a non-positive idle");
+        .expect("invariant: a `Setup` has a positive idle");
     nanos.div_ceil(1_000_000)
 }
 
-/// The key for `label` that signs stateless resets or connection IDs. It comes from
-/// the node key, so every shard and every restart of the node signs alike, and a
-/// restarted node resets a peer's stale connection at once.
-fn key(private_key: &PrivateKey, label: &[u8]) -> hmac::Key {
+/// The key for `label` that signs stateless resets or connection IDs. A node's
+/// `secret` is its key, so every shard and every restart of the node signs alike, and
+/// a restarted node resets a peer's stale connection at once.
+fn key(secret: &[u8; 32], label: &[u8]) -> hmac::Key {
     hkdf::Salt::new(hkdf::HKDF_SHA256, b"foundation/1 quic")
-        .extract(&private_key.0)
+        .extract(secret)
         .expand(&[label], hmac::HMAC_SHA256)
         .expect("invariant: an HMAC key is shorter than HKDF's limit")
         .into()
@@ -377,7 +410,7 @@ mod tests {
         use super::*;
 
         fn sign(private_key: [u8; 32], label: &[u8]) -> [u8; 32] {
-            let key = key(&PrivateKey(private_key), label);
+            let key = key(&private_key, label);
             let mut signature = [0; 32];
             key.sign(b"a connection id", &mut signature);
             signature
@@ -466,6 +499,71 @@ mod tests {
                 let (_, to, _) = pair.server.sent.last().expect("a datagram");
                 assert_eq!(*to, moved);
             });
+        }
+    }
+
+    mod program {
+        use super::*;
+
+        #[test]
+        fn answers_an_initial_with_a_stateless_reset_that_the_dialer_ignores() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let setup = shard.client().setup().expect("a setup");
+                pair.server.endpoint =
+                    Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(100));
+                let resets = pair.server.sent.iter().filter(|(_, to, reset)| {
+                    *to == pair::CLIENT
+                        && reset.len() < usize::from(MTU_MIN)
+                        && reset[0] & 0xc0 == 0x40
+                });
+                assert_eq!(resets.count(), pair.client.sent.len());
+                assert!(!connected(&pair.client) && lost(&pair.client).is_none());
+            });
+        }
+
+        #[test]
+        fn signs_its_resets_with_a_key_from_its_entropy() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                pair.server.endpoint = program(shard);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(100));
+                let initial = pair.client.sent[0].2.clone();
+                let token = |reset: &[u8]| reset[reset.len() - 16..].to_vec();
+                let first = token(&pair.server.sent[0].2);
+                let mut other = program(shard);
+                let meta = pair::meta(pair::CLIENT, &initial);
+                other.receive(pair.now(), &meta, &initial);
+                let mut buffer = Vec::new();
+                let reset = other.transmit(pair.now(), &mut buffer).expect("a reset");
+                assert_ne!(token(reset.contents), first);
+            });
+        }
+
+        #[test]
+        fn issues_ids_with_a_key_from_its_entropy() {
+            testing::run(1, |shard| {
+                let (now, mut buffer) = (pair::at(Duration::ZERO), Vec::new());
+                let mut dialer = program(shard);
+                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
+                let issued = ids(initial.contents).1.expect("a source ID").to_vec();
+                // A program resets a short packet only to an ID that it could issue.
+                let mut short = [[0x40].as_slice(), &issued].concat();
+                short.resize(64, 0);
+                let mut other = program(shard);
+                other.receive(now, &pair::meta(pair::CLIENT, &short), &short);
+                assert!(other.transmit(now, &mut buffer).is_none());
+            });
+        }
+
+        /// A program's endpoint on `shard`.
+        fn program(shard: &testing::Shard) -> Endpoint {
+            let setup = shard.client().setup().expect("a setup");
+            Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN)
         }
     }
 
@@ -571,8 +669,11 @@ mod tests {
         fn offers_only_quic_v1_to_a_peer_of_another_version() {
             let versions = testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let reply = reply(&mut endpoint, Monotonic(0), pair::CLIENT, &initial);
                 let reply = reply.expect("a reply");
@@ -594,8 +695,11 @@ mod tests {
         fn ignores_another_version_in_fewer_than_1200_bytes() {
             let replies = testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let mut initial = pair::draft_29();
                 initial.pop();
                 let bare = [0xc0, 0xff, 0, 0, 0x1d, 0, 0];
@@ -679,9 +783,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(
-            expected = "invariant: `Config::check` refuses a non-positive idle"
-        )]
+        #[should_panic(expected = "invariant: a `Setup` has a positive idle")]
         fn panics_when_not_positive() {
             idle_ms(Span::from_nanos(0));
         }
@@ -727,6 +829,23 @@ mod tests {
 
     mod datagrams {
         use super::*;
+
+        #[test]
+        fn the_limit_a_peer_gets_is_the_largest_block_of_the_pool() {
+            testing::run(1, |shard| {
+                let pair = Pair::with(shard, Span::SECOND, DELAY, |config| {
+                    config.message_bytes_max = NonZeroUsize::MAX;
+                    config.window_bytes = config.pool.largest();
+                });
+                let largest =
+                    shard.config(pair::SERVER_KEY, Span::SECOND).pool.largest();
+                // The datagram calls wait on #68, and the path MTU caps the limit a
+                // peer reads, so this reads the limit the server sends.
+                let shown = format!("{:?}", pair.server.endpoint.settings.transport);
+                let limit = format!("datagram_receive_buffer_size: Some({largest}),");
+                assert!(shown.contains(&limit), "{shown}");
+            });
+        }
 
         #[test]
         fn to_a_peer_that_takes_none_are_too_large_at_any_size() {
@@ -815,7 +934,11 @@ mod tests {
                 .find(|(_, _, datagram)| datagram[0] & 0x80 == 0)
                 .expect("a short header");
             let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-            let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+            let endpoint = Endpoint::new(
+                &testing::setup(&config),
+                SERVER_SHARD,
+                NonZeroUsize::MIN,
+            );
             (stale.clone(), endpoint)
         }
 
@@ -855,7 +978,11 @@ mod tests {
             let mut forged = [[0x40].as_slice(), issued].concat();
             forged.resize(40, 0);
             let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-            let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+            let endpoint = Endpoint::new(
+                &testing::setup(&config),
+                SERVER_SHARD,
+                NonZeroUsize::MIN,
+            );
             (forged, endpoint)
         }
 
@@ -951,8 +1078,11 @@ mod tests {
                 let reset = reply(&mut server, now, pair::CLIENT, &stale);
                 let reset = reset.expect("a reset");
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut client =
-                    Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut client = Endpoint::new(
+                    &testing::setup(&config),
+                    CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 [&mut server, &mut client]
                     .map(|endpoint| reply(endpoint, now, pair::SERVER, &reset))
             });

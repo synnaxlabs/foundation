@@ -27,7 +27,6 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// none connects.
 pub(crate) async fn dial(
     carrier: &quic::Carrier,
-    clock: &Clock,
     peer: PublicKey,
     addresses: &[Address],
 ) -> Result<quic::Session, Error> {
@@ -37,15 +36,16 @@ pub(crate) async fn dial(
         Address::Tcp(_) => 1,
         Address::Relay { .. } => 2,
     });
+    let clock = carrier.clock();
     let mut dial = Dial {
         carrier,
-        clock,
         peer,
         addresses,
         causes: Vec::new(),
         flying: Vec::new(),
         // The first attempt starts without it, and resets it.
         sleep: clock.sleep_until(Monotonic(0)),
+        clock,
     };
     poll_fn(|cx| dial.poll(cx)).await
 }
@@ -53,7 +53,7 @@ pub(crate) async fn dial(
 /// The attempts of one [`dial`].
 struct Dial<'a> {
     carrier: &'a quic::Carrier,
-    clock: &'a Clock,
+    clock: Clock,
     peer: PublicKey,
     addresses: Vec<Address>,
     /// Why each attempt started so far failed, by its index in `addresses`. `None`
