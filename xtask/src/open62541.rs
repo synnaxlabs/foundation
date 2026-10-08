@@ -306,8 +306,8 @@ fn arguments(command: &str) -> Vec<String> {
     arguments
 }
 
-/// Builds the copy in `copy` into `out` with the compiler `cc`, and gives each error
-/// of [`check`].
+/// Builds the copy in `copy` into `out` with the compiler `cc`, a name that `PATH`
+/// finds or an absolute path, and gives each error of [`check`].
 fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     let read = |name: &str| {
         std::fs::read_to_string(copy.join(name))
@@ -1037,7 +1037,6 @@ OFFSET           TYPE              VALUE
     #[test]
     #[cfg(unix)]
     fn check_refuses_a_cc_that_is_not_gcc() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = temp("clang");
         create_files(
             &dir,
@@ -1045,14 +1044,21 @@ OFFSET           TYPE              VALUE
         );
         // GCC's macros on standard error make a check that reads the wrong stream
         // pass.
+        let script = "#!/bin/sh\n\
+                      echo '#define __GNUC__ 4'\n\
+                      echo '#define __clang__ 1'\n\
+                      echo '#define __GNUC__ 13' >&2\n";
         let cc = dir.join("cc");
-        std::fs::write(
-            &cc,
-            "#!/bin/sh\necho '#define __GNUC__ 4'\necho '#define __clang__ 1'\n\
-             echo '#define __GNUC__ 13' >&2\n",
+        // A child writes it: while this process holds it open for writing, a process
+        // that another test forks holds it open too, and running it fails with
+        // ETXTBSY.
+        exec(
+            Command::new("sh")
+                .args(["-c", r#"printf %s "$1" > "$0" && chmod 755 "$0""#])
+                .arg(&cc)
+                .arg(script),
         )
         .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             inspect(&dir.join("copy"), &dir.join("out"), &cc),
             Err(vec!["cc is not GCC, which the check needs".to_owned()])
