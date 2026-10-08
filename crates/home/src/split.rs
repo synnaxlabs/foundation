@@ -983,24 +983,40 @@ mod tests {
                     ],
                 }]);
                 let index = [10_u64, 20].map(u64::to_le_bytes).concat();
-                let mut matrix = encoded(&set, 2, 2, &[7; 8]);
-                matrix[0] = 9;
+                let encoded_index = encoded(&set, 0, 2, &index);
+                let tagged = |entry, values: &[u8]| {
+                    let mut series = encoded(&set, entry, 2, values);
+                    series[0] = 9;
+                    series
+                };
+                let length =
+                    |expected, actual| codec::Error::Length { expected, actual };
+                let tag = codec::Error::Tag { vector: 0, tag: 9 };
                 let pool = create_pool(1 << 16);
                 let cases = [
                     (
                         Form::Raw,
-                        vec![(0, index.clone()), (1, vec![1, 2, 3])],
+                        vec![(0, index.clone()), (1, vec![1; 3])],
                         2,
-                        codec::Error::Length {
-                            expected: 4,
-                            actual: 3,
-                        },
+                        length(4, 3),
+                    ),
+                    (
+                        Form::Raw,
+                        vec![(0, index.clone()), (2, vec![7; 7])],
+                        3,
+                        length(8, 7),
                     ),
                     (
                         Form::Encoded,
-                        vec![(0, encoded(&set, 0, 2, &index)), (2, matrix)],
+                        vec![(0, encoded_index.clone()), (1, tagged(1, &[5; 4]))],
+                        2,
+                        tag.clone(),
+                    ),
+                    (
+                        Form::Encoded,
+                        vec![(0, encoded_index), (2, tagged(2, &[7; 8]))],
                         3,
-                        codec::Error::Tag { vector: 0, tag: 9 },
+                        tag,
                     ),
                 ];
                 for (form, entries, slot, error) in cases {
