@@ -7292,10 +7292,12 @@ Rules:
    layer 3 crate may take `hub` with `sim`, so its tests build a hub through
    `hub::testing::open`, on the shard of `home::testing::shard` (`laptop.architect`,
    2026-10-08T17:50:53Z:
-   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). The
-   `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
-   code could call the ring), the hub tests in `node`, and a builder that takes a
-   `sim::node::Node`, which adds an edge on `sim`.
+   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). It
+   supersedes the Lost item "a second way to build a shard in `home`" of the `hub` edge,
+   which the architect decided (#340:
+   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6030590185). Lost:
+   `buffer` in the `hub` row (hub code could call the ring), the hub tests in `node`,
+   and a builder that takes a `sim::node::Node`, which adds an edge on `sim`.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
