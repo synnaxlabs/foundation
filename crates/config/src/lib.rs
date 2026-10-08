@@ -12,7 +12,7 @@ mod private_key;
 mod retention;
 mod subject;
 
-use std::collections::{BTreeMap, BTreeSet, btree_map};
+use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
@@ -147,6 +147,7 @@ fn checked<'a>(
             }
         }
     }
+    found.repeats();
     if found.diagnostics.is_empty() {
         found.writers.sort_by_key(|writer| order(writer.at));
         Ok(found)
@@ -185,10 +186,9 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// The label of each tree key so far that comes first in [`order`], and the kind of
-    /// its block, by the key in lowercase, so that keys that differ only in case
-    /// collide.
-    labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
+    /// Each label of each tree key so far, with the kind of its block, by the key in
+    /// lowercase, so that keys that differ only in case collide.
+    labels: BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The label of the first connector in [`order`] that a `connector` block in any
@@ -221,8 +221,8 @@ struct Writer {
 struct Reported;
 
 impl<'a> Found<'a> {
-    /// Reads the one label of a block of `kind` as its name, and gives the tree key,
-    /// unique in any case, and the label's span.
+    /// Reads the one label of a block of `kind` as its name, and gives the tree key and
+    /// the label's span. [`Found::repeats`] reports a key that repeats.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
         let keyword = kind.as_str();
         let fix = "Give the block one label, its name, such as \"site_a.budget\"";
@@ -260,40 +260,43 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        let ((first, earlier), (label, later)) =
-            match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
-                btree_map::Entry::Vacant(entry) => {
-                    entry.insert((label, kind));
-                    return Some((key, label.span));
-                }
-                btree_map::Entry::Occupied(mut held)
-                    if order(label.span) < order(held.get().0.span) =>
-                {
-                    ((label, kind), held.insert((label, kind)))
-                }
-                btree_map::Entry::Occupied(held) => (*held.get(), (label, kind)),
-            };
-        let (earlier, keyword) = (earlier.as_str(), later.as_str());
-        let blocks = if earlier == keyword {
-            format!("`{keyword}`")
-        } else {
-            format!("`{earlier}` and `{keyword}`")
-        };
-        let mut diagnostic = Diagnostic::new(
-            DUPLICATE_NAME,
-            label.span,
-            format!(
-                "the name {:?} repeats the earlier `{earlier}` name {:?}",
-                label.text, first.text
-            ),
-            format!("Give each {blocks} block a name that differs by more than case"),
-        );
-        diagnostic.notes.extend(first.span.map(|span| Note {
-            span,
-            text: "the earlier name".into(),
-        }));
-        self.diagnostics.push(diagnostic);
-        None
+        self.labels
+            .entry(key.as_str().to_ascii_lowercase().into())
+            .or_default()
+            .push((label, kind));
+        Some((key, label.span))
+    }
+
+    /// Reports each label of a tree key after the first in [`order`].
+    fn repeats(&mut self) {
+        for labels in self.labels.values_mut() {
+            labels.sort_by_key(|(label, _)| order(label.span));
+            let (first, earlier) = labels[0];
+            for &(label, later) in &labels[1..] {
+                let (earlier, keyword) = (earlier.as_str(), later.as_str());
+                let blocks = if earlier == keyword {
+                    format!("`{keyword}`")
+                } else {
+                    format!("`{earlier}` and `{keyword}`")
+                };
+                let mut diagnostic = Diagnostic::new(
+                    DUPLICATE_NAME,
+                    label.span,
+                    format!(
+                        "the name {:?} repeats the earlier `{earlier}` name {:?}",
+                        label.text, first.text
+                    ),
+                    format!(
+                        "Give each {blocks} block a name that differs by more than case"
+                    ),
+                );
+                diagnostic.notes.extend(first.span.map(|span| Note {
+                    span,
+                    text: "the earlier name".into(),
+                }));
+                self.diagnostics.push(diagnostic);
+            }
+        }
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -676,6 +679,36 @@ mod tests {
         });
         for _ in 0..2 {
             assert_eq!(check(&documents), Err(vec![repeat.clone()]));
+            documents.reverse();
+        }
+    }
+
+    #[test]
+    fn refuses_each_later_name_at_the_first_in_any_order_of_the_files() {
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
+        let mut documents = [
+            document(vec![settings(0, 0, "site_a.budget", &policy)]),
+            document(vec![settings(1, 0, "Site_A.budget", &policy)]),
+            document(vec![settings(2, 0, "SITE_A.budget", &policy)]),
+        ];
+        let repeats = [(1, "Site_A.budget"), (2, "SITE_A.budget")].map(|(file, text)| {
+            let mut repeat = refused(
+                "config.duplicate-name",
+                at(file, 1),
+                &format!(
+                    "the name {text:?} repeats the earlier `node_settings` name \
+                     \"site_a.budget\""
+                ),
+                "Give each `node_settings` block a name that differs by more than case",
+            );
+            repeat.notes.push(Note {
+                span: at(0, 1).unwrap(),
+                text: "the earlier name".into(),
+            });
+            repeat
+        });
+        for _ in 0..2 {
+            assert_eq!(check(&documents), Err(repeats.to_vec()));
             documents.reverse();
         }
     }
