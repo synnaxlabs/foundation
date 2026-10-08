@@ -208,7 +208,7 @@ fn a_wrong_config_gives_its_file_line_and_fix() {
         .replace("\"http://localhost:8086\"", "8086");
     rig.config(&hcl);
     rig.start();
-    let output = rig.run(&["plan", "plant.hcl", "--out", "plant.plan"]);
+    let output = rig.run(&["plan", "plant.hcl", "--out", "plant.plan"], b"");
     assert_eq!(
         (
             output.status.code(),
