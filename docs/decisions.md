@@ -1877,7 +1877,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
   `send_parts` gives the carrier one slice of the block for each run of adjacent parts
   over 1452 bytes. It copies each stretch of shorter runs and zeros between them into
-  the endpoint's buffer, in one walk of its parts. A stretch of at most 1452 bytes goes
+  the connection's buffer, in one walk of its parts. A stretch of at most 1452 bytes goes
   to noq from that buffer, and noq copies it in the same `write`. A longer one is copied
   into a new buffer of its length, which noq keeps until the ACK. A partial write of it
   keeps the rest and copies nothing again. The block's count changes once for each run
