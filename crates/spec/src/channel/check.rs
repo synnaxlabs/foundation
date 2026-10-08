@@ -6,7 +6,8 @@ use std::fmt;
 use types::channel;
 use types::name::Name;
 
-use super::{Channel, DataType, Edge, Kind};
+use super::{Channel, Edge, Kind};
+use crate::data_type::DataType;
 
 /// Checks the edges between `channels`: a data channel's index is an index channel,
 /// its quality is a data channel of type quality, an index's error channel is a data
