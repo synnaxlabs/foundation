@@ -494,6 +494,9 @@ How to read this record:
   median agrees within 3%. If one does not, a `crate:buffer` issue follows, and there is
   no baseline until it is fixed. Decided by `laptop.architect` (2026-10-08T03:12:46Z):
   https://github.com/synnaxlabs/foundation/pull/1729#issuecomment-6051403457.
+  Supersedes "Its head numbers are the baseline of the `wal` benchmark" in
+  https://github.com/synnaxlabs/foundation/pull/1698#issuecomment-6050306136. The
+  #1698 numbers stay the record of the P1 judgment of #1698 only.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
