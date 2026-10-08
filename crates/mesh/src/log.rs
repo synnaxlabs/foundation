@@ -468,7 +468,7 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
                 .is_some_and(|rest| matches!(header(rest), At::Header(_)))
         };
         if torn.is_some_and(follows)
-            || (torn.is_some() && known.is_some())
+            || (torn.is_some() && matches!(first, Some(At::Header(_))))
             || known.is_some_and(|number| number > next)
         {
             let offset = wide(start(end));
@@ -1917,28 +1917,54 @@ mod tests {
         }
     }
 
-    // The number 9 of the next file is after the end, and a torn record ends `log-1`
-    // in the second case. A number of another version has no meaning to this build.
+    // The number 9 of the next file is after the end. A number of another version has
+    // no meaning to this build.
     #[test]
     fn gives_the_version_error_for_a_next_file_of_another_version() {
-        for torn in [false, true] {
-            let (mut sim, node) = create_node(0);
-            create_three_files(&mut sim, &node);
-            sim.run_on(&node, move |node, _| async move {
-                let mut record = encode(9, None, &[bytes(4, 10)]);
-                record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-                sign(&mut record);
-                put(&node, "log-2", 0, &record).await;
-                if torn {
-                    put(&node, "log-1", wide(HEADER) + 5, &[0xFF]).await;
-                }
-            })
-            .unwrap();
-            let expected = Error::Version {
-                path: file("log-2"),
-                found: 2,
-            };
-            assert_eq!(stored(&mut sim, &node), Err(expected), "torn {torn}");
+        let (mut sim, node) = create_node(0);
+        create_three_files(&mut sim, &node);
+        sim.run_on(&node, |node, _| async move {
+            let mut record = encode(9, None, &[bytes(4, 10)]);
+            record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+            sign(&mut record);
+            put(&node, "log-2", 0, &record).await;
+        })
+        .unwrap();
+        let expected = Error::Version {
+            path: file("log-2"),
+            found: 2,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    // A record after a torn one, in its file or the next, was written after the torn
+    // one, whatever its version or number.
+    #[test]
+    fn refuses_a_record_after_a_torn_one() {
+        let good = encode(0, None, &[bytes(1, 10)]);
+        let mut torn = encode(1, None, &[bytes(2, 10)]);
+        let last = torn.len() - 1;
+        torn[last] ^= 0xFF;
+        let mut other = encode(2, None, &[bytes(3, 10)]);
+        other[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+        sign(&mut other);
+        let head = [good.clone(), torn].concat();
+        let expected = Error::Corrupt {
+            path: file("log-0"),
+            offset: wide(good.len()),
+        };
+        let same = [[head.clone(), other.clone()].concat()];
+        assert_eq!(scan(Path::new(DIR), &same), Err(expected.clone()), "same");
+        assert_eq!(
+            scan(Path::new(DIR), &[head.clone(), other]),
+            Err(expected.clone()),
+            "next of another version"
+        );
+        for number in [0, 1] {
+            let record = encode(number, None, &[bytes(3, 10)]);
+            let segments = [head.clone(), record];
+            let scanned = scan(Path::new(DIR), &segments);
+            assert_eq!(scanned, Err(expected.clone()), "next at {number}");
         }
     }
 

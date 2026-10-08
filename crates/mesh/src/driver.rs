@@ -1783,7 +1783,7 @@ mod tests {
     #[test]
     fn each_proposal_returns_after_the_write_of_its_entry() {
         for seed in 0..16 {
-            solo_at(seed, |node, tasks| async move {
+            solo_at(seed, move |node, tasks| async move {
                 let pool = small_pool();
                 let config = Config {
                     pool: Rc::clone(&pool),
@@ -1796,7 +1796,8 @@ mod tests {
                     let other = mesh.clone();
                     Box::pin(async move { other.propose(home(id)).await })
                 });
-                assert_eq!(poll_each(&mut calls).await, [Poll::Pending, Poll::Pending]);
+                let polled = poll_each(&mut calls).await;
+                assert_eq!(polled, [Poll::Pending, Poll::Pending], "run {seed}");
                 let results = Rc::new(RefCell::new([None, None]));
                 for (slot, call) in calls.into_iter().enumerate() {
                     let given = Rc::clone(&results);
@@ -1806,11 +1807,11 @@ mod tests {
                     });
                 }
                 node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-                assert_eq!(*results.borrow(), [None, None]);
+                assert_eq!(*results.borrow(), [None, None], "run {seed}");
                 drop(held);
                 node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
                 let positions = [after(first, 1), after(first, 2)].map(Ok).map(Some);
-                assert_eq!(*results.borrow(), positions);
+                assert_eq!(*results.borrow(), positions, "run {seed}");
             });
         }
     }
@@ -3555,7 +3556,7 @@ mod tests {
     #[test]
     fn a_lone_voter_leads_after_one_election_timeout() {
         for seed in 0..16 {
-            solo_at(seed, |node, tasks| async move {
+            solo_at(seed, move |node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
                 let clock = node.clock();
                 let opened = clock.now();
@@ -3563,7 +3564,7 @@ mod tests {
                 let asked = asked - opened;
                 // The timeout is 10 to 19 ticks, and `lead_at` asks once per tick.
                 let timeout = seconds(1)..=seconds(2);
-                assert!(timeout.contains(&asked), "it led at {asked}");
+                assert!(timeout.contains(&asked), "run {seed}: it led at {asked}");
             });
         }
     }
