@@ -2382,8 +2382,11 @@ How to read this record:
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
-  problems (#1741). Decided by `laptop.architect`: chunks through
-  `blob` and no BQ12 check, 2026-10-07T06:42:23Z
+  problems (#1741). Two channels of one key, and a data channel whose index is not an
+  index of the founding, are problems at each build, so only a defect gives one:
+  `Hub::define` panics at each open of shard 0. A founding in a join answer (#336)
+  gets no new check. Decided by `laptop.architect`: chunks through `blob` and no BQ12
+  check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
@@ -2403,6 +2406,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
+  The panic of `Hub::define` at open, 2026-10-08T20:03:40Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068045531).
 - **SPEC APPLY (#1083)** `Mesh::apply(base, definitions, homes)` makes the definitions,
   by tree key, the region's spec through the leader, as `set_home` does, and gives the
   new pointer. It first runs `spec::region::check` (REGION CHECK) at the region's
