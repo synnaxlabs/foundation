@@ -38,6 +38,7 @@ pub struct Config {
 }
 
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
+/// It is not `Send`: each shard makes its own.
 #[derive(Debug)]
 pub struct Supervisor(Config);
 
