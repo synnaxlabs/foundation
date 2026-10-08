@@ -181,7 +181,7 @@ fn encode(name: &Name, entry: &Entry, keys: &BTreeMap<Name, Key>) -> Vec<u8> {
     }
 }
 
-/// A kind whose config is one attribute, `writes`: the channels it writes to the device.
+/// A kind whose one attribute, `writes`, names the channels it writes to the device.
 struct Commander;
 
 impl Kind for Commander {
