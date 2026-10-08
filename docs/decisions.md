@@ -3916,9 +3916,9 @@ How to read this record:
   after it, and a paragraph after them fails. The first word of a value, with its
   backticks and one final comma, period, or semicolon removed, is the word that is
   checked. Decided by the director at 2026-10-08T02:57:36Z
-  (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). A
-  hand reader of code fences, with no CommonMark parser, meets that ruling. Decided by
-  the director at 2026-10-08T04:01:43Z
+  (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
+  hand rule for code fences, as REVIEW CHECK stated it at `48101724`, meets that
+  ruling. Decided by the director at 2026-10-08T04:01:43Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239). The
   check ends a line at `\n`, `\r\n`, or a lone `\r`, as that ruling covers (decided by
   the director at 2026-10-08T04:42:33Z,
