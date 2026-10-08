@@ -102,14 +102,15 @@ Check:
   does not reach the cause that the PR names, is a finding. For a fix of a test that
   fails only sometimes, also name the line of the regression test that makes the cause
   happen: a test that needs timing, load, or the state of the runner to fail is a
-  finding. When the crate's architect ruled that the defect is the test (`testing.md`,
-  "A bug fix starts with a failing regression test"), check instead that the fixed test
-  passes in each order and still fails when its defect happens, and that the PR links
-  the failing runs. Do both again in each round whose range changes the fix or that
-  test. Does each new `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an
-  entry skip code that the PR adds or changes, when the entry is wider than one function
-  or its reason ends with the PR (a stub that it fills)? The PR narrows or removes that
-  entry.
+  finding. When the exception in `testing.md` holds (the crate's architect ruled, in a
+  comment that the PR links, that the code is correct in each order of the race, and
+  only a hook that only tests use could force the order), check instead that the fixed
+  test passes in each order and still fails when its defect happens in the order that
+  reaches it, and that the PR links the failing runs. Do both again in each round whose
+  range changes the fix or that test. Does each new `.cargo/mutants.toml` entry meet the
+  rule in `testing.md`? Does an entry skip code that the PR adds or changes, when the
+  entry is wider than one function or its reason ends with the PR (a stub that it
+  fills)? The PR narrows or removes that entry.
 - Copies: when the PR corrects what a doc, a comment, or a decision states, or renames
   or removes a name that a text uses (a code, an item, a key), search the workspace
   (`git grep`) and the open issues (`gh issue list --search`) for each other copy of the

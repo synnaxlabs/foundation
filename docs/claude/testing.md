@@ -149,11 +149,11 @@ again once to prove that the failure replays (r16 59).
   a constant equals itself. Assert properties: order, round trip, bounds (r16 56).
 - **No `#[ignore]`.** A known bug is a test that asserts today's wrong result, with a
   comment and an issue link (r16 53). Two exceptions. A scenario in `acceptance` that
-  cannot run yet, and a test in `crates/node/tests/it/` that runs the `foundation`
-  binary as the acceptance scenario of an open milestone, as its plan issue names it,
-  and cannot run yet, is `#[ignore = "waits on #<n>"]`, with each open issue that it
-  waits on. The PR that closes such an issue removes it from each reason, and removes
-  the `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
+  cannot run yet is `#[ignore = "waits on #<n>"]`, with each open issue that it waits
+  on. So is a test in `crates/node/tests/it/` that runs the `foundation` binary as the
+  acceptance scenario of an open milestone, as its plan issue names it, and cannot run
+  yet. The PR that closes such an issue removes it from each reason, and removes the
+  `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
   runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
   never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
