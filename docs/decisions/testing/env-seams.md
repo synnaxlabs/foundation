@@ -63,10 +63,10 @@
   `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
   nothing stores a failure. For a source that is not local or is of the other family,
   `os` gives the kernel's answer (on Linux, `Unreachable` or `Io { code: 22 }`), and
-  `sim` gives `Io { code: 99 }`. For port 0, `os` gives the kernel's answer. Until
-  #1972 patches `noq-udp`, such a transmit can turn GSO and the IPv4 ECN mark off for
-  the life of the socket. Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02
-  UTC, #1965,
+  `sim` gives `Io { code: 99 }`. For port 0, `os` gives the kernel's answer. Such a
+  transmit changes no state of the socket (`laptop.architect-2`, 2026-10-08 21:15 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
+  Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066909518,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743).
   Supersedes "or the errno" of item 2 of
