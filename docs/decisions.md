@@ -4118,12 +4118,15 @@ How to read this record:
   since our config always has an event loop. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
   2026-10-08 02:27 UTC). A test asserts the pragmas of `shim.c` after the
-  preprocessor. It stands against honest code. A `#line` directive in `shim.c` has no
-  honest use, since the file is written by hand, so review of `shim.c` covers it, and
-  the `#line` rule of the copy check does not apply to it. If `shim.c` is ever
-  generated, that rule applies to it. Decided by `laptop.architect-2`
+  preprocessor. It stands against honest code. A `#line` directive or a line marker
+  in `shim.c` has no honest use, since the file is written by hand, so review of
+  `shim.c` covers it, and the `#line` rule of the copy check does not apply to it. If
+  `shim.c` is ever generated, that rule applies to it. Decided by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1947#issuecomment-6067031461,
-  2026-10-08 19:03 UTC).
+  2026-10-08 19:03 UTC; the line marker:
+  https://github.com/synnaxlabs/foundation/pull/1947#issuecomment-6067179092,
+  2026-10-08 19:12 UTC).
   The copy also holds `arch/common/timer.c` and `timer.h`, which the build with
   `UA_ARCHITECTURE=none` does not compile. `cargo xtask open62541` takes them from a
   closed list of extra release files, with the reason of each, and compiles them with
@@ -4134,6 +4137,21 @@ How to read this record:
   2026-10-08 17:47 UTC; the release path,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
   2026-10-08 18:08 UTC).
+  The copy and `shim.c` allocate through the global allocator of the binary.
+  `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4 functions
+  of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and `UA_free`
+  as them, before `config.h` sets the libc calls as the defaults. They keep the C
+  contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)` and
+  `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is aligned
+  to 16. No pointer crosses between the libc allocator and these: the objects of the
+  copy and of `shim.c` call no libc function that gives or takes a heap pointer. A
+  crypto library that a later PR links keeps its own allocator. So the counting
+  allocator of a test or benchmark binary counts C too. Lost:
+  `UA_ENABLE_MALLOC_SINGLETON` (a global), and `--wrap=malloc` (`std::alloc` calls
+  `malloc`, so it recurses).
+  Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067206932,
+  2026-10-08 19:13 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
