@@ -32,11 +32,13 @@ pub(crate) enum Ends<'a> {
 }
 
 impl<'a> Ends<'a> {
-    fn pieces(self) -> Pieces<'a> {
+    /// The ends a piece at a time. Encoded ones decode into `out`, which must hold a
+    /// vector of them.
+    fn pieces(self, out: &'a mut [u8]) -> Pieces<'a> {
         match self {
             Self::Raw(ends) => Pieces::Raw(Some(ends)),
             Self::Encoded { count, bytes } => {
-                Pieces::Encoded(Decoder::new(Scalar::U32, count, bytes))
+                Pieces::Encoded(Decoder::new(Scalar::U32, count, bytes), out)
             }
         }
     }
@@ -54,17 +56,27 @@ pub(crate) fn encoded(
     let Some((from, len, rest)) = skip(elements, vectors, &mut out) else {
         return Ok(());
     };
+    let mut rest_out = [0; VECTOR_LEN];
+    let mut storage;
+    let ends_out: &mut [u8] = match ends {
+        Ends::Raw(_) => &mut [],
+        Ends::Encoded { .. } => {
+            storage = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
+            &mut storage
+        }
+    };
     let piece = out.split_at(len).0;
-    if valid(ends.pieces(), from, piece, Pieces::Encoded(rest)) {
+    let pieces = Pieces::Encoded(rest, &mut rest_out);
+    if valid(ends.pieces(&mut *ends_out), from, piece, pieces) {
         return Ok(());
     }
     let (from, len, rest) =
         skip(elements, vectors, &mut out).expect("invariant: a vector is not ASCII");
     check(
-        ends.pieces(),
+        ends.pieces(ends_out),
         from,
         out.split_at(len).0,
-        Pieces::Encoded(rest),
+        Pieces::Encoded(rest, &mut rest_out),
     )
 }
 
@@ -97,15 +109,13 @@ fn valid(
     piece: &[u8],
     mut rest: Pieces<'_>,
 ) -> bool {
-    let mut ends_out = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
-    let mut rest_out = [0; VECTOR_LEN];
     let mut text = Text::default();
     let mut piece = piece;
     let mut start = from;
     if text.elements(piece).is_err() {
         return false;
     }
-    while let Some(decoded) = ends.next(&mut ends_out) {
+    while let Some(decoded) = ends.next() {
         for end in past(decoded, from).1 {
             let end = value(*end);
             while let Some(at) = end.checked_sub(start) {
@@ -116,7 +126,7 @@ fn valid(
                     break;
                 }
                 start = start.strict_add(piece.len());
-                let Some(next) = rest.next(&mut rest_out) else {
+                let Some(next) = rest.next() else {
                     piece = &[];
                     break;
                 };
@@ -139,12 +149,10 @@ fn check(
     piece: &[u8],
     mut rest: Pieces<'_>,
 ) -> Result<(), Error> {
-    let mut ends_out = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
-    let mut rest_out = [0; VECTOR_LEN];
     let mut text = Text::default();
     let mut piece = piece;
     let mut start = from;
-    while let Some(decoded) = ends.next(&mut ends_out) {
+    while let Some(decoded) = ends.next() {
         let (before, past) = past(decoded, from);
         text.sample = text.sample.strict_add(before);
         for end in past {
@@ -153,9 +161,7 @@ fn check(
             let mut left = end.saturating_sub(start);
             while left > 0 {
                 if piece.is_empty() {
-                    piece = rest
-                        .next(&mut rest_out)
-                        .expect("invariant: the elements hold each end");
+                    piece = rest.next().expect("invariant: the elements hold each end");
                 }
                 let (head, tail) = piece.split_at(left.min(piece.len()));
                 text.elements(head)?;
@@ -186,18 +192,16 @@ fn value(end: [u8; 4]) -> usize {
 enum Pieces<'a> {
     /// The bytes, until taken.
     Raw(Option<&'a [u8]>),
-    Encoded(Decoder<'a>),
+    /// The vectors, and the scratch that each decodes into.
+    Encoded(Decoder<'a>, &'a mut [u8]),
 }
 
-impl<'a> Pieces<'a> {
-    /// The next piece, decoded into `out` when encoded.
-    fn next<'o>(&mut self, out: &'o mut [u8]) -> Option<&'o [u8]>
-    where
-        'a: 'o,
-    {
+impl Pieces<'_> {
+    /// The next piece.
+    fn next(&mut self) -> Option<&[u8]> {
         match self {
             Self::Raw(bytes) => bytes.take(),
-            Self::Encoded(vectors) => vectors
+            Self::Encoded(vectors, out) => vectors
                 .next(out)
                 .map(|vector| vector.expect("invariant: the vectors were checked")),
         }
