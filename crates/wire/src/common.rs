@@ -50,6 +50,13 @@ impl<'b, E: Copy> Fields<'b, E> {
         Ok(field)
     }
 
+    /// Takes the next field of `len` bytes.
+    pub(crate) fn take_slice(&mut self, len: usize) -> Result<&'b [u8], E> {
+        let (field, rest) = self.rest.split_at_checked(len).ok_or(self.length)?;
+        self.rest = rest;
+        Ok(field)
+    }
+
     /// Checks that no byte follows the last field.
     pub(crate) fn end(&self) -> Result<(), E> {
         if self.rest.is_empty() {
