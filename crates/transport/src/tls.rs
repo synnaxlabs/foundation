@@ -81,8 +81,7 @@ impl Tls {
     /// Makes a self-signed certificate for the node key. The same key always gives
     /// the same bytes.
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
-        let pair = Pair::new(private_key);
-        let certificate = issue(&pair.public().to_bytes(), |tbs| pair.sign(tbs));
+        let certificate = certificate(private_key);
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
         let key = any_eddsa_type(&pkcs8)
             .expect("invariant: the PKCS#8 template holds an Ed25519 key");
@@ -189,6 +188,12 @@ fn provider() -> CryptoProvider {
     }
 }
 
+/// The self-signed certificate of the node with `private_key`.
+pub(crate) fn certificate(private_key: &PrivateKey) -> Vec<u8> {
+    let pair = Pair::new(private_key);
+    issue(&pair.public().to_bytes(), |tbs| pair.sign(tbs))
+}
+
 /// The template certificate for `key`, with the signature `sign` gives for its
 /// to-be-signed part.
 fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> [u8; 64]) -> Vec<u8> {
@@ -234,6 +239,27 @@ pub(crate) fn peer(
                 .expect("invariant: a verifier accepted this chain"),
         ),
     })
+}
+
+/// The peer that a node's server makes of a dialer's `protocol` and `chain`: the
+/// client verifier, then [`peer`]. rustls calls no verifier for an empty chain.
+///
+/// # Errors
+///
+/// The verifier's error, or that of [`peer`].
+#[cfg(feature = "fuzzing")]
+pub(crate) fn accept(
+    protocol: Option<&[u8]>,
+    chain: &[CertificateDer<'_>],
+) -> Result<Peer, rustls::Error> {
+    let verifier = AnyKey {
+        algorithms: provider().signature_verification_algorithms,
+    };
+    let now = UnixTime::since_unix_epoch(Duration::ZERO);
+    if let Some((end_entity, intermediates)) = chain.split_first() {
+        verifier.verify_client_cert(end_entity, intermediates, now)?;
+    }
+    peer(protocol, (!chain.is_empty()).then_some(chain))
 }
 
 /// The node key that a chain carries. Refuses a chain that is not one certificate of
@@ -972,6 +998,52 @@ mod tests {
         fn refuses_bytes_that_are_not_der() {
             assert_eq!(
                 key(&CertificateDer::from(vec![1, 2, 3]), &[]),
+                Err(CertificateError::BadEncoding.into())
+            );
+        }
+    }
+
+    #[cfg(feature = "fuzzing")]
+    mod accept {
+        use super::*;
+
+        #[test]
+        fn when_chain_is_empty_the_peer_is_a_client() {
+            assert_eq!(accept(Some(ALPN), &[]), Ok(Peer::Client));
+        }
+
+        #[test]
+        fn when_chain_is_a_node_certificate_the_peer_is_the_node() {
+            let private_key = PrivateKey([1; 32]);
+            let chain = [certificate(&Tls::new(&private_key))];
+            assert_eq!(
+                accept(Some(ALPN), &chain),
+                Ok(Peer::Node(private_key.public()))
+            );
+        }
+
+        #[test]
+        fn when_protocol_differs_it_refuses() {
+            let chain = [certificate(&Tls::new(&PrivateKey([1; 32])))];
+            assert_eq!(
+                accept(Some(b"foundation/2"), &chain),
+                Err(rustls::Error::NoApplicationProtocol)
+            );
+        }
+
+        #[test]
+        fn when_chain_has_two_certificates_it_refuses() {
+            let der = certificate(&Tls::new(&PrivateKey([1; 32])));
+            assert_eq!(
+                accept(Some(ALPN), &[der.clone(), der]),
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_certificate_is_not_der_it_refuses() {
+            assert_eq!(
+                accept(Some(ALPN), &[CertificateDer::from(vec![1, 2, 3])]),
                 Err(CertificateError::BadEncoding.into())
             );
         }
