@@ -896,12 +896,15 @@ fn a_lookup_needs_no_runtime() {
     let mut cx = Context::from_waker(&waker);
     let net = net();
     let mut lookup = pin!(net.resolve("localhost", 4433));
-    assert!(lookup.as_mut().poll(&mut cx).is_pending());
-    let woken =
-        runtime().block_on(async { timeout(BOUND, counted.woken.notified()).await });
-    woken.expect("the answer wakes the lookup");
-    let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) else {
-        panic!("a woken lookup is ready");
+    // The answer can come before the first poll reads it, so a poll may be `Ready`
+    // at once.
+    let found = loop {
+        if let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) {
+            break found;
+        }
+        let woken = runtime()
+            .block_on(async { timeout(BOUND, counted.woken.notified()).await });
+        woken.expect("the answer wakes a pending lookup");
     };
     assert!(found.is_ok_and(|found| !found.is_empty()));
 }
