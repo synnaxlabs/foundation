@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Waker};
 
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
@@ -38,6 +40,7 @@ const MANY: usize = 264;
 
 fn main() {
     many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect();
+    dropped_calls_of_the_spec_hold_no_heap();
 }
 
 // The raft log keeps each entry in memory until #253, so the heap grows with each
@@ -52,6 +55,42 @@ fn many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect(
          that take effect hold {taken} more",
         MANY - FEW,
     );
+}
+
+// Each call waits for the read of the new pointer, which runs only after the loop
+// yields, so no read wakes the calls in the loop.
+fn dropped_calls_of_the_spec_hold_no_heap() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let ran = sim.run_on(&node, move |node, tasks| async move {
+        let mesh = Mesh::open(create_config(&node, &tasks).await)
+            .await
+            .expect("the mesh opens");
+        node.clock()
+            .sleep(Span::from_nanos(Span::SECOND.nanos()))
+            .await;
+        let applied = mesh.apply(mesh.pointer(), create_definitions("plant.app"));
+        applied.await.expect("the change takes effect");
+        let mut few = 0;
+        for done in 1..=MANY {
+            {
+                let call = pin!(mesh.spec());
+                let polled = call.poll(&mut Context::from_waker(Waker::noop()));
+                assert!(polled.is_pending(), "the call waits for the read");
+            }
+            if done == FEW {
+                few = ALLOCATOR.held();
+            }
+        }
+        let many = ALLOCATOR.held();
+        assert!(
+            many <= few,
+            "{} more dropped calls hold {} more bytes",
+            MANY - FEW,
+            many.saturating_sub(few),
+        );
+    });
+    assert_eq!(ran, Ok(()), "the run ends");
 }
 
 /// The base of each apply.
