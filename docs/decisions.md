@@ -4577,8 +4577,9 @@ How to read this record:
   after the header. The node reads no datagram until the first protocol that takes
   datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
   reads the key from its data directory (#1660). The node admits every peer that
-  completes the handshake; the mesh checks each message of a mesh stream (NODE MESH). At the stop, each session and
-  stream future drops, then the transport. The bound on the wait for a header is #1628.
+  completes the handshake; the mesh checks each message of a mesh stream (NODE MESH).
+  At the stop, each session and stream future drops, then the transport. The bound on
+  the wait for a header is #1628.
   Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
@@ -4596,6 +4597,17 @@ How to read this record:
   Supersedes the deferral of
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048464411
   (2026-10-07 22:50 UTC), under which the node ran on with no port until #1647.
+  Amended (2026-10-08, PR 3b of #585, by `laptop.architect`, 03:37 UTC): shard 0 opens
+  the mesh before the first session. `route` gives each `Mesh` stream of a
+  `Peer::Node` session to `Mesh::serve` with that key, never a key from a header or a
+  message. A `Mesh` stream of a `Peer::Client` session stops with
+  `Code(wire::header::REJECTED)`, and its reply half resets with the same code. For
+  `Mesh` streams, the admission rule is the mesh's check of each message: a peer that
+  is not the member it names gets `Spoofed`, and the stream stops at that message. The
+  `Hub` rule comes with PR 4. At the stop, each session and stream future drops, then
+  the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
+  DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475.
 - **NODE MESH (#585, 2026-10-08)** `Config::key` is the node's key, beside
   `Config::private_key`; both are patches until #1660 moves them to node-local disk.
   `Config::region: Option<Region>` gives the region that the node is a member of: its
