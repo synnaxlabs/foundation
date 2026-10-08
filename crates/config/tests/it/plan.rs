@@ -854,6 +854,133 @@ connector \"f\" {
 }
 
 #[test]
+fn gives_no_split_placement_after_a_tie() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+placement \"a_1\" {
+  select = \"a.*\"
+  home = \"n\"
+}
+placement \"a_2\" {
+  select = \"a.*\"
+  home = \"n\"
+}
+placement \"a\" {
+  select = \"a\"
+  home = \"n\"
+}
+connector \"a\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}
+channel \"b.time\" {
+  kind = \"index\"
+}
+placement \"b_time\" {
+  select = \"b.time\"
+  home = \"n\"
+}
+placement \"b_1\" {
+  select = \"b\"
+  home = \"n\"
+}
+placement \"b_2\" {
+  select = \"b\"
+  home = \"n\"
+}
+connector \"b\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"b.time\"]
+}
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let tie = |at, first, second| {
+        problem(
+            "config.unplaced",
+            (0, label(text, at)),
+            &format!(
+                "the placements `{first}` and `{second}` select the name with the same \
+                 specificity"
+            ),
+            "Change the `select` of one of the two placements, so that one selects the \
+             name more specifically",
+        )
+    };
+    let expected = [tie("a.time", "a_1", "a_2"), tie("b", "b_1", "b_2")];
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn gives_split_placement_after_an_index_with_no_home() {
+    let text = "\
+channel \"c.time\" {
+  kind = \"index\"
+}
+placement \"c_time\" {
+  select = \"c.time\"
+  standby = \"n\"
+}
+placement \"c\" {
+  select = \"c\"
+  home = \"n\"
+}
+connector \"c\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+channel \"e.time\" {
+  kind = \"index\"
+}
+placement \"e\" {
+  select = \"e.*\"
+  standby = \"n\"
+}
+connector \"e\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"e.time\"]
+}
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let expected = [
+        problem(
+            "config.unplaced",
+            (0, label(text, "c.time")),
+            "the placement `c_time` wins for the index and names no home, and no \
+             connector writes the index",
+            "Name a `home` in the placement, or write the index with a connector",
+        ),
+        split(
+            text,
+            "c_time",
+            "the placement `c_time` wins for the index `c.time`, but the placement `c` \
+             wins for the connector `c`",
+            "c",
+        ),
+        problem(
+            "config.unplaced",
+            (0, label(text, "e.time")),
+            "the node `n` of a connector is the home and has another role in the \
+             placement `e`",
+            "Remove the node from the placement",
+        ),
+        split(
+            text,
+            "e",
+            "the placement `e` wins for the index `e.time`, but no placement selects \
+             the connector `e`",
+            "e",
+        ),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
 fn takes_the_first_writer_in_source_order_in_any_order_of_the_files() {
     let first = format!(
         "{PLANT}\
