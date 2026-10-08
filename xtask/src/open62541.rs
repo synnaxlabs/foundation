@@ -534,13 +534,14 @@ fn build<'a>(
         let object = out.join(format!("{index}.o"));
         let cc = |mode: &[&str]| {
             let mut cc = Command::new("cc");
+            // `./` keeps a source such as `-x.c` or `@x.c` from being an option. Else
+            // GCC gives cc1 the base name as `-dumpbase`, which cc1 reads as a
+            // response file when it starts with `@`.
             cc.current_dir(copy)
                 .args(flags.lines())
-                .args(["-g", "-O0"])
+                .args(["-g", "-O0", "-dumpbase", &index.to_string()])
                 .args(mode);
-            // `./` keeps a source that starts with `-` from being a flag.
-            let dot = if source.starts_with('-') { "./" } else { "" };
-            spawn(cc.arg(format!("{dot}{source}")))
+            spawn(cc.arg(Path::new(".").join(source)))
         };
         let compile = cc(&["-c", "-o", &object.to_string_lossy()])?;
         children.push((source, object, compile, cc(&["-E", "-dI"])?));
@@ -1385,8 +1386,8 @@ End of search list.
                 "src/more/ua_text.c: the section `.text_ptr` takes the address of \
                  `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
                     .to_owned(),
-                "src/more/ua_types.c: includes src/more/../../../build/other.h, which \
-                 is outside the copy"
+                "src/more/ua_types.c: includes ./src/more/../../../build/other.h, \
+                 which is outside the copy"
                     .to_owned(),
                 "src/more/ua_types.c: includes the system header `sys/stat.h`, which \
                  SYSTEM_HEADERS does not list"
@@ -1455,6 +1456,29 @@ End of search list.
         });
         assert_eq!(result, Ok(()));
         assert_eq!(check(&root), Ok(()));
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_names_a_clock_call_in_a_source_whose_name_starts_with_an_at_sign() {
+        let (root, repo, result) = run_on("at-source", |repo| {
+            let text = "long long UA_DateTime_now(void);\n\
+                        long long UA_gen(void) { return UA_DateTime_now(); }\n";
+            create_files(repo, &[("@gen.c", text), ("gen.c", "int gen;\n")]);
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap()
+                + "target_sources(open62541-object PRIVATE @gen.c gen.c)\n";
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "@gen.c: `UA_gen` calls a global clock function. Find whether a node \
+                 runs it; if not, add it to CLOCK_CALLS with the reason"
+                    .to_owned()
+            ])
+        );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
