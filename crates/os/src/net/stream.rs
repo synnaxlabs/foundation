@@ -321,7 +321,7 @@ mod tests {
                 assert!(matches!(filled, Ok(1..)), "{filled:?}");
                 let found = poll_fn(|cx| stream.poll_read(cx, &mut [0; 8])).await;
                 assert_eq!(found, Err(timed_out.clone()));
-                let written = poll_fn(|cx| stream.poll_write(cx, &[])).await;
+                let written = poll_fn(|cx| stream.poll_write(cx, &bytes)).await;
                 assert_eq!(written, Err(timed_out.clone()));
                 let closed = poll_fn(|cx| stream.poll_close(cx)).await;
                 assert_eq!(closed, Err(timed_out));
