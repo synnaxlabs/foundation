@@ -111,7 +111,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - An internal invariant that breaks panics. Bad outside input never panics: it returns
   an error. Panic and assert messages state what broke and the values (r16 20).
 - `Drop` never panics. It never blocks unless the type also gives a call that does
-  not block (r16 23). One exception: `sim::Sim` (SIM DROP in `docs/decisions/testing/`).
+  not block (r16 23). One exception: `sim::Sim` (SIM DROP in
+  `docs/decisions/testing/sim-drop.md`).
 
 ## Unsafe
 

@@ -1,6 +1,5 @@
 # Terms used two ways
 
-
 **X47. "Lease".** It means a node lease (failover), a control lease (writer setting),
 and r12's `endpoint::Lease<T>`. Resolution: in prose, always "node lease" or "control
 lease". Rename `endpoint::Lease<T>` to `endpoint::Handle<T>`. (Names delegation.)

@@ -1,6 +1,5 @@
 # The checks the user asked for
 
-
 **X1. Node in the spec vs node membership as runtime state.**
 Conflict: S8 defines `Node { key, name, public_key }`, and BQ2 lists `spec::Node`.
 BQ11a makes joining an operation and membership runtime state. r3's example layout has

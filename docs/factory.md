@@ -142,5 +142,5 @@ that pass in CI.
 
 Opus 5.5 everywhere. Fable only on an issue the person or the architect labels
 `model:fable`. The weekly `code-quality` and `drift` agents run on Sonnet; search
-subagents run on Haiku. COST TRIALS in `docs/decisions/operations/` runs some reviewers
-on Sonnet.
+subagents run on Haiku. COST TRIALS in `docs/decisions/operations/cost-trials.md` runs
+some reviewers on Sonnet.

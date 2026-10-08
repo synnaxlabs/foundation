@@ -14,15 +14,15 @@ clock, the network, the disk, or a random source directly. Clippy's
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
 behavior. Never print a pointer. No `thread_local!` state. Four exceptions: TLS draws
-its own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions/transport/`).
-`sim::Sim::new` reads `Instant::now` once as the epoch of the run, and only differences
-from it are read. The `hyper` server of HTTP SIM SERVER reads OS time into a
-`thread_local!` on each poll, only for the `date` header, which is off. It gets no
-`timer`, so no read changes what it does (the person,
+its own randomness from aws-lc (TLS RANDOMNESS in
+`docs/decisions/transport/tls-randomness.md`). `sim::Sim::new` reads `Instant::now` once
+as the epoch of the run, and only differences from it are read. The `hyper` server of
+HTTP SIM SERVER reads OS time into a `thread_local!` on each poll, only for the `date`
+header, which is off. It gets no `timer`, so no read changes what it does (the person,
 https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
 2026-10-07T17:04:29Z). The random state `UA_rng` of the open62541 copy is one per
 thread, so `connector-opcua` sets its start value on each thread that calls open62541
-(OPEN62541 SOURCE in `docs/decisions/connectors/`).
+(OPEN62541 SOURCE in `docs/decisions/connectors/open62541-source.md`).
 
 ## Layers
 

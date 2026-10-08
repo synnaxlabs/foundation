@@ -1,6 +1,5 @@
 # Per-index state at the home
 
-
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
 | Encoded samples | Index log (write-ahead ring, then segments), as stored bodies (STORED BODY) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer`, `home` (stored body) |

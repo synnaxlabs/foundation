@@ -1,6 +1,5 @@
 # Deferred features
 
-
 - Cross-company sharing (K5).
 - SSO mapping a login to a subject (C8).
 - Consumer groups for named readers (S10).

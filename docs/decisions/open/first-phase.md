@@ -1,6 +1,5 @@
 # First phase
 
-
 The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memory`),
 `types`, `codec`, and `wire` (`data-path`), `raft` and `spec` (`consensus`), and
 `env`, `os`, and `sim` plus the QUIC against TLS over TCP benchmark on Linux
@@ -47,10 +46,10 @@ still prove a significant amount of the behavior." and "Copy, yes I can agree wi
 that"), relayed by `laptop.monitor` at 2026-10-07T14:10:57Z:
 https://github.com/synnaxlabs/foundation/issues/1149#issuecomment-6039778221.
 
-5.5 sets no drain rate. Before the two tests lose `#[ignore]`, the lab runs a drain span
-after the heal in place of `OUTAGE`: two times the sum of the delay before the drain
-starts and the time to send `WRITTEN` at the drain rate measured in the lab.
-`laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
+`docs/decisions/open/mvp.md` sets no drain rate. Before the two tests lose `#[ignore]`,
+the lab runs a drain span after the heal in place of `OUTAGE`: two times the sum of the
+delay before the drain starts and the time to send `WRITTEN` at the drain rate measured
+in the lab. `laptop.architect-2` decided this at 2026-10-07T16:31:12Z (#1477:
 https://github.com/synnaxlabs/foundation/issues/1477#issuecomment-6042249280).
 
 **ONE NODE (2026-10-08)** A milestone beside FIRST SLICE, which keeps priority: one real

@@ -1,6 +1,5 @@
 # Definitions
 
-
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
 | Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls `region::check`, which runs it; commits). Two channels with one key are `channel::Problem::Duplicate`, not a panic (REGION CHECK; it supersedes the panic of the architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890, and the `Problem::Shared` that replaced it: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6032581487, superseded by `laptop.architect-2`, 2026-10-08T11:11:18Z: https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6058584682) |

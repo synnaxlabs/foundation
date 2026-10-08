@@ -1,6 +1,5 @@
 # Where things are defined
 
-
 Storage classes used in the table:
 
 - **Files**: definition files, read through the Document model.

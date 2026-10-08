@@ -104,7 +104,7 @@ coordinator admits them. Any builder takes any crate. One task is in progress pe
 
 Each PR pays a fixed cost: CI, its review rounds, an audit, and a slot in the merge
 queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHANGES in
-`docs/decisions/operations/`).
+`docs/decisions/operations/small-changes.md`).
 
 - **Small change:** a fix, a test pin, a doc or comment fix, a rename, or a record, of
   under about 50 lines.

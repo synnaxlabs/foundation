@@ -1,6 +1,5 @@
 # Settled under a delegation
 
-
 On 2026-10-05 the person gave every open decision to the advisor and the
 coordinator: "Don't block any decisiosn on me. consult with the advisor and come toa
 conclusion together". Each one is listed below.

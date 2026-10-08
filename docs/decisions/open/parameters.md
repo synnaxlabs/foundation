@@ -1,6 +1,5 @@
 # Parameters for experiment
 
-
 - Delivery and wire: group commit interval, credit window (bytes, from link BDP), batch
   size, linger, max packet size, latest-over-TCP send buffer, priority mapping, catch-up
   merge size.

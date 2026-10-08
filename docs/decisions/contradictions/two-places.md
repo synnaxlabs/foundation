@@ -1,6 +1,5 @@
 # Data structures defined in two places
 
-
 **X18. Control state after failover: read from the channel vs internal records.**
 Conflict: r13 section 6.2 starts the new gate from "the copied control channel". BQ11b
 forbids core decisions that read channels back. BQ6 lists "control handoffs" among the

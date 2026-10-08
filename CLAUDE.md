@@ -96,7 +96,8 @@ Dependencies are explicit, injected inputs, never reached for from the environme
 - 🚨 **No mutable globals, ever.** No `static mut`, no global `OnceLock` or
   `lazy_static` holding state, no singletons. A registry is an injected, explicitly
   built value. Constants are fine. One exception: a counting `#[global_allocator]` in
-  a test or benchmark binary (COUNTING ALLOCATOR in `docs/decisions/testing/`).
+  a test or benchmark binary (COUNTING ALLOCATOR in
+  `docs/decisions/testing/counting-allocator.md`).
 - **No load-time self-wiring.** No `ctor`, no `inventory`, no link-time registration.
   Wire at the call site.
 - **Pluggable dispatch** (handlers keyed by kind) is built at one explicit wiring site:

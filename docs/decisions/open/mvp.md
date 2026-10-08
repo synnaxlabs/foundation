@@ -1,6 +1,5 @@
 # MVP
 
-
 Decided with the person on 2026-10-05. The MVP is an edge-to-cloud mesh that survives
 a bad link:
 

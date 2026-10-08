@@ -1,6 +1,5 @@
 # Still open
 
-
 Shapes that need the person:
 
 1. **Calculation engine design.** Language, windows, state, placement, quality

@@ -1,6 +1,5 @@
 # Layer rules
 
-
 **X44. C1 rule 1 ("layer 3 uses only `hub`") vs what connectors need.**
 Conflict: connectors also need `types`, `block`, `spec`, `document`, the estimator,
 and `env` seams.

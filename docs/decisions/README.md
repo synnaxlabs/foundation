@@ -5,10 +5,15 @@ structure lives, the crate map, and what is still open.
 
 Each record is one file in the folder of its topic, such as
 `transport/stream-wire.md`. The file name is the record's ID in lower case, without
-its text in parentheses, with `-` for each group of other characters. When two IDs in
-one folder give the same name, both names keep the text in parentheses. The folders
-are the index, and no file lists the records. To find a record by its ID, use
-`grep -rl 'READER RULES' docs/decisions/`.
+its text in parentheses, with `-` for each group of other characters. When a file in
+the folder already has that name, the new file keeps the text in parentheses, and the
+old file keeps its name. The folders are the index, and no file lists the records. To
+find a record by its ID, use `grep -rl '^- \*\*READER RULES' docs/decisions/`.
+
+The person decided on 2026-10-08 at 19:36 UTC to split `docs/decisions.md` into one
+file per record, to stop the merge conflicts on that file
+(https://github.com/synnaxlabs/foundation/issues/1980). `laptop.director` decided the
+folders and the file names (https://github.com/synnaxlabs/foundation/pull/1983).
 
 The other files:
 

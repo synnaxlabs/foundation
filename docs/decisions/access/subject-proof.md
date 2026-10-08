@@ -11,10 +11,12 @@
     (8);
   - request or session open: the 20 bytes `foundation/request/1`, the connection key
     (16), and the exact bytes that the program sent.
+
   `types::hello::Hello::encode` writes the fields of the hello after the tag, so
   `access` and `wire` share one encoder of the field run, and a test in `types` pins
   its exact bytes (`laptop.architect`, 2026-10-08T10:15:03Z,
   https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057658762).
+
   The tags take the MESH LOG form, so each SDK reads one form, and no tag is a prefix
   of another (`laptop.architect`, 2026-10-08T07:39:12Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055096691). A

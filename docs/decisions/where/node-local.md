@@ -1,6 +1,5 @@
 # Connectors, time, status, and node-local state
 
-
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
 | Kind | Binary: one literal table built in `node` | The build | `config` (check), `ops` (discover), supervisor (run) | `connector` (contract), `connector-<kind>` |

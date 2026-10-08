@@ -1,6 +1,5 @@
 # Retired entries
 
-
 | Retired entry | Replaced by |
 | --- | --- |
 | A1 sketch: channel `home` field, epoch and seq pair, standby in the mesh file | S5, S12, A8 |

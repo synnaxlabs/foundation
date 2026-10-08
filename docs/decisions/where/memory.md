@@ -1,6 +1,5 @@
 # Sessions and values in memory
 
-
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
 | Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder; `home` (INDEX FRAMES) | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
