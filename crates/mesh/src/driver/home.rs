@@ -24,6 +24,10 @@ impl Mesh {
     /// changes when the node appends a change of voters, before the commit: a new
     /// leader that replaces that entry changes the result back. `NotMember` reads
     /// what this node applied, so a node that has not applied a join yet gives it.
+    ///
+    /// # Panics
+    ///
+    /// On a broken invariant of the region state: a refusal of the change.
     pub async fn set_home(
         &self,
         index: channel::Key,
@@ -34,12 +38,12 @@ impl Mesh {
             if self.group.borrow().state.member(home).is_none() {
                 return Err(Error::NotMember(home));
             }
-            if attempt
-                .settle(Change::Home { index, home })
-                .await?
-                .is_some()
-            {
-                return Ok(());
+            match attempt.settle(Change::Home { index, home }).await? {
+                Some(Ok(())) => return Ok(()),
+                Some(Err(refused)) => {
+                    panic!("invariant: a home change is never refused: {refused}")
+                }
+                None => {}
             }
         }
     }
