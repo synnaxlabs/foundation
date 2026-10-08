@@ -2331,24 +2331,28 @@ How to read this record:
   sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a header is
   whole or absent. At a restart, zeros where a record should start, or a good header
   with a torn body, are the end of the log. Anything else, or a record after a torn one,
-  is `Error::Corrupt`, and the node does not start. Open writes again, whole, the end
-  file that it finds: the records as it read them, then zeros to the end of the file. So
-  a torn record leaves nothing that a later open reads as a header. Each read and each
-  write of the open is whole sectors, so a header gets one write. An open with a pool
-  whose largest block is less than one sector gives `Error::Pool(TooLarge)` before it
-  reads or makes a file. Then it syncs the end file, the directory, and its parent,
-  because `raft` acts on what open gives and a crash can leave any of them with no sync.
-  The write is there because a read sees, from the cache, the writes that a failed sync
-  of this boot lost, and a later sync does not write them (SIM CRASH): an open that only
-  syncs gives records, or keeps zeros, that the disk does not hold (#1066; the ring has
-  the same rule, #698). Each file before the end file is durable, because a failed write
-  poisons the log, and the next open has the file of that write as its end file or
-  removes it. An open of a log that has a file thus writes and syncs 1 MiB or more, for
-  each region. P1 gives a Raspberry Pi 4 under 1 s to start, and no one has measured
-  this cost there (#1140). Lost: zeros only after a torn end (the first shape), which is
-  the defect; and a read with direct I/O, which not each driver can give: macOS does not
-  promise a read that skips the cache (decided by the architect, #1128,
-  2026-10-07T05:37:30Z:
+  is `Error::Corrupt`, and the node does not start. The error is at the torn record,
+  whatever the version of the record after it, in its file or the next. A record of
+  another version with no torn record before it is `Error::Version` (#1784, approved by
+  the architect, 2026-10-08T04:26:06Z:
+  https://github.com/synnaxlabs/foundation/pull/1776#issuecomment-6052206016). Open
+  writes again, whole, the end file that it finds: the records as it read them, then
+  zeros to the end of the file. So a torn record leaves nothing that a later open reads
+  as a header. Each read and each write of the open is whole sectors, so a header gets
+  one write. An open with a pool whose largest block is less than one sector gives
+  `Error::Pool(TooLarge)` before it reads or makes a file. Then it syncs the end file,
+  the directory, and its parent, because `raft` acts on what open gives and a crash can
+  leave any of them with no sync. The write is there because a read sees, from the
+  cache, the writes that a failed sync of this boot lost, and a later sync does not
+  write them (SIM CRASH): an open that only syncs gives records, or keeps zeros, that
+  the disk does not hold (#1066; the ring has the same rule, #698). Each file before the
+  end file is durable, because a failed write poisons the log, and the next open has the
+  file of that write as its end file or removes it. An open of a log that has a file
+  thus writes and syncs 1 MiB or more, for each region. P1 gives a Raspberry Pi 4 under
+  1 s to start, and no one has measured this cost there (#1140). Lost: zeros only after
+  a torn end (the first shape), which is the defect; and a read with direct I/O, which
+  not each driver can give: macOS does not promise a read that skips the cache (decided
+  by the architect, #1128, 2026-10-07T05:37:30Z:
   https://github.com/synnaxlabs/foundation/issues/1128#issuecomment-6031715225). One
   check over the whole record lost: a damaged length then reads as a torn end, and the
   log drops the good records after it. Zeros over the header of a durable record, which

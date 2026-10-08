@@ -175,7 +175,8 @@ impl Log {
     /// - [`Error::Pool`] when the largest block of `pool` is less than one sector of
     ///   512 bytes, or `pool` has no block for a read or a write.
     /// - [`Error::Corrupt`] when a record is not valid and is not a torn end.
-    /// - [`Error::Version`] when a record has another format version.
+    /// - [`Error::Version`] when a record has another format version. A record after a
+    ///   torn one gives [`Error::Corrupt`] at the torn one, whatever its version.
     /// - [`Error::Stray`] when `dir` holds a file that is not the next log file.
     pub(crate) async fn open(
         files: Files,
