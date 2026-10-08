@@ -16,7 +16,7 @@ use crate::common::{PORT, SERVER, config, part};
 /// The peers before the first count of the heap.
 const FIRST: usize = 50;
 /// The peers before the last count of the heap.
-const LAST: usize = 250;
+const LAST: usize = 1050;
 /// The bytes of a key. A transport that kept anything for each ended peer would hold
 /// at least its key.
 const KEY: usize = 32;
@@ -28,6 +28,7 @@ const LIVE: Span = Span::from_nanos(10_000_000_000);
 pub(crate) fn main() {
     let (first, last) = run();
     let grown = last.saturating_sub(first);
+    panic!("PROBE END");
     assert!(
         grown < (LAST - FIRST) * KEY,
         "the run holds {first} heap bytes after {FIRST} peers, and {last} after \
@@ -53,7 +54,7 @@ fn run() -> (usize, usize) {
             let dialed = transport.dial(SERVER.public(), &at).await;
             dialed.expect("a session").close(Code(1));
             drop(transport);
-            if peer + 1 == FIRST || peer + 1 == LAST {
+            if (peer + 1) % 50 == 0 {
                 node.clock().sleep(LIVE).await;
             }
         }
@@ -76,8 +77,9 @@ fn serve(node: &Node, out: Arc<Mutex<(usize, usize)>>) {
         let mut counts = [0; 2];
         for peer in 1..=LAST {
             drop(transport.accept().await.expect("a session"));
-            if peer == FIRST || peer == LAST {
+            if peer % 50 == 0 {
                 own.clock().sleep(DRAIN).await;
+                eprintln!("PROBE {peer} {}", ALLOCATOR.held());
                 counts[usize::from(peer == LAST)] = ALLOCATOR.held();
             }
         }
