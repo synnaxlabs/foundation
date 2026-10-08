@@ -727,7 +727,7 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
 #[test]
 fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let raw = [&1497_u32.to_le_bytes()[..], &[b'x'; 1497]].concat();
-    let sent = raw.clone();
+    let written = raw.clone();
     let home = |test: Test, incoming| async move {
         test.hub.define(Channel {
             key: channel::Key::from_u128(6),
@@ -741,11 +741,11 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
             clock.sleep(SETTLE).await;
             let set = Arc::clone(writer.set());
             let [index, text, value] = [1, 6, 2].map(|key| super::entry(&set, key));
-            let series = [(index, 8), (text, sent.len()), (value, 8)];
+            let series = [(index, 8), (text, written.len()), (value, 8)];
             let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
             for (entry, bytes) in [
                 (index, &now.to_le_bytes()[..]),
-                (text, &sent),
+                (text, &written),
                 (value, &30_i64.to_le_bytes()),
             ] {
                 let series = draft.series_mut(entry).expect("the series is present");
