@@ -3000,10 +3000,10 @@ mod tests {
             });
         }
 
-        // The heartbeat of leader 2 in the term after `later`, which 2 and 4
-        // elected, with the chain of leader 3 of `later` that makes 4 a voter from
-        // index 2.
-        fn elected_through_chain() -> raft::Message {
+        // The heartbeat of leader 2 in the term after `later`, with the `votes` of
+        // its election and the chain of leader 3 of `later` that makes 4 a voter
+        // from index 2.
+        fn elected_through_chain(votes: &[(u8, u8)]) -> raft::Message {
             let at = |index| Position {
                 term: later(),
                 index,
@@ -3023,9 +3023,17 @@ mod tests {
                 }
             };
             let next = Term(later().0.checked_add(1).unwrap());
-            let mut elected = heartbeat(2, next, &[(2, 2), (4, 4)]);
+            let mut elected = heartbeat(2, next, votes);
             elected.chain = [(2, set(&[2, 3])), (3, set(&[]))].map(link).into();
             elected
+        }
+
+        // The `Unproven` of `elected_through_chain`.
+        fn chain_unproven() -> Error {
+            Error::Raft(raft::Error::Unproven {
+                term: Term(later().0.checked_add(1).unwrap()),
+                from: key(2),
+            })
         }
 
         // Node 1 holds the real join of 4 at 1 and a stale join at 2, and the
@@ -3037,12 +3045,21 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 write(&mesh, changes(&[join(4), stale_join()])).await;
-                let unproven = Error::Raft(raft::Error::Unproven {
-                    term: Term(later().0 + 1),
-                    from: key(2),
-                });
-                let elected = elected_through_chain();
-                assert_eq!(mesh.receive(public(2), elected), Err(unproven));
+                let elected = elected_through_chain(&[(2, 2), (4, 4)]);
+                assert_eq!(mesh.receive(public(2), elected), Err(chain_unproven()));
+                assert_eq!(term(&mesh), common::TERM);
+            });
+        }
+
+        // The same log, with the vote of 4 under its stale key: the node never
+        // counts a wrong key.
+        #[test]
+        fn a_vote_under_the_stale_key_of_a_node_only_a_chain_names_is_not_counted() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                write(&mesh, changes(&[join(4), stale_join()])).await;
+                let elected = elected_through_chain(&[(2, 2), (4, 5)]);
+                assert_eq!(mesh.receive(public(2), elected), Err(chain_unproven()));
                 assert_eq!(term(&mesh), common::TERM);
             });
         }
@@ -3053,7 +3070,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
                 write(&mesh, changes(&[join(4)])).await;
-                let elected = elected_through_chain();
+                let elected = elected_through_chain(&[(2, 2), (4, 4)]);
                 assert_eq!(mesh.receive(public(2), elected), Ok(()));
                 assert_eq!(term(&mesh), Term(later().0 + 1));
             });

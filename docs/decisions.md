@@ -2342,16 +2342,15 @@ How to read this record:
   in the log of its sender, not the entries below its position in the log of the
   receiver, so the lookup never reads a link as a configuration entry: when the
   two joins are in the log and the entry that names the signer is in the chain
-  only, the vote of that signer is removed. The limit is in liveness only, and
-  #1623 is the sound fix, designed with #336 (decided by `laptop.director`,
-  2026-10-07T21:03:30Z:
+  only, the vote of that signer is removed. The limit is in liveness only: the
+  node never counts a wrong key, and #1623 is the sound fix, designed with #336
+  (decided by `laptop.director`, 2026-10-07T21:03:30Z:
   https://github.com/synnaxlabs/foundation/issues/1382#issuecomment-6046807570).
   Two joins below that entry still strand a follower under a leader that the real
   node elected, until #336 builds the voter that checks a join before it stamps it.
-  A
-  hard proof that lost such a claim can be no quorum at a node with a newer
-  configuration, which then learns the term from the leader. A follower answers a cut
-  run with the last entry it kept, and the leader sends the rest from there.
+  A hard proof that lost such a claim can be no quorum at a node with a newer
+  configuration, which then learns the term from the leader. A follower answers a
+  cut run with the last entry it kept, and the leader sends the rest from there.
   `propose_voters` refuses a set with a node that is not a member in the applied
   state of this node (`Error::NotMember`, the first such key), so each log
   that holds the `Voters` entry holds the join of each of its voters before it, and the
