@@ -20,7 +20,7 @@ const DEST: &str = "patches/open62541";
 /// are ours, and no feature the connector does not use.
 const OPTIONS: [&str; 11] = [
     "-DUA_ARCHITECTURE=none",
-    "-DUA_MULTITHREADING=100",
+    "-DUA_MULTITHREADING=0",
     "-DUA_ENABLE_ENCRYPTION=OFF",
     "-DUA_ENABLE_PUBSUB=OFF",
     "-DUA_ENABLE_XML_ENCODING=OFF",

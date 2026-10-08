@@ -78,7 +78,7 @@
 /* #undef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 /* Multithreading */
-#define UA_MULTITHREADING 100
+#define UA_MULTITHREADING 0
 
 /* Advanced Options */
 #define UA_ENABLE_STATUSCODE_DESCRIPTIONS
