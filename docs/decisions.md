@@ -485,6 +485,30 @@ How to read this record:
   record panics. Decided by the architect (#1345,
   https://github.com/synnaxlabs/foundation/issues/1345#issuecomment-6036930649,
   2026-10-07T11:26:39Z).
+- **WAL BENCH (#324, 2026-10-08)** The cargo feature `sim` of `buffer`, off by default
+  (`buffer`'s dev-dependency on itself turns it on for the bench), adds
+  `#[doc(hidden)] pub mod bench` with `Ring { new, commit }` over `wal::Writer`, as
+  STORED BENCH does for `home`. Only the bench `benches/wal.rs` (`test = true`) uses it.
+  `commit` appends its records, takes `trimmed`, syncs each record, and releases to the
+  trimmed tail, so a time holds the writer's cost for each commit. The bench runs
+  commits of 1 and 8 records, in rings of 64 and 4096 blocks: 1 record gives the cost
+  for each commit (`trimmed`, `release`), 8 the cost for each record (`append`,
+  `synced`). Lost: a copy of `wal.rs` in the bench through `#[path]`, which needs
+  `entry`, `record`, and `crc32c` copied too and the workspace lints off; a time of
+  `Buffer::append` and `committed` on a simulated file system, whose file writes hide
+  the cost of the writer; and a control bench of code that a PR does not change, since
+  the bench host gives A/A. It lands before the next PR after #1698 that changes
+  `Writer::append`, `synced`, `release`, or `trimmed`. Decided by `laptop.architect`
+  (2026-10-08T01:37:51Z):
+  https://github.com/synnaxlabs/foundation/issues/324#issuecomment-6050388456. Its
+  baseline is a quiet-host run of this bench at the head of #1729, not the #1698 rerun,
+  whose scratch bench had no warm-up. The run makes two passes of one binary, and each
+  median agrees within 3%. If one does not, a `crate:buffer` issue follows, and there is
+  no baseline until it is fixed. Decided by `laptop.architect` (2026-10-08T03:12:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1729#issuecomment-6051403457.
+  Supersedes "Its head numbers are the baseline of the `wal` benchmark" in
+  https://github.com/synnaxlabs/foundation/pull/1698#issuecomment-6050306136. The
+  #1698 numbers stay the record of the P1 judgment of #1698 only.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -4000,6 +4024,48 @@ How to read this record:
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **SMALL CHANGES (2026-10-08)** A change of under about 50 lines (a fix, a test pin, a
+  doc fix, a rename, or a record) goes into the PR that its session builds in its crate
+  or its file, as its own commit, never a PR of its own. A review finding with such a
+  fix in a crate or a file that the PR changes is fixed in that PR. Else it is an item
+  of an open issue in its crate, by preference one whose PR has had no review round. It
+  goes alone only when no open issue in its crate fits, when it fixes a broken `main`,
+  or when other work waits on it. A small mechanical change, and a small refactor that a
+  fix needs, follow the same rule, as their own commit before the fix; a larger one
+  ships alone. Each architect, red-team, and `laptop.monitor` keeps one PR open for its
+  own small changes, sent to review at most once a day, or at once when other work waits
+  on it (`docs/coordination.md`, "Small changes"). Of the 252 PRs that merged in the 24
+  h to 2026-10-08T03:05Z, 65 changed 50 lines or fewer, and each paid the full fixed
+  cost of CI, review rounds, an audit, and a queue slot (#1705: 8 lines, two review
+  rounds, and an audit). The person decided to fold small fixes into open PRs, relayed
+  by `laptop.monitor`
+  (https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6051321753,
+  2026-10-08T03:05:03Z): "We should batch small optimizations/fixes into single pull
+  requests. One set of test runs, one set of reviews. Less context and less
+  infrastructure cost", and, on a proposed batch branch, "these batch branches could
+  hold up progress on the next piece. Instead they should preferrably be folded into
+  current or existing larger PRs". The rest was decided by the director at
+  2026-10-08T03:23:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051516851), with the
+  link of its item 7 corrected at 2026-10-08T03:31:23Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051596894) and its
+  item 2 widened to a file at 2026-10-08T03:39:52Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051684071).
+  Supersedes the mechanical-change and refactor sentences of `CLAUDE.md` Rule 2
+  (https://github.com/synnaxlabs/foundation/blob/8f6a0596/CLAUDE.md#L200-L202).
+- **COST TRIALS (2026-10-08)** Until 2026-10-09T04:00Z, `box1.builder-1`,
+  `box1.builder-2`, `box1.builder-4`, and `box2.builder-7` run the `reviewer` of a
+  second round that does not skip `breaker` on Sonnet. After the end time,
+  `laptop.monitor` compares the groups and reports to the person, and a new decision
+  keeps or removes the trial. The Sonnet audit trial waits until the trail checks that
+  a script can make are in `cargo xtask review` (#1467, #1211). Until then the `audit`
+  agent runs on Opus. When both issues close, a new decision starts that trial and
+  sets its end and its measure. The person (2026-10-08T01:13Z): "Let's try all 3 of
+  these and see what we get". The person dropped change 1, which closes a round with
+  commits by `Text fixes:` (2026-10-08T01:17Z, on the decline by `laptop.director`,
+  https://github.com/synnaxlabs/foundation/pull/1601#issuecomment-6050149418): "Ok
+  fine". Both are recorded in https://github.com/synnaxlabs/foundation/issues/1703.
+  Supersedes FACTORY MODELS for these runs.
 - **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
   own PR through the queue when the gate, the review rounds, and CI pass; agents may run
   `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and
@@ -4555,9 +4621,7 @@ How to read this record:
   reads the key from its data directory (#1660). The node admits every peer that
   completes the handshake until the mesh states its rule. At the stop, each session and
   stream future drops, then the transport. The bound on the wait for a header is #1628.
-  A transport that stops with an error ends the routing and the node runs on with no
-  port, until #1647 stops the node. #1647 merges before the first protocol in `route`
-  gets a server. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
   datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
@@ -4567,6 +4631,13 @@ How to read this record:
   over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
   bandwidth-delay product. The number of sessions has no bound until #1628.
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
+  Amended (2026-10-08, #1647, by `laptop.architect-2`, 00:05 UTC): a transport that
+  stops with an error stops the node, and `Node::join` gives `Error::Transport`. The
+  node does not rebind the port:
+  https://github.com/synnaxlabs/foundation/issues/1647#issuecomment-6049354544.
+  Supersedes the deferral of
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048464411
+  (2026-10-07 22:50 UTC), under which the node ran on with no port until #1647.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -4773,6 +4844,7 @@ How to read this record:
 | 5.5 and STORE AND FORWARD one-hour cut (#1072) | STORE AND FORWARD amendment (2026-10-07) |
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
+| NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
 
 ---
 

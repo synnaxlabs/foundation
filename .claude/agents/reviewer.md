@@ -28,10 +28,11 @@ issue and each link to the architect that step 3 asks for. An answer that names 
 work with no linked issue, or that lacks a link that step 3 asks for, is a finding. Read
 each such link, and each approval that a `Public surface:` line of an earlier round
 links: one that does not name the item, or that came before the last commit that changes
-the item, counts as missing. Each item, number, or claim of the PR body that the range
-makes false is a finding too. A report gives, after the summary, the `Public surface:`
-and `Hot path:` lines that `.claude/agents/architecture.md` defines: in a second round
-for the range, and in a round 1 that runs no `architecture` agent for the PR.
+the item, counts as missing. Each item, number, or claim of the PR title or body that
+the range makes false is a finding too: the title becomes the message of the merge
+commit. A report gives, after the summary, the `Public surface:` and `Hot path:` lines
+that `.claude/agents/architecture.md` defines: in a second round for the range, and in a
+round 1 that runs no `architecture` agent for the PR.
 
 Check:
 
