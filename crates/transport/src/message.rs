@@ -27,6 +27,18 @@ pub(crate) fn prefix(len: usize) -> Varint {
         .unwrap_or_else(|| panic!("a message of {len} bytes is over the varint limit"))
 }
 
+/// Each cut of the least and the greatest real prefix of 2, 4, and 8 bytes, so each
+/// value bit is both clear and set.
+#[cfg(test)]
+pub(crate) fn cut_prefixes() -> impl Iterator<Item = Vec<u8>> {
+    [64, 16_383, 16_384, (1 << 30) - 1, 1 << 30, (1 << 62) - 1]
+        .into_iter()
+        .flat_map(|len| {
+            let whole = prefix(len).to_vec();
+            (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
+        })
+}
+
 /// Splits a stream's bytes into whole messages, each in one block.
 #[derive(Debug)]
 pub(crate) struct Reader {
@@ -385,12 +397,14 @@ mod tests {
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
-    /// Each cut of a real prefix of 2, 4, and 8 bytes.
-    fn cut_prefixes() -> impl Iterator<Item = Vec<u8>> {
-        [64, 16_384, 1 << 30].into_iter().flat_map(|len| {
-            let whole = prefix(len).to_vec();
-            (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
-        })
+    /// `cut` at the least limit a node can have, at the most it has by default, and at
+    /// no limit.
+    fn at_each_limit(cut: Vec<u8>) -> [(Vec<u8>, usize); 3] {
+        [
+            (cut.clone(), 1_472),
+            (cut.clone(), 1 << 16),
+            (cut, usize::MAX),
+        ]
     }
 
     /// Every message `reader` reads from `source`, until the stream ends.
@@ -453,6 +467,12 @@ mod tests {
 
             #[test]
             fn when_stream_ends_inside_a_prefix_it_fails(
+                limit in prop_oneof![
+                    Just(16),
+                    Just(1_472),
+                    Just(1 << 16),
+                    Just(usize::MAX),
+                ],
                 // `None` repeats the first byte.
                 tail in prop::collection::vec(
                     prop_oneof![
@@ -478,17 +498,18 @@ mod tests {
                                 let cut = whole.get(..cut).expect("a cut");
                                 let bytes = [start.as_slice(), cut].concat();
                                 let mut source = Source::new(bytes, split);
-                                let mut reader = Reader::new(16);
+                                let mut reader = Reader::new(limit);
                                 prop_assert_eq!(
                                     read_all(&mut reader, &pool, &mut source),
                                     Err(Error::Broken {
                                         reason: "the stream ended inside a message"
                                             .to_owned()
                                     }),
-                                    "{:x?} then {:x?}, {} per chunk",
+                                    "{:x?} then {:x?}, {} per chunk, limit {}",
                                     start,
                                     cut,
-                                    split
+                                    split,
+                                    limit
                                 );
                                 // Private: only a peer that misframes ends a stream
                                 // inside a message, and no heap count is exact in a
@@ -514,16 +535,16 @@ mod tests {
             // full one.
             for (len, split) in (0..=70).map(|len| (len, 1)).chain([(200, 2), (200, 7)])
             {
-                for cut in cut_prefixes() {
+                for (cut, limit) in cut_prefixes().flat_map(at_each_limit) {
                     let bytes = [encode(&[vec![1; len]]), cut.clone()].concat();
                     let mut source = Source::new(bytes, split);
-                    let mut reader = Reader::new(usize::MAX);
+                    let mut reader = Reader::new(limit);
                     assert_eq!(
                         read_all(&mut reader, &pool, &mut source),
                         Err(Error::Broken {
                             reason: "the stream ended inside a message".to_owned()
                         }),
-                        "{len} bytes, then {cut:x?}, {split} per chunk"
+                        "{len} bytes, then {cut:x?}, {split} per chunk, limit {limit}"
                     );
                     // Private: only a peer that misframes ends a stream inside a
                     // message, and no heap count is exact in a binary with a test
@@ -540,9 +561,9 @@ mod tests {
             let pool = pool(1 << 16);
             for (admits, gives) in [(false, true), (true, false), (false, false)] {
                 for split in 1..=7 {
-                    for cut in cut_prefixes() {
+                    for (cut, limit) in cut_prefixes().flat_map(at_each_limit) {
                         let mut source = Source::new(cut.clone(), split);
-                        let mut reader = Reader::new(usize::MAX);
+                        let mut reader = Reader::new(limit);
                         let read = reader.read(
                             |_| admits,
                             |len| pool.alloc(len).ok().filter(|_| gives),
@@ -553,7 +574,8 @@ mod tests {
                             Err(Error::Broken {
                                 reason: "the stream ended inside a message".to_owned()
                             }),
-                            "admit {admits}, take {gives}: {cut:x?}, {split} per chunk"
+                            "admit {admits}, take {gives}: {cut:x?}, {split} per chunk, \
+                             limit {limit}"
                         );
                     }
                 }

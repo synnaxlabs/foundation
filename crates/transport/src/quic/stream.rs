@@ -4139,11 +4139,7 @@ mod tests {
 
     #[test]
     fn that_end_inside_a_message_break_the_connection() {
-        // Inside a body, then at each byte inside a prefix of 2, 4, and 8 bytes.
-        let cuts = [64, 16_384, 1 << 30].into_iter().flat_map(|len| {
-            let whole = message::prefix(len).to_vec();
-            (1..whole.len()).map(move |end| whole.get(..end).expect("a cut").to_vec())
-        });
+        let cuts = message::cut_prefixes();
         for cut in iter::once(vec![3, b'a']).chain(cuts) {
             let bytes = [&[2], cut.as_slice()].concat();
             testing::run(1, move |shard| {
