@@ -19,23 +19,23 @@ each Bash command alone, with no `&&` chain and no shell variable. The permissio
 refuses a command when it cannot prove that the command stays inside the worktree.
 
 Read `docs/claude/testing.md` and the section of `docs/decisions.md` the PR builds. Then
-read the diff (`gh pr diff <n>`) and every file it touches. In a second round you get
-the earlier findings and a commit range: review only that range, and check that each fix
-closes its finding and adds no new defect, and that each answer with no code change
-holds against the code and against "Findings" step 3 of `.claude/skills/review/SKILL.md`
-on `main`. Name each answer that defers work or decides what a ruling means, with its
-issue and each link to the architect that step 3 asks for. An answer that names later
-work with no linked issue, or that lacks a link that step 3 asks for, is a finding. Read
-each such link, and each approval that a `Public surface:` line of an earlier round
-links: one that does not name the item, or whose approved SHA comes before a commit that
-changes the item's surface or the meaning of a ruling
-(`.claude/skills/architect/SKILL.md`, "Review before the person" step 3), counts as
-missing. Read each architect review and ruling on the PR, on a PR that it replaces, on
-each issue that it closes, and linked from a round comment: each later step or trigger
-that one names, and that lacks the record that "Done" in the `review` skill asks for, is
-a finding. Each item, number, or claim of the PR title or body that the range makes
-false is a finding too: the title becomes the message of the merge commit. A report
-gives, after the summary, the `Public surface:` and `Hot path:` lines that
+read the diff (`gh pr diff <n>`) and every file it touches. In each round, each item,
+number, or claim of the PR title or body that is false at the PR head is a finding: the
+title becomes the message of the merge commit. In a second round you get the earlier
+findings and a commit range: review only that range, and check that each fix closes its
+finding and adds no new defect, and that each answer with no code change holds against
+the code and against "Findings" step 3 of `.claude/skills/review/SKILL.md` on `main`.
+Name each answer that defers work or decides what a ruling means, with its issue and
+each link to the architect that step 3 asks for. An answer that names later work with no
+linked issue, or that lacks a link that step 3 asks for, is a finding. Read each such
+link, and each approval that a `Public surface:` line of an earlier round links: one
+that does not name the item, or whose approved SHA comes before a commit that changes
+the item's surface or the meaning of a ruling (`.claude/skills/architect/SKILL.md`,
+"Review before the person" step 3), counts as missing. Read each architect review and
+ruling on the PR, on a PR that it replaces, on each issue that it closes, and linked
+from a round comment: each later step or trigger that one names, and that lacks the
+record that "Done" in the `review` skill asks for, is a finding. A report gives, after
+the summary, the `Public surface:` and `Hot path:` lines that
 `.claude/agents/architecture.md` defines: in a second round for the range, and in a
 round 1 that runs no `architecture` agent for the PR.
 
