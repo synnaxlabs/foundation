@@ -239,10 +239,8 @@ fn a_drop_after_close_delivers_the_bytes_the_kernel_still_holds() {
         let (_listener, mut client, mut server) = create_pair(&net).await;
         assert_eq!(write(&mut client, &[&[7]]).await, Ok(1));
         let bytes = vec![7; 1 << 20];
-        let Poll::Ready(queued) = write_once(&mut client, &bytes) else {
-            panic!("an empty send buffer takes bytes")
-        };
-        let queued = queued + 1;
+        let queued = write(&mut client, &[&bytes]).await;
+        let queued = queued.expect("an empty send buffer takes bytes") + 1;
         assert!(queued < 1 << 20, "the kernel holds the rest: {queued}");
         assert_eq!(close(&mut client).await, Ok(()));
         drop(client);
@@ -261,7 +259,8 @@ fn a_drop_after_close_delivers_the_bytes_the_kernel_still_holds() {
 
 /// With a peer that reads nothing, the kernel sends until the peer's receive buffer
 /// is full. The write then waits at the unsent bound, with most of the send buffer
-/// still free. Measured on Linux.
+/// still free. macOS waits for the write event after each write, so the next poll
+/// that no event preceded waits.
 #[test]
 fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
     on_thread("net-unsent", || async {
@@ -277,10 +276,15 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
             written += n;
             assert!(written < 1 << 20, "the send buffer never fills: {written}");
         }
-        assert!(
-            written > 1 << 16,
-            "the peer's buffer fills first: {written}"
-        );
+        if cfg!(target_os = "macos") {
+            let max = config.options.unsent_bytes_max;
+            assert!(written < 2 * max, "a write waits for the event: {written}");
+        } else {
+            assert!(
+                written > 1 << 16,
+                "the peer's buffer fills first: {written}"
+            );
+        }
     });
 }
 
