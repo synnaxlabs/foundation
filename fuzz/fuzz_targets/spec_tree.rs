@@ -6,12 +6,14 @@
 //! the decoded entries exactly when `spec::region::tree` of them has the same root.
 //!
 //! Input: a count of chunks, each a count of pieces, each a length, bytes, and a
-//! link. A length of `KEY` or more adds an entry key instead of bytes, and one of
-//! `VALUE` or more adds an entry value that is a definition, so that a short input
-//! builds a tree that `definitions` reads. Then changes to the end, each a length, a name, and a length and value, where
-//! a value length of 255 deletes. A link `k` above zero adds the digest of chunk
-//! `k - 1`, modulo the chunks built so far, where chunk 0 is the empty tree. A count
-//! past the end reads as zero; bytes past the end stop at the end.
+//! link. A length from `KEY` to `VALUE - 1` adds the entry key `p.a`, `p.b`, or
+//! `p.c` instead of bytes. A length of `VALUE` or more adds an index channel
+//! definition with its value length, so that a short input builds a tree that
+//! `definitions` reads. Then changes to the end, each a length, a name, and a length
+//! and value, where a value length of 255 deletes. A link `k` above zero adds the
+//! digest of chunk `k - 1`, modulo the chunks built so far, where chunk 0 is the
+//! empty tree. A count past the end reads as zero; bytes past the end stop at the
+//! end.
 
 #![no_main]
 
