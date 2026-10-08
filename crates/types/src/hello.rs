@@ -105,4 +105,10 @@ mod tests {
     fn panics_on_an_out_of_another_length() {
         create_hello().encode(&mut [0; 95]);
     }
+
+    #[test]
+    #[should_panic(expected = "out has 97 bytes, and the hello has 96")]
+    fn panics_on_a_longer_out() {
+        create_hello().encode(&mut [0; 97]);
+    }
 }

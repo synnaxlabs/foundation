@@ -322,6 +322,21 @@ mod program {
     use super::*;
 
     #[test]
+    fn refuses_unknown_kinds() {
+        for kind in (0..=u8::MAX).filter(|kind| ![4, 5].contains(kind)) {
+            assert_eq!(
+                Program::default().decode(&zeros(kind, 73)),
+                Err(Error::Kind { kind })
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_an_empty_message() {
+        assert_eq!(Program::default().decode(&[]), Err(Error::Empty));
+    }
+
+    #[test]
     fn decodes_each_challenge() {
         let mut program = Program::default();
         for _ in 0..3 {

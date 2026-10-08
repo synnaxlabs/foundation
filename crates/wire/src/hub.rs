@@ -422,7 +422,7 @@ pub mod ends {
 pub enum Error {
     /// The message has no bytes.
     Empty,
-    /// The first byte names no message.
+    /// The first byte names no message of this stream.
     Kind {
         /// The first byte.
         kind: u8,
@@ -506,7 +506,7 @@ impl fmt::Display for Error {
             Self::Empty => f.write_str("the hub message is empty"),
             Self::Kind { kind } => write!(
                 f,
-                "the hub message has kind {kind}, which the hub wire does not have"
+                "the hub message has kind {kind}, which this stream does not carry"
             ),
             Self::Length { len } => write!(
                 f,
@@ -1141,7 +1141,7 @@ mod tests {
             (Error::Empty, "the hub message is empty"),
             (
                 Error::Kind { kind: 9 },
-                "the hub message has kind 9, which the hub wire does not have",
+                "the hub message has kind 9, which this stream does not carry",
             ),
             (
                 Error::Length { len: 4 },

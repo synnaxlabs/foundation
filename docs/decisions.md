@@ -1559,7 +1559,8 @@ How to read this record:
   four protocols from a client. The stream and client rules are approved by the
   coordinator on #90. The hello stream was changed by `laptop.architect` at
   2026-10-08T09:53:58Z
-  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526). Rejected: a version agreed once per session
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526).
+  Rejected: a version agreed once per session
   (the format flag's flip reaches nodes at different times, so one session can carry
   streams of two versions) and a session per protocol (`transport` stays blind to
   protocols, and it costs five handshakes per peer pair).
@@ -4389,8 +4390,9 @@ How to read this record:
   checks a first hello, after `Error::Changed` for another subject, key, `via`, or
   connection, and takes the carrier from the `Admitted`: a move to another node is a
   new connection. `Changed` names the first field that differs, an
-  `access::proof::Field` (`laptop.architect`, 2026-10-08,
-  https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181). Stop codes: `REFUSED` 20 for an unknown subject, an unlisted key, or
+  `access::proof::Field` (`laptop.architect`, 2026-10-08T10:19:16Z,
+  https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181).
+  Stop codes: `REFUSED` 20 for an unknown subject, an unlisted key, or
   a bad signature, which tell about the spec and so share one code (`Signature` too:
   `admit` checks it only for a listed key); each other step its own code, `UNSYNCED`
   21, `STALE` 22, `VIA` 23, `EXPIRED` 24, `CAPPED` 25, `CHANGED` 26. `hub` maps each
