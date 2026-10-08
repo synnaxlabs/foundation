@@ -143,6 +143,7 @@ fn create_config_on(
         voters: members.iter().map(|member| member.card.key()).collect(),
         members,
         files: node.files(),
+        dir: PathBuf::new(),
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),

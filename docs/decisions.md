@@ -2855,6 +2855,18 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
   three types.
+  Amended (2026-10-08, PR 3b of #585): `Config::dir` is the mesh's directory in
+  `Config::files`, and the log is in its `log` directory. `node` gives `mesh` (decided
+  by `laptop.architect`, 03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). `open`
+  makes `dir` and syncs its parent when it is not there. `Mesh::ended` gives `Ended`, a
+  future that resolves when each task of the mesh has ended: the group's task and each
+  task that sends. It holds no `Group`, so it waits soon after the last clone drops or
+  the group stops. Then the log is closed, and a new open of `dir` succeeds. Lost: a
+  counting `Tasks` driver in `node`, which counts each task of a shard, not those of the
+  mesh; a `Files` call that gives a subdirectory, which changes `env` for one caller
+  (the field won, by `laptop.architect-2`, 03:54 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866).
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and

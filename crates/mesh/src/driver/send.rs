@@ -13,7 +13,7 @@ use transport::stream::Sender;
 use transport::{Class, Session, Transport};
 use types::node;
 
-use super::{Group, header};
+use super::{Group, Live, header};
 use crate::bytes::block;
 use crate::message::Message;
 
@@ -26,6 +26,8 @@ pub(super) struct Senders {
     pub(super) transport: Rc<Transport>,
     pub(super) pool: Rc<Pool>,
     pub(super) tasks: Tasks,
+    // Counts each task that holds this, until it ends.
+    pub(super) _live: Live,
 }
 
 // Why a message did not go.

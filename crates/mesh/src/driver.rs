@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
@@ -33,8 +34,11 @@ use crate::member::Member;
 use crate::message::Message;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
+pub use end::Ended;
+use end::{Live, Running};
 use send::Senders;
 
+mod end;
 mod home;
 mod send;
 mod stream;
@@ -50,7 +54,7 @@ fn header(pool: &Pool) -> Result<Block, block::Error> {
 const HEARTBEAT_TICKS: u32 = 1;
 /// The most messages that wait for one member.
 const QUEUE_MAX: usize = 64;
-/// The directory of the log, in the mesh's directory.
+/// The directory of the log, in [`Config::dir`].
 const LOG: &str = "log";
 
 /// What a [`Mesh`] is built from.
@@ -70,8 +74,11 @@ pub struct Config {
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
     pub voters: BTreeSet<node::Key>,
-    /// The mesh's directory.
+    /// The node's files. The mesh reads and writes only in `dir`.
     pub files: Files,
+    /// The mesh's directory in `files`. The mesh makes it when it is not there. Its
+    /// parent must be there.
+    pub dir: PathBuf,
     /// Times the ticks of the group.
     pub clock: Clock,
     /// Gives each election timeout its random part.
@@ -93,10 +100,11 @@ pub struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory gives [`Error::Log`].
+/// open of the same directory gives [`Error::Log`]. [`Mesh::ended`] tells when.
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
+    running: Rc<Running>,
     pool: Rc<Pool>,
     clock: Clock,
     #[cfg_attr(
@@ -113,7 +121,7 @@ impl fmt::Debug for Mesh {
 }
 
 impl Mesh {
-    /// Reads the log from `config.files`, starts the group as a follower, and spawns
+    /// Reads the log from `config.dir`, starts the group as a follower, and spawns
     /// its task on `config.tasks`. Homes are known again when this node applies the
     /// log, after it hears the leader.
     ///
@@ -150,6 +158,7 @@ impl Mesh {
             transport,
             pool: Rc::clone(&mesh.pool),
             tasks: tasks.clone(),
+            _live: Live::new(&mesh.running),
         };
         tasks.spawn(senders.run());
         Ok(mesh)
@@ -172,7 +181,7 @@ impl Mesh {
             return Err(Error::NotMember(key));
         }
         let pool = Rc::clone(&config.pool);
-        let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
+        let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
         let unapplied = written(&stored.entries).collect();
         let start = Start {
             hard: stored.hard,
@@ -207,8 +216,10 @@ impl Mesh {
             calls: BTreeMap::new(),
         }));
         let weak = Rc::downgrade(&group);
+        let running = Rc::default();
         config.tasks.spawn(run(
             weak,
+            Live::new(&running),
             log,
             signer,
             config.clock.clone(),
@@ -216,6 +227,7 @@ impl Mesh {
         ));
         Ok(Self {
             group,
+            running,
             pool,
             clock: config.clock,
             entropy: config.entropy,
@@ -226,6 +238,13 @@ impl Mesh {
     #[must_use]
     pub fn key(&self) -> node::Key {
         self.group.borrow().raft.key()
+    }
+
+    /// Resolves when each task of the mesh has ended: soon after the group stops or
+    /// the last clone drops. Then the log is closed, and the mesh holds no session, no
+    /// block, and no clone of [`Config::transport`]. It holds no clone of the mesh.
+    pub fn ended(&self) -> Ended {
+        Ended(Rc::clone(&self.running))
     }
 
     /// A watch of the home of `index`.
@@ -912,11 +931,25 @@ fn request(body: &Body) -> bool {
     }
 }
 
+// Opens the log in `dir`, and makes `dir` when it is not there.
+async fn open_log(
+    files: Files,
+    dir: &Path,
+    pool: Rc<Pool>,
+) -> Result<(Log, log::Stored), log::Error> {
+    files.create_dir(dir).await?;
+    files
+        .sync_dir(dir.parent().unwrap_or(Path::new("")))
+        .await?;
+    Log::open(files, dir.join(LOG), pool).await
+}
+
 // Ticks the group and does what each `Ready` says, in the order that `raft` needs:
 // sign, write, send, apply. It ends when the group stops or its last handle drops.
 // It is the only caller of `Raft::ready`, so the writes keep their order.
 async fn run(
     group: Weak<RefCell<Group>>,
+    _live: Live,
     mut log: Log,
     signer: Signer,
     clock: Clock,
@@ -997,7 +1030,6 @@ mod tests {
     use std::mem::ManuallyDrop;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::num::{NonZeroU32, NonZeroUsize};
-    use std::path::Path;
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use std::task::Wake;
@@ -1106,6 +1138,7 @@ mod tests {
             members: common::create_members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
+            dir: PathBuf::new(),
             clock: node.clock(),
             entropy: node.entropy(),
             tasks: tasks.clone(),
@@ -4783,6 +4816,93 @@ mod tests {
             node.clock().sleep(Span::MILLISECOND).await;
             let again = open(&node, &tasks, 1, &[1], &[1]).await;
             assert_eq!(again.err(), None);
+        });
+    }
+
+    #[test]
+    fn ended_waits_for_the_last_mesh_and_the_log() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let (mut first, second) = (mesh.ended(), mesh.ended());
+            node.clock().sleep(Span::SECOND).await;
+            let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut first).poll(cx))).await;
+            assert_eq!(polled, Poll::Pending);
+            drop(mesh);
+            first.await;
+            second.await;
+            assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
+        });
+    }
+
+    #[test]
+    fn ended_waits_for_each_task_that_sends() {
+        solo(|node, tasks| async move {
+            let config = config(&node, &tasks, 1, &IDS, &IDS);
+            let transport = Rc::clone(&config.transport);
+            let mesh = Mesh::open(config).await.unwrap();
+            node.clock()
+                .sleep(Span::from_nanos(5 * Span::SECOND.nanos()))
+                .await;
+            assert!(Rc::strong_count(&transport) > 2);
+            let ended = mesh.ended();
+            drop(mesh);
+            ended.await;
+            assert_eq!(Rc::strong_count(&transport), 1);
+        });
+    }
+
+    #[test]
+    fn ended_resolves_when_the_group_stops() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let cause = fail_sync(&node);
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Err(cause));
+            mesh.ended().await;
+        });
+    }
+
+    #[test]
+    fn a_power_cut_keeps_the_directory_of_the_config() {
+        let mut sim = Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let at = sim
+            .run_on(&node, |node, tasks| async move {
+                let config = Config {
+                    dir: "region".into(),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::start(config).await.unwrap();
+                lead(&mesh, &node.clock(), home(1)).await
+            })
+            .unwrap();
+        sim.crash(&node, Crash::Power);
+        let entries = sim
+            .run_on(&node, |node, _| async move {
+                let dir = Path::new("region").join(LOG);
+                let (_, stored) =
+                    Log::open(node.files(), dir, create_pool()).await.unwrap();
+                stored.entries
+            })
+            .unwrap();
+        assert_eq!(entries.last().map(|entry| entry.at), Some(at));
+    }
+
+    #[test]
+    fn the_log_is_in_the_directory_of_the_config() {
+        solo(|node, tasks| async move {
+            let dir = Path::new("region");
+            let at = || Config {
+                dir: dir.into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let _mesh = Mesh::start(at()).await.unwrap();
+            let busy = Mesh::start(at()).await.err();
+            let path = dir.join(LOG).join("log-0");
+            let cause = log::Error::Files(files::Error::Busy { path });
+            assert_eq!(busy, Some(Error::Log(cause)));
+            assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
         });
     }
 
