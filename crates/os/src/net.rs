@@ -72,8 +72,15 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
 }
 
 /// `address` as `sim` names it: an IPv4 address on an IPv6 socket is an IPv4 address.
+/// Any other address keeps its scope and flow label.
 fn canonical(address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(address.ip().to_canonical(), address.port())
+    match address {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(v4.into(), v6.port()),
+            None => address,
+        },
+        SocketAddr::V4(_) => address,
+    }
 }
 
 /// Sets `options` on a TCP socket.
@@ -171,6 +178,8 @@ mod tests {
     }
 
     mod canonical {
+        use std::net::SocketAddrV6;
+
         use super::*;
 
         #[test]
@@ -181,6 +190,13 @@ mod tests {
             assert_eq!(canonical(plain), plain);
             let v6: SocketAddr = "[::1]:8080".parse().unwrap();
             assert_eq!(canonical(v6), v6);
+        }
+
+        #[test]
+        fn keeps_the_scope_and_flow_label_of_an_ipv6_address() {
+            let link_local = SocketAddrV6::new("fe80::1".parse().unwrap(), 8080, 7, 2);
+            let address = SocketAddr::V6(link_local);
+            assert_eq!(canonical(address), address);
         }
     }
 

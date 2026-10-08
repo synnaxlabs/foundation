@@ -149,6 +149,12 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("a current-thread runtime builds")
 }
 
+fn runtime_with_no_io() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime builds")
+}
+
 #[test]
 fn a_vectored_write_reaches_the_peer_in_order() {
     on_thread("net-write", || async {
@@ -505,6 +511,31 @@ fn a_listener_on_a_mapped_address_agrees_with_its_streams() {
 }
 
 #[test]
+fn a_connect_to_a_mapped_address_names_plain_ipv4_ends() {
+    on_thread("net-mapped", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let port = listener.local().port();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), port);
+        let client = connect(&net, mapped).await;
+        let server = accept(&mut listener).await;
+        assert_eq!(client.peer(), listener.local());
+        assert_eq!(client.local(), server.peer());
+    });
+}
+
+#[test]
+fn a_refused_connect_to_a_mapped_address_names_the_ipv4_address() {
+    on_thread("net-refused", || async {
+        let net = net();
+        let remote = listen(&net).local();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), remote.port());
+        let outcome = net.connect(&connect_config(mapped)).await.map(|_| ());
+        assert_eq!(outcome, Err(Error::Refused { remote }));
+    });
+}
+
+#[test]
 #[cfg(target_pointer_width = "64")]
 fn an_unsent_bound_past_a_c_int_fails_the_listen_and_the_connect() {
     on_thread("net-bad-option", || async {
@@ -638,6 +669,22 @@ fn a_poll_after_a_reset_on_a_second_thread_panics() {
 }
 
 #[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_close_after_a_reset_on_a_second_thread_panics() {
+    let (mut server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, client, mut server) = create_pair(&net).await;
+        let remote = client.local();
+        drop(client);
+        read_reset(&mut server, remote).await;
+        (server, listener)
+    });
+    runtime().block_on(async {
+        drop(close(&mut server).await);
+    });
+}
+
+#[test]
 #[should_panic(expected = "a TCP listener polls only on the thread of its first poll")]
 fn a_listener_poll_on_a_second_thread_panics() {
     let (mut listener, _client, _server) = on_thread("net-first", || async {
@@ -677,11 +724,31 @@ fn a_connect_with_no_runtime_panics() {
 fn a_first_listener_poll_in_a_runtime_with_no_io_driver_panics() {
     let net = net();
     let mut listener = listen(&net);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a current-thread runtime builds");
-    runtime.block_on(async {
+    runtime_with_no_io().block_on(async {
         drop(poll_fn(|cx| listener.poll_accept(cx)).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "A Tokio 1.x context was found, but IO is disabled")]
+fn a_first_stream_poll_in_a_runtime_with_no_io_driver_panics() {
+    let (mut client, _listener) = on_thread("net-connect", || async {
+        let net = net();
+        let listener = listen(&net);
+        (connect(&net, listener.local()).await, listener)
+    });
+    runtime_with_no_io().block_on(async {
+        drop(read(&mut client, &mut [0; 8]).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "A Tokio 1.x context was found, but IO is disabled")]
+fn a_connect_in_a_runtime_with_no_io_driver_panics() {
+    let net = net();
+    let listener = listen(&net);
+    runtime_with_no_io().block_on(async {
+        drop(net.connect(&connect_config(listener.local())).await);
     });
 }
 

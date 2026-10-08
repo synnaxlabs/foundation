@@ -52,9 +52,11 @@ impl Stream {
         error
     }
 
-    fn live(&mut self) -> Result<Pin<&mut TcpStream>, Error> {
-        let stream = self
-            .socket
+    /// Takes `socket` alone, so a poll reads `failed` while it holds the stream.
+    fn live(
+        socket: &mut Socket<std::net::TcpStream, TcpStream>,
+    ) -> Result<Pin<&mut TcpStream>, Error> {
+        let stream = socket
             .live("stream", TcpStream::from_std)
             .map_err(io_error)?;
         Ok(Pin::new(stream))
@@ -86,13 +88,14 @@ impl tcp::Driver for Stream {
         let peer = self.peer;
         let mut read = ReadBuf::new(buffer);
         // The kernel keeps the bytes that came before a reset, so they come first.
-        let outcome = match ready!(self.live()?.poll_read(cx, &mut read)) {
-            Ok(()) => match (read.filled().len(), &self.failed) {
-                (0, Some(failed)) => Err(failed.clone()),
-                (read, _) => Ok(read),
-            },
-            Err(e) => Err(self.fail(stream_error(errno(&e), peer))),
-        };
+        let outcome =
+            match ready!(Self::live(&mut self.socket)?.poll_read(cx, &mut read)) {
+                Ok(()) => match (read.filled().len(), &self.failed) {
+                    (0, Some(failed)) => Err(failed.clone()),
+                    (read, _) => Ok(read),
+                },
+                Err(e) => Err(self.fail(stream_error(errno(&e), peer))),
+            };
         Poll::Ready(outcome)
     }
 
@@ -102,12 +105,11 @@ impl tcp::Driver for Stream {
         buffers: &[IoSlice<'_>],
     ) -> Poll<Result<usize, Error>> {
         let peer = self.peer;
-        let (closed, failed) = (self.closed, self.failed.clone());
-        let stream = self.live()?;
-        if let Some(failed) = failed {
-            return Poll::Ready(Err(failed));
+        let stream = Self::live(&mut self.socket)?;
+        if let Some(failed) = &self.failed {
+            return Poll::Ready(Err(failed.clone()));
         }
-        if closed {
+        if self.closed {
             // A reset after the close is the stream's end. Without one, the write
             // is a misuse, as `sim` reports it.
             return Poll::Ready(Err(match Self::pending(&stream) {
@@ -123,12 +125,11 @@ impl tcp::Driver for Stream {
 
     fn poll_close(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
         let peer = self.peer;
-        let (closed, failed) = (self.closed, self.failed.clone());
-        let stream = self.live()?;
-        if let Some(failed) = failed {
-            return Poll::Ready(Err(failed));
+        let stream = Self::live(&mut self.socket)?;
+        if let Some(failed) = &self.failed {
+            return Poll::Ready(Err(failed.clone()));
         }
-        if closed {
+        if self.closed {
             return Poll::Ready(match Self::pending(&stream) {
                 Some(code) => Err(self.fail(stream_error(code, peer))),
                 None => Ok(()),
@@ -257,6 +258,28 @@ mod tests {
         })
         .expect("the probes time out in the bound");
         drop(server);
+    }
+
+    /// With the reset's error already taken by a read on another descriptor, the
+    /// kernel's `ENOTCONN` is all the close can give.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_close_after_a_reset_whose_error_was_read_gives_not_connected() {
+        let (client, server) = create_pair();
+        let other = client.try_clone().unwrap();
+        let mut stream = stream(client);
+        sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
+        drop(server);
+        other.set_nonblocking(false).unwrap();
+        other
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let read = other.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
+        assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
+        other.set_nonblocking(true).unwrap();
+        let closed = on_runtime(|| poll_fn(|cx| stream.poll_close(cx)));
+        let code = Errno::NOTCONN.raw_os_error();
+        assert_eq!(closed, Err(Error::Io { code }));
     }
 
     #[test]
