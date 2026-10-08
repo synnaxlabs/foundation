@@ -5959,7 +5959,18 @@ How to read this record:
   includes, unchanged, plus the files that its build generates. Its `build.rs` reads
   the copy, with no `[patch.crates-io]`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
-  2026-10-08 10:08 UTC).
+  2026-10-08 10:08 UTC). `fuzz/` is a workspace of its own, so `fuzz/Cargo.toml` holds
+  the `[patch.crates-io]` table of the root `Cargo.toml` (#1864). The PR that changes a
+  copy of a Rust crate lists its mutants as `docs/dependencies.md`, "Local patches",
+  states
+  (`laptop.architect-2`, 2026-10-08T11:36:09Z,
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337, and
+  2026-10-08T12:05:01Z for hand mutants,
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510). That rule
+  does not cover a C copy. Trigger: the PR that first changes a file in a C copy states
+  how a test outside the copy checks each changed line, for the approval of the
+  architect of `connector-opcua` (#435; `laptop.architect-2`, 2026-10-08T11:24:06Z,
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
 
 ### 1.16 Retired entries
 
