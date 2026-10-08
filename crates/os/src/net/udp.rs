@@ -45,7 +45,7 @@ struct Bound {
 }
 
 impl Udp {
-    /// Binds a socket to `config.local`. Needs no runtime.
+    /// Binds a socket to `config.local`, with don't-fragment set. Needs no runtime.
     pub(super) fn bind(config: &udp::Config) -> Result<Self, Error> {
         let local = config.local;
         let fd =
@@ -60,6 +60,11 @@ impl Udp {
         bind(fd.as_fd(), local)?;
         let socket = UdpSocket::from(fd);
         let state = UdpSocketState::new((&socket).into()).map_err(|e| from_io(&e))?;
+        // Linux and macOS each set don't-fragment, so this fails only on an OS that
+        // cannot keep the contract.
+        if state.may_fragment() {
+            return Err(io_error(Errno::NOPROTOOPT));
+        }
         let local = socket.local_addr().map_err(|e| from_io(&e))?;
         let bound = Bound {
             send_batch_max: state.max_gso_segments(),
