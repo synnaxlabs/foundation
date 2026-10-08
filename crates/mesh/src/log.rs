@@ -1960,29 +1960,44 @@ mod tests {
     }
 
     // A record after a torn one, in its file or the next, was written after the torn
-    // one, whatever its version or number. No write of the log makes these files, so
-    // the test gives their bytes to `scan`.
+    // one, whatever its version or number.
     #[test]
-    fn refuses_a_record_after_a_torn_one() {
-        let good = encode(0, None, &[bytes(1, 10)]);
-        let mut torn = encode(1, None, &[bytes(2, 10)]);
-        let last = torn.len() - 1;
-        torn[last] ^= 0xFF;
-        let mut other = encode(2, None, &[bytes(3, 10)]);
-        other[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-        sign(&mut other);
-        let head = [good.clone(), torn].concat();
+    fn refuses_a_record_of_another_version_after_a_torn_one_in_its_file() {
+        let (mut sim, node) = create_node(0);
+        create_three_files(&mut sim, &node);
+        sim.run_on(&node, |node, _| async move {
+            let mut torn = encode(2, None, &[bytes(3, 10)]);
+            let last = torn.len() - 1;
+            torn[last] ^= 0xFF;
+            let mut other = encode(3, None, &[bytes(4, 10)]);
+            other[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+            sign(&mut other);
+            put(&node, "log-2", 0, &[torn, other].concat()).await;
+        })
+        .unwrap();
         let expected = Error::Corrupt {
-            path: file("log-0"),
-            offset: wide(good.len()),
+            path: file("log-2"),
+            offset: 0,
         };
-        let same = [[head.clone(), other].concat()];
-        assert_eq!(scan(Path::new(DIR), &same), Err(expected.clone()), "same");
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    #[test]
+    fn refuses_a_next_file_that_starts_at_or_before_a_torn_record() {
         for number in [0, 1] {
-            let record = encode(number, None, &[bytes(3, 10)]);
-            let segments = [head.clone(), record];
-            let scanned = scan(Path::new(DIR), &segments);
-            assert_eq!(scanned, Err(expected.clone()), "next at {number}");
+            let (mut sim, node) = create_node(0);
+            create_three_files(&mut sim, &node);
+            sim.run_on(&node, move |node, _| async move {
+                put(&node, "log-1", wide(HEADER) + 5, &[0xFF]).await;
+                let record = encode(number, None, &[bytes(3, 10)]);
+                put(&node, "log-2", 0, &record).await;
+            })
+            .unwrap();
+            let expected = Error::Corrupt {
+                path: file("log-1"),
+                offset: 0,
+            };
+            assert_eq!(stored(&mut sim, &node), Err(expected), "next at {number}");
         }
     }
 
