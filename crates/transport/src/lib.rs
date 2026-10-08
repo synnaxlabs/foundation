@@ -67,13 +67,12 @@ mod tls;
     expect(dead_code, reason = "the QUIC carrier is the first user")
 )]
 mod varint;
+mod wake;
 
 use std::cell::RefCell;
 use std::fmt;
-use std::future::poll_fn;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
-use std::task::{Poll, ready};
 
 use types::ed25519::{PrivateKey, PublicKey};
 use types::time::Span;
@@ -86,7 +85,7 @@ pub use error::Error;
 pub use port::Port;
 pub use session::{Peer, Session};
 
-use table::{Found, Table};
+use table::Table;
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
@@ -193,22 +192,7 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let found = self.table.borrow_mut().find(peer);
-        let attempt = match found {
-            Found::Open(session) => return Ok(session),
-            Found::Dialing(attempt) => attempt,
-            Found::Start(attempt) => {
-                let dialer = self.carrier.dialer();
-                let table = Rc::clone(&self.table);
-                let addresses = addresses.to_vec();
-                self.tasks.spawn(async move {
-                    let dial = dial::dial(&dialer, peer, &addresses).await;
-                    table.borrow_mut().dialed(peer, dial.map(Session::new));
-                });
-                attempt
-            }
-        };
-        poll_fn(|cx| attempt.poll(cx)).await
+        table::dial(&self.table, &self.carrier, &self.tasks, peer, addresses).await
     }
 
     /// Waits for the next new session: one that a dial on this transport made, or
@@ -232,16 +216,7 @@ impl Transport {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Session, Error> {
-        poll_fn(|cx| {
-            let mut table = self.table.borrow_mut();
-            if let Some(session) = table.poll_dialed(cx) {
-                return Poll::Ready(Ok(session));
-            }
-            let session = ready!(self.carrier.poll_accept(cx)).map(Session::new)?;
-            table.accepted(&session);
-            Poll::Ready(Ok(session))
-        })
-        .await
+        table::accept(&self.table, &self.carrier).await
     }
 
     /// What this transport counted since [`Transport::new`].

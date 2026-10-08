@@ -1,6 +1,6 @@
 use std::fmt;
 use std::future::poll_fn;
-use std::rc::{Rc, Weak};
+use std::rc::{self, Rc};
 
 use types::ed25519::PublicKey;
 
@@ -39,14 +39,8 @@ impl Session {
     }
 
     /// A handle that does not keep the session from closing at its last drop.
-    pub(crate) fn downgrade(&self) -> Weak<quic::Session> {
-        Rc::downgrade(&self.0)
-    }
-
-    /// The session of `weak` while a handle holds it and it is open: no caller
-    /// closed it, and it has not ended.
-    pub(crate) fn upgrade(weak: &Weak<quic::Session>) -> Option<Self> {
-        weak.upgrade().filter(|session| session.live()).map(Self)
+    pub(crate) fn downgrade(&self) -> Weak {
+        Weak(Rc::downgrade(&self.0))
     }
 
     /// Who is on the other end.
@@ -190,6 +184,21 @@ impl fmt::Debug for Session {
         f.debug_struct("Session")
             .field("peer", &self.peer())
             .finish_non_exhaustive()
+    }
+}
+
+/// A handle to a [`Session`] that does not keep it from closing at its last drop.
+#[derive(Default)]
+pub(crate) struct Weak(rc::Weak<quic::Session>);
+
+impl Weak {
+    /// The session while a handle holds it and it is open: no caller closed it, and
+    /// it has not ended.
+    pub(crate) fn open(&self) -> Option<Session> {
+        self.0
+            .upgrade()
+            .filter(|session| session.live())
+            .map(Session)
     }
 }
 

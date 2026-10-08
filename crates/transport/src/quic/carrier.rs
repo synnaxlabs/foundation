@@ -25,6 +25,7 @@ use super::stream::{Incoming, Receiver, Sender};
 use super::wait::{self, RETRY};
 use super::{Endpoint, Event, Setup, connection};
 use crate::stream::Part;
+use crate::wake::register;
 use crate::{Class, Code, Error, PAYLOAD_IPV4, Peer, Status, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
@@ -210,7 +211,7 @@ struct State {
     /// Each connection that a [`Session`] holds or that no caller accepted yet.
     sessions: BTreeMap<connection::Key, Slot>,
     /// The connections peers dialed, in the order they connected, for
-    /// [`Carrier::accept`]. `None` once the carrier dropped.
+    /// [`Carrier::poll_accept`]. `None` once the carrier dropped.
     accepted: Option<VecDeque<connection::Key>>,
     /// The wakers of the [`Carrier::accept`] calls that wait.
     accepting: Vec<Waker>,
@@ -902,13 +903,6 @@ impl Held {
     }
 }
 
-/// Adds `waker` to `wakers` unless one there wakes the same task.
-pub(crate) fn register(wakers: &mut Vec<Waker>, waker: &Waker) {
-    if !wakers.iter().any(|w| w.will_wake(waker)) {
-        wakers.push(waker.clone());
-    }
-}
-
 /// Makes `waker` the one waker of `stream` in `wakers`.
 fn register_one(wakers: &mut Map<StreamId, Waker>, stream: StreamId, waker: &Waker) {
     let held = wakers.entry(stream).or_insert_with(|| waker.clone());
@@ -935,7 +929,7 @@ mod tests {
     use types::ed25519::PrivateKey;
     use types::time::{Monotonic, Span};
 
-    use super::{BATCHES, Carrier, Part, Retry, Socket, register};
+    use super::{BATCHES, Carrier, Part, Retry, Socket};
     use crate::quic::{Endpoint, connection, stream, wait};
     use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
     use crate::{Class, Code, Error, Peer};
@@ -1237,25 +1231,6 @@ mod tests {
         // Only the timer can wake the client's task.
         link(&mut sim, &client, &server, cut());
         assert_eq!(sim.run(), Ok(()));
-    }
-
-    #[test]
-    fn register_keeps_one_waker_for_each_task() {
-        struct Count(AtomicUsize);
-        impl Wake for Count {
-            fn wake(self: Arc<Self>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let one = Arc::new(Count(AtomicUsize::new(0)));
-        let other = Arc::new(Count(AtomicUsize::new(0)));
-        let mut wakers = Vec::new();
-        for count in [&one, &one, &other] {
-            register(&mut wakers, &Waker::from(Arc::clone(count)));
-        }
-        wakers.into_iter().for_each(Waker::wake);
-        let counts = [&one, &other].map(|count| count.0.load(Ordering::Relaxed));
-        assert_eq!(counts, [1, 1]);
     }
 
     #[test]

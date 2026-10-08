@@ -3,13 +3,16 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::{Rc, Weak};
-use std::task::{Context, Poll, Waker};
+use std::future::poll_fn;
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker, ready};
 
+use env::tasks::Tasks;
 use types::ed25519::PublicKey;
 use types::hash::Map;
 
-use crate::{Error, Peer, Session, quic};
+use crate::session::{self, Session};
+use crate::{Address, Error, Peer, dial, quic, wake};
 
 /// The fewest entries at which a prune runs.
 const FLOOR: usize = 16;
@@ -30,24 +33,77 @@ pub(crate) struct Table {
 /// What a [`Table`] knows of one node.
 #[derive(Default)]
 struct Entry {
-    open: Weak<quic::Session>,
+    session: session::Weak,
     dial: Option<Rc<Attempt>>,
 }
 
 /// What [`Table::find`] gives.
-pub(crate) enum Found {
+enum Found {
     Open(Session),
     Dialing(Rc<Attempt>),
     /// No session and no dial: the caller starts this attempt.
     Start(Rc<Attempt>),
 }
 
+/// Gives the open session to `node`, else waits for the dial that runs for it, else
+/// starts a dial at `addresses` as a task on `tasks` and waits for it.
+///
+/// # Errors
+///
+/// As [`Transport::dial`](crate::Transport::dial).
+pub(crate) async fn dial(
+    table: &Rc<RefCell<Table>>,
+    carrier: &quic::Carrier,
+    tasks: &Tasks,
+    node: PublicKey,
+    addresses: &[Address],
+) -> Result<Session, Error> {
+    let found = table.borrow_mut().find(node);
+    let attempt = match found {
+        Found::Open(session) => return Ok(session),
+        Found::Dialing(attempt) => attempt,
+        Found::Start(attempt) => {
+            let dialer = carrier.dialer();
+            let table = Rc::clone(table);
+            let addresses = addresses.to_vec();
+            tasks.spawn(async move {
+                let dial = dial::dial(&dialer, node, &addresses).await;
+                table.borrow_mut().dialed(node, dial.map(Session::new));
+            });
+            attempt
+        }
+    };
+    poll_fn(|cx| attempt.poll(cx)).await
+}
+
+/// Waits for the next session for `accept`: one that a dial made, else one that a
+/// peer opened on `carrier`.
+///
+/// # Errors
+///
+/// As [`Transport::accept`](crate::Transport::accept).
+pub(crate) async fn accept(
+    table: &RefCell<Table>,
+    carrier: &quic::Carrier,
+) -> Result<Session, Error> {
+    poll_fn(|cx| {
+        let mut table = table.borrow_mut();
+        if let Some(session) = table.poll_dialed(cx) {
+            return Poll::Ready(Ok(session));
+        }
+        let session = ready!(carrier.poll_accept(cx)).map(Session::new)?;
+        table.accepted(&session);
+        Poll::Ready(Ok(session))
+    })
+    .await
+}
+
 impl Table {
     /// The open session to `node`, or else the dial that runs for it, or else a new
     /// attempt that the caller must start and end with [`Table::dialed`].
-    pub(crate) fn find(&mut self, node: PublicKey) -> Found {
+    fn find(&mut self, node: PublicKey) -> Found {
         let entry = self.entry(node);
-        if let Some(session) = Session::upgrade(&entry.open) {
+        if let Some(session) = entry.session.open() {
             return Found::Open(session);
         }
         if let Some(attempt) = &entry.dial {
@@ -61,18 +117,18 @@ impl Table {
     /// Ends the attempt to `node` with what its dial gave. A session becomes the open
     /// one and waits for `accept`. After an error, the attempt gives the open session
     /// that the peer opened meanwhile, if one is open.
-    pub(crate) fn dialed(&mut self, node: PublicKey, dialed: Result<Session, Error>) {
+    fn dialed(&mut self, node: PublicKey, dialed: Result<Session, Error>) {
         let entry = self.nodes.get_mut(&node);
         let entry = entry.expect("invariant: a dial keeps its entry");
         let attempt = entry.dial.take().expect("invariant: one dial ends it");
         let result = match dialed {
             Ok(session) => {
-                entry.open = session.downgrade();
+                entry.session = session.downgrade();
                 self.dialed.push_back(session.clone());
                 self.accepting.drain(..).for_each(Waker::wake);
                 Ok(session)
             }
-            Err(error) => Session::upgrade(&entry.open).ok_or(error),
+            Err(error) => entry.session.open().ok_or(error),
         };
         if result.is_err() {
             self.nodes.remove(&node);
@@ -82,18 +138,18 @@ impl Table {
 
     /// Makes `session`, which a peer opened, the open one to its node. A client's
     /// session has no node.
-    pub(crate) fn accepted(&mut self, session: &Session) {
+    fn accepted(&mut self, session: &Session) {
         if let Peer::Node(node) = session.peer() {
-            self.entry(node).open = session.downgrade();
+            self.entry(node).session = session.downgrade();
         }
     }
 
     /// The entry of `node`, new when it has none. First it drops each entry with no
-    /// session and no dial, when the table is at its limit.
+    /// open session and no dial, when the table is at its limit.
     fn entry(&mut self, node: PublicKey) -> &mut Entry {
         if self.nodes.len() >= self.limit {
             let live = |_: &PublicKey, entry: &mut Entry| {
-                entry.dial.is_some() || entry.open.strong_count() > 0
+                entry.dial.is_some() || entry.session.open().is_some()
             };
             self.nodes.retain(live);
             self.limit = self.nodes.len().saturating_mul(2).max(FLOOR);
@@ -103,10 +159,10 @@ impl Table {
 
     /// The next session that a dial made, or `None`, and then `cx` wakes when one
     /// comes.
-    pub(crate) fn poll_dialed(&mut self, cx: &Context<'_>) -> Option<Session> {
+    fn poll_dialed(&mut self, cx: &Context<'_>) -> Option<Session> {
         let session = self.dialed.pop_front();
         if session.is_none() {
-            quic::register(&mut self.accepting, cx.waker());
+            wake::register(&mut self.accepting, cx.waker());
         }
         session
     }
@@ -114,7 +170,7 @@ impl Table {
 
 /// One dial to a node, which each caller that dials the node meanwhile waits on.
 #[derive(Default)]
-pub(crate) struct Attempt(RefCell<State>);
+struct Attempt(RefCell<State>);
 
 #[derive(Default)]
 struct State {
@@ -124,12 +180,12 @@ struct State {
 
 impl Attempt {
     /// Ready with what the dial gave.
-    pub(crate) fn poll(&self, cx: &Context<'_>) -> Poll<Result<Session, Error>> {
+    fn poll(&self, cx: &Context<'_>) -> Poll<Result<Session, Error>> {
         let mut state = self.0.borrow_mut();
         if let Some(result) = &state.result {
             return Poll::Ready(result.clone());
         }
-        quic::register(&mut state.waiting, cx.waker());
+        wake::register(&mut state.waiting, cx.waker());
         Poll::Pending
     }
 

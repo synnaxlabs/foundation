@@ -42,7 +42,7 @@ use crate::message::Reader;
 use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
-pub(crate) use self::carrier::{Carrier, Dialer, Session, register};
+pub(crate) use self::carrier::{Carrier, Dialer, Session};
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
 pub(crate) use self::settings::{Role, Setup};
