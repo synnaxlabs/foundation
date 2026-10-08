@@ -98,8 +98,8 @@ fn wakers(count: usize) -> Vec<Waker> {
         .collect()
 }
 
-/// Each poll through the scope polls its future once, and allocates nothing with the
-/// same waker. A drop of the scope wakes the last waker and ends the task.
+/// Each poll through the scope polls its future once, and allocates nothing. A drop of
+/// the scope wakes the last waker and ends the task.
 fn check() {
     let polls = Rc::new(Cell::new(0));
     let (scope, mut task) = scoped(&polls);
@@ -114,10 +114,11 @@ fn check() {
     );
     let woken = Arc::new(Woken::default());
     let last = Waker::from(Arc::clone(&woken));
-    poll(&mut task, &[wakers(1).remove(0), last], 1000);
+    poll(&mut task, &[wakers(1).remove(0), last.clone()], 1000);
+    poll(&mut task, &[last], 1);
     assert_eq!(
         polls.get(),
-        2001,
+        2002,
         "one poll of the future per poll of the task"
     );
     drop(scope);
@@ -128,7 +129,7 @@ fn check() {
     let mut cx = Context::from_waker(Waker::noop());
     let polled = task.as_mut().poll(&mut cx);
     assert!(polled.is_ready(), "the task ends once the scope drops");
-    assert_eq!(polls.get(), 2001, "the future is not polled after the drop");
+    assert_eq!(polls.get(), 2002, "the future is not polled after the drop");
 }
 
 #[divan::bench(sample_count = 20)]

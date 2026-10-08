@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes `Scope` to the `scope` bench.
+# Exposes `Scope` to the `scope` bench. Off by default.
 bench = []
 
 [[bin]]
@@ -29,7 +29,7 @@ types = { path = "../types" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
 divan = { workspace = true }
-# Turns on `bench`, since the bench host runs no features.
+# Turns on `bench` for the bench, since the bench host runs no features.
 node = { path = ".", features = ["bench"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
