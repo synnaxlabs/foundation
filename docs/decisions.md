@@ -2600,8 +2600,8 @@ How to read this record:
   has a second name, a crash leaves strays at that name, and the open needs a rule for
   them. Decided by `laptop.architect` (2026-10-07T20:47:57Z), item 1:
   https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6046560177.
-  Supersedes the reason "`env::files` has no rename" of
-  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The open
+  Supersedes the reason "`env::files` has no rename" of the rules in
+  https://github.com/synnaxlabs/foundation/issues/1226 (2026-10-07T06:59:56Z). The open
   lists the directory and trusts no name: a get of a listed digest reads and checks its
   bytes, and a put of one writes it again, because a process crash leaves whole bytes in
   the cache that no sync covers, and a put that trusted a read of them would return
