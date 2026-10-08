@@ -4071,7 +4071,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
   2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260 and of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849.
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849
+  (`laptop.director`,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6064080980,
+  2026-10-08 16:10 UTC).
   Our change makes the random state `UA_rng` of `src/util/ua_util.c` one per thread
   (`UA_THREAD_LOCAL`), so a draw on one thread does not move the state of another.
   Decided by `laptop.architect-2`
@@ -4084,13 +4087,16 @@ How to read this record:
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
   2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production. A second change of `src/util/ua_util.c` keeps a flag for each thread,
-  which `UA_random_seed` and `UA_random_seed_deterministic` set, and
-  `UA_UInt32_random` and `UA_Guid_random` print their name and abort on a thread
-  with no start value. The C driver then calls each of the two draws on a thread with
-  none, and the test asserts the abort and its exact output. Decided by
-  `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117). So
+  production, and a draw on a thread with none aborts. A second change of
+  `src/util/ua_util.c` keeps a flag for each thread, which `UA_random_seed` and
+  `UA_random_seed_deterministic` set, and `UA_UInt32_random` and `UA_Guid_random`
+  call `abort()` on a thread with no start value. The C driver then calls each of the
+  two draws on a thread with none, and the test asserts the abort and its exact
+  output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Supersedes "each thread with none draws the same fixed
+  values" of
+  https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. So
   `connector-opcua` (PR 4 of #435) sets the start value with
   `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
   `UA_random_seed`, which reads the clock. It does so on each thread before that
