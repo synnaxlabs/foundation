@@ -4061,7 +4061,12 @@ mod tests {
             let message = shard.block(&[0xc; 100]);
             spend(&mut pair, shard, &mut sender, message::prefix(100).len());
             let now = pair.now();
-            let written = pair.client.endpoint.write(now, &sender, &mut Some(message));
+            let written = pair::write(
+                &mut pair.client.endpoint,
+                now,
+                &sender,
+                &mut Some(message),
+            );
             assert_eq!(written, Ok(Poll::Pending));
             pair.run(RUN);
             let id = sender.key().id;
@@ -6887,8 +6892,12 @@ mod tests {
                 assert_eq!(reset_codes(&pair, &log, id), [9]);
                 let reply = incoming.sender.expect("a two-way stream");
                 let (now, message) = (pair.now(), shard.block(b"b"));
-                let written =
-                    pair.server.endpoint.write(now, &reply, &mut Some(message));
+                let written = pair::write(
+                    &mut pair.server.endpoint,
+                    now,
+                    &reply,
+                    &mut Some(message),
+                );
                 assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
             });
         }

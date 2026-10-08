@@ -82,7 +82,6 @@ pub(super) fn connection(
     &mut connection.inner
 }
 
-/// The time `elapsed` after the start of a run.
 /// [`Endpoint::write`] of all of `message`.
 pub(super) fn write(
     endpoint: &mut Endpoint,
@@ -105,6 +104,7 @@ pub(super) fn try_write(
     endpoint.try_write(now, sender, message, &[whole])
 }
 
+/// The time `elapsed` after the start of a run.
 pub(super) fn at(elapsed: Duration) -> Monotonic {
     Monotonic(u64::try_from(elapsed.as_nanos()).expect("fits"))
 }
