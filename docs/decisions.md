@@ -4333,11 +4333,13 @@ How to read this record:
   types, with `{:?}`. The form of one line or a list, the first-word rule, and the marks
   of a private key are from `laptop.architect-2` at 2026-10-08T06:42:17Z
   (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085), which
-  supersedes item 1 of the ruling at 2026-10-08T05:49:53Z. That ruling, by
-  `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142),
-  decided the PEM rule and supersedes change 2 of the ruling at 03:15:41Z. `config`
-  refuses a `subject` at the name of a `connector` (`config.subject-is-connector`)
+  supersedes item 1 of
+  https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142
+  (`laptop.architect-2`, 2026-10-08T05:49:53Z). That ruling decided the PEM rule and
+  supersedes change 2 of
+  https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217
+  (2026-10-08T03:15:41Z). `config` refuses a `subject` at the name of a `connector`
+  (`config.subject-is-connector`)
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217), with a
   note at the connector (`laptop.architect-2`, 2026-10-08T06:58:26Z,
   https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054362063), in any

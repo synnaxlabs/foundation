@@ -1,9 +1,9 @@
 //! `config::check` never panics on the documents of HCL files, gives the same entries
 //! for the files in either order or problems in both, and orders its problems as its
 //! doc says. Files that pass alone, with keys that differ in more than case and no
-//! subject named as a connector, pass together and give the union of their entries.
-//! Each `\x1e` in the input starts the next file, up to three. The kind table has
-//! the influx kind.
+//! subject named as a connector in any ASCII case, pass together and give the union
+//! of their entries. Each `\x1e` in the input starts the next file, up to three. The
+//! kind table has the influx kind.
 
 #![no_main]
 
@@ -48,7 +48,7 @@ fuzz_target!(|text: &str| {
 });
 
 /// Files that each pass alone, with keys that differ in more than case and no subject
-/// named as a connector in any case, pass together.
+/// named as a connector in any ASCII case, pass together.
 fn passing_files_pass_together(documents: &[Document], kinds: &Table) {
     let mut passing = Vec::new();
     let mut union = BTreeMap::new();
