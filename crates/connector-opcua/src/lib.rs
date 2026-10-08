@@ -89,10 +89,12 @@ mod tests {
                 library.iter().any(|a| a == "-std=c99"),
                 "{path}: {library:?}"
             );
-            assert!(
-                !library.iter().any(|a| a == "-Werror"),
-                "{path}: {library:?}"
-            );
+            for arg in ["-Wall", "-Wextra", "-Werror"] {
+                assert!(
+                    !library.contains(&arg.into()),
+                    "{path}: {arg} in {library:?}"
+                );
+            }
         }
     }
 }
