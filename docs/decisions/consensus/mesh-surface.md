@@ -133,7 +133,7 @@
   the files of a crate, beside `buffer::Config::dir`. A change that wants it later
   moves `buffer` and `mesh` together.
   `Mesh::holder(PublicKey) -> Option<node::Key>` gives the member whose card holds a
-  public key, by a scan of the members, so a caller such as `hub` admits a peer by the
+  public key, by a scan of the members, so a caller such as `node` admits a peer by the
   key that its transport proves. It gives the key, not a `Member`, which a caller reads
   with `Mesh::member` when it needs the record. A map by public key lost: it is a second
   copy that each write of the members must keep in step. At most one member holds a
