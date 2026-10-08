@@ -1036,6 +1036,7 @@ dependencies = [
  "clock",
  "codec",
  "counting",
+ "crc32c",
  "divan",
  "env",
  "estimate",

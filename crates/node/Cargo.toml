@@ -18,6 +18,7 @@ blob = { path = "../blob" }
 block = { path = "../block" }
 buffer = { path = "../buffer" }
 clock = { path = "../clock" }
+crc32c = { workspace = true }
 env = { path = "../env" }
 estimate = { path = "../estimate" }
 home = { path = "../home" }
