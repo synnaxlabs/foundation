@@ -4792,11 +4792,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054362063), in any
   ASCII case (`laptop.architect-2`, 2026-10-08T07:02:08Z,
   https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054428920). The read
-  moves to `ssh-key` if the person approves it
-  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
-  PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
-  2026-10-08T06:42:17Z
-  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085).
+  moves to `ssh-key` in the PR of #337 that first prints a key's fingerprint. Decided
+  by `laptop.architect-2` at 2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085). The
+  person approved `ssh-key` 0.6.7 at 2026-10-08T16:58Z
+  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6064910986). Our
+  checks stay before it: the first-word table, one line, and small order.
   `access::Rules` keeps each subject by its label, which
   `spec::definition::Kind::label` gives for its tree key. `admit` and `verify` look up
   the hello's subject and build no key, so only `spec` holds the key form, and
