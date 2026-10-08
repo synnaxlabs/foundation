@@ -3198,6 +3198,34 @@ mod port {
             assert_eq!(read, Some((vec![later], vec![7])));
         }
 
+        /// The hub reads the homes of the node's mesh, so a reader of a channel whose
+        /// index has its home at another node gets that home.
+        #[test]
+        fn a_reader_of_a_channel_whose_home_is_another_node_gets_the_home() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let mut founding = founded(&host);
+            founding.members.push(member(OTHER.0, &OTHER.1, &host));
+            founding.voters.insert(OTHER.0);
+            founding
+                .homes
+                .insert(types::channel::Key::from_u128(1), OTHER.0);
+            let node = start(&host, founding);
+            let opened = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&opened);
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                *out.lock().unwrap() = Some(reader.err());
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let remote = ::hub::reader::Error::Remote { home: OTHER.0 };
+            assert_eq!(opened.lock().unwrap().take(), Some(Some(remote)));
+        }
+
         /// The node with key [`OWN`] on `host`, the one member and voter of its region.
         fn start_alone(host: &sim::node::Node) -> Node {
             start(host, region(&[member(OWN, &KEY, host)]))
