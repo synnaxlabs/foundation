@@ -12,13 +12,13 @@ use types::time::{Span, Stamp};
 /// How far past the earliest mesh time a hello may expire.
 pub const CAP: Span = Span::from_nanos(15 * Span::MINUTE.nanos());
 
-const HELLO_TAG: &[u8] = b"foundation hello 1\0";
-const REQUEST_TAG: &[u8] = b"foundation request 1\0";
+const HELLO_TAG: &[u8] = b"foundation/hello/1";
+const REQUEST_TAG: &[u8] = b"foundation/request/1";
 
 /// The bytes that the signature of `hello` covers. Each integer is little-endian:
-/// the 18 bytes `foundation hello 1`, a zero byte, the length of the subject (1
-/// byte), the subject, the key (32), `via` (16), the connection (16), the nonce
-/// (16), and `expires` in nanoseconds (8).
+/// the 18 bytes `foundation/hello/1`, the length of the subject (1 byte), the
+/// subject, the key (32), `via` (16), the connection (16), the nonce (16), and
+/// `expires` in nanoseconds (8).
 ///
 /// # Panics
 ///
@@ -41,8 +41,8 @@ pub fn hello(hello: &Hello) -> Vec<u8> {
 }
 
 /// The bytes that the signature of a request or session open on `connection` covers:
-/// the 20 bytes `foundation request 1`, a zero byte, the connection (16), and `body`,
-/// the exact bytes that the program sent.
+/// the 20 bytes `foundation/request/1`, the connection (16), and `body`, the exact
+/// bytes that the program sent.
 #[must_use]
 pub fn request(connection: connection::Key, body: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(REQUEST_TAG.len() + 16 + body.len());

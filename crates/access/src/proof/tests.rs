@@ -115,8 +115,8 @@ mod golden {
 
         assert_eq!(
             bytes,
-            hex::<115>(concat!(
-                "666f756e646174696f6e2068656c6c6f203100",
+            hex::<114>(concat!(
+                "666f756e646174696f6e2f68656c6c6f2f31",
                 "07",
                 "6f70732e616e61",
                 "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
@@ -127,8 +127,8 @@ mod golden {
             ))
         );
         let signature = hex(concat!(
-            "bbd7bcb84994ad8934fe826f5419411fc106d2fb3cf3b5a23303fcdb8ac7c438",
-            "f8d76781b486851cca8dffc85e4834ba008e7f4c1ed0f2cc360615414367480a",
+            "f7752b95cf02e41d6d79d4474e84cb53ed6a02c2a9725e44888fd853f6f61f78",
+            "bc2011c1feb9557346878c032f92f51ed0191f722d86c469839d1d701b0a7f03",
         ));
         assert_eq!(create_hello().key.verify(&bytes, &signature), Ok(()));
     }
@@ -139,15 +139,15 @@ mod golden {
 
         assert_eq!(
             bytes,
-            hex::<53>(concat!(
-                "666f756e646174696f6e2072657175657374203100",
+            hex::<52>(concat!(
+                "666f756e646174696f6e2f726571756573742f31",
                 "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
                 "6f70656e20736974655f612e70745f31",
             ))
         );
         let signature = hex(concat!(
-            "4b795093e9deebe7403856c09760deb55a8d0fac093e905a6b6966484f88ebe3",
-            "070034a710d1b7b7a3d6fba388b6378206749cfda5857aa22c6d64cee0768700",
+            "60bfa85a16ec42321352a9ab26ad64056eee4bb51f63e07e0e43ab310cfa4634",
+            "1bc146b32998921f446113a0d563e5ccd5232654cc8ba4da49d4c499e062ed03",
         ));
         assert_eq!(create_hello().key.verify(&bytes, &signature), Ok(()));
     }
@@ -162,9 +162,9 @@ mod golden {
 
         let bytes = super::hello(&hello);
 
-        assert_eq!(bytes[19], 255);
-        assert_eq!(&bytes[20..275], subject.as_bytes());
-        assert_eq!(bytes.len(), 19 + 1 + 255 + 88);
+        assert_eq!(bytes[18], 255);
+        assert_eq!(&bytes[19..274], subject.as_bytes());
+        assert_eq!(bytes.len(), 18 + 1 + 255 + 88);
     }
 
     /// A hello whose field `field` differs from the golden one.
