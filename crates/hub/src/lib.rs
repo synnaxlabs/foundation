@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::task::Waker;
 
 use spec::channel::Kind;
+use spec::definition::Definition;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
@@ -132,21 +133,25 @@ impl Hub {
         Self(state)
     }
 
-    /// Makes each of `channels` known to sessions, the indexes first, so their order
-    /// does not matter. The home carries an index from the first session that finds
-    /// this node is its home.
+    /// Makes each channel of `definitions` known to sessions, the indexes first, so
+    /// their order does not matter. It skips each definition that is not a channel. The
+    /// home carries an index from the first session that finds this node is its home.
     ///
     /// # Panics
     ///
-    /// When a channel has the key or name of a known channel or of another of
-    /// `channels`, or the index of a data channel is neither known nor an index of
-    /// `channels`.
-    pub fn define<'c>(
+    /// When a channel has the key or name of a known channel or of another channel of
+    /// `definitions`, or the index of a data channel is neither known nor an index of
+    /// `definitions`.
+    pub fn define<'d>(
         &self,
-        channels: impl IntoIterator<Item = (&'c Name, &'c spec::channel::Channel)>,
+        definitions: impl IntoIterator<Item = (&'d Name, &'d Definition)>,
     ) {
-        let (indexes, data): (Vec<_>, Vec<_>) = channels
+        let (indexes, data): (Vec<_>, Vec<_>) = definitions
             .into_iter()
+            .filter_map(|(name, definition)| match definition {
+                Definition::Channel(channel) => Some((name, channel)),
+                _ => None,
+            })
             .partition(|(_, channel)| matches!(channel.kind, Kind::Index { .. }));
         let mut state = self.0.borrow_mut();
         for (name, channel) in indexes.into_iter().chain(data) {

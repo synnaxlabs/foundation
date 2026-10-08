@@ -700,19 +700,12 @@ impl Serve {
             );
         };
         let (key, entropy) = (self.endpoint.key, self.endpoint.entropy.clone());
-        // The endpoint's open takes the founding, so the channels go first.
-        let channels: Vec<_> = self
+        // The endpoint's open takes the founding, so the definitions go first.
+        let definitions = self
             .endpoint
             .region
-            .iter()
-            .flat_map(|region| &region.definitions)
-            .filter_map(|(name, definition)| match definition {
-                spec::definition::Definition::Channel(channel) => {
-                    Some((name.clone(), channel.clone()))
-                }
-                _ => None,
-            })
-            .collect();
+            .as_ref()
+            .map(|region| region.definitions.clone());
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
                 Ok(opened) => opened,
@@ -727,7 +720,9 @@ impl Serve {
             entropy,
             mesh: mesh.clone(),
         });
-        hub.define(channels.iter().map(|(name, channel)| (name, channel)));
+        if let Some(definitions) = &definitions {
+            hub.define(definitions);
+        }
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // `next` gives the stop of the group on a watch of any index.
         let watch = mesh
