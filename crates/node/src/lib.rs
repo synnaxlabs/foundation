@@ -299,7 +299,7 @@ impl Node {
     /// such as sessions; it sends its result back through a value it owns. Its future
     /// runs until it completes or shard 0 ends, which drops it. A panic in a task ends
     /// shard 0 and fails the node: [`Node::join`] gives [`Error::Panicked`], unless
-    /// the transport or the mesh's group stopped first, which gives
+    /// the node saw the transport or the mesh's group stop first, which gives
     /// [`Error::Transport`] or [`Error::Group`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where

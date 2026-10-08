@@ -6082,9 +6082,13 @@ How to read this record:
   2 of https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136, and
   the private rank of shard 0's stop is a fixed tie-break with no contract. Decided by
   `laptop.architect-2` at 17:49:13Z
-  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217). Lost:
-  "the transport's when both stop at once", because the node sees each stop only at
-  its next poll, so of two stops at one instant either can come first (the breaker,
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217), and
+  for `Node::spawn` at 17:58:35Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065936160): a
+  panic gives `Error::Panicked` unless the node saw the transport or the group stop
+  first. Lost: "the transport's when both stop at once", because the node sees each
+  stop only at its next poll, so of two stops at one instant either can come first
+  (the breaker,
   https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065770160 and
   https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065929818).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
