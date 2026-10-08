@@ -73,8 +73,8 @@ struct Malformed {
     /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form.
     fixed: bool,
     problem: String,
-    /// The problem of an old round that names a hot path ([`named`]): it requires
-    /// `performance`, which a round that does not parse cannot name.
+    /// The problem of an old round that names a hot path ([`named`]) and whose
+    /// `Reviewers:` line, if any, names no `performance`.
     hot: Option<String>,
 }
 
@@ -257,21 +257,24 @@ fn approval(record: &Record, head: &str) -> Option<String> {
     })
 }
 
+/// The reviewers that the value of a `Reviewers:` line lists.
+fn listed(reviewers: &str) -> BTreeSet<String> {
+    reviewers
+        .split(',')
+        .map(|r| r.trim().trim_matches('`').to_string())
+        .collect()
+}
+
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
 /// The fields are the first paragraph after that line, so the findings text cannot
 /// set them. The last paragraph is the end lines ([`END`]), unless the comment is
 /// `old`, posted before [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
     // Only the end lines keep their indent: an indented one is a quote, not a line.
-    let mut lines = body.lines().map(str::trim_end);
+    // Only spaces and tabs may end a closing fence.
+    let mut lines = body.lines().map(|l| l.trim_end_matches([' ', '\t']));
     let number = lines.find_map(|l| l.trim_start().strip_prefix("## Review round "))?;
     let paragraphs = paragraphs(lines);
-    let named = old && named(&paragraphs);
-    let performance = named.then(|| {
-        format!(
-            "review round {number} names no performance, which this round requires."
-        )
-    });
     let lines = paragraphs
         .first()
         .into_iter()
@@ -282,6 +285,14 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
     let findings = field("Findings: ");
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
+    let named = old && named(&paragraphs);
+    let performance = (named
+        && !reviewers.is_some_and(|r| listed(r).contains("performance")))
+    .then(|| {
+        format!(
+            "review round {number} names no performance, which this round requires."
+        )
+    });
     let Ok(number) = number.parse::<u32>() else {
         return Some(Err(Malformed {
             fixed,
@@ -316,11 +327,7 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
         };
         Ok(Round {
             number,
-            reviewers: reviewers
-                .ok_or_else(|| missing("Reviewers"))?
-                .split(',')
-                .map(|r| r.trim().trim_matches('`').to_string())
-                .collect(),
+            reviewers: listed(reviewers.ok_or_else(|| missing("Reviewers"))?),
             breakerless,
             from: from.to_string(),
             end: end.to_string(),

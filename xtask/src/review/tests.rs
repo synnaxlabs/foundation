@@ -952,3 +952,34 @@ fn reads_items_of_each_page_and_a_single_object() {
         "EOF while parsing a value at line 1 column 3"
     );
 }
+
+#[test]
+fn a_fence_with_a_no_break_space_after_it_does_not_close() {
+    let quoted = ROUND.replace("weakening.\n\n", "weakening.\n\n```\n```\u{a0}\n\n");
+    assert_ne!(quoted, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&quoted)])),
+        vec![unended("Deferred")]
+    );
+    let shown = later("reviewer, breaker").replace(
+        "weakening.\n\n",
+        "weakening.\n\nDeferred: none\nPublic surface: none\nHot path: `send`\n\n\
+         ```\n```\u{a0}\n\n",
+    );
+    assert_ne!(shown, later("reviewer, breaker"));
+    assert_eq!(check(&record(vec![bot(&shown)])), vec![unended("Deferred")]);
+    let closed = ROUND.replace("weakening.\n\n", "weakening.\n\n```\n``` \t\n\n");
+    assert_eq!(check(&record(vec![bot(&closed)])), Vec::<String>::new());
+}
+
+#[test]
+fn an_old_malformed_round_that_names_performance_needs_no_performance() {
+    let named = old(
+        "## Review round 1\n\nReviewers: reviewer, architecture, breaker, performance\n\
+         Range: a\nFindings: 2\n\nHot path: `send`",
+    );
+    assert_eq!(
+        check(&record(vec![named, bot(ROUND)])),
+        vec!["review round 1 has the range `a`, not `<from>..<head>`".to_string()]
+    );
+}
