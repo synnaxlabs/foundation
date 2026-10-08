@@ -3917,8 +3917,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
   Supersedes the clause "A negative span reads, and each caller owns its bound" of
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886, and its
-  `error.fix()` for `time::Error::Long`: that fix is now "Use a span from "0s" to
-  "106751d"", since each span it names reads.
+  fix for `time::Error::Long`, "Use a span from "-106751d" to "106751d"": that fix is
+  now "Use a span from "0s" to "106751d"", since each span it names reads. Decided by
+  `laptop.architect-2` at 2026-10-08T07:36:01Z
+  (https://github.com/synnaxlabs/foundation/pull/1828#issuecomment-6055037900).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
