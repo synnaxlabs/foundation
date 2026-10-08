@@ -19,6 +19,7 @@ use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code, Port, Transport};
 use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
+use types::frame::Form;
 use types::frame::Path as FramePath;
 use types::sample::Type;
 use types::time::Span;
@@ -26,7 +27,7 @@ use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, RING, SETTLE, STAMP, Test, fill, scrambled, write,
+    AREA, BODY_MAX, I64, LIVE, RING, SETTLE, STAMP, Test, fill, scrambled, write,
     write_series, write_wide,
 };
 
@@ -716,6 +717,65 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
             .map(|key| vec![i64::try_from(key).expect("fits")])
             .collect();
         assert_eq!(decoded(&got, &types), values);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A text series longer than `PEER_MESSAGE` whose length is not a multiple of 8: the
+/// cut falls inside it, and its zeros go in the second message.
+#[test]
+fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
+    let raw = [&1497_u32.to_le_bytes()[..], &[b'x'; 1497]].concat();
+    let sent = raw.clone();
+    let home = |test: Test, incoming| async move {
+        test.hub.define(Channel {
+            key: channel::Key::from_u128(6),
+            name: super::name("text"),
+            data_type: Type::String,
+            index: channel::Key::from_u128(1),
+        });
+        let mut writer = test.writer("a", &["text", "value"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            let set = Arc::clone(writer.set());
+            let [index, text, value] = [1, 6, 2].map(|key| super::entry(&set, key));
+            let series = [(index, 8), (text, sent.len()), (value, 8)];
+            let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+            for (entry, bytes) in [
+                (index, &now.to_le_bytes()[..]),
+                (text, &sent),
+                (value, &30_i64.to_le_bytes()),
+            ] {
+                let series = draft.series_mut(entry).expect("the series is present");
+                series.copy_from_slice(bytes);
+            }
+            draft.set_count(0, 1);
+            writer.write(LIVE, draft).expect("the home takes it");
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+    };
+    session(66, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[6, 2, 1], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(places(&got), [0, 1, 2]);
+        let end = usize::try_from(got.ends[0].1).expect("fits");
+        assert_ne!(end % 8, 0);
+        assert!(
+            got.body[end..end.next_multiple_of(8)]
+                .iter()
+                .all(|&b| b == 0)
+        );
+        let mut text = vec![0; raw.len()];
+        codec::decode(Type::String, 1, &got.body[..end], &mut text).expect("decodes");
+        assert_eq!(text, raw);
+        let value =
+            end.next_multiple_of(8)..usize::try_from(got.ends[1].1).expect("fits");
+        let mut out = [0; 8];
+        codec::decode(I64, 1, &got.body[value], &mut out).expect("decodes");
+        assert_eq!(i64::from_le_bytes(out), 30);
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });
