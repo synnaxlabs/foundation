@@ -72,20 +72,21 @@ command outside that worktree. Remove each worktree when its agent returns
    its reviewers returns. It starts with its name line, then the rating and summary from
    the `reviewer`'s report, as given (Rating). Then its reviewers, its range
    (`<from>..<head sha>`), and the confirmed findings, most severe first: file and line,
-   what goes wrong, and the fix. It ends with four lines. First `Deferred:` and `none`,
-   or the issue of each deferred finding, each with the link to the architect's OK in a
-   risk crate. Then `Later steps:` and `none`, or each later step that a round, an
-   architect review, an architect's ruling, or an issue that the PR closes names, each
-   with the link to the open issue or the decisions entry that holds it ("Done"). Then
-   `Public surface:` and `none`, or each item that `.claude/agents/architecture.md`
-   defines for that line (the `architecture` report names them, and in a round with no
-   `architecture` agent the `reviewer` report names those of its range) and each rule
-   change that Round 1 sends to `laptop.director`, each with the link to its approval
-   once it exists. An approval holds for the text at the SHA that it approves: after a
-   commit changes the item, the line gives it `approval owed` in place of the link until
-   a new approval exists. A later round keeps each item of the round before it. Then
-   `Hot path:` as the `architecture` report gives it, or, in a round with no
-   `architecture` agent, the `reviewer` report.
+   what goes wrong, and the fix. It links each test doc that the `reviewer` report names
+   as the reason for a hand mutant (`docs/claude/testing.md`). It ends with four lines.
+   First `Deferred:` and `none`, or the issue of each deferred finding, each with the
+   link to the architect's OK in a risk crate. Then `Later steps:` and `none`, or each
+   later step that a round, an architect review, an architect's ruling, or an issue that
+   the PR closes names, each with the link to the open issue or the decisions entry that
+   holds it ("Done"). Then `Public surface:` and `none`, or each item that
+   `.claude/agents/architecture.md` defines for that line (the `architecture` report
+   names them, and in a round with no `architecture` agent the `reviewer` report names
+   those of its range) and each rule change that Round 1 sends to `laptop.director`,
+   each with the link to its approval once it exists. An approval holds for the text at
+   the SHA that it approves: after a commit changes the item, the line gives it
+   `approval owed` in place of the link until a new approval exists. A later round keeps
+   each item of the round before it. Then `Hot path:` as the `architecture` report gives
+   it, or, in a round with no `architecture` agent, the `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A finding whose fix is a small change in a crate or a
