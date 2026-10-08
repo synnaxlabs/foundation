@@ -4626,11 +4626,12 @@ How to read this record:
   and `Compression` until their blocks come: the files cannot state such a kind, so
   they ask for no removal. Lost: remove it, and refuse the plan, which stops each apply
   with no fix in the files (`laptop.architect`, #1886, 2026-10-08T15:22:47Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An edge that `check` cannot resolve stays
-  `config.unknown-channel` (CHANNEL BLOCK). An edge to a channel of the wrong kind is
-  `config.wrong-channel`. `place` runs for each index, with the node of its first
-  writer: a connector whose `writes` holds the index or a channel on it. Its `Unplaced`
-  is `config.unplaced` at the label of the index, with each placement by its label.
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An
+  edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
+  edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
+  index, with the node of its first writer: a connector whose `writes` holds the index
+  or a channel on it. Its `Unplaced` is `config.unplaced` at the label of the index,
+  with each placement by its label.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
   `config.writer-nodes` is at the `node` of the first connector on a second node that
