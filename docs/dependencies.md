@@ -92,7 +92,7 @@ so the `Advisories of each patched release` step of the `deny` job in
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
-| `noq-proto` | 1.3.0 | A peer that waits for a stream gets the slot of the first stream that frees, and `STREAMS_BLOCKED` goes in the next packet (`docs/decisions/transport/stream-slots.md`) | A slot comes back only once 1/8 of the window is free, so with `streams_max` 16 a `Session::open` that waits gets no stream until three streams end (#2018) |
+| `noq-proto` | 1.3.0 | The peer gets each freed stream in a `MAX_STREAMS` frame at once, also when the node stops a stream (`docs/decisions/transport/stream-slots.md`) | A slot comes back only once 1/8 of the window is free, so with `streams_max` 16 a `Session::open` that waits gets no stream until three streams end (#2018) |
 | `noq-udp` | 1.3.0 | None yet | One send that gets `EIO` or `EINVAL` turns off GSO for the life of the socket, and one that gets `EINVAL` also turns off the IPv4 ECN mark, also when the cause is a bad source or port 0 of that one transmit (#1972) |
 | `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`), and a draw on a thread with no start value aborts | With one state per process, the values of a test server depend on the draws of other threads; a thread with no start value draws the same values as each other such thread (#435) |
 
