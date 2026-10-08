@@ -1399,7 +1399,7 @@ mod tests {
     ) -> transport::Config {
         transport::Config {
             private_key: private(id),
-            message_bytes_max: NonZeroUsize::new(pool.largest().min(1 << 16)).unwrap(),
+            message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
             window_bytes: 1 << 20,
             streams_max: NonZeroU32::new(16).unwrap(),
             idle: IDLE,

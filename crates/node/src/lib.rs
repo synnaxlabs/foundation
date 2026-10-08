@@ -152,7 +152,7 @@ const STREAMS: NonZeroU32 = NonZeroU32::new(64).expect("not zero");
 const IDLE: Span = Span::from_nanos(30_000_000_000);
 /// The largest message of a stream, when the pool holds it, a patch as [`WINDOW`]
 /// is.
-const MESSAGE: usize = 1 << 16;
+const MESSAGE: NonZeroUsize = NonZeroUsize::new(1 << 16).expect("not zero");
 
 impl Node {
     /// Binds the node's port at [`Config::listen`], then starts one shard per core,
@@ -636,10 +636,9 @@ impl Endpoint {
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), Error> {
-        let message = NonZeroUsize::new(MESSAGE.min(pool.largest()));
         let config = transport::Config {
             private_key: self.private_key.clone(),
-            message_bytes_max: message.expect("invariant: a pool holds a block"),
+            message_bytes_max: MESSAGE,
             window_bytes: WINDOW,
             streams_max: STREAMS,
             idle: IDLE,

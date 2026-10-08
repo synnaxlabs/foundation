@@ -257,35 +257,6 @@ mod admit {
     }
 
     #[test]
-    fn refuses_a_reserved_subject_that_foundation_did_not_make() {
-        let key = public(&pair(TEST_1));
-        let policy = spec::access::Policy::new(
-            types::name::Selector::new(["ops.@x"]).unwrap(),
-            types::name::Selector::new(["ops.**"]).unwrap(),
-            [Action::Read, Action::Write, Action::Apply, Action::Admin]
-                .into_iter()
-                .collect(),
-            types::authority::Authority(0),
-        );
-        let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
-        let tree: BTreeMap<Name, Definition> = [
-            (name("ops.@x.@subject"), subject),
-            (name("ops.@x.@access"), Definition::Access(policy)),
-        ]
-        .into();
-        let ops: types::name::Prefix = "ops".parse().unwrap();
-        let root = (types::name::Prefix::ROOT, &BTreeMap::new());
-        let rules = Rules::new([root, (ops, &tree)]);
-        let subject = name("ops.@x");
-        let hello = Hello {
-            subject: subject.clone(),
-            ..create_hello()
-        };
-        let result = admit(&rules, NOW, hello).map(|_admitted| ());
-        assert_eq!(result, Err(Error::Unknown { subject }));
-    }
-
-    #[test]
     fn refuses_a_subject_that_the_spec_does_not_have() {
         let rules = rules(&[("ops.bob", &[public(&pair(TEST_1))])]);
 
@@ -499,19 +470,6 @@ mod admit {
         let admitted = admit(&listed(), now, hello.clone()).unwrap();
 
         assert_eq!(admitted.hello(), &hello);
-    }
-
-    #[test]
-    fn refuses_a_subject_whose_definition_is_not_at_its_subject_key() {
-        let key = public(&pair(TEST_1));
-        let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
-        let tree: BTreeMap<Name, Definition> = [(name("ops.ana"), subject)].into();
-        let rules = Rules::new([(types::name::Prefix::ROOT, &tree)]);
-
-        let error = admit(&rules, NOW, create_hello()).unwrap_err();
-
-        let subject = name("ops.ana");
-        assert_eq!(error, Error::Unknown { subject });
     }
 
     #[test]

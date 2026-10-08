@@ -38,11 +38,13 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
-use crate::{Class, Code, Config, Error, Peer};
+use crate::stream::Part;
+use crate::{Class, Code, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
+pub(crate) use self::settings::{Role, Setup};
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
@@ -115,34 +117,26 @@ pub(crate) enum Event {
 }
 
 impl Endpoint {
-    /// An endpoint for this node's key whose connection IDs all start with
-    /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams, the
-    /// socket's batch max, and at most
-    /// [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
-    ///
-    /// # Panics
-    ///
-    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
-        if let Err(error) = config.check() {
-            panic!("{error}");
-        }
-        let (settings, endpoint) = Settings::new(config, shard);
+    /// An endpoint for `setup` whose connection IDs all start with `shard`. Each
+    /// [`Transmit`] holds at most `datagrams_max` datagrams, the socket's batch max,
+    /// and at most [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
+    pub(crate) fn new(setup: &Setup, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        let (settings, endpoint) = Settings::new(setup, shard);
         Self {
-            epoch: config.clock.epoch(),
+            epoch: setup.clock.epoch(),
             settings,
             inner: endpoint,
             datagrams_max: datagrams_max.min(settings::BATCH_MAX),
-            pool: Rc::clone(&config.pool),
-            message_bytes_max: config.message_bytes_max.get(),
-            window_bytes: config.window_bytes,
+            pool: Rc::clone(&setup.pool),
+            message_bytes_max: setup.message_bytes_max,
+            window_bytes: setup.window_bytes,
             connections: Vec::new(),
             serial: 0,
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
             refusing: false,
-            resets: stateless::Limit::new(&config.entropy),
+            resets: stateless::Limit::new(&setup.entropy),
             received: BytesMut::new(),
         }
     }
@@ -324,50 +318,56 @@ impl Endpoint {
         connection.streams.accept(key)
     }
 
-    /// Puts `message`, when `Some`, on the stream after the messages before it, and
-    /// takes it. Leaves it while the stream holds part of an earlier message.
-    /// `Ready` when the stream holds no message: it took all of `message`, or with
-    /// `None`, all of the one before. Else `Pending`: write again after
+    /// Puts a message of `parts` of `message`, when `Some`, on the stream after the
+    /// messages before it, and takes the block: for each part, its range of the
+    /// block, then its zeros. Leaves it while the stream holds part of an earlier
+    /// message. `Ready` when the stream holds no message: it took all of `message`,
+    /// or with `None`, all of the one before. Else `Pending`: write again after
     /// [`Event::Writable`] to send the rest. The streams that wait for the
     /// connection take turns, by class with `Complete` ahead of `Latest` while it is
     /// owed bytes, then oldest first, so a write behind one waits.
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] when `message` is over the peer's largest message.
-    /// Nothing of it is sent, and it stays in `message`. Then the error of the
-    /// connection's [`Event::Closed`] once it ended. Then [`Error::Reset`] with
-    /// `Code(0)` after an [`Endpoint::cancel`] reset the stream, and
-    /// [`Error::Stopped`] when the peer stopped it; each later write gives it too.
+    /// [`Error::TooLarge`] when the message, the sum of the range lengths and the
+    /// zeros, is over the peer's largest message. Nothing of it is sent, and the
+    /// block stays in `message`. Then the error of the connection's
+    /// [`Event::Closed`] once it ended. Then [`Error::Reset`] with `Code(0)` after an
+    /// [`Endpoint::cancel`] reset the stream, and [`Error::Stopped`] when the peer
+    /// stopped it; each later write gives it too.
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`.
+    /// When `message` is `Some` and a range starts after its end or ends past the
+    /// block. Then after an [`Endpoint::finish`] that gave `Ok`.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &Sender,
         message: &mut Option<Block>,
+        parts: &[Part],
     ) -> Result<Poll<()>, Error> {
+        let bytes = message
+            .as_ref()
+            .map_or(0, |block| crate::stream::size(parts, block.len()));
         sender.check_open();
-        if let Some(message) = message {
-            stream::check_size(message.len(), sender.bytes_max())?;
-        }
+        stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
         self.streams(
             now,
             key,
             sender.closed().cloned(),
-            |streams, inner, _, _| streams.write(inner, sender, message),
+            |streams, inner, _, _| streams.write(inner, sender, message, parts, bytes),
         )
     }
 
-    /// Puts `message` on the stream after the messages before it when the stream
-    /// can take it now. Else gives it back with nothing of it sent: when the stream
-    /// still holds part of an earlier message once it wrote what it could of it,
-    /// when the send budget has no room for it or a stream that goes ahead of it
-    /// waits for room or its turn. The stream does not wait for room for a message
-    /// it gives back. Once taken, the stream sends the rest of it by itself.
+    /// Puts a message of `parts` of `message` on the stream after the messages before
+    /// it, as [`Endpoint::write`] does, when the stream can take it now. Else gives
+    /// the block back with nothing of it sent: when the stream still holds part of
+    /// an earlier message once it wrote what it could of it, when the send budget
+    /// has no room for it or a stream that goes ahead of it waits for room or its
+    /// turn. The stream does not wait for room for a message it gives back. Once
+    /// taken, the stream sends the rest of it by itself.
     ///
     /// # Errors
     ///
@@ -375,22 +375,26 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`.
+    /// As [`Endpoint::write`].
     pub(crate) fn try_write(
         &mut self,
         now: Monotonic,
         sender: &Sender,
         message: Block,
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
+        let bytes = crate::stream::size(parts, message.len());
         sender.check_open();
-        stream::check_size(message.len(), sender.bytes_max())?;
+        stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
         self.streams(
             now,
             key,
             sender.closed().cloned(),
-            |streams, inner, _, _| streams.try_write(inner, sender, &mut message),
+            |streams, inner, _, _| {
+                streams.try_write(inner, sender, &mut message, parts, bytes)
+            },
         )?;
         Ok(message)
     }
@@ -907,8 +911,11 @@ mod tests {
         fn to_port_zero_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
                 endpoint.connect(Monotonic(0), server(), remote);
             });
@@ -1031,8 +1038,11 @@ mod tests {
         fn stays_at_the_earliest_timer_when_a_later_dial_starts() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let mut buffer = Vec::new();
                 endpoint.connect(Monotonic(0), server(), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
@@ -1057,8 +1067,11 @@ mod tests {
         fn writes_a_response_into_the_callers_buffer() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = pair::meta(pair::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
@@ -1074,8 +1087,11 @@ mod tests {
         fn keeps_at_most_responses_max_responses() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = pair::meta(pair::CLIENT, &initial);
                 for _ in 0..=RESPONSES_MAX {
@@ -1148,7 +1164,7 @@ mod tests {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(64).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                    Endpoint::new(&testing::setup(&config), pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(1 << 16).collect();
@@ -1157,8 +1173,12 @@ mod tests {
                 for _ in 0..testing::STREAMS_MAX - 1 {
                     let opened = client.open_sender(now, key, Class::Command);
                     let sender = opened.expect("a stream");
-                    let written =
-                        client.write(now, &sender, &mut Some(shard.block(&sent)));
+                    let written = pair::write(
+                        client,
+                        now,
+                        &sender,
+                        &mut Some(shard.block(&sent)),
+                    );
                     assert_eq!(written, Ok(Poll::Ready(())));
                 }
                 pair.run(Duration::from_secs(1));
@@ -1210,10 +1230,14 @@ mod tests {
         fn answers_a_refused_first_initial_with_a_close() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut server =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut server = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let (_, mut client) = Settings::new(&config, pair::CLIENT_SHARD);
+                let (_, mut client) =
+                    Settings::new(&testing::setup(&config), pair::CLIENT_SHARD);
                 let now = server.instant(Monotonic(0));
                 let dial =
                     client.connect(now, other_protocol(), pair::SERVER, SERVER_NAME);
@@ -1271,8 +1295,11 @@ mod tests {
         fn with_no_stride_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = Meta {
                     len: 10,
@@ -1290,7 +1317,7 @@ mod tests {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(10).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                    Endpoint::new(&testing::setup(&config), pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(20_000).collect();
@@ -1298,7 +1325,8 @@ mod tests {
                 let client = &mut pair.client.endpoint;
                 let opened = client.open_sender(now, key, Class::Command);
                 let sender = opened.expect("a stream");
-                let written = client.write(now, &sender, &mut Some(shard.block(&sent)));
+                let written =
+                    pair::write(client, now, &sender, &mut Some(shard.block(&sent)));
                 assert_eq!(written, Ok(Poll::Ready(())));
                 pair.run(Duration::from_millis(100));
                 assert!(pair.client.batch_max > 1, "{}", pair.client.batch_max);

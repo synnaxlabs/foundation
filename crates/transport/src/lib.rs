@@ -31,6 +31,7 @@
 
 mod address;
 mod class;
+pub mod client;
 mod code;
 pub mod datagram;
 mod dial;
@@ -71,6 +72,7 @@ use types::time::Span;
 
 pub use address::Address;
 pub use class::Class;
+pub use client::Client;
 pub use code::Code;
 pub use error::Error;
 pub use port::Port;
@@ -84,6 +86,9 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// and so does a hub head or key.
 const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
 
+/// The rule that a pool breaks when its largest block is below [`MESSAGE_BYTES_MIN`].
+const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
+
 /// The sessions of one shard. It dials peers and accepts the sessions the node
 /// routes to this shard. It stays on the thread that made it. `node` binds one
 /// [`Port`] and splits it into one part for each shard.
@@ -94,7 +99,6 @@ const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
 /// or timed out. Then it frees its [`port::Part`], so a later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
-    clock: env::clock::Clock,
     public_key: PublicKey,
 }
 
@@ -104,9 +108,10 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when `config.idle` is not positive, `config.window_bytes` is
-    /// below `config.message_bytes_max`, or `config.message_bytes_max` is below 1472
-    /// or over `config.pool.largest()`.
+    /// [`Error::Config`] when `config.idle` is not positive, the message limit (the
+    /// smaller of `config.message_bytes_max` and `config.pool.largest()`) is below
+    /// 1472, the largest UDP payload a node takes, or `config.window_bytes` is below
+    /// that limit.
     ///
     /// ```
     /// use transport::{Config, Error, Transport, port};
@@ -116,12 +121,9 @@ impl Transport {
     /// }
     /// ```
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
-        config.check()?;
-        let clock = config.clock.clone();
         let public_key = config.private_key.public();
         Ok(Self {
-            carrier: quic::Carrier::new(config, part),
-            clock,
+            carrier: quic::Carrier::new(config.setup()?, part),
             public_key,
         })
     }
@@ -168,7 +170,7 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier, &self.clock, peer, addresses).await;
+        let dialed = dial::dial(&self.carrier, peer, addresses).await;
         dialed.map(Session::new)
     }
 
@@ -256,14 +258,14 @@ impl fmt::Debug for Transport {
 pub struct Config {
     /// The node's key. Peers authenticate the node by its public key.
     pub private_key: PrivateKey,
-    /// The largest message this node accepts on a stream, and the largest datagram.
-    /// Peers exchange their limits in the handshake, and each sender checks the
-    /// peer's. Must be at least 1472, the largest UDP payload a node takes, and at
-    /// most `pool.largest()`.
+    /// The largest message this node accepts on a stream, and the largest datagram,
+    /// at most `pool.largest()`: the transport takes the smaller of the two. Peers
+    /// exchange their limits in the handshake, and each sender checks the peer's.
     pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.
-    /// Size it near bandwidth times round trip. Must be at least `message_bytes_max`.
+    /// Size it near bandwidth times round trip. Must be at least the message limit:
+    /// the smaller of `message_bytes_max` and `pool.largest()`.
     pub window_bytes: usize,
     /// The most two-way streams, and apart from them the most one-way streams, a peer
     /// may have open to this node at once, per session. Size it near the rate of new
@@ -285,21 +287,33 @@ pub struct Config {
 }
 
 impl Config {
-    /// The first rule of [`Transport::new`] that this config breaks. A field's own
-    /// range comes before its relation to another field, so the error names the field
-    /// to change.
-    fn check(&self) -> Result<(), Error> {
-        let message_bytes_max = self.message_bytes_max.get();
+    /// The node's setup, or the first rule of [`Transport::new`] that this config
+    /// breaks. A field's own range comes before its relation to another field, so the
+    /// error names the field to change.
+    pub(crate) fn setup(self) -> Result<quic::Setup, Error> {
+        let limit = self.message_bytes_max.get().min(self.pool.largest());
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
-        } else if message_bytes_max < MESSAGE_BYTES_MIN {
-            ("message_bytes_max", "must be at least 1472")
-        } else if message_bytes_max > self.pool.largest() {
-            ("message_bytes_max", "must be at most pool.largest()")
-        } else if self.window_bytes < message_bytes_max {
-            ("window_bytes", "must be at least message_bytes_max")
+        } else if limit < MESSAGE_BYTES_MIN {
+            if limit < self.message_bytes_max.get() {
+                ("pool", POOL_RULE)
+            } else {
+                ("message_bytes_max", "must be at least 1472")
+            }
+        } else if self.window_bytes < limit {
+            ("window_bytes", "must be at least the message limit")
         } else {
-            return Ok(());
+            return Ok(quic::Setup {
+                role: quic::Role::Node(self.private_key),
+                message_bytes_max: limit,
+                window_bytes: self.window_bytes,
+                streams_max: self.streams_max,
+                idle: self.idle,
+                clock: self.clock,
+                entropy: self.entropy,
+                tasks: self.tasks,
+                pool: self.pool,
+            });
         };
         Err(Error::Config { field, rule })
     }
@@ -317,7 +331,7 @@ mod tests {
 
     use super::{Config, Error, Transport};
     use crate::testing::{self, Shard};
-    use crate::{Address, Code, Peer, Port};
+    use crate::{Address, Class, Code, Peer, Port};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
@@ -330,13 +344,13 @@ mod tests {
         field: "message_bytes_max",
         rule: "must be at least 1472",
     };
-    const CEILING: Error = Error::Config {
-        field: "message_bytes_max",
-        rule: "must be at most pool.largest()",
+    const POOL: Error = Error::Config {
+        field: "pool",
+        rule: "must hold a message of at least 1472 bytes",
     };
     const WINDOW: Error = Error::Config {
         field: "window_bytes",
-        rule: "must be at least message_bytes_max",
+        rule: "must be at least the message limit",
     };
 
     /// A config of `shard` with these limits.
@@ -376,8 +390,8 @@ mod tests {
                 (Span::ZERO, message, message, IDLE),
                 (Span::from_nanos(-1), message, message, IDLE),
                 (Span::SECOND, 1471, 1471, FLOOR),
-                (Span::SECOND, largest + 1, largest + 1, CEILING),
                 (Span::SECOND, message - 1, message, WINDOW),
+                (Span::SECOND, largest - 1, largest + 1, WINDOW),
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
@@ -398,7 +412,6 @@ mod tests {
                 (Span::ZERO, largest + 1, largest + 1, IDLE),
                 (Span::ZERO, 0, 1 << 16, IDLE),
                 (Span::SECOND, 0, 1471, FLOOR),
-                (Span::SECOND, 0, largest + 1, CEILING),
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
@@ -411,22 +424,64 @@ mod tests {
     }
 
     #[test]
-    fn new_gives_the_floor_before_the_ceiling_of_a_small_pool() {
+    fn new_takes_a_message_limit_over_the_pool_and_a_window_of_the_pool() {
+        testing::run(0, |shard| {
+            let largest = largest(shard);
+            for message in [largest + 1, usize::MAX] {
+                let config = config(shard, Span::SECOND, largest, message);
+                let new = Transport::new(config, shard.part());
+                assert_eq!(new.err(), None, "{message} bytes");
+            }
+        });
+    }
+
+    #[test]
+    fn new_names_the_pool_when_its_largest_block_is_below_the_floor() {
         testing::run(0, |shard| {
             let budget = block::Config { budget: 1 << 10 };
             let memory = Heap::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
-            assert!(pool.largest() < 1000, "{} bytes", pool.largest());
-            for (message, error) in [(1000, FLOOR), (1472, CEILING)] {
-                let mut config = config(shard, Span::SECOND, message, message);
+            let largest = pool.largest();
+            assert!(largest < 1000, "{largest} bytes");
+            for (idle, window, message, error) in [
+                (Span::SECOND, 1 << 16, 1000, POOL),
+                (Span::SECOND, 1 << 16, 1472, POOL),
+                (Span::SECOND, 0, 1472, POOL),
+                (Span::SECOND, 1 << 16, largest, FLOOR),
+                (Span::ZERO, 1 << 16, 1472, IDLE),
+            ] {
+                let mut config = config(shard, idle, window, message);
                 config.pool = Rc::clone(&pool);
                 assert_eq!(
                     Transport::new(config, shard.part()).err(),
                     Some(error),
-                    "{message} bytes"
+                    "idle {idle:?}, window {window}, message {message}"
                 );
             }
         });
+    }
+
+    #[test]
+    fn a_peer_sees_the_message_limit_of_the_pool() {
+        let (mut sim, _, _) = testing::sessions(
+            0,
+            |config| Config {
+                message_bytes_max: NonZeroUsize::MAX,
+                window_bytes: config.pool.largest(),
+                ..config
+            },
+            // Both sides have pools of the same budget.
+            |side| async move {
+                let opened = side.session.open_sender(Class::Command).await;
+                let sender = opened.expect("a stream");
+                assert_eq!(sender.bytes_max(), side.pool.largest());
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
