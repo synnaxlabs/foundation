@@ -38,7 +38,7 @@ const BODY_MIN: usize = ALIGN - HEADER_LEN;
 const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry");
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
-pub(crate) const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
+const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 
 fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length in memory fits in u64")
@@ -456,6 +456,21 @@ impl Writer {
     #[cfg(test)]
     pub(crate) fn head(&self) -> u64 {
         self.head
+    }
+
+    /// The writer of an empty ring of `layout` with its tail at `offset`, after its
+    /// restart record of one block.
+    ///
+    /// # Panics
+    ///
+    /// When `offset` is not aligned or the restart record does not fit.
+    #[cfg(any(test, feature = "sim"))]
+    pub(crate) fn empty(layout: Layout, offset: u64) -> Self {
+        let tail = Position::new(offset, 9).expect("aligned");
+        let mut cursor = Cursor::new(layout, tail, TABLE);
+        let zeros = vec![0; cursor.window().len];
+        assert_eq!(cursor.next(&zeros), Ok(Step::End), "an empty ring");
+        cursor.writer(offset, 9).expect("the restart record fits").0
     }
 
     /// Plans a record with a body of `len` bytes.
@@ -1653,19 +1668,9 @@ mod tests {
             let _sealed = plan.seal(0, []);
         }
 
-        /// The writer of an empty ring with its tail at `offset`, after its restart
-        /// record of one block.
-        fn opened(layout: Layout, offset: u64) -> Writer {
-            let tail = Position::new(offset, 9).expect("aligned");
-            let mut cursor = Cursor::new(layout, tail, PIECE);
-            let zeros = vec![0; cursor.window().len];
-            assert_eq!(cursor.next(&zeros), Ok(Step::End));
-            cursor.writer(offset, 9).expect("the restart record fits").0
-        }
-
         #[test]
         fn is_full_at_the_end_of_the_offsets() {
-            let mut writer = opened(layout(), u64::MAX - 12287);
+            let mut writer = Writer::empty(layout(), u64::MAX - 12287);
             let plan = writer.append(8);
             assert_eq!(plan.map(|plan| plan.next), Ok(u64::MAX - 4095));
             let full = Full {
@@ -1678,7 +1683,7 @@ mod tests {
         #[test]
         fn is_full_when_the_wrap_passes_the_end_of_the_offsets() {
             let small = Layout::new(15 * 4096, 4088).expect("the sizes make a ring");
-            let mut writer = opened(small, u64::MAX - 12287);
+            let mut writer = Writer::empty(small, u64::MAX - 12287);
             let full = Full {
                 needed: 3 * 4096,
                 free: 8191,
@@ -1690,7 +1695,7 @@ mod tests {
 
         #[test]
         fn wraps_before_the_end_of_the_offsets() {
-            let mut writer = opened(layout(), u64::MAX - 73727);
+            let mut writer = Writer::empty(layout(), u64::MAX - 73727);
             let plan = writer.append(ALIGN).expect("fits");
             assert_eq!(plan.wrap, Some(61440));
             assert_eq!(plan.place, 0);
@@ -1717,7 +1722,7 @@ mod tests {
         /// with the chain value `n`, and is synced.
         fn filled(records: u32) -> Writer {
             let layout = Layout::new(16 * 4096, 4087).expect("the sizes make a ring");
-            let mut writer = opened(layout, 0);
+            let mut writer = Writer::empty(layout, 0);
             for chain in 1..=records {
                 let ends = queue(&mut writer, 8, chain).expect("the ring has room");
                 writer.synced(ends);
@@ -1818,7 +1823,7 @@ mod tests {
             layout: Layout,
             commits: impl IntoIterator<Item = (Vec<usize>, Vec<usize>)>,
         ) -> Option<(usize, Full)> {
-            let mut writer = opened(layout, 0);
+            let mut writer = Writer::empty(layout, 0);
             let mut queued = Vec::new();
             for (commit, (during, after)) in commits.into_iter().enumerate() {
                 let tail = writer.trimmed(None);
@@ -2060,7 +2065,7 @@ mod tests {
                         at 8192"
         )]
         fn panics_on_a_synced_record_that_is_not_after_the_last() {
-            let mut writer = opened(layout(), 0);
+            let mut writer = Writer::empty(layout(), 0);
             queue(&mut writer, 8, 1).expect("the ring has room");
             let (wrap, record) = (None, at(1, 1));
             writer.synced(Ends { wrap, record });
@@ -2073,7 +2078,7 @@ mod tests {
         )]
         fn panics_on_a_synced_record_past_the_head() {
             let (wrap, record) = (None, at(2, 1));
-            opened(layout(), 0).synced(Ends { wrap, record });
+            Writer::empty(layout(), 0).synced(Ends { wrap, record });
         }
 
         #[test]

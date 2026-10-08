@@ -1,7 +1,7 @@
 //! `wal::Writer`, for the bench target only. Not a stable surface.
 
 use crate::record::{ALIGN, BLOCK};
-use crate::wal::{Cursor, Ends, Layout, Position, Step, TABLE, Writer};
+use crate::wal::{Ends, Layout, Position, Writer};
 
 /// The body lengths of the records of a commit, in turn.
 const LENS: [usize; 5] = [8, 8, ALIGN, 8, 2 * ALIGN];
@@ -27,13 +27,8 @@ impl Ring {
     pub fn new(blocks: u64) -> Self {
         let area = blocks.checked_mul(BLOCK).expect("a valid layout");
         let layout = Layout::new(area, 2 * ALIGN).expect("a valid layout");
-        let tail = Position::new(0, 9).expect("aligned");
-        let mut cursor = Cursor::new(layout, tail, TABLE);
-        let zeros = vec![0; cursor.window().len];
-        assert_eq!(cursor.next(&zeros), Ok(Step::End), "an empty ring");
-        let (writer, _) = cursor.writer(0, 9).expect("an empty ring has room");
         Self {
-            writer,
+            writer: Writer::empty(layout, 0),
             ends: Vec::new(),
             chain: 9,
             next: 0,
