@@ -328,8 +328,9 @@ fn split(
         found.entries[at].label_span,
         message,
         format!(
-            "Select the connector `{connector}` and each index under its name with one \
-             placement, such as `select = \"{connector}.**\"`"
+            "Make the placement `{}` win for the connector `{connector}` and each name \
+             under it",
+            label(theirs.unwrap_or(at))
         ),
     ))
 }
