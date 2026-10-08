@@ -170,6 +170,22 @@ fn sync_same_record_wide(bencher: Bencher<'_, '_>) {
     });
 }
 
+/// `sync_new_record` with 100,000 paths of 12 runs each: one new run for each path,
+/// with cold lines.
+#[divan::bench(sample_count = 30, sample_size = 1)]
+fn sync_new_record_wide(bencher: Bencher<'_, '_>) {
+    const PATHS: u32 = 100_000;
+    bencher
+        .with_inputs(|| create_logs(PATHS, 12))
+        .bench_local_refs(|logs| {
+            for index in 0..PATHS {
+                let header = header(index, 12, 1);
+                logs.sync(Slot::new(index), black_box(&header), black_box(4096 * 13))
+                    .expect("syncs");
+            }
+        });
+}
+
 /// Control for `sync_same_record_wide`: the code of `Logs::append` did not change.
 #[divan::bench(sample_count = 30, sample_size = 1)]
 fn append_batch_wide(bencher: Bencher<'_, '_>) {
