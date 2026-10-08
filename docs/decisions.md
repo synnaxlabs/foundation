@@ -1461,8 +1461,8 @@ How to read this record:
   check of the mode costs the decode of a `Credit` +0.28 ns. The `Ended` state and the
   mode flag of `Reader`, for `Behind`, cost a body message up to +0.37 ns and a frame up
   to +1 ns. Both are accepted with no code change; a `Credit` decode past +1 ns over
-  `main` comes back to the architect (lost: `#[inline]` on `decode`, which is not
-  measured and grows each caller; the architect, 2026-10-07T22:18:40Z,
+  `main` comes back to the architect (lost: `#[inline]` on `wire::hub::Home::decode`,
+  which is not measured and grows each caller; the architect, 2026-10-07T22:18:40Z,
   https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6048002213, and
   2026-10-08T00:16:49Z,
   https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6049484466). Stop
