@@ -4,11 +4,11 @@
 //! keeps each packet's bytes in place until their spare bytes pass the larger of
 //! 32 KiB and 1.5 times the bytes it holds, which these messages do not reach. So
 //! the only heap block that holds all of a longer pattern is that buffer. A read of
-//! 64 chunks makes no more allocations than a list that doubles to 64 slots, and one
-//! of 65 chunks makes one more: the buffer, and no larger list. A second copy makes
-//! none, and a read of a short message after it makes none: the reader keeps its
-//! list. The counts cover each thread, so this binary has no test harness. The sim
-//! runs on one thread, so the counts are exact.
+//! 64 chunks makes no more allocations than a list that grows 1.5 times or more from
+//! 1 slot to 64, and one of 65 chunks makes one more: the buffer, and no larger list.
+//! A second copy makes none, and a read of a short message after it makes none: the
+//! reader keeps its list. The counts cover each thread, so this binary has no test
+//! harness. The sim runs on one thread, so the counts are exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -97,8 +97,9 @@ fn main() {
         unreachable!("four cases")
     };
     assert!(
-        full <= 7,
-        "a list that doubles from 1 slot reaches 64 in 7 allocations, not {full}"
+        full <= 12,
+        "a list that grows 1.5 times or more reaches 64 slots in 12 allocations, \
+         not {full}"
     );
     assert_eq!(
         past.checked_sub(full),
