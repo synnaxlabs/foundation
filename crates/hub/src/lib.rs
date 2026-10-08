@@ -65,10 +65,19 @@ pub struct Config {
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
-    /// The region's mesh, or `None` for a node with no region. The mesh names the home
-    /// of each index and the address of each member. With `None`, this node is the
-    /// home of each index.
-    pub mesh: Option<::mesh::Mesh>,
+    /// The node's region, or `None` for a node with no region. With `None`, this node is
+    /// the home of each index.
+    pub region: Option<Region>,
+}
+
+/// What the hub of a node in a region reads homes from, and reaches them on.
+#[derive(Debug)]
+pub struct Region {
+    /// The region's mesh. It names the home of each index and the addresses of each
+    /// member.
+    pub mesh: ::mesh::Mesh,
+    /// The transport of this shard. The hub dials the home of each remote reader on it.
+    pub transport: Rc<transport::Transport>,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -92,7 +101,10 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
-    mesh: Option<::mesh::Mesh>,
+    region: Option<Region>,
+    /// The session to the home of each other node that a reader dialed, which each
+    /// later reader there shares.
+    sessions: hash::Map<types::node::Key, transport::Session>,
 }
 
 impl Hub {
@@ -111,7 +123,7 @@ impl Hub {
             node,
             time,
             entropy,
-            mesh,
+            region,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -126,7 +138,8 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
-            mesh,
+            region,
+            sessions: hash::Map::default(),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -170,19 +183,23 @@ impl Hub {
         Writer::open(&self.0, config).await
     }
 
-    /// Opens a reader session on `channels`, which share one index, as
-    /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, as a
-    /// view of only `channels` and their index. A complete reader gets each live frame
-    /// written after the returned future resolves, until it misses one
-    /// ([`reader::Mode::Complete`]).
+    /// Opens a reader session on `channels`, which share one index. While the mesh
+    /// names no home for the index, it waits for one. At the home of another node, the
+    /// session is one hub stream to that home, on the one session that the hub holds
+    /// to it. It gets each frame of the index, as a view of only `channels` and their
+    /// index. A complete reader gets each live frame written after the returned future
+    /// resolves, until it misses one ([`reader::Mode::Complete`]).
     ///
     /// # Errors
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
     /// another index than the first. [`reader::Error::Empty`] for no name. Then
-    /// [`reader::Error::Remote`] when the home of the index is not this node, and
-    /// [`reader::Error::Mesh`] when the mesh stopped.
+    /// [`reader::Error::Mesh`] when the mesh stopped. At the home of another node:
+    /// [`reader::Error::Transport`] when the dial or the stream fails,
+    /// [`reader::Error::Refused`] when the home refuses the session,
+    /// [`reader::Error::Message`] for a reply that breaks the hub protocol, and
+    /// [`reader::Error::Pool`] when the shard's pool has no block for the open.
     pub async fn reader(
         &self,
         channels: &[Name],
@@ -281,7 +298,7 @@ async fn carry(
     let (watch, node) = {
         let state = state.borrow();
         (
-            state.mesh.as_ref().map(|mesh| mesh.watch(index)),
+            state.region.as_ref().map(|region| region.mesh.watch(index)),
             state.node,
         )
     };
@@ -296,4 +313,48 @@ async fn carry(
     }
     state.borrow_mut().carry(index);
     Ok(())
+}
+
+/// Opens a stream of `class` to `home`, another node, on the hub's session to it,
+/// which it dials first when the hub has none. Drops the session when the open fails,
+/// so the next open dials again.
+async fn stream(
+    state: &Rc<RefCell<State>>,
+    home: types::node::Key,
+    class: transport::Class,
+) -> Result<(transport::stream::Sender, transport::stream::Receiver), transport::Error>
+{
+    let held = state.borrow().sessions.get(&home).cloned();
+    let session = if let Some(session) = held {
+        session
+    } else {
+        let (member, transport) = {
+            let state = state.borrow();
+            let region = state
+                .region
+                .as_ref()
+                .expect("invariant: only a region names another home");
+            let member = region
+                .mesh
+                .member(home)
+                .expect("invariant: the mesh names only a member as a home");
+            (member, Rc::clone(&region.transport))
+        };
+        let card = member.card.card();
+        let session = transport
+            .dial(card.public_key, card.addresses.as_slice())
+            .await?;
+        // A concurrent open can dial first: keep its session.
+        state
+            .borrow_mut()
+            .sessions
+            .entry(home)
+            .or_insert(session)
+            .clone()
+    };
+    let opened = session.open(class).await;
+    if opened.is_err() {
+        state.borrow_mut().sessions.remove(&home);
+    }
+    opened
 }

@@ -1,5 +1,7 @@
 //! Reader sessions: which frames one gets, why one does not open, and the session.
 
+mod remote;
+
 use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
@@ -9,11 +11,14 @@ use std::task::Poll;
 
 use ::home::reader::Next;
 use types::channel;
-use types::frame::key_set::KeySet;
+use types::frame::key_set::{Group, KeySet};
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
+use wire::header::MALFORMED;
+use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
 use crate::{Away, State};
+use remote::Remote;
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -53,6 +58,19 @@ pub enum Ended {
     Buffer(env::files::Error),
     /// A complete reader missed a frame ([`Mode::Complete`]).
     Behind,
+    /// The stream to the home of another node broke.
+    Stream(transport::Error),
+    /// The home of another node stopped or reset the stream with this HUB WIRE code.
+    Refused(transport::Code),
+    /// A message from the home of another node broke HUB WIRE. The reader stopped the
+    /// stream with `MALFORMED`.
+    Message(wire::hub::Error),
+    /// The ends of a frame from the home of another node break a rule of a frame. The
+    /// reader stopped the stream with `MALFORMED`.
+    Frame(types::frame::Error),
+    /// The shard's pool had no block for a frame or a credit. The reader stopped the
+    /// stream with `BUSY`.
+    Pool(block::Error),
 }
 
 impl fmt::Display for Ended {
@@ -62,7 +80,35 @@ impl fmt::Display for Ended {
             Self::Behind => f.write_str(
                 "the reader missed a frame and gets no later one: open a new reader",
             ),
+            Self::Stream(error) => write!(f, "the stream to the home broke: {error}"),
+            Self::Refused(code) => write!(
+                f,
+                "the home ended the session with code {}: {}",
+                code.0,
+                refusal(*code)
+            ),
+            Self::Message(error) => {
+                write!(f, "a message from the home broke the hub protocol: {error}")
+            }
+            Self::Frame(error) => {
+                write!(f, "a frame from the home is not valid: {error}")
+            }
+            Self::Pool(error) => {
+                write!(f, "the pool had no block for the reader: {error}")
+            }
         }
+    }
+}
+
+/// What the home of another node meant by `code`, a HUB WIRE code.
+fn refusal(code: transport::Code) -> &'static str {
+    match code.0 {
+        MALFORMED => "a message of this node broke the hub protocol",
+        UNKNOWN => "the home does not know a channel of the reader",
+        NOT_HOME => "the node is not the home of the index",
+        FAILED => "the home's buffer failed, or its mesh stopped",
+        BUSY => "the home had no memory for a reply",
+        _ => unreachable!("invariant: only a HUB WIRE code refuses a session"),
     }
 }
 
@@ -77,14 +123,17 @@ pub enum Error {
     ManyIndexes,
     /// The reader names no channel.
     Empty,
-    /// The home of the index is `home`, another node, and this hub does not yet read
-    /// from another node (#340).
-    Remote {
-        /// The home.
-        home: types::node::Key,
-    },
     /// The mesh stopped, so the home of the index is not known.
     Mesh(mesh::Stopped),
+    /// The session or the stream to the home of another node failed.
+    Transport(transport::Error),
+    /// The home of another node stopped or reset the stream with this HUB WIRE code.
+    Refused(transport::Code),
+    /// The reply of the home of another node broke HUB WIRE. The reader stopped the
+    /// stream with `MALFORMED`.
+    Message(wire::hub::Error),
+    /// The shard's pool had no block for a message to the home of another node.
+    Pool(block::Error),
 }
 
 impl fmt::Display for Error {
@@ -95,37 +144,48 @@ impl fmt::Display for Error {
                 "the channels are on more than one index: open a reader per index",
             ),
             Self::Empty => f.write_str("a reader names at least one channel"),
-            Self::Remote { home } => write!(
-                f,
-                "the home of the index is node {home}, and a reader reads only at \
-                 this node"
-            ),
             Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
+            Self::Transport(error) => {
+                write!(f, "the transport to the home failed: {error}")
+            }
+            Self::Refused(code) => write!(
+                f,
+                "the home refused the reader with code {}: {}",
+                code.0,
+                refusal(*code)
+            ),
+            Self::Message(error) => {
+                write!(f, "the reply of the home broke the hub protocol: {error}")
+            }
+            Self::Pool(error) => {
+                write!(f, "the pool had no block for the open: {error}")
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
 
-impl From<Away> for Error {
-    fn from(away: Away) -> Self {
-        match away {
-            Away::Remote(home) => Self::Remote { home },
-            Away::Mesh(stopped) => Self::Mesh(stopped),
-        }
-    }
-}
-
 /// A reader session through the reader's channels. Dropping it closes the session;
 /// frames that wait do not go out.
 #[derive(Debug)]
 pub struct Reader {
-    session: Session,
-    /// The credit of a complete reader, and the charge of each frame it took and gave
-    /// back.
-    credit: Option<(Credit, u64)>,
+    source: Source,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
+}
+
+/// Where a reader's frames come from.
+#[derive(Debug)]
+enum Source {
+    /// A session at this node's home, with the credit of a complete one and the charge
+    /// of each frame it took and gave back.
+    Local {
+        session: Session,
+        credit: Option<(Credit, u64)>,
+    },
+    /// A session at the home of another node.
+    Remote(Box<Remote>),
 }
 
 impl Reader {
@@ -136,6 +196,7 @@ impl Reader {
         mode: Mode,
     ) -> Result<Self, Error> {
         let mut keys = Vec::with_capacity(channels.len());
+        let mut data = Vec::with_capacity(channels.len());
         let index = {
             let borrowed = state.borrow();
             let mut index = None;
@@ -148,10 +209,28 @@ impl Reader {
                     return Err(Error::ManyIndexes);
                 }
                 keys.push(channel.key);
+                if channel.key != channel.index
+                    && !data.iter().any(|&(key, _)| key == channel.key)
+                {
+                    data.push((channel.key, channel.data_type));
+                }
             }
             index.ok_or(Error::Empty)?
         };
-        crate::carry(state, index).await?;
+        let home = match crate::carry(state, index).await {
+            Ok(()) => None,
+            Err(Away::Remote(home)) => Some(home),
+            Err(Away::Mesh(stopped)) => return Err(Error::Mesh(stopped)),
+        };
+        if let Some(home) = home {
+            let group = Group { index, data: &data };
+            let set = state.borrow_mut().interner.intern(&[group]);
+            let remote = Remote::open(state, home, set, mode).await?;
+            return Ok(Self {
+                source: Source::Remote(Box::new(remote)),
+                frame: None,
+            });
+        }
         let (mut slots, slot) = {
             let mut borrowed = state.borrow_mut();
             let assigned = borrowed.interner.slots();
@@ -176,8 +255,7 @@ impl Reader {
             Mode::Latest => (Session::latest(state, slots, slot), None),
         };
         Ok(Self {
-            session,
-            credit,
+            source: Source::Local { session, credit },
             frame: None,
         })
     }
@@ -196,19 +274,47 @@ impl Reader {
         reason = "it gives a future, which `Iterator::next` cannot"
     )]
     pub fn next(&mut self) -> impl Future<Output = Result<Received<'_>, Ended>> {
-        if let Some(frame) = self.frame.take()
-            && let Some((credit, taken_bytes)) = &mut self.credit
-        {
-            *taken_bytes += frame.charge();
-            credit.grant(*taken_bytes + WINDOW);
+        if let Some(frame) = self.frame.take() {
+            match &mut self.source {
+                Source::Local {
+                    credit: Some((credit, taken_bytes)),
+                    ..
+                } => {
+                    *taken_bytes += frame.charge();
+                    credit.grant(*taken_bytes + WINDOW);
+                }
+                Source::Local { credit: None, .. } => {}
+                Source::Remote(remote) => remote.give_back(&frame),
+            }
         }
         async move {
-            let (frame, set, mask) = self.session.take().await?;
+            let (frame, set, mask) = match &mut self.source {
+                Source::Local { session, .. } => session.take().await?,
+                Source::Remote(remote) => remote.take().await?,
+            };
             let frame = self.frame.insert(frame);
             Ok(Received {
                 view: View::new(frame, mask),
                 set,
             })
+        }
+    }
+}
+
+/// Why a [`Session`] at this node's home gives no more frames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// The shard's buffer failed.
+    Buffer(env::files::Error),
+    /// A complete session missed a frame.
+    Behind,
+}
+
+impl From<Stop> for Ended {
+    fn from(stop: Stop) -> Self {
+        match stop {
+            Stop::Buffer(error) => Self::Buffer(error),
+            Stop::Behind => Self::Behind,
         }
     }
 }
@@ -279,14 +385,14 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`Ended`] once no frame waits and the session can give no more, on this and
-    /// every later call: [`Ended::Behind`] before [`Ended::Buffer`].
+    /// [`Stop`] once no frame waits and the session can give no more, on this and
+    /// every later call: [`Stop::Behind`] before [`Stop::Buffer`].
     ///
     /// # Panics
     ///
     /// When the interner does not hold the key set of the frame, which a writer of
     /// this hub made.
-    pub(crate) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Ended> {
+    pub(crate) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Stop> {
         let frame = poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
@@ -300,11 +406,11 @@ impl Session {
                     self.streak += 1;
                     return Poll::Ready(Ok(frame));
                 }
-                Next::Behind => return Poll::Ready(Err(Ended::Behind)),
+                Next::Behind => return Poll::Ready(Err(Stop::Behind)),
                 Next::Empty => {}
             }
             if let Some(error) = &state.failed {
-                return Poll::Ready(Err(Ended::Buffer(error.clone())));
+                return Poll::Ready(Err(Stop::Buffer(error.clone())));
             }
             self.streak = 0;
             state.wakers.insert(self.key, cx.waker().clone());
@@ -346,5 +452,33 @@ impl Drop for Session {
         let mut state = self.state.borrow_mut();
         state.wakers.remove(&self.key);
         state.home.close_reader(self.key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use transport::Code;
+
+    use super::*;
+
+    #[test]
+    fn names_what_the_home_meant_by_each_code_that_ends_a_session() {
+        let meanings = [
+            (MALFORMED, "a message of this node broke the hub protocol"),
+            (UNKNOWN, "the home does not know a channel of the reader"),
+            (NOT_HOME, "the node is not the home of the index"),
+            (FAILED, "the home's buffer failed, or its mesh stopped"),
+            (BUSY, "the home had no memory for a reply"),
+        ];
+        for (code, meaning) in meanings {
+            assert_eq!(
+                Error::Refused(Code(code)).to_string(),
+                format!("the home refused the reader with code {code}: {meaning}")
+            );
+            assert_eq!(
+                Ended::Refused(Code(code)).to_string(),
+                format!("the home ended the session with code {code}: {meaning}")
+            );
+        }
     }
 }

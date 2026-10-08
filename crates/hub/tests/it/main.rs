@@ -33,6 +33,7 @@ use types::time::{Span, Stamp};
 
 mod client;
 mod region;
+mod remote;
 mod serve;
 
 /// The node key of the hub under test.
@@ -89,8 +90,8 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
-    /// The mesh of the node's region, which the hub holds too.
-    region: Option<mesh::Mesh>,
+    /// The node's region, which the hub holds too.
+    region: Option<hub::Region>,
     hub: Hub,
 }
 
@@ -102,7 +103,7 @@ impl Test {
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
-        region: Option<mesh::Mesh>,
+        region: Option<hub::Region>,
     ) -> Self {
         let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -142,7 +143,10 @@ impl Test {
             node: NODE,
             time: mesh.clone(),
             entropy: node.entropy(),
-            mesh: region.clone(),
+            region: region.as_ref().map(|region| hub::Region {
+                mesh: region.mesh.clone(),
+                transport: Rc::clone(&region.transport),
+            }),
         });
         let channels: BTreeMap<_, _> = CHANNELS
             .into_iter()

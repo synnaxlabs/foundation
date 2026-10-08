@@ -20,7 +20,7 @@ use wire::header::MALFORMED;
 use wire::hub::client::STALE;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::reader::{Credit, Ended, Session};
+use crate::reader::{Credit, Session, Stop};
 use crate::{Away, State};
 
 pub use client::{Reply, Request};
@@ -234,12 +234,12 @@ async fn serve(
             Event::Frame(Ok((frame, set, _))) => {
                 layout.send(state, sender, &frame, set).await?;
             }
-            Event::Frame(Err(Ended::Behind)) => {
+            Event::Frame(Err(Stop::Behind)) => {
                 sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
-            Event::Frame(Err(Ended::Buffer(error))) => {
+            Event::Frame(Err(Stop::Buffer(error))) => {
                 return Err(Error::Buffer(error));
             }
         }
@@ -249,7 +249,7 @@ async fn serve(
 enum Event<F> {
     /// The peer finished, or broke the stream or HUB WIRE.
     Finished(Result<(), Error>),
-    Frame(Result<F, Ended>),
+    Frame(Result<F, Stop>),
 }
 
 /// Reads what the peer sends after the keys run, and grants each credit. Returns when

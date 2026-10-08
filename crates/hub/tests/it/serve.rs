@@ -178,7 +178,7 @@ pub(super) fn session_in<H, P>(
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
         let region = if regional {
-            Some(region::open(&node, &tasks, Rc::clone(&transport)).await)
+            Some(region::open(&node, &tasks, Rc::clone(&transport), Vec::new()).await)
         } else {
             None
         };

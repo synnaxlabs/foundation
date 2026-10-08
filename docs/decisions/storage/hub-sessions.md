@@ -99,3 +99,21 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
   supersedes "`define` carries at once" in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.
+  Amended (2026-10-08T20:07:32Z, #340 PR 4d-b): a reader of an index whose home is
+  another node reads from that home over one hub stream (HUB WIRE), and
+  `reader::Error::Remote` goes. `hub::Config::region: Option<hub::Region>` replaces
+  `hub::Config::mesh`: a `Region` holds the mesh and the shard's transport, so a mesh
+  with no transport is a state the type cannot hold. The hub keeps one
+  `transport::Session` for each home that it reads from, dials it at the first open,
+  keeps the first of two concurrent dials, and drops it when an open on it fails, so
+  the next open dials again. A complete reader sends `Credit` once its grant is half a
+  window (1 MiB) short of the frames given back plus a window. The new errors:
+  `reader::Error::{Transport, Refused, Message, Pool}` and
+  `reader::Ended::{Stream, Refused, Message, Frame, Pool}`. `Refused` takes each stop
+  or reset with a code of HUB WIRE; a failed dial is `Transport`. Decided by
+  `laptop.architect`: the reader's errors (2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511), and
+  `Region` (2026-10-08T20:07:32Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), which
+  supersedes `hub::Config::mesh` of
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821.

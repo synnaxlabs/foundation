@@ -2107,7 +2107,7 @@ mod hub {
                     node: types::node::Key::from_u128(1),
                     time,
                     entropy,
-                    mesh: None,
+                    region: None,
                 });
                 define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;

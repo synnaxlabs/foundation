@@ -32,3 +32,8 @@
   The state holds a clone of the region's mesh when the hub has one. Decided by
   `laptop.architect` (2026-10-08T18:42:42Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
+  With PR 4d-b of #340, the state holds the region (the mesh and an `Rc` of the
+  shard's transport) and the hub's session to each home it reads from. A remote
+  reader holds the state, so it counts as a session of the hub. Decided by
+  `laptop.architect` (2026-10-08T20:07:32Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715).

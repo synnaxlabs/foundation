@@ -13,7 +13,7 @@ use mesh::Member;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
 use transport::stream::Incoming;
-use transport::{Class, Code, Transport};
+use transport::{Address, Class, Code, Transport};
 use types::channel;
 use types::ed25519::PrivateKey;
 use types::node::SealKey;
@@ -27,19 +27,20 @@ use super::{
 };
 
 /// The other member of the region, which is not a voter.
-const OTHER: types::node::Key = types::node::Key::from_u128(2);
+pub(super) const OTHER: types::node::Key = types::node::Key::from_u128(2);
 pub(super) const TIME: channel::Key = channel::Key::from_u128(1);
 const TIME_B: channel::Key = channel::Key::from_u128(3);
 /// The first file of the mesh's log.
 const LOG: &str = "mesh/log/log-0";
 
-/// The mesh of region `plant` at [`NODE`] over `transport`, whose one voter is
-/// [`NODE`] and whose other member is [`OTHER`].
+/// Region `plant` at [`NODE`] over `transport`, whose one voter is [`NODE`] and whose
+/// other member is [`OTHER`] at `other`.
 pub(super) async fn open(
     node: &sim::node::Node,
     tasks: &Tasks,
     transport: Rc<Transport>,
-) -> mesh::Mesh {
+    other: Vec<Address>,
+) -> hub::Region {
     let pool = own_pool();
     let store = blob::Store::open(blob::Config {
         files: node.files(),
@@ -53,7 +54,7 @@ pub(super) async fn open(
         private_key: HOME,
         founding: mesh::region::Founding {
             prefix: "plant".parse().expect("a prefix"),
-            members: vec![member(NODE, &HOME), member(OTHER, &PEER)],
+            members: vec![member(NODE, &HOME, Vec::new()), member(OTHER, &PEER, other)],
             voters: [NODE].into(),
             definitions: BTreeMap::new(),
         },
@@ -63,19 +64,24 @@ pub(super) async fn open(
         entropy: node.entropy(),
         tasks: tasks.clone(),
         pool,
-        transport,
+        transport: Rc::clone(&transport),
         store: Rc::new(store),
     };
-    mesh::Mesh::open(config).await.expect("the mesh opens")
+    let mesh = mesh::Mesh::open(config).await.expect("the mesh opens");
+    hub::Region { mesh, transport }
 }
 
-/// The member `key` of region `plant`, with no address.
-fn member(key: types::node::Key, private_key: &PrivateKey) -> Member {
+/// The member `key` of region `plant` at `addresses`.
+fn member(
+    key: types::node::Key,
+    private_key: &PrivateKey,
+    addresses: Vec<Address>,
+) -> Member {
     let card = Card {
         name: format!("plant.node{key}").parse().expect("a name"),
         public_key: public_key(private_key),
         seal_key: SealKey::new([9; 32]).expect("a seal key"),
-        addresses: Addresses::new(Vec::new()).expect("no address"),
+        addresses: Addresses::new(addresses).expect("addresses"),
         version: 1,
     };
     Member {
@@ -100,7 +106,7 @@ where
     sim.run_on(&node, move |node, tasks| async move {
         let transport =
             super::serve::transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let region = open(&node, &tasks, Rc::new(transport)).await;
+        let region = open(&node, &tasks, Rc::new(transport), Vec::new()).await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let mut test = Test::new(node, tasks, layout, POOL, Some(region)).await;
         test.sync().await;
@@ -113,14 +119,15 @@ impl Test {
     /// Sets `home` as the home of `index` in the region.
     pub(super) async fn set_home(&self, index: channel::Key, home: types::node::Key) {
         let region = self.region.as_ref().expect("a region");
-        region.set_home(index, home).await.expect("sets the home");
+        let set = region.mesh.set_home(index, home).await;
+        set.expect("sets the home");
     }
 
     /// Makes the mesh stop at its next write of the log, and gives why it stopped.
     async fn stop_mesh(&self) -> mesh::Stopped {
         self.node.fail_file(Path::new(LOG), Operation::Sync);
         let region = self.region.as_ref().expect("a region");
-        match region.set_home(TIME, NODE).await {
+        match region.mesh.set_home(TIME, NODE).await {
             Err(mesh::Error::Stopped(stopped)) => stopped,
             other => panic!("the mesh did not stop: {other:?}"),
         }
@@ -164,17 +171,21 @@ fn a_writer_with_an_index_whose_home_is_another_node_does_not_open() {
 }
 
 #[test]
-fn a_reader_of_an_index_whose_home_is_another_node_does_not_open() {
+fn a_reader_of_an_index_at_a_member_with_no_address_does_not_reach_it() {
     run(3, |test| async move {
         test.set_home(TIME, OTHER).await;
         let names = [name("value")];
         let opened = test.hub.reader(&names, reader::Mode::Latest).await;
-        let error = opened.expect_err("the home of time is the other node");
-        assert_eq!(error, reader::Error::Remote { home: OTHER });
+        let error = opened.expect_err("the other node has no address");
+        let unreachable = transport::Error::Unreachable {
+            peer: public_key(&PEER),
+            attempts: Vec::new(),
+        };
+        assert_eq!(error, reader::Error::Transport(unreachable));
         assert_eq!(
             error.to_string(),
-            "the home of the index is node 00000000-0000-0000-0000-000000000002, and \
-             a reader reads only at this node"
+            "the transport to the home failed: no address reached peer \
+             8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
         );
     });
 }

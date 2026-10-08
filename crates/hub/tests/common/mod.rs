@@ -27,7 +27,7 @@ pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         node: types::node::Key::from_u128(1),
         time,
         entropy: node.entropy(),
-        mesh: None,
+        region: None,
     });
     let time = Channel {
         key: channel::Key::from_u128(1),

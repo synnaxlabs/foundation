@@ -717,6 +717,10 @@ impl Serve {
                 Ok(opened) => opened,
                 Err(error) => return fail(error),
             };
+        let region = mesh.clone().map(|mesh| hub::Region {
+            mesh,
+            transport: Rc::clone(&transport),
+        });
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -724,7 +728,7 @@ impl Serve {
             node: key,
             time: self.time,
             entropy,
-            mesh: mesh.clone(),
+            region,
         });
         hub.define(channels.iter().map(|(name, channel)| (name, channel)));
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
