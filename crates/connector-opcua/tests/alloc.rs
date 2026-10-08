@@ -68,5 +68,5 @@ fn the_fuzz_round_trip_allocates_for_each_step() {
     let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
     data.resize(data.len() + 7 * 4, 0);
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&data));
-    assert_eq!(count, 11, "the round trip of a Variant");
+    assert_eq!(count, 10, "the round trip of a Variant");
 }

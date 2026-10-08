@@ -38,16 +38,13 @@ pub fn decode(data: &[u8]) {
     );
     // A `Variant` of `ExtensionObject` values decodes only when 4 bytes follow its
     // length for each value, and the header of the first value fits at each value
-    // (#435). So an encoding that does not decode gets zeros after it.
-    let (again, read) = Value::decode(data_type, &once)
-        .or_else(|_| {
-            let mut padded = once.clone();
-            padded.resize(once.len() * 2, 0);
-            Value::decode(data_type, &padded)
-        })
-        .unwrap_or_else(|e| {
-            panic!("{name}: {once:02x?} does not decode: {}", e.name())
-        });
+    // (#435). Each other end-of-input check only loosens when bytes follow, so the
+    // zeros change no other result, and the length check still holds.
+    let mut padded = once.clone();
+    padded.resize(once.len() * 2, 0);
+    let (again, read) = Value::decode(data_type, &padded).unwrap_or_else(|e| {
+        panic!("{name}: {once:02x?} does not decode: {}", e.name())
+    });
     assert_eq!(
         read,
         once.len(),

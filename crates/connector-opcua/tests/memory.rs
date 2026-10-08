@@ -92,7 +92,8 @@ fn the_drop_frees_the_client_its_loop_and_its_timers() {
 }
 
 fn the_fuzz_round_trip_frees_each_value() {
-    // A Variant of 7 ExtensionObjects, then the padding that #435 needs.
+    // A `Variant` (23, as `ffi` is private) of 7 `ExtensionObject` values, then the
+    // zeros that #435 needs.
     let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
     data.resize(data.len() + 7 * 4, 0);
     let before = ALLOCATOR.held();
