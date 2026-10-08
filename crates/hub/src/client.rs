@@ -158,8 +158,7 @@ impl Client {
     /// when the node stopped the request or closed the session with a refusal,
     /// [`Error::Transport`] when the stream or the session failed;
     /// [`Error::Message`] for a response that `wire` refuses or that ends early;
-    /// [`Error::Unanswered`] when the node finished the stream with no response;
-    /// [`Error::Pool`] when no block of the pool can hold the header or the `Request`.
+    /// [`Error::Unanswered`] when the node finished the stream with no response.
     pub async fn request(&self, body: &[u8]) -> Result<Vec<u8>, Error> {
         let shared = &self.0.0;
         let length = u64::try_from(body.len())

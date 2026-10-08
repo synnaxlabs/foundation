@@ -648,9 +648,16 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
     );
 }
 
-/// The most that a renewal comes after the pool has room: two retries of 10 ms, as
-/// the record states it, which hold the time a hello takes to the node.
-const RETRY_MAX: Span = Span::from_nanos(20_000_000);
+/// The retry of a message that finds the pool full, as the record states it.
+const RETRY: Span = Span::from_nanos(10_000_000);
+
+/// The most that a renewal comes after the pool has room: two retries, which hold the
+/// time a hello takes to the node.
+const RETRY_MAX: Span = Span::from_nanos(2 * RETRY.nanos());
+
+/// When the pool has room after the time of a renewal: half a retry past a whole
+/// number of retries, so a retry of another span comes at another time.
+const ROOM: Span = Span::from_nanos(25 * RETRY.nanos() + RETRY.nanos() / 2);
 
 /// Half of `LIFE`, as the record states it.
 const HALF: Span = Span::from_nanos(5 * Span::MINUTE.nanos());
@@ -745,8 +752,8 @@ fn renews_the_hello_once_the_pool_has_room() {
     );
 }
 
-/// A renewal that finds the pool full tries again every 10 ms, so it comes soon after
-/// the pool has room a quarter second after its time.
+/// A renewal that finds the pool full tries again every 10 ms, so it comes at the
+/// first retry after the pool has room.
 #[test]
 fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
     raw(
@@ -760,10 +767,10 @@ fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
             let renewal = take(&mut hello).await;
             let came = clock.now() - sent;
             let late = Span::from_nanos(came.nanos() - HALF.nanos());
-            let room = Span::from_nanos(Span::SECOND.nanos() / 4);
+            let next = ROOM.nanos() + RETRY.nanos() / 2;
             assert!(
-                late >= room && late.nanos() < room.nanos() + RETRY_MAX.nanos(),
-                "the renewal comes soon after the pool has room: {late:?}"
+                late.nanos() >= next && late.nanos() < ROOM.nanos() + RETRY_MAX.nanos(),
+                "the renewal comes at the first retry after the pool has room: {late:?}"
             );
             // The challenge gives a mesh time of zero, so a hello whose wait for a
             // block took none of its life expires `LIFE` after it came.
@@ -784,7 +791,7 @@ fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
                 .await;
             let held = fill(&pool);
             node.clock()
-                .sleep(Span::from_nanos(Span::SECOND.nanos() * 5 / 4))
+                .sleep(Span::from_nanos(Span::SECOND.nanos() + ROOM.nanos()))
                 .await;
             drop(held);
             node.clock().sleep(Span::SECOND).await;
@@ -817,6 +824,83 @@ fn ends_the_wait_for_a_block_when_the_session_closes() {
             assert_eq!(got, Some(Err(Error::Refused(Refusal::Busy))));
             drop(held);
         },
+    );
+}
+
+/// A pool of 1 MiB over memory that a test can make refuse, and the switch for it.
+fn scarce() -> (Rc<block::Pool>, block::testing::Switch) {
+    let config = block::Config { budget: 1 << 20 };
+    let (memory, switch) = block::testing::Scarce::new(config.reservation());
+    (Rc::new(block::Pool::new(config, memory)), switch)
+}
+
+/// Lets each commit of `switch` succeed after `wait` on `clock`.
+fn allow_after(
+    tasks: &env::tasks::Tasks,
+    clock: env::clock::Clock,
+    switch: block::testing::Switch,
+    wait: Span,
+) {
+    tasks.spawn(async move {
+        clock.sleep(wait).await;
+        switch.allow();
+    });
+}
+
+/// A pool whose memory refuses a block waits for it as for a full pool, so `connect`
+/// sends its header and hello once the memory has room.
+#[test]
+fn connects_once_the_memory_of_the_pool_has_room() {
+    let home = serve_session(
+        147,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let (pool, switch) = scarce();
+            switch.refuse();
+            allow_after(&tasks, node.clock(), switch, Span::SECOND);
+            let began = node.clock().now();
+            let client = connect_with(&node, tasks, at, AGENT, pool)
+                .await
+                .expect("connects");
+            assert!(node.clock().now() - began >= Span::SECOND);
+            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+            node.clock().sleep(QUIET).await;
+        },
+    );
+    assert_eq!(
+        home.served[0],
+        Ok(Got::Request(name(SUBJECT), b"ab".to_vec()))
+    );
+}
+
+/// The `Request` of a request waits for its block as each message does. The pool
+/// holds no block of its size yet, so its memory must commit one.
+#[test]
+fn sends_a_request_once_the_memory_of_the_pool_has_room() {
+    let home = serve_session(
+        148,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let (pool, switch) = scarce();
+            let client = connect_with(&node, tasks.clone(), at, AGENT, pool)
+                .await
+                .expect("connects");
+            node.clock().sleep(QUIET).await;
+            switch.refuse();
+            allow_after(&tasks, node.clock(), switch, Span::SECOND);
+            let began = node.clock().now();
+            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+            assert!(node.clock().now() - began >= Span::SECOND);
+            node.clock().sleep(QUIET).await;
+        },
+    );
+    assert_eq!(
+        home.served[0],
+        Ok(Got::Request(name(SUBJECT), b"ab".to_vec()))
     );
 }
 
@@ -1067,8 +1151,9 @@ fn sends_a_body_at_the_cap_from_a_pool_of_one_chunk_on_each_link() {
                     .await
                     .expect("connects");
                 let cap = usize::try_from(BODY_BYTES_MAX).expect("fits");
-                let got = client.request(&body(cap)).await.map(drop);
-                assert_eq!(got, Ok(()), "{label}");
+                let sent = body(cap);
+                let got = client.request(&sent).await;
+                assert!(got == Ok(reversed(&sent)), "{label}");
             },
         );
     }

@@ -18,6 +18,7 @@ wire = { path = "../wire" }
 
 [dev-dependencies]
 aws-lc-rs.workspace = true
+block = { path = "../block", features = ["sim"] }
 buffer = { path = "../buffer" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
