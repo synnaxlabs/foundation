@@ -4203,6 +4203,36 @@ How to read this record:
   subject at its plain name, which takes that name from a channel or a connector and
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
+  `access::Rules` keeps the keys of each subject by `<name>`, and `admit` finds them,
+  so no caller builds the tree key (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636).
+- **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
+  `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
+  builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
+  request. `verify` finds the key in the spec again and checks the time again, so a
+  spec that removes the key stops the next request, and no caller writes its own
+  expiry check. The signed bytes are a contract for each SDK; each integer is
+  little-endian:
+  - hello: the 18 bytes `foundation hello 1`, a zero byte, the subject length (1 byte),
+    the subject, the key (32), `via` (16), the connection key (16), the nonce (16), and
+    `expires` in nanoseconds (8);
+  - request or session open: the 20 bytes `foundation request 1`, a zero byte, the
+    connection key (16), and the exact bytes that the program sent.
+
+  Each tag ends with a zero byte, so no tag is a prefix of another. A request is
+  checked with the key of the hello over its connection key, so a request signed with
+  another key or for another connection gives `Error::Signature`, and no connection
+  check exists. `peer` is the node that carried the hello: this node when the program
+  connected to it, else the node whose transport session forwarded it. A hello is
+  live while the latest mesh time is before `expires`, and `expires` may be at most
+  `proof::CAP` (15 minutes) past the earliest mesh time. Lost: `access` decodes the
+  signed bytes of the hello itself (design B), because `access` then owns a decoder of
+  outside input and the hello's wire form, which HUB WIRE gives to `wire`; a free
+  `verify` of any `&Hello`, which accepts a key that the program picked when a caller
+  skips `admit`; and `Error::Connection`, which the signature makes needless. A
+  hosted proof waits on #1832. Decided by `laptop.architect` at
+  2026-10-08T07:35:46Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies and connectors itself. A policy reaches a name when
@@ -6046,7 +6076,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys with the derive and the verify, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys with the derive and the verify, subject hellos, connection keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -6056,7 +6086,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
-| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
+| 1 | `access` | Decides whether a proof is of its subject (signed hellos and requests), and whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
