@@ -175,7 +175,8 @@ impl Reader {
 }
 
 /// A session at the shard's home, through a mask of the reader's channels: the frames
-/// it takes, and why it ends. Each [`Reader`] drives one.
+/// it takes, and why it ends. Each [`Reader`] drives one, and so does each stream of a
+/// remote reader.
 #[derive(Debug)]
 pub(crate) struct Session {
     state: Rc<RefCell<State>>,

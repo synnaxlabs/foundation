@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
-use std::ops::Range;
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
@@ -13,7 +12,7 @@ use transport::stream::{Incoming, Part, Receiver, Sender};
 use transport::{Class, Code};
 use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
-use types::frame::{self, Frame};
+use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, Reply, UNKNOWN, ends};
 
@@ -143,7 +142,7 @@ async fn serve(
     let Some(Opened {
         mut session,
         credit,
-        mut places,
+        mut layout,
     }) = open(state, class, &mut home, receiver).await?
     else {
         sender.finish()?;
@@ -169,7 +168,7 @@ async fn serve(
                 return Ok(());
             }
             Event::Frame(Ok((frame, set, _))) => {
-                places.send(state, sender, &frame, set).await?;
+                layout.send(state, sender, &frame, set).await?;
             }
             Event::Frame(Err(Ended::Behind)) => {
                 sender.send(reply(state, Reply::Behind)?).await?;
@@ -212,7 +211,7 @@ struct Opened {
     session: Session,
     /// The credit of a complete session.
     credit: Option<Credit>,
-    places: Places,
+    layout: Layout,
 }
 
 /// Reads the open and its keys, checks each key as it arrives, and opens the session
@@ -275,7 +274,7 @@ async fn open(
     Ok(Some(Opened {
         session,
         credit,
-        places: Places::new(slots, index),
+        layout: Layout::new(slots, index),
     }))
 }
 
@@ -308,26 +307,17 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
 
 /// How a session sends each frame, through its places. It keeps its buffers across
 /// frames, so a frame allocates only its blocks.
-struct Places {
-    /// The slot of each place: of each listing in the open, repeats too.
-    slots: Box<[Slot]>,
+struct Layout {
+    places: frame::Places,
     index: Slot,
-    /// The place of each entry of the frame's key set.
-    by_entry: Vec<Option<usize>>,
-    /// The range of each place's series in the frame's body.
-    by_place: Vec<Option<Range<usize>>>,
-    series: Vec<Series>,
     parts: Vec<Part>,
 }
 
-impl Places {
+impl Layout {
     fn new(slots: Box<[Slot]>, index: Slot) -> Self {
         Self {
-            by_place: vec![None; slots.len()],
-            slots,
+            places: frame::Places::new(slots),
             index,
-            by_entry: Vec::new(),
-            series: Vec::new(),
             parts: Vec::new(),
         }
     }
@@ -341,92 +331,48 @@ impl Places {
         frame: &Frame,
         set: &KeySet,
     ) -> Result<(), Error> {
-        let head = self.lay(frame, set);
+        let placed = self.places.lay(frame, set);
+        let head = head(frame, set, self.index, placed.len());
         sender.send(reply(state, Reply::Head(head))?).await?;
-        for run in self.runs(sender.bytes_max()) {
+        for run in runs(placed, sender.bytes_max()) {
             let mut block = alloc(state, run.len() * ends::LEN)?;
             ends::encode(
-                run.iter().map(|series| (series.place, series.end)),
+                run.iter().map(|series| {
+                    let place = u32::try_from(series.place).expect("a place is a u32");
+                    let end =
+                        u32::try_from(series.end).expect("a frame's body fits a u32");
+                    (place, end)
+                }),
                 &mut block,
             );
             sender.send(block.freeze()).await?;
         }
         let mut cut = Cut::default();
-        while cut.next(&self.series, sender.bytes_max(), &mut self.parts) {
+        while cut.next(placed, sender.bytes_max(), &mut self.parts) {
             sender.send_parts(frame.body(), &self.parts).await?;
         }
         Ok(())
     }
+}
 
-    /// Lays out the series of `frame` that the session has a place for, in place
-    /// order, and gives the frame's head.
-    fn lay(&mut self, frame: &Frame, set: &KeySet) -> Head {
-        self.by_entry.clear();
-        self.by_entry.resize(set.entries().len(), None);
-        for (place, &slot) in self.slots.iter().enumerate() {
-            if let Some(entry) = set.find(slot) {
-                self.by_entry[entry].get_or_insert(place);
-            }
-        }
-        self.by_place.fill(None);
-        for ((entry, series), (_, end)) in frame.iter().zip(frame.ends()) {
-            if let Some(place) = self.by_entry[entry] {
-                self.by_place[place] = Some(end - series.len()..end);
-            }
-        }
-        self.series.clear();
-        let present = self
-            .by_place
-            .iter()
-            .enumerate()
-            .filter_map(|(place, range)| {
-                let range = range.clone()?;
-                let len = range.len();
-                Some(((place, range), len))
-            });
-        let mut last_end = 0;
-        for ((place, range), end) in frame::ends(present) {
-            if let Some(last) = self.series.last_mut() {
-                let start = end - range.len();
-                last.zeros = u8::try_from(start - last_end).expect("a pad fits a u8");
-            }
-            last_end = end;
-            self.series.push(Series {
-                place: u32::try_from(place).expect("a place is a u32"),
-                range,
-                end: u32::try_from(end).expect("a frame's body fits a u32"),
-                zeros: 0,
-            });
-        }
-        let index = set
-            .find(self.index)
-            .expect("invariant: a session's frame holds its index");
-        Head {
-            path: frame.path(),
-            range: frame
-                .range(set.entries()[index].group)
-                .expect("invariant: a frame holds the range of each group"),
-            series: u32::try_from(self.series.len())
-                .expect("a count of places is a u32"),
-        }
-    }
-
-    /// The series that [`Self::lay`] gave, in runs whose ends fit `max` bytes.
-    fn runs(&self, max: usize) -> std::slice::Chunks<'_, Series> {
-        self.series.chunks(max / ends::LEN)
+/// The head of `frame`, of key set `set`, for a session of index `index` that sends
+/// `series` of its series.
+fn head(frame: &Frame, set: &KeySet, index: Slot, series: usize) -> Head {
+    let index = set
+        .find(index)
+        .expect("invariant: a session's frame holds its index");
+    Head {
+        path: frame.path(),
+        range: frame
+            .range(set.entries()[index].group)
+            .expect("invariant: a frame holds the range of each group"),
+        series: u32::try_from(series).expect("a count of places is a u32"),
     }
 }
 
-/// One series of a frame that a session sends.
-#[derive(Clone, Debug)]
-struct Series {
-    place: u32,
-    /// Its bytes in the frame's body.
-    range: Range<usize>,
-    /// Its end in the reader's body.
-    end: u32,
-    /// The zeros after it in the reader's body, to the start of the next series.
-    zeros: u8,
+/// `placed` in runs whose ends fit `max` bytes.
+fn runs(placed: &[Placed], max: usize) -> std::slice::Chunks<'_, Placed> {
+    placed.chunks(max / ends::LEN)
 }
 
 /// Where the cut of a body into messages stands: the series and how many of its bytes,
@@ -438,21 +384,25 @@ struct Cut {
 }
 
 impl Cut {
-    /// Fills `parts` with the next message of the body of `series`, at most `max`
+    /// Fills `parts` with the next message of the body of `placed`, at most `max`
     /// bytes. Gives `false` once the body is sent.
-    fn next(&mut self, series: &[Series], max: usize, parts: &mut Vec<Part>) -> bool {
+    fn next(&mut self, placed: &[Placed], max: usize, parts: &mut Vec<Part>) -> bool {
         parts.clear();
         let mut room = max;
         while room > 0
-            && let Some(at) = series.get(self.at)
+            && let Some(at) = placed.get(self.at)
         {
-            let len = at.range.len();
-            let total = len + usize::from(at.zeros);
+            let len = at.bounds.len();
+            let pad = placed
+                .get(self.at + 1)
+                .map_or(0, |next| next.end - next.bounds.len() - at.end);
+            let total = len + pad;
             let take = (total - self.done).min(room);
             let (from, to) = (self.done, self.done + take);
             if take > 0 {
                 parts.push(Part {
-                    range: at.range.start + from.min(len)..at.range.start + to.min(len),
+                    range: at.bounds.start + from.min(len)
+                        ..at.bounds.start + to.min(len),
                     zeros: u8::try_from(to.max(len) - from.max(len))
                         .expect("a pad fits a u8"),
                 });
@@ -469,6 +419,7 @@ impl Cut {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
     use std::sync::Arc;
 
     use types::frame::key_set::{Group, Interner};
@@ -502,14 +453,11 @@ mod tests {
         (draft.freeze(Path::Live), set)
     }
 
-    /// Each series that `places` laid out, as `(place, range, end, zeros)`. It reads
-    /// private state so each case of the pure layout has a test; the tests through
-    /// `Hub::serve` check the layout on the wire.
-    fn laid(places: &Places) -> Vec<(u32, Range<usize>, u32, u8)> {
-        places
-            .series
+    /// Each series of `placed`, as `(place, bounds, end)`.
+    fn laid(placed: &[Placed]) -> Vec<(usize, Range<usize>, usize)> {
+        placed
             .iter()
-            .map(|s| (s.place, s.range.clone(), s.end, s.zeros))
+            .map(|p| (p.place, p.bounds.clone(), p.end))
             .collect()
     }
 
@@ -521,20 +469,20 @@ mod tests {
         let mut interner = Interner::new();
         let [b, index, a, _, absent] =
             [3, 1, 2, 5, 4].map(|k| interner.slots().assign(key(k)));
-        let mut places = Places::new([index, a, b, absent].into(), index);
+        let mut layout = Layout::new([index, a, b, absent].into(), index);
         let (wide, set) = frame(&mut interner, &pool, &[2, 3, 5], &[3, 8, 5, 8]);
-        let head = places.lay(&wide, &set);
+        let placed = layout.places.lay(&wide, &set);
         assert_eq!(
-            laid(&places),
-            [(0, 8..16, 8, 0), (1, 16..21, 13, 3), (2, 0..3, 19, 0)]
+            laid(placed),
+            [(0, 8..16, 8), (1, 16..21, 13), (2, 0..3, 19)]
         );
+        let head = head(&wide, &set, index, placed.len());
         assert_eq!(head.path, Path::Live);
         assert_eq!(Some(head.range), wide.range(0));
         assert_eq!(head.series, 3);
         let (narrow, set) = frame(&mut interner, &pool, &[2], &[8, 5]);
-        let head = places.lay(&narrow, &set);
-        assert_eq!(laid(&places), [(0, 0..8, 8, 0), (1, 8..13, 13, 0)]);
-        assert_eq!(head.series, 2);
+        let placed = layout.places.lay(&narrow, &set);
+        assert_eq!(laid(placed), [(0, 0..8, 8), (1, 8..13, 13)]);
     }
 
     /// The head carries the range of the session's index group, not the first group.
@@ -542,8 +490,7 @@ mod tests {
     fn gives_the_range_of_the_index_group_of_the_session() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let [_, _, index, value] =
-            [1, 2, 4, 5].map(|k| interner.slots().assign(key(k)));
+        let [_, _, index, _] = [1, 2, 4, 5].map(|k| interner.slots().assign(key(k)));
         let set = interner.intern(&[
             Group {
                 index: key(1),
@@ -559,8 +506,7 @@ mod tests {
         draft.set_count(0, 1);
         draft.set_count(1, 3);
         let frame = draft.freeze(Path::Live);
-        let mut places = Places::new([index, value].into(), index);
-        let head = places.lay(&frame, &set);
+        let head = head(&frame, &set, index, 2);
         assert_eq!(Some(head.range), frame.range(1));
         assert_ne!(frame.range(0), frame.range(1));
     }
@@ -572,49 +518,48 @@ mod tests {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
         let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
-        let mut places = Places::new([index, a, index, b].into(), index);
+        let mut layout = Layout::new([index, a, index, b].into(), index);
         let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
-        let head = places.lay(&frame, &set);
+        let placed = layout.places.lay(&frame, &set);
         assert_eq!(
-            laid(&places),
-            [(0, 0..8, 8, 0), (1, 8..16, 16, 0), (3, 16..24, 24, 0)]
+            laid(placed),
+            [(0, 0..8, 8), (1, 8..16, 16), (3, 16..24, 24)]
         );
-        assert_eq!(head.series, 3);
     }
 
     #[test]
     fn splits_the_ends_into_runs_that_fit_the_message_limit() {
-        let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
-        let mut interner = Interner::new();
-        let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
-        let mut places = Places::new([index, a, b].into(), index);
-        let (wide, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
-        places.lay(&wide, &set);
-        let runs = |max| places.runs(max).map(<[Series]>::len).collect::<Vec<_>>();
+        let placed = placed(&[(0..8, 0), (8..16, 0), (16..24, 0)]);
+        let runs = |max| runs(&placed, max).map(<[Placed]>::len).collect::<Vec<_>>();
         assert_eq!(runs(16), [2, 1]);
         assert_eq!(runs(23), [2, 1]);
         assert_eq!(runs(24), [3]);
     }
 
-    fn series(ranges: &[(Range<usize>, u8)]) -> Vec<Series> {
-        ranges
+    /// Series with `bounds` in the home's body, each followed by `zeros` of padding in
+    /// the reader's body.
+    fn placed(bounds: &[(Range<usize>, usize)]) -> Vec<Placed> {
+        let mut start = 0;
+        bounds
             .iter()
-            .zip(0..)
-            .map(|((range, zeros), place)| Series {
-                place,
-                range: range.clone(),
-                end: 0,
-                zeros: *zeros,
+            .enumerate()
+            .map(|(place, (bounds, zeros))| {
+                let end = start + bounds.len();
+                start = end + zeros;
+                Placed {
+                    place,
+                    bounds: bounds.clone(),
+                    end,
+                }
             })
             .collect()
     }
 
-    /// Each message of the cut, as `(range, zeros)` of each part. It reads private
-    /// state for the same reason as `laid`.
-    fn cut(series: &[Series], max: usize) -> Vec<Vec<(Range<usize>, u8)>> {
+    /// Each message of the cut, as `(range, zeros)` of each part.
+    fn cut(placed: &[Placed], max: usize) -> Vec<Vec<(Range<usize>, u8)>> {
         let (mut cut, mut parts, mut messages) =
             (Cut::default(), Vec::new(), Vec::new());
-        while cut.next(series, max, &mut parts) {
+        while cut.next(placed, max, &mut parts) {
             messages.push(parts.iter().map(|p| (p.range.clone(), p.zeros)).collect());
         }
         messages
@@ -622,13 +567,13 @@ mod tests {
 
     #[test]
     fn sends_a_body_that_fits_in_one_message() {
-        let series = series(&[(0..5, 3), (16..24, 0)]);
+        let series = placed(&[(0..5, 3), (16..24, 0)]);
         assert_eq!(cut(&series, 64), [vec![(0..5, 3), (16..24, 0)]]);
     }
 
     #[test]
     fn cuts_a_series_and_its_zeros_at_the_message_limit() {
-        let series = series(&[(0..5, 3), (16..24, 0)]);
+        let series = placed(&[(0..5, 3), (16..24, 0)]);
         assert_eq!(
             cut(&series, 4),
             [
@@ -650,7 +595,7 @@ mod tests {
 
     #[test]
     fn sends_no_message_for_empty_series() {
-        let series = series(&[(8..8, 0), (8..10, 0), (16..16, 0)]);
+        let series = placed(&[(8..8, 0), (8..10, 0), (16..16, 0)]);
         assert_eq!(cut(&series, 64), [vec![(8..10, 0)]]);
         assert!(cut(&series[..1], 64).is_empty());
     }
