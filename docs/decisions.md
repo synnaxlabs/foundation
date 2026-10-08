@@ -4676,8 +4676,9 @@ How to read this record:
   `Rules::new` panics at a subject definition at a key that gives no label, which its
   precondition excludes (`laptop.architect`, 2026-10-08T13:40:56Z,
   https://github.com/synnaxlabs/foundation/pull/1880#issuecomment-6061170874; built
-  for #1890; it changes the skip of 11:11:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907).
+  for #1890). Supersedes the skip of
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907
+  (2026-10-08T11:11:39Z).
   `Rules::new` takes only trees with no problem from
   `spec::region::check` at their prefix, and checks nothing itself: `Mesh::spec` gives
   only such trees (SPEC CHANGE, #1741), and `node` builds `Rules` only from it (#1744).
