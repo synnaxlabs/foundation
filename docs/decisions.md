@@ -1178,8 +1178,8 @@ How to read this record:
   adds 0.3% to the write of one frame. Accepted by laptop.architect:
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
   A doc states what is true at its commit: `Reader` states no credit window, as a
-  latest reader has none, and `Session` names only `Reader` as its driver. #1636 adds
-  each stream of a remote reader when it adds that driver (laptop.architect,
+  latest reader has none, and `Session` names `Reader` and each stream of a remote
+  reader as its drivers, since #1636 adds the second (laptop.architect,
   2026-10-08T01:01:26Z,
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049988923).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
@@ -1201,6 +1201,12 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043897000).
   Decided by `laptop.architect` (2026-10-07T21:23:22Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6047128783).
+  The future of `Hub::serve` holds a hub clone and a session, so it keeps the hub's
+  state and the commit task alive. `node` keeps each such future where `keep` drops it,
+  after the guard and before it awaits the commit, and never runs one with
+  `tasks.spawn`, which gives no way to drop it. Decided by the architect
+  (2026-10-07T21:34:19Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1693,12 +1699,15 @@ How to read this record:
   `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
   `Head` has no form. The body holds only the series of the reader's view, the index
   series too, written from the frame's block as slices, and both ends charge the frame
-  that the reader builds (CREDIT RULES, M2). A series has the place of its first listing
-  in the open, from 0. The reader's `hub` lists the keys in the entry order of its own
-  frame (its slot order), the index too, so a place is an entry of the reader's frame
-  and a session has `channels` places. An open whose keys do not hold the index is not
-  valid: the home's `hub` checks it and stops the session with `MALFORMED` (lost:
-  `UNKNOWN`; the architect, 2026-10-07,
+  that the reader builds (CREDIT RULES, M2). `serve` opens each complete session with
+  `delivery::complete::Charge::Places` of the slots of its open (#1642, #1636; the
+  architect, 2026-10-07T22:25:18Z,
+  https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
+  has the place of its first listing in the open, from 0. The reader's `hub` lists the
+  keys in the entry order of its own frame (its slot order), the index too, so a place
+  is an entry of the reader's frame and a session has `channels` places. An open whose
+  keys do not hold the index is not valid: the home's `hub` checks it and stops the
+  session with `MALFORMED` (lost: `UNKNOWN`; the architect, 2026-10-07,
   https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
   of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
   message. The rest is one run of bytes, in messages of at most the peer's
@@ -1724,10 +1733,10 @@ How to read this record:
   `View::bounds` is crate-private, as no crate outside `types` calls it (the architect,
   2026-10-08T00:49:22Z,
   https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049855032; lost: a
-  public `bounds`, a second way to lay a reader's frame beside `Places`). At
-  the open it makes the list of each place and its home entry, sorted by place, and
-  writes each ends message from it with `wire::hub::ends::encode`, which sizes the
-  message by its buffer, so no scratch buffer holds the ends (the architect, #1146,
+  public `bounds`, a second way to lay a reader's frame beside `Places`). `serve`
+  writes each ends message from the series that `Places::lay` gives, in place order,
+  with `wire::hub::ends::encode`, which sizes the message by its buffer, so no scratch
+  buffer holds the ends (the architect, #1146,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
   takes exactly the ends the buffer holds and no more, so one iterator passed with
   `by_ref()` splits a run into messages; the caller owns the count of the run (the
@@ -1757,11 +1766,31 @@ How to read this record:
   which is not measured and grows each caller; the architect, 2026-10-07T22:18:40Z,
   https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6048002213, and
   2026-10-08T00:16:49Z,
-  https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6049484466). Stop
-  codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
-  the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
-  decode, comes from the wrong side, or breaks a rule above), which every protocol may
-  use. Lost: a `message_bytes_max` of at least the largest pool block (a client or a
+  https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6049484466). A
+  latest open needs a stream of class `Latest`, and a complete open a stream of class
+  `Complete`, since the class sets the priority of each frame that the home sends back;
+  the home's `hub` checks it at the `Open` and stops the session with `MALFORMED`.
+  Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
+  is not the home of the index), 18 `FAILED` (the home's buffer failed), 19 `BUSY` (the
+  home's pool had no block for a reply; a later open can succeed), and 2
+  `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
+  or breaks a rule above), which every protocol may use. A reset drops the frames in
+  flight, which is correct for `FAILED`, since the session cannot go on (lost: a
+  `Reply::Failed` that keeps them, a second end message to fuzz). Each reply block holds
+  one message. An ends message holds at most the frame's series, at 8 bytes each, the
+  size of their descriptors in the frame's block, so the pool can always hold it (the
+  architect, 2026-10-07T22:17:44Z,
+  https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988).
+  Supersedes "A reply block holds at most `min(bytes_max, Pool::largest)` bytes"
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The
+  home ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait
+  needs a clock in `hub` and a wait queue for each session, and the end frees the
+  frames the session pins (`mesh` ends its stream in the same case). The class rule and
+  code 18 were decided by the architect (2026-10-07T21:34:19Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
+  by the architect (2026-10-07T21:47:56Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084).
+  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
   foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
   a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
   because the home knows its index and a second copy needs a check; the whole
