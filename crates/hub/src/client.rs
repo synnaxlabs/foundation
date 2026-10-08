@@ -16,7 +16,7 @@ use types::connection;
 use types::ed25519::{Pair, PrivateKey, PublicKey};
 use types::hello::Hello;
 use types::name::Name;
-use types::time::{Monotonic, Span};
+use types::time::{Monotonic, Span, Stamp};
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::{
@@ -182,6 +182,7 @@ impl Client {
         let signature = shared
             .pair
             .sign(&access::proof::request(shared.connection, body));
+        // Never `Error::Pool`: `connect` took a larger block for its hello.
         let mut message = shared.alloc(Request::LEN).await?;
         Request { length, signature }.encode(&mut message);
         sender.send(message.freeze()).await?;
@@ -269,6 +270,7 @@ impl Shared {
             via: self.via,
             connection: self.connection,
             nonce: challenge.nonce,
+            // Set after the wait for a block, so the wait takes none of the life.
             expires: challenge.now.latest,
         };
         let mut signed = Signed {
@@ -276,9 +278,14 @@ impl Shared {
             signature: [0; 64],
         };
         let mut message = self.alloc(signed.encoded_len()).await?;
-        // The expiry is set after the wait for a block, so the wait takes none of the
-        // hello's life. The mesh time of the challenge is as old as the challenge.
-        signed.hello.expires = challenge.now.latest + (self.clock.now() - came) + LIFE;
+        // The mesh time of the challenge is as old as the challenge. It is the node's,
+        // so the expiry stops at the end of mesh time.
+        signed.hello.expires = challenge
+            .now
+            .latest
+            .checked_add(self.clock.now() - came)
+            .and_then(|stamp| stamp.checked_add(LIFE))
+            .unwrap_or(Stamp::from_nanos(i64::MAX));
         signed.signature = self.pair.sign(&access::proof::hello(&signed.hello));
         signed.encode(&mut message);
         sender.send(message.freeze()).await?;

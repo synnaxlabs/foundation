@@ -827,6 +827,36 @@ fn ends_the_wait_for_a_block_when_the_session_closes() {
     );
 }
 
+/// A challenge at the end of mesh time gives a hello that expires then, not a panic.
+#[test]
+fn ends_the_life_of_a_hello_at_the_end_of_time() {
+    raw(
+        149,
+        |session, mut hello, node| async move {
+            let end = Stamp::from_nanos(i64::MAX);
+            let mut bytes = [0; Challenge::LEN];
+            Challenge {
+                nonce: [7; 16],
+                now: Interval {
+                    earliest: end,
+                    latest: end,
+                },
+            }
+            .encode(&mut bytes);
+            let message = own_pool().copy(&bytes).expect("room");
+            let sender = hello.sender.as_mut().expect("two-way");
+            sender.send(message).await.expect("sends");
+            assert_eq!(take(&mut hello).await.hello.expires, end);
+            challenge(&mut hello).await;
+            node.clock().sleep(QUIET).await;
+            drop(session);
+        },
+        |node, tasks, at| async move {
+            connect(&node, tasks, at, AGENT).await.expect("connects");
+        },
+    );
+}
+
 /// A pool of 1 MiB over memory that a test can make refuse, and the switch for it.
 fn scarce() -> (Rc<block::Pool>, block::testing::Switch) {
     let config = block::Config { budget: 1 << 20 };
