@@ -22,7 +22,7 @@ const BOT: &str = "synnax-foundation-factory[bot]";
 const FORMAT: &str =
     "in the format of .claude/skills/review/SKILL.md, \"Round comment\".";
 
-/// The line that starts and ends a code block, and stands for each line in one.
+/// The line that stands for each line of a code block, its fences too.
 const FENCE: &str = "```";
 
 /// The names of the lines that end each round comment, in order.
@@ -291,10 +291,10 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
                 )
             })?,
         };
-        let rest = paragraphs.get(1..).unwrap_or_default();
         let hot = if old {
-            named(rest)
+            named(&paragraphs)
         } else {
+            let rest = paragraphs.get(1..).unwrap_or_default();
             hot(rest.last().map_or(&[][..], Vec::as_slice), number)?
         };
         Ok(Round {
@@ -317,12 +317,23 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
 /// The paragraphs of `lines`, split at blank lines. Each line of a code block, blank
 /// ones too, becomes [`FENCE`], which is never a field or an end line.
 fn paragraphs<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<&'a str>> {
-    let mut fenced = false;
+    let mut open: Option<(char, usize)> = None;
     lines
         .map(|l| {
-            let fence = l.trim_start().starts_with(FENCE);
-            let quoted = fenced || fence;
-            fenced ^= fence;
+            let quoted = match (open, fence(l)) {
+                (None, None) => false,
+                (None, Some((mark, length, _))) => {
+                    open = Some((mark, length));
+                    true
+                }
+                (Some((mark, length)), Some((m, n, "")))
+                    if m == mark && n >= length =>
+                {
+                    open = None;
+                    true
+                }
+                (Some(_), _) => true,
+            };
             if quoted { FENCE } else { l }
         })
         .collect::<Vec<_>>()
@@ -330,6 +341,20 @@ fn paragraphs<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<&'a str>> {
         .filter(|p| !p.is_empty())
         .map(<[&str]>::to_vec)
         .collect()
+}
+
+/// The mark, length, and info text of the code fence that `line` is, if any: three or
+/// more backticks or tildes after its indent. A backtick fence has no backtick in its
+/// info text, so a line that starts with inline code is not one. A fence closes the
+/// block that a fence of its mark and no greater length opened, when it has no info.
+fn fence(line: &str) -> Option<(char, usize, &str)> {
+    let line = line.trim_start();
+    let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let info = line.trim_start_matches(mark);
+    let length = line.len() - info.len();
+    let info = info.trim();
+    (length >= 3 && !(mark == '`' && info.contains('`')))
+        .then_some((mark, length, info))
 }
 
 /// Whether the end lines `paragraph` of round `number` name a hot path ([`function`]).
@@ -356,7 +381,7 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
 }
 
 /// Whether a round posted before [`CUTOFF`] names a hot path: a `Hot path:` line in
-/// `paragraphs`, the round's text after its fields, names a function ([`function`]).
+/// `paragraphs`, the round's text after its heading, names a function ([`function`]).
 fn named(paragraphs: &[Vec<&str>]) -> bool {
     let start = format!("{}:", END[2]);
     paragraphs.iter().any(|p| {
@@ -387,10 +412,11 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
 }
 
 /// Whether the `Hot path:` value `value` names a function: its first word, with
-/// backticks and a final `,`, `.`, or `;` removed, is not `none`.
+/// its backticks and one final `,`, `.`, or `;` removed, is not `none`.
 fn function(value: &str) -> bool {
     let first = value.split_whitespace().next().unwrap_or_default();
-    first.trim_matches(['`', ',', '.', ';']) != "none"
+    let first = first.replace('`', "");
+    first.strip_suffix([',', '.', ';']).unwrap_or(&first) != "none"
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.

@@ -231,6 +231,7 @@ fn an_old_round_that_names_a_hot_path_needs_performance() {
     ];
     let cases = [
         ("Hot path: none", "Hot path: `send`"),
+        ("Findings: none", "Findings: none\nHot path: `send`"),
         ("Hot path: none", "Hot path:\n- `send`, once per frame"),
         (
             "\n\nDeferred: none\nPublic surface: none\n",
@@ -245,10 +246,14 @@ fn an_old_round_that_names_a_hot_path_needs_performance() {
         "Hot path: none",
         "Hot path: none\n\n```\nHot path: `send`\n```",
     );
+    let tildes = ROUND.replace(
+        "Hot path: none",
+        "Hot path: none\n\n~~~\nHot path: `send`\n~~~",
+    );
     let indented =
         ROUND.replace("Hot path: none", "Hot path: none\n\n    Hot path: `send`");
     let wrapped = ROUND.replace("Hot path: none", "Hot path:\nnone, tests only");
-    for round in [quoted, indented, wrapped] {
+    for round in [quoted, tildes, indented, wrapped] {
         assert_eq!(
             check(&record(vec![old(&round)])),
             Vec::<String>::new(),
@@ -298,6 +303,57 @@ fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
         check(&record(vec![bot(&closed)])),
         vec![unended("Deferred")]
     );
+    for fence in ["```", "~~~", "````"] {
+        let unclosed =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{fence}\n\n"));
+        assert_ne!(unclosed, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&unclosed)])),
+            vec![unended("Deferred")],
+            "{fence}"
+        );
+    }
+    let indented = ROUND.replace(
+        "weakening.\n\nDeferred: none\nPublic surface: none\nHot path: none",
+        "weakening.\n\n  ```\n\nDeferred: none\nPublic surface: none\n\
+         Hot path: none\n  ```",
+    );
+    assert_ne!(indented, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&indented)])),
+        vec![unended("Deferred")]
+    );
+    let short = ROUND.replace("weakening.\n\n", "weakening.\n\n````\n```\n\n");
+    assert_eq!(check(&record(vec![bot(&short)])), vec![unended("Deferred")]);
+    let other = ROUND.replace("weakening.\n\n", "weakening.\n\n```\n~~~\n\n");
+    assert_eq!(check(&record(vec![bot(&other)])), vec![unended("Deferred")]);
+    let info = ROUND.replace("weakening.\n\n", "weakening.\n\n```\n``` rust\n\n");
+    assert_eq!(check(&record(vec![bot(&info)])), vec![unended("Deferred")]);
+}
+
+#[test]
+fn reads_an_indented_heading_and_indented_fields() {
+    let indented = ROUND
+        .replace("## Review", "  ## Review")
+        .replace("\nReviewers:", "\n  Reviewers:")
+        .replace("\nRange:", "\n  Range:")
+        .replace("\nFindings:", "\n  Findings:");
+    assert_ne!(indented, ROUND);
+    assert_eq!(check(&record(vec![bot(&indented)])), Vec::<String>::new());
+    assert_eq!(check(&record(vec![old(&indented)])), Vec::<String>::new());
+}
+
+#[test]
+fn reads_inline_code_at_the_start_of_a_line_as_text() {
+    let inline = ROUND.replace("No bug,", "```cargo xtask review``` passes. No bug,");
+    assert_ne!(inline, ROUND);
+    assert_eq!(check(&record(vec![bot(&inline)])), Vec::<String>::new());
+    let fenced = ROUND.replace(
+        "weakening.\n\n",
+        "weakening.\n\n``` rust\nlet a = 1;\n```\n\n",
+    );
+    assert_ne!(fenced, ROUND);
+    assert_eq!(check(&record(vec![bot(&fenced)])), Vec::<String>::new());
 }
 
 #[test]
@@ -373,6 +429,15 @@ fn a_round_that_names_a_hot_path_needs_performance() {
         check(&record(vec![bot(&called)])),
         check(&record(vec![bot(&hot)]))
     );
+    for value in [",none", "none..", "none;,", "`none`.."] {
+        let punctuated = later("reviewer, breaker")
+            .replace("Hot path: none", &format!("Hot path: {value}"));
+        assert_eq!(
+            check(&record(vec![bot(&punctuated)])),
+            check(&record(vec![bot(&hot)])),
+            "{value}"
+        );
+    }
     let quiet = later("reviewer, breaker")
         .replace("Hot path: none", "Hot path: `none`, tests only");
     assert_eq!(check(&record(vec![bot(&quiet)])), Vec::<String>::new());
@@ -738,6 +803,8 @@ fn names_the_pr_field_a_record_lacks() {
         "2026-10-08T03:00:00.5Z",
         "2026-10-08 03:00:00Z",
         "2026-1-08T03:00:00Z",
+        "2026-10-08T03:00:0aZ",
+        "2026-10-08T03:00:00+",
     ] {
         assert_eq!(
             record_of(&pull, &files, &[comment(created)]).unwrap_err(),
