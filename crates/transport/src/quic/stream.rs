@@ -463,7 +463,7 @@ struct Left<'a> {
 enum Piece<'a> {
     /// A run over [`COPIED_MAX`] bytes, as a slice of the block.
     Slice(Bytes),
-    /// Shorter runs and zeros: one part of the block, or the parts copied into one
+    /// Shorter runs and zeros: one range of the block, or the parts copied into one
     /// buffer.
     Copied(&'a [u8]),
 }
@@ -550,7 +550,7 @@ impl<'a> Left<'a> {
 
     /// The next write of `block`, and what is left after it: a run over
     /// [`COPIED_MAX`] bytes, else each shorter run and zeros up to the next long run,
-    /// copied into `buffer` when there is more than one part.
+    /// copied into `buffer` unless they are one part with no zeros.
     fn piece<'b>(
         &self,
         block: &'b Bytes,
