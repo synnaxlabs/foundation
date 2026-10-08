@@ -141,13 +141,9 @@ impl Used {
         behind.is_some_and(|behind| behind.pointer == pointer)
     }
 
-    // Whether a newer pointer replaced `pointer`. If not, `cx` wakes when one does.
-    fn replaced(&mut self, pointer: Pointer, cx: &mut Context<'_>) -> bool {
-        if self.newest.as_ref().map(|newest| newest.pointer) != Some(pointer) {
-            return true;
-        }
-        self.task = Some(cx.waker().clone());
-        false
+    // Whether a newer pointer replaced `pointer`.
+    fn replaced(&self, pointer: Pointer) -> bool {
+        self.newest.as_ref().map(|newest| newest.pointer) != Some(pointer)
     }
 
     // The next job for the newest pointer, once its step allows one.
@@ -394,8 +390,9 @@ pub(super) async fn keep(
                 }
             }
         });
-        // A retry stops when a newer pointer replaces its own, so that a call never
-        // waits for it. The file part of a read never stops.
+        // The store part of a job stops when the group stops or drops, and that of a
+        // retry also when a newer pointer replaces its own, so that a call never waits
+        // for it. The file part of a read never stops.
         let gave = poll_fn(|cx| {
             if let Poll::Ready(gave) = gave.as_mut().poll(cx) {
                 return Poll::Ready(Some(gave));
@@ -403,12 +400,13 @@ pub(super) async fn keep(
             let Some(group) = group.upgrade() else {
                 return Poll::Ready(None);
             };
-            let replaced = retried && group.borrow_mut().used.replaced(pointer, cx);
-            if replaced {
-                Poll::Ready(None)
-            } else {
-                Poll::Pending
+            let mut group = group.borrow_mut();
+            let stopped = group.running().is_err();
+            if stopped || retried && group.used.replaced(pointer) {
+                return Poll::Ready(None);
             }
+            group.used.task = Some(cx.waker().clone());
+            Poll::Pending
         });
         let Some(gave) = gave.await else {
             continue;

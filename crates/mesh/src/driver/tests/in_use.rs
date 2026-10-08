@@ -418,6 +418,41 @@ fn a_call_at_a_later_pointer_waits_for_no_retry_of_an_older_one() {
     });
 }
 
+// The retry get of the missed chunk waits on a put that does not end, and the group
+// stops. Only the test and `keep` hold the store.
+#[test]
+fn keep_ends_when_the_group_stops_during_a_retry() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &create_large(200));
+        let lacked = *update.chunks.iter().find(|at| **at != update.root).unwrap();
+        let held = update.chunks.iter().copied().filter(|at| *at != lacked);
+        let held: Vec<Digest> = held.collect();
+        put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let second = settled.await.unwrap();
+        assert_eq!(mesh.spec().await.unwrap().behind.unwrap().pointer, second);
+        let block = mesh.pool.copy(chunks.get(lacked).unwrap()).unwrap();
+        let mut stuck = pin!(mesh.store.put(lacked, &block));
+        assert!(now(stuck.as_mut()).await.is_pending());
+        node.clock().sleep(seconds(2)).await;
+        assert_eq!(Rc::strong_count(&mesh.store), 2, "keep runs");
+        let stopped = super::fail_sync(&node);
+        let mut b_chunks = Chunks::default();
+        let b = spec::region::tree(&mut b_chunks, &create_subjects(&["plant.b"], 1));
+        put(&mesh.store, &mesh.pool, &b_chunks, &b.chunks)
+            .await
+            .unwrap();
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(second, b.root, BTreeSet::new(), holders);
+        assert_eq!(settled.await, Err(Error::Stopped(stopped)));
+        node.clock().sleep(seconds(3)).await;
+        assert_eq!(Rc::strong_count(&mesh.store), 1, "keep runs after the stop");
+    });
+}
+
 // The first read misses one chunk. The next get of it fails, and the one after finds
 // no chunk.
 #[test]
