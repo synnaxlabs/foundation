@@ -3007,7 +3007,7 @@ mod port {
         }
 
         /// A node started with a region with founding definitions puts the chunks of
-        /// their tree in its chunk store: the mesh opens at version 0 of that tree.
+        /// their tree in its chunk store.
         #[test]
         fn the_mesh_opens_at_the_founding_definitions_of_its_region() {
             let mut sim = sim::Sim::new(sim::Config::default());
