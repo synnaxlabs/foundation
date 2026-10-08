@@ -2908,6 +2908,28 @@ mod port {
             );
         }
 
+        /// A restart with another region stops the node, and `join` gives the region
+        /// that the first start kept.
+        #[test]
+        fn a_restart_with_another_region_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let node = start_alone(&hosts[0]);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let mut members = pair(&hosts);
+            let node = start(&hosts[0], (OWN, KEY), region(&members));
+            assert_eq!(sim.run(), Ok(()));
+            members.sort_by_key(|member| member.card.key());
+            let error = ::mesh::Error::Founding {
+                stored: Box::new(region(&[member(OWN, &KEY, &hosts[0])])),
+                given: Box::new(region(&members)),
+            };
+            assert_eq!(node.join(), Err(Error::Mesh(error)));
+        }
+
         /// A chunk store that does not open stops the node, and `join` gives why.
         #[test]
         fn a_chunk_store_that_does_not_open_stops_the_node() {

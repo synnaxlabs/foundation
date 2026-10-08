@@ -80,11 +80,11 @@ pub struct Config<M> {
     pub key: types::node::Key,
     /// The region whose mesh the node opens, or `None` for no mesh. One founding
     /// member has [`Config::key`], and its card holds the public half of
-    /// [`Config::private_key`]. Give the same value at each start: the node keeps no
-    /// copy of it, and until the mesh stores it (#1209), a log opened with another
-    /// value checks proofs against the wrong voters and starts at another spec. A
-    /// patch until the node keeps its region in its data directory when it founds or
-    /// joins one, and reads it at each start (#1660, #1744).
+    /// [`Config::private_key`]. Give the same value at each start: the mesh refuses
+    /// another value, and [`Node::join`] gives [`Error::Mesh`] with
+    /// [`mesh::Error::Founding`]. A patch until the node keeps its region in its data
+    /// directory when it founds or joins one, and reads it at each start (#1660,
+    /// #1744).
     pub region: Option<mesh::region::Founding>,
 }
 
