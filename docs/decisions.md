@@ -822,15 +822,18 @@ How to read this record:
   of `stored` in the bench through `#[path]`, which breaks at its first `crate::` item,
   and a time of `Shard` writes and reads, which hides the cost of the body in the cost
   of the write. Decided by `laptop.architect` (2026-10-07T18:46:13Z):
-  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576. `cargo
-  bench -p home` turns on `sim` through a dev-dependency of `home` on itself, since the
-  bench host runs no features. Decided by `laptop.architect` (2026-10-07T19:05:26Z):
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576.
+  `cargo bench -p home` turns on `sim` through a dev-dependency of `home` on itself,
+  since the bench host runs no features. Decided by `laptop.architect`
+  (2026-10-07T19:05:26Z):
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850. Amended
-  by `laptop.architect` (2026-10-08T01:01:28Z): the feature is `sim`, not `bench`, since
-  the feature says that the module is test-only, and the module keeps the name `bench`,
-  since it says what the module serves. This supersedes only the feature name in the two
-  rulings above:
-  https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224.
+  by `laptop.architect` (2026-10-08T01:01:28Z):
+  https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224. The
+  feature is `sim`, not `bench`, since the feature says that the module is test-only,
+  and the module keeps the name `bench`, since it says what the module serves.
+  Supersedes the feature name of
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044535576 and
+  https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
