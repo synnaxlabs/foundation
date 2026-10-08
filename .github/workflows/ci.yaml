@@ -145,13 +145,23 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: Dependencies
         run: cargo deny check advisories bans licenses sources
-      # A crate in `[patch.crates-io]` is a path package, which no advisory reaches.
-      # Without the table, each patched crate is checked as its release.
+      # A patched crate is a path package, which no advisory reaches. A package that
+      # depends on the exact release of each path package outside the workspace
+      # checks those releases.
       - name: Advisories of each patched release
+        shell: bash
         run: |
-          awk '/^\[/ { patch = ($0 == "[patch.crates-io]") } !patch' Cargo.toml > unpatched
-          mv unpatched Cargo.toml
-          cargo deny check advisories
+          dir="$RUNNER_TEMP/patched"
+          mkdir -p "$dir/src" && touch "$dir/src/lib.rs"
+          {
+            printf '[package]\nname = "patched"\nversion = "0.0.0"\nedition = "2024"\n'
+            printf '\n[workspace]\n\n[dependencies]\n'
+            cargo metadata --format-version 1 --locked | jq -r '.workspace_members as $m
+              | .packages[] | select(.source == null and (.id | IN($m[]) | not))
+              | "\(.name) = \"=\(.version)\""'
+          } > "$dir/Cargo.toml"
+          cargo deny --manifest-path "$dir/Cargo.toml" --config deny.toml \
+            check advisories
 
   wait:
     needs: changes
