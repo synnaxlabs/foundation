@@ -257,27 +257,6 @@ fn connectors<'f>(
             _ => None,
         })
         .collect();
-    let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
-    for (_, _, node, placed) in &connectors {
-        if let Ok(Some(placement)) = winner(placed) {
-            nodes.entry(placement).or_default().insert(*node);
-        }
-    }
-    for (name, entry, node, placed) in &connectors {
-        match placed {
-            Ok(Placed {
-                placement: Some(placement),
-                home,
-                ..
-            }) if home != node => {
-                let shared = nodes[placement].iter().any(|other| other != node);
-                diagnostics
-                    .push(connector_home(found, placement, home, name, node, shared));
-            }
-            Ok(_) => {}
-            Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
-        }
-    }
     let nearest: Vec<_> = indexes
         .iter()
         .filter_map(|(index, own)| {
@@ -294,23 +273,83 @@ fn connectors<'f>(
             owners.entry(*connector).or_default().insert(own);
         }
     }
-    let home = |placement: &Name| {
-        placements
-            .iter()
-            .find(|(key, _)| *key == placement)
-            .and_then(|(_, policy)| policy.home())
-    };
-    for (index, own, (connector, _, node, theirs)) in nearest {
-        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
-            let moved = owners.get(connector).filter(|owners| {
-                theirs.is_none()
-                    && (owners.len() > 1
-                        || owners.iter().any(|p| home(p).is_some_and(|h| h != *node)))
-            });
-            diagnostics
-                .extend(split(found, index, own, connector, node, theirs, moved));
+    let moves = moves(&connectors, owners, placements);
+    for (name, entry, node, placed) in &connectors {
+        match placed {
+            Ok(Placed {
+                placement: Some(placement),
+                home,
+                ..
+            }) if home != node => {
+                let fix = moves.get(name).map(String::as_str);
+                diagnostics
+                    .push(connector_home(found, placement, home, name, node, fix));
+            }
+            Ok(_) => {}
+            Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
         }
     }
+    for (index, own, (connector, _, _, theirs)) in nearest {
+        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
+            let fix = moves.get(connector).map(String::as_str);
+            diagnostics.extend(split(found, index, own, connector, theirs, fix));
+        }
+    }
+}
+
+/// The one fix of each diagnostic of each connector that no placement can win for
+/// with each of its indexes at the connector's node, by connector. `owners` holds the
+/// winners of the indexes of each connector. The fix names each winner.
+fn moves<'c>(
+    connectors: &'c [(&Name, &Entry, &Name, Result<Placed<'_>, Unplaced>)],
+    mut owners: BTreeMap<&Name, BTreeSet<&'c Name>>,
+    placements: &[(&Name, &Policy)],
+) -> BTreeMap<&'c Name, String> {
+    let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
+    for (_, _, node, placed) in connectors {
+        if let Ok(Some(placement)) = winner(placed) {
+            nodes.entry(placement).or_default().insert(*node);
+        }
+    }
+    let elsewhere = |placement: &Name, node: &Name| {
+        placements.iter().any(|(key, policy)| {
+            *key == placement && policy.home().is_some_and(|home| home != node)
+        })
+    };
+    let mut moves = BTreeMap::new();
+    for (name, _, node, placed) in connectors {
+        let mut owners = owners.remove(*name).unwrap_or_default();
+        let fix = match placed {
+            Ok(Placed {
+                placement: Some(placement),
+                home,
+                ..
+            }) if home != node
+                && nodes[placement].iter().any(|other| other != node) =>
+            {
+                owners.insert(placement);
+                format!(
+                    "Exclude the connector `{name}` and its indexes from the \
+                     `select` of {}, and select them with another placement whose \
+                     `home` is `{node}`",
+                    each(&owners)
+                )
+            }
+            Ok(Placed {
+                placement: None, ..
+            }) if owners.len() > 1 || owners.iter().any(|p| elsewhere(p, node)) => {
+                format!(
+                    "Exclude the indexes of the connector `{name}` from the \
+                     `select` of {}, and select the connector and its indexes with \
+                     another placement whose `home` is `{node}`",
+                    each(&owners)
+                )
+            }
+            _ => continue,
+        };
+        moves.insert(*name, fix);
+    }
+    moves
 }
 
 /// Names each placement in `keys` by its label: "`p`", "`p` and `q`", or "`p`, `q`,
@@ -321,33 +360,32 @@ fn each(keys: &BTreeSet<&Name>) -> String {
         [one] => one.clone(),
         [first, second] => format!("{first} and {second}"),
         [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
-        [] => unreachable!("invariant: a moved index has at least one winner"),
+        [] => unreachable!("invariant: a moved connector has a winner"),
     }
 }
 
 /// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
-/// `placement` names `home`. `shared` is true when `placement` also wins for a
-/// connector on another node, which a new `home` would move the problem to.
+/// `placement` names `home`. `moved` is the fix of each diagnostic of `connector` when
+/// `placement` also wins for a connector on another node, which a new `home` would
+/// move the problem to.
 fn connector_home(
     found: &Found<'_>,
     placement: &Name,
     home: &Name,
     connector: &Name,
     node: &Name,
-    shared: bool,
+    moved: Option<&str>,
 ) -> Diagnostic {
     let p = label(placement);
-    let fix = if shared {
-        format!(
-            "Exclude the connector `{connector}` and its indexes from the `select` of \
-             `{p}`, and select them with a placement whose `home` is `{node}`"
-        )
-    } else {
-        format!(
-            "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
-             `copies`"
-        )
-    };
+    let fix = moved.map_or_else(
+        || {
+            format!(
+                "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
+                 `copies`"
+            )
+        },
+        str::to_owned,
+    );
     Diagnostic::new(
         CONNECTOR_HOME,
         span(found.blocks[placement], "home"),
@@ -360,17 +398,16 @@ fn connector_home(
 }
 
 /// A `config.split-placement` diagnostic when `own`, the placement that wins for
-/// `index`, is not `theirs`, the one that wins for the connector `connector` on
-/// `node`. `moved` holds the winners of the connector's indexes when no one of them can
-/// take the connector, so the fix moves each index to a placement at `node`.
+/// `index`, is not `theirs`, the one that wins for the connector `connector`. `moved`
+/// is the fix of each diagnostic of `connector` when no placement can win for it and
+/// each of its indexes at its node.
 fn split(
     found: &Found<'_>,
     index: &Name,
     own: Option<&Name>,
     connector: &Name,
-    node: &Name,
     theirs: Option<&Name>,
-    moved: Option<&BTreeSet<&Name>>,
+    moved: Option<&str>,
 ) -> Option<Diagnostic> {
     let (at, message) = match (own, theirs) {
         (Some(own), Some(theirs)) if own != theirs => (
@@ -400,19 +437,16 @@ fn split(
         ),
         _ => return None,
     };
-    let fix = match moved {
-        Some(owners) => format!(
-            "Exclude the indexes of the connector `{connector}` from the `select` of \
-             {}, and select the connector and its indexes with a placement whose \
-             `home` is `{node}`",
-            each(owners)
-        ),
-        None => format!(
-            "Make the placement `{}` win for the connector `{connector}` and the index \
-             `{index}`",
-            label(theirs.unwrap_or(at))
-        ),
-    };
+    let fix = moved.map_or_else(
+        || {
+            format!(
+                "Make the placement `{}` win for the connector `{connector}` and the \
+                 index `{index}`",
+                label(theirs.unwrap_or(at))
+            )
+        },
+        str::to_owned,
+    );
     Some(Diagnostic::new(
         SPLIT_PLACEMENT,
         found.entries[at].label_span,

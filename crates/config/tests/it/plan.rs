@@ -691,12 +691,13 @@ placement \"a\" {{
     }
 }
 
-/// The fix of `config.connector-home` for `connector` on `node` when its placement
-/// `p` wins for a connector on another node.
-fn exclude(connector: &str, p: &str, node: &str) -> String {
+/// The fix of each diagnostic of `connector` on `node` when its placement wins for a
+/// connector on another node, where `winners` lists each placement that wins for
+/// `connector` or one of its indexes.
+fn exclude(connector: &str, winners: &str, node: &str) -> String {
     format!(
         "Exclude the connector `{connector}` and its indexes from the `select` of \
-         `{p}`, and select them with a placement whose `home` is `{node}`"
+         {winners}, and select them with another placement whose `home` is `{node}`"
     )
 }
 
@@ -748,7 +749,7 @@ fn plans_connectors_after_the_connector_home_fix_of_a_placement_of_two_nodes() {
     let all = "\"p.**\"";
     plans_after_connector_home(
         &two_nodes("m", all, "m", ""),
-        &[exclude("p.a", "p", "n"), exclude("p.c", "p", "n")],
+        &[exclude("p.a", "`p`", "n"), exclude("p.c", "`p`", "n")],
         &two_nodes(
             "m",
             "[\"p.**\", \"!p.a\", \"!p.a.time\", \"!p.c\"]",
@@ -774,9 +775,9 @@ placement \"b\" {
     plans_after_connector_home(
         &two_nodes("m", "\"p.**\"", "k", ""),
         &[
-            exclude("p.a", "p", "n"),
-            exclude("p.b", "p", "m"),
-            exclude("p.c", "p", "n"),
+            exclude("p.a", "`p`", "n"),
+            exclude("p.b", "`p`", "m"),
+            exclude("p.c", "`p`", "n"),
         ],
         &two_nodes(
             "m",
@@ -820,7 +821,7 @@ placement \"x\" {
 ";
     plans_after_connector_home(
         &text("\"x\", \"x.*\", \"y\"", ""),
-        &[exclude("x", "p", "n")],
+        &[exclude("x", "`p`", "n")],
         &text("\"y\"", fixed),
     );
 }
@@ -858,7 +859,7 @@ placement \"e\" {
 ";
     plans_after_connector_home(
         &text("n", "\"d.**\"", ""),
-        &[exclude("d.e", "d", "m")],
+        &[exclude("d.e", "`d`", "m")],
         &text("n", "\"d.**\", \"!d.e\", \"!d.e.time\"", e),
     );
     let d = "\
@@ -869,7 +870,7 @@ placement \"on_d\" {
 ";
     plans_after_connector_home(
         &text("m", "\"d.**\"", ""),
-        &[exclude("d", "d", "n")],
+        &[exclude("d", "`d`", "n")],
         &text("m", "\"d.**\", \"!d\"", d),
     );
 }
@@ -907,7 +908,7 @@ placement \"e\" {
     ] {
         plans_after_connector_home(
             &text(channel, &format!("  select = \"d.**\"\n{roles}"), ""),
-            &[exclude("d.e", "d", "m")],
+            &[exclude("d.e", "`d`", "m")],
             &text(
                 channel,
                 &format!("  select = [\"d.**\", \"!d.e\"]\n{roles}"),
@@ -1261,8 +1262,8 @@ placement \"p\" {{
     };
     let nodes = ["m", "n"];
     let fix = "Exclude the indexes of the connector `a` from the `select` of `p`, and \
-               select the connector and its indexes with a placement whose `home` \
-               is `n`";
+               select the connector and its indexes with another placement whose \
+               `home` is `n`";
     for indexes in [&["a.time"][..], &["a.time", "a.value"]] {
         let refused = text(indexes, false);
         let found = problems(Spec::create_empty().plan(&[&refused], &nodes));
@@ -1338,11 +1339,67 @@ fn plans_after_the_split_placement_fix_of_indexes_of_more_than_one_placement() {
         let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
         let fix = format!(
             "Exclude the indexes of the connector `a` from the `select` of {of}, and \
-             select the connector and its indexes with a placement whose `home` is `n`"
+             select the connector and its indexes with another placement whose `home` \
+             is `n`"
         );
         let expected = vec![("config.split-placement", fix); placed.len()];
         assert_eq!(found, expected, "{refused}");
         let fixed = text(placed, true);
+        let plan = Spec::create_empty().plan(&[&fixed], &nodes);
+        assert!(plan.is_ok(), "{fixed}: {plan:?}");
+    }
+}
+
+#[test]
+fn plans_after_the_one_fix_of_a_connector_whose_index_another_placement_wins() {
+    let text = |home: &str, excluded: bool| {
+        let (out, a) = if excluded {
+            (
+                ", \"!a\", \"!a.time\"",
+                "placement \"a\" {\n  select = [\"a\", \"a.time\"]\n  \
+                 home = \"n\"\n}\n",
+            )
+        } else {
+            ("", "")
+        };
+        format!(
+            "\
+channel \"a.time\" {{
+  kind = \"index\"
+}}
+connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}}
+connector \"b\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = []
+}}
+placement \"t\" {{
+  select = [\"a\", \"b\"{out}]
+  home = \"m\"
+}}
+placement \"r\" {{
+  select = [\"a.time\"{out}]
+  home = \"{home}\"
+}}
+{a}"
+        )
+    };
+    let nodes = ["k", "m", "n"];
+    let fix = exclude("a", "`r` and `t`", "n");
+    for home in nodes {
+        let refused = text(home, false);
+        let found = problems(Spec::create_empty().plan(&[&refused], &nodes));
+        let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+        let expected = [
+            ("config.connector-home", fix.clone()),
+            ("config.split-placement", fix.clone()),
+        ];
+        assert_eq!(found, expected, "{refused}");
+        let fixed = text(home, true);
         let plan = Spec::create_empty().plan(&[&fixed], &nodes);
         assert!(plan.is_ok(), "{fixed}: {plan:?}");
     }
