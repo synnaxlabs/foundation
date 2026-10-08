@@ -4759,7 +4759,12 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
   `config.split-placement` fix of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126 when no
-  placement can win for `c` and each of its indexes at `n`, the case 2 text of
+  placement can win for `c` and each of its indexes at `n`, the
+  `config.split-placement` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064298961 (item 2)
+  when `p` names no `home` and an index of `c` has no writer, the `Overlap` fix of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561, the
+  case 2 text of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171 and the
   text of https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980,
   which name one placement and "a placement", the `chunks` input and its panic of
