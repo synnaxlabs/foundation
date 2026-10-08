@@ -54,8 +54,8 @@ pub(crate) fn serve(
 ///
 /// A request id must be a string or a 64-bit integer, so the reply carries it
 /// unchanged. A failed operation is a JSON-RPC error whose `data` is
-/// `{"errors": [...]}`, each item a problem with `code`, `message`, `fix`, `place`, and
-/// `notes`.
+/// `{"errors": [...]}`, each item a problem with `code`, `message`, `fix`, `place` when
+/// the problem is in a file, and `notes`.
 pub(crate) fn respond(message: &str) -> Option<String> {
     let reply = match serde_json::from_str::<Value>(message) {
         Ok(Value::Object(message)) => answer(message)?,
