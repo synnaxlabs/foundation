@@ -1008,7 +1008,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "the block is the message's length")]
+        #[should_panic(expected = "the copy is the message's length")]
         fn when_the_block_is_not_the_message_length_fill_panics() {
             let pool = pool(1 << 16);
             let mut source = Source::new(encode(&[vec![1; 4]]), 64);
