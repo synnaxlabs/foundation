@@ -4988,6 +4988,9 @@ How to read this record:
   `Gateway::request()`, the kind at construction, because each caller still matches
   variants that its stream cannot carry; and `Gateway` and `Program` for request
   streams only, a header-or-body enum where the caller knows which comes.
+  Supersedes shape decision 1 of #1854
+  (https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181), one
+  decoder for each side that takes the kind of the stream from its first message.
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies, connectors, and subjects itself. A policy reaches a name when
