@@ -113,17 +113,27 @@ fn main() {
             measure(&mut sender, &pool, &clock, shape).await;
         }
         sender.finish().expect("finished");
+        // A stream that kept a copy of the parts of each message would grow its list
+        // at the first message of many parts.
+        let short = &SHAPES[2];
         let mut first = [0; 2];
-        for (count, parts) in first.iter_mut().zip([&[][..], &SHAPES[0].parts()]) {
-            clock.sleep(PAUSE).await;
+        for (count, parts) in first.iter_mut().zip([&[][..], &short.parts()]) {
             let opened = session.open_sender(Class::Complete).await;
             let mut sender = opened.expect("a stream");
-            let block = filled(&pool, SHAPES[0].large());
+            clock.sleep(PAUSE).await;
+            poll(&mut sender, filled(&pool, 8), &[]);
+            clock.sleep(PAUSE).await;
+            let block = filled(&pool, short.large());
             *count = ALLOCATOR.count(|| poll(&mut sender, block, parts)).1;
             sender.finish().expect("finished");
         }
         let [sent, parted] = first;
-        assert_eq!(parted, sent, "the first message of a stream keeps no parts");
+        assert_eq!(
+            parted,
+            sent + short.over,
+            "the first message of parts on a stream: {}",
+            short.cause
+        );
         clock.sleep(PAUSE).await;
         session.close(Code(0));
         clock.sleep(Span::MILLISECOND).await;
