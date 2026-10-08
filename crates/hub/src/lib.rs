@@ -3,6 +3,7 @@
 
 mod channel;
 mod commit;
+mod link;
 pub mod reader;
 pub mod serve;
 pub mod writer;
@@ -12,12 +13,14 @@ use std::rc::Rc;
 use std::task::Waker;
 
 use spec::channel::Kind;
+use spec::definition::Definition;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
 use types::sample::{Scalar, Type};
 
 use channel::Channel;
+pub use link::{Link, Served};
 use reader::Reader;
 use writer::Writer;
 
@@ -37,8 +40,8 @@ pub mod home {
 }
 
 /// The hub of one shard: it opens writer and reader sessions on the indexes of the
-/// shard's home. It is not `Send`: each call is on the shard's thread. Clones share
-/// it.
+/// shard's home, and serves each hub stream of a transport session through a
+/// [`Link`]. It is not `Send`: each call is on the shard's thread. Clones share it.
 #[derive(Clone, Debug)]
 pub struct Hub(Rc<RefCell<State>>);
 
@@ -52,6 +55,12 @@ pub struct Config {
     pub interner: Interner,
     /// Where the hub spawns its commit task.
     pub tasks: env::tasks::Tasks,
+    /// This node's key. A client's hello must name it as `via`.
+    pub node: types::node::Key,
+    /// Mesh time, which the hub checks each hello and request against.
+    pub time: clock::Reader,
+    /// The source of each challenge's nonce.
+    pub entropy: env::entropy::Entropy,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -70,6 +79,11 @@ struct State {
     commit: commit::Signal,
     /// The error that ended the home's buffer.
     failed: Option<env::files::Error>,
+    node: types::node::Key,
+    time: clock::Reader,
+    entropy: env::entropy::Entropy,
+    /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
+    rules: access::Rules,
 }
 
 impl Hub {
@@ -85,6 +99,9 @@ impl Hub {
             home,
             interner,
             tasks,
+            node,
+            time,
+            entropy,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -95,25 +112,34 @@ impl Hub {
             woken: Vec::new(),
             commit: commit::Signal::default(),
             failed: None,
+            node,
+            time,
+            entropy,
+            rules: access::Rules::default(),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
     }
 
-    /// Makes each of `channels` known to sessions, the indexes first, so their order
-    /// does not matter. The home carries each index at once.
+    /// Makes each channel of `definitions` known to sessions, the indexes first, so
+    /// their order does not matter. It skips each definition that is not a channel. The
+    /// home carries each index at once.
     ///
     /// # Panics
     ///
-    /// When a channel has the key or name of a known channel or of another of
-    /// `channels`, or the index of a data channel is neither known nor an index of
-    /// `channels`.
-    pub fn define<'c>(
+    /// When a channel has the key or name of a known channel or of another channel of
+    /// `definitions`, or the index of a data channel is neither known nor an index of
+    /// `definitions`.
+    pub fn define<'d>(
         &self,
-        channels: impl IntoIterator<Item = (&'c Name, &'c spec::channel::Channel)>,
+        definitions: impl IntoIterator<Item = (&'d Name, &'d Definition)>,
     ) {
-        let (indexes, data): (Vec<_>, Vec<_>) = channels
+        let (indexes, data): (Vec<_>, Vec<_>) = definitions
             .into_iter()
+            .filter_map(|(name, definition)| match definition {
+                Definition::Channel(channel) => Some((name, channel)),
+                _ => None,
+            })
             .partition(|(_, channel)| matches!(channel.kind, Kind::Index { .. }));
         let mut state = self.0.borrow_mut();
         for (name, channel) in indexes.into_iter().chain(data) {
@@ -165,23 +191,18 @@ impl Hub {
         Reader::open(&self.0, channels, mode)
     }
 
-    /// Serves one remote reader session on `incoming`, a hub stream whose header the
-    /// caller read. It reads the `Open` and its keys, opens the session at this
-    /// node's home, sends `Opened`, then sends each frame that the session takes
-    /// through the reader's places, and applies each `Credit`. It returns when the
-    /// session ends: after `Behind` and a finish when the session missed a frame, or
-    /// when the peer finishes or the stream breaks. A drop of the future closes the
-    /// session at the home and drops the stream.
-    ///
-    /// # Errors
-    ///
-    /// The [`serve::Error`] that ended the session. The stream stops with the code
-    /// that HUB WIRE gives for it, except after [`serve::Error::Stream`].
-    pub async fn serve(
-        &self,
-        incoming: transport::stream::Incoming,
-    ) -> Result<(), serve::Error> {
-        serve::run(&self.0, incoming).await
+    /// Sets the access rules that each later hello and request is checked against.
+    /// Until the first call, the rules know no subject, so they refuse each hello with
+    /// `access::proof::Error::Unknown`.
+    pub fn set_rules(&self, rules: access::Rules) {
+        self.0.borrow_mut().rules = rules;
+    }
+
+    /// The hub's part of `session`. Give each hub stream of the session to
+    /// [`Link::serve`].
+    #[must_use]
+    pub fn link(&self, session: transport::Session) -> Link {
+        Link::new(Rc::clone(&self.0), session)
     }
 }
 

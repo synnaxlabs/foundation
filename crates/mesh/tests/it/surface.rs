@@ -160,6 +160,7 @@ async fn create_config_on(
             voters: members.iter().map(|member| member.card.key()).collect(),
             members,
             definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
         },
         files: node.files(),
         dir: PathBuf::new(),
@@ -227,26 +228,6 @@ fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
         drop(mesh);
         assert_eq!(watch.next().await, Err(Stopped::Dropped));
     });
-}
-
-// For one set of voters, the members and the voters are the same for each place, so
-// no rule that reads only them gives the key of each of the three nodes. With one
-// voter, two places are not voters. With three, two places are not the first voter.
-#[test]
-fn key_gives_the_key_of_the_config() {
-    for voters in [1..=1, 1..=3] {
-        for place in [1, 2, 3] {
-            let voters = voters.clone();
-            solo(move |node, tasks| async move {
-                let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
-                let mut config =
-                    create_voter_config(&node, &tasks, place, members.into()).await;
-                config.founding.voters = voters.map(key).collect();
-                let mesh = Mesh::open(config).await.unwrap();
-                assert_eq!(mesh.key(), key(place));
-            });
-        }
-    }
 }
 
 #[test]
@@ -434,7 +415,6 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 
 #[test]
 fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
-    let _: fn(&Mesh) -> node::Key = Mesh::key;
     let _: fn(&Mesh) -> Pointer = Mesh::pointer;
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
