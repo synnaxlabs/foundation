@@ -78,12 +78,13 @@
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
   Once each buffer has opened, shard 0 reads the node's key and private key from the
   file `node.key` in the data directory, before the hub, the transport, and the mesh
-  open. The file is 68 bytes: the tag `foundation/key/1`, the node key (UUIDv7,
-  big-endian), the Ed25519 private key, and the CRC32C of those 64 bytes
-  (little-endian). It is one sector, which a crash keeps whole or old. At the first
-  start, shard 0 makes the file with `Mode::Create`; 68 zero bytes are a key not yet
-  written, so shard 0 makes a key (`types::node::Key::v7` at mesh time, once it has one,
-  from `Config::entropy`, and 32 random bytes). At each start, shard 0 writes the key
+  open. The file is 68 bytes: the tag `foundation/key/1`, the node key (big-endian;
+  UUIDv7 when shard 0 makes it), the Ed25519 private key, and the CRC32C of those 64
+  bytes (little-endian). It is one sector, which a crash keeps whole or old. At the
+  first start, shard 0 makes the file with `Mode::Create`, unless `node::create_key`
+  made it first (NODE MESH); 68 zero bytes are a key not yet written, so shard 0 makes
+  a key (`types::node::Key::v7` at mesh time, once it has one, from `Config::entropy`,
+  and 32 random bytes). At each start, shard 0 writes the key
   back and syncs the file and the directory before the transport proves it, because a
   failed sync of an earlier start can leave a key that a read sees but a power cut
   loses. A node that joins by ticket (#336) makes its key the same way at its first
