@@ -2443,10 +2443,13 @@ mod tests {
             |side| async move {
                 assert_eq!(side.transport.status().budget_waits, 0);
                 let mut senders = Vec::new();
-                // The two that wait are `CatchUp` and `Complete`.
-                let classes = [Class::Complete; 3]
-                    .into_iter()
-                    .chain([Class::CatchUp, Class::Complete]);
+                // One claim of each class waits.
+                let classes = [Class::Complete; 3].into_iter().chain([
+                    Class::CatchUp,
+                    Class::Complete,
+                    Class::Latest,
+                    Class::Command,
+                ]);
                 for class in classes {
                     let opened = side.session.open_sender(class).await;
                     senders.push(opened.expect("a stream"));
@@ -2463,17 +2466,17 @@ mod tests {
                 }
                 // QUIC takes the first message whole, and the window only part of the
                 // second. The second and third hold the budget, so the others wait.
-                assert_eq!(side.transport.status().budget_waits, 2);
+                assert_eq!(side.transport.status().budget_waits, 4);
                 for send in &mut pending {
                     poll_once(Pin::new(send)).await;
                 }
-                assert_eq!(side.transport.status().budget_waits, 2);
+                assert_eq!(side.transport.status().budget_waits, 4);
                 drop(pending);
                 side.session.close(Code(4));
                 let closed = Error::Closed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
                 side.node.clock().sleep(spans(IDLE, 3)).await;
-                assert_eq!(side.transport.status().budget_waits, 2);
+                assert_eq!(side.transport.status().budget_waits, 4);
             },
             |side| async move {
                 let closed = Error::PeerClosed { code: Code(4) };
