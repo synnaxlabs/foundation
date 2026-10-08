@@ -2290,6 +2290,7 @@ mod tests {
             let cause = Unknown::Kind { kind: 9 };
             let stopped = Stopped::Change { at: bad, cause };
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+            assert_eq!(mesh.holder(public(1)), Some(key(1)));
         });
     }
 
