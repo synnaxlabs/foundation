@@ -259,9 +259,9 @@ pub enum Mode {
 
 /// One open file. Its length does not change, and every read and write stays inside
 /// it. A failed or dropped [`File::sync`], or a dropped [`File::rename`], poisons the
-/// file: every later call fails with [`Error::Poisoned`]. After a failed sync, a second
-/// sync can report success for lost data; after a dropped rename, the path of the
-/// handle may be stale. Close the file, then reopen it and recover.
+/// file: every later call fails with [`Error::Poisoned`]. After a failed or dropped
+/// sync, a second sync can report success for lost data; after a dropped rename, the
+/// path of the handle may be stale. Close the file, then reopen it and recover.
 ///
 /// Calls may overlap in time. A [`File::sync`] covers the writes that ended before it
 /// started. Where the ranges of calls in flight at the same time overlap, the bytes
@@ -666,8 +666,8 @@ impl fmt::Display for Error {
             }
             Self::Poisoned { path } => write!(
                 f,
-                "a sync of file {} failed or was dropped; close it, then reopen it and \
-                 recover",
+                "a sync of file {} failed or was dropped, or a rename of it was dropped; \
+                 close it, then reopen it and recover",
                 path.display()
             ),
             Self::Busy { path } => write!(
@@ -1421,6 +1421,10 @@ mod tests {
             let mut file = Stuck::file(Operation::Rename);
             drop_pending(file.rename(Path::new("ring/1")));
             assert_eq!(ready(file.write_at(0, &[])), poisoned("ring/0"));
+            let into = block::Pool::heap(block::Config { budget: 4_096 })
+                .alloc(0)
+                .expect("room");
+            assert_eq!(ready(file.read_at(0, into)).map(drop), poisoned("ring/0"));
         }
 
         #[test]
@@ -1658,8 +1662,8 @@ mod tests {
             };
             assert_eq!(
                 e.to_string(),
-                "a sync of file ring/0 failed or was dropped; close it, then reopen \
-                 it and recover"
+                "a sync of file ring/0 failed or was dropped, or a rename of it was \
+                 dropped; close it, then reopen it and recover"
             );
         }
 
