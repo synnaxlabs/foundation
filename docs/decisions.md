@@ -5909,9 +5909,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1904#issuecomment-6063609356).
   `mesh::region::Founding` replaced `node::Region`, which copied three fields of
   `mesh::Config`, so `node` maps no `mesh` value by hand (#1859). Decided by
-  `laptop.architect` at 2026-10-08T10:23:48Z
-  (https://github.com/synnaxlabs/foundation/pull/1857#issuecomment-6057800438) and
-  10:34:37Z (https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
+  `laptop.architect` at 2026-10-08T10:23:48Z and 10:34:37Z
+  (https://github.com/synnaxlabs/foundation/pull/1857#issuecomment-6057800438,
+  https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
   The type lands as PR 1 of #1209, ordered by `laptop.coordinator` at
   2026-10-08T15:21:38Z
   (https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6063144369) and
