@@ -3345,6 +3345,10 @@ How to read this record:
   `spec::region::tree(chunks, definitions)` builds the tree of a region's definitions,
   and cannot fail. `mesh` calls it at open and at apply. Lost: the function in
   `spec::tree`, which then points at the model above it; and the encode in the caller.
+  `spec::region::definitions(chunks, root)` reads a region's tree back into its
+  definitions, the inverse of `tree`. `mesh` calls it for each new spec
+  (`laptop.architect-2`, 2026-10-08T11:11:54Z,
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058593807).
   `plan` (#1082) maps a key to its region with the function of `spec::region`, and
   keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
   https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
