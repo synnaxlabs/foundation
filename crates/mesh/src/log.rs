@@ -505,25 +505,29 @@ fn records(
     let mut end = 0_usize;
     while let Some(rest) = bytes.get(start(end)..) {
         let at = start(end);
-        let head = match header(rest) {
-            At::End => break,
-            At::Garbage => return Err(corrupt(at)),
-            At::Header(head) => head,
+        let claimed = |after: &[u8]| bytes.len().saturating_sub(after.len());
+        let (body, after) = match Record::read(rest) {
+            Record::End => break,
+            Record::Version(found) => {
+                let path = file.to_path_buf();
+                return Err(Error::Version { path, found });
+            }
+            Record::Torn { number, after } if number == *next => {
+                return Ok((end, Some(claimed(after))));
+            }
+            Record::Whole {
+                number,
+                body,
+                after,
+            } if number == *next => (body, after),
+            Record::Garbage
+            | Record::Short
+            | Record::Torn { .. }
+            | Record::Whole { .. } => {
+                return Err(corrupt(at));
+            }
         };
-        if head.version != VERSION {
-            let path = file.to_path_buf();
-            return Err(Error::Version {
-                path,
-                found: head.version,
-            });
-        }
-        let Some((body, after)) = head.body().filter(|_| head.number == *next) else {
-            return Err(corrupt(at));
-        };
-        let claimed = bytes.len().saturating_sub(after.len());
-        if check(body) != head.check {
-            return Ok((end, Some(claimed)));
-        }
+        let claimed = claimed(after);
         apply(stored, body).ok_or_else(|| corrupt(at))?;
         end = claimed;
         *next = next.saturating_add(1);
@@ -559,10 +563,52 @@ struct Header<'a> {
     after: &'a [u8],
 }
 
-impl<'a> Header<'a> {
-    // The body the header claims and the bytes after it, when the body fits.
-    fn body(&self) -> Option<(&'a [u8], &'a [u8])> {
-        self.after.split_at_checked(self.len)
+// The record at the start of some bytes.
+enum Record<'a> {
+    // Zeros, or too few bytes for a header: the end of the records.
+    End,
+    // Bytes that are not zeros and not a header.
+    Garbage,
+    // A header of another format version.
+    Version(u16),
+    // A header that claims a body longer than the bytes after it.
+    Short,
+    // A body that fails its check, and the bytes after it.
+    Torn {
+        number: u64,
+        after: &'a [u8],
+    },
+    // A body that passes its check, and the bytes after it.
+    Whole {
+        number: u64,
+        body: &'a [u8],
+        after: &'a [u8],
+    },
+}
+
+impl<'a> Record<'a> {
+    fn read(bytes: &'a [u8]) -> Self {
+        let head = match header(bytes) {
+            At::End => return Self::End,
+            At::Garbage => return Self::Garbage,
+            At::Header(head) => head,
+        };
+        if head.version != VERSION {
+            return Self::Version(head.version);
+        }
+        let Some((body, after)) = head.after.split_at_checked(head.len) else {
+            return Self::Short;
+        };
+        let number = head.number;
+        if check(body) == head.check {
+            Self::Whole {
+                number,
+                body,
+                after,
+            }
+        } else {
+            Self::Torn { number, after }
+        }
     }
 }
 
@@ -675,20 +721,21 @@ fn body(mut bytes: &[u8]) -> Option<(Option<Hard>, Vec<Entry>)> {
     Some((hard, entry::decode(std::mem::take(body))?))
 }
 
-/// The record that `record` encodes to, or `None` when it is not one valid record of
-/// the format version this build writes. The number of the record and whether its
-/// entries follow a log are not checked.
-#[cfg(feature = "sim")]
-pub(crate) fn round_trip(record: &[u8]) -> Option<Vec<u8>> {
-    let At::Header(head) = header(record) else {
+/// The number, hard state, and entries of `record`, the reverse of [`encode`], or
+/// `None` when it is not one whole record of the format version this build writes.
+/// The number of the record and whether its entries follow a log are not checked.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn decode(record: &[u8]) -> Option<(u64, Option<Hard>, Vec<Entry>)> {
+    let Record::Whole {
+        number,
+        body: bytes,
+        after: [],
+    } = Record::read(record)
+    else {
         return None;
     };
-    let (bytes, after) = head.body()?;
-    if head.version != VERSION || !after.is_empty() || check(bytes) != head.check {
-        return None;
-    }
     let (hard, entries) = body(bytes)?;
-    Some(encode(head.number, hard, &entries))
+    Some((number, hard, entries))
 }
 
 /// Makes both checks of `record` match its bytes. Does nothing to fewer bytes than a
@@ -1929,6 +1976,20 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_torn_record_after_the_last_that_is_not_the_next_one() {
+        let first = encode(0, None, &[bytes(1, 10)]);
+        let mut torn = encode(2, None, &[bytes(2, 10)]);
+        *torn.last_mut().unwrap() ^= 1;
+        let offset = wide(first.len());
+        let segments = [[first, torn].concat()];
+        let expected = Error::Corrupt {
+            path: file("log-0"),
+            offset,
+        };
+        assert_eq!(scan(Path::new(DIR), &segments), Err(expected));
+    }
+
+    #[test]
     fn refuses_a_bad_last_record_of_a_file_before_a_file_with_records() {
         for (name, number) in [("log-0", 0), ("log-1", 1)] {
             let (mut sim, node) = create_node(0);
@@ -2793,12 +2854,10 @@ mod tests {
             entries in entries(),
         ) {
             let bytes = encode(number, hard.clone(), &entries);
-            let At::Header(head) = header(&bytes) else {
-                panic!("a record starts with a header");
+            let Record::Whole { number: read_number, body, after } = Record::read(&bytes) else {
+                panic!("a record reads as a whole record");
             };
-            prop_assert_eq!((head.version, head.number), (VERSION, number));
-            let (body, after) = head.body().unwrap();
-            prop_assert_eq!((check(body), after), (head.check, &[][..]));
+            prop_assert_eq!((read_number, after), (number, &[][..]));
             let mut stored = Stored::default();
             prop_assert_eq!(apply(&mut stored, body), Some(()));
             let hard = hard.unwrap_or_default();
@@ -2815,13 +2874,8 @@ mod tests {
             let mut bytes = encode(3, hard, &entries);
             let at = at.index(bytes.len());
             bytes[at] ^= 1 << bit;
-            let valid = match header(&bytes) {
-                At::Header(head) => head.body().is_some_and(|(body, _)| {
-                    head.number == 3 && check(body) == head.check
-                }),
-                At::End | At::Garbage => false,
-            };
-            prop_assert!(!valid);
+            let whole = matches!(Record::read(&bytes), Record::Whole { number: 3, .. });
+            prop_assert!(!whole);
         }
 
         #[test]

@@ -40,12 +40,13 @@ pub fn round_trip_entries(bytes: &[u8]) -> Option<Vec<u8>> {
 /// of the log also checks.
 #[must_use]
 pub fn round_trip_log_record(bytes: &[u8]) -> Option<Vec<u8>> {
-    log::round_trip(bytes)
+    let (number, hard, entries) = log::decode(bytes)?;
+    Some(log::encode(number, hard, &entries))
 }
 
 /// Writes into `bytes` the two checks of a mesh log record: the body check over the
 /// bytes after the header, then the header check over the rest of the header. Does
-/// nothing to `bytes` shorter than a header, of 34 bytes.
+/// nothing to `bytes` shorter than a record header.
 pub fn seal_log_record(bytes: &mut [u8]) {
     log::seal(bytes);
 }
