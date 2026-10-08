@@ -157,13 +157,18 @@ mod tests {
     /// turn. On each, it checks that the peer is a program, echoes the first message
     /// of the first stream, and waits until the program drops the session.
     fn serve(node: &Node, sessions: usize) {
-        testing::transport(node, SERVER, move |transport, _| async move {
+        testing::shard(node, SERVER, move |config, node| async move {
+            // A program's pool has the budget of this one.
+            let largest = config.pool.largest();
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = crate::Transport::new(config, part).expect("a transport");
             for _ in 0..sessions {
                 let session = transport.accept().await.expect("a session");
                 assert_eq!(session.peer(), Peer::Client);
                 let mut incoming = session.accept().await.expect("a stream");
                 let received = incoming.receiver.recv().await.expect("a message");
                 let mut sender = incoming.sender.expect("a two-way stream");
+                assert_eq!(sender.bytes_max(), largest);
                 sender.send(received.expect("one")).await.expect("sent");
                 sender.finish().expect("finished");
                 let closed = Error::PeerClosed { code: Code(0) };
@@ -295,6 +300,8 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    /// Reads the setup: each field reaches the endpoint by the path of a node, which
+    /// the tests of `Transport` pin.
     #[test]
     fn a_program_has_the_fixed_limits() {
         testing::run(0, |shard| {
