@@ -1,19 +1,21 @@
-//! After a read that gives a whole long message, the receiver keeps a list of at
-//! most 64 chunks, not one sized by the message. The count covers each thread, so
+//! After a read that gives a whole long message, in one poll or over many, the
+//! receiver keeps a list of at most 64 chunks, not one sized by the message. The count covers each thread, so
 //! this binary has no test harness. The sim runs on one thread, so the count is
 //! exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
+use env::clock::Clock;
 use sim::Sim;
 use sim::node::Node;
 use transport::stream::Receiver;
@@ -35,31 +37,62 @@ const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its send: past the server's read.
 const LIVE: Span = Span::from_nanos(2_000_000_000);
 
-/// The length of the message that the server's one poll gives, whether the next poll
-/// gives the end of the stream, and the net heap bytes that the drop of the receiver
-/// then gives back.
-type Out = (Option<usize>, bool, usize);
+/// How the server reads the message.
+#[derive(Clone, Copy, Debug)]
+enum Reading {
+    /// In one poll, once the message is in.
+    Whole,
+    /// Each millisecond from when the stream comes, until the message is in.
+    Parts,
+}
+
+/// What the server's reads give.
+#[derive(Clone, Copy, Debug, Default)]
+struct Out {
+    /// The length of the message that the read gives.
+    len: Option<usize>,
+    /// The polls of the read that give `Pending`.
+    pending: usize,
+    /// Whether the next read gives the end of the stream.
+    ended: bool,
+    /// The net heap bytes that the drop of the receiver then gives back.
+    kept: usize,
+}
 
 fn main() {
-    for len in [100_000, 240_000, 1 << 18] {
-        let (read, ended, kept) = run(len);
-        assert_eq!(read, Some(len), "{len} bytes: the read");
-        assert!(ended, "{len} bytes: the stream ends after the message");
-        assert!(
-            kept <= KEPT_MAX,
-            "{len} bytes: the receiver keeps {kept} bytes after a whole message"
-        );
+    for reading in [Reading::Whole, Reading::Parts] {
+        for len in [100_000, 240_000, 1 << 18] {
+            let out = run(reading, len);
+            assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
+            assert_eq!(
+                out.pending > 0,
+                matches!(reading, Reading::Parts),
+                "{reading:?}, {len} bytes: the read gives `Pending` {} times",
+                out.pending
+            );
+            assert!(
+                out.ended,
+                "{reading:?}, {len} bytes: the stream ends after the message"
+            );
+            assert!(
+                out.kept <= KEPT_MAX,
+                "{reading:?}, {len} bytes: the receiver keeps {} bytes after a whole \
+                 message",
+                out.kept
+            );
+        }
     }
 }
 
-/// The [`Out`] of the server's read of a message of `len` bytes.
-fn run(len: usize) -> Out {
+/// The [`Out`] of the server's read of a message of `len` bytes in the way of
+/// `reading`.
+fn run(reading: Reading, len: usize) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
-    let out = Arc::new(Mutex::new((None, false, 0)));
-    serve(&server, Arc::clone(&out));
+    let out = Arc::new(Mutex::new(Out::default()));
+    serve(&server, reading, Arc::clone(&out));
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
         let pool = Rc::clone(&config.pool);
@@ -80,9 +113,9 @@ fn run(len: usize) -> Out {
     *out.lock().expect("not poisoned")
 }
 
-/// Starts the server on `node`. Once the message is in, it reads it in one poll, then
-/// the end, drops the receiver, and puts the [`Out`] in `out`.
-fn serve(node: &Node, out: Arc<Mutex<Out>>) {
+/// Starts the server on `node`. It reads the message in the way of `reading`, then
+/// the end once it comes, drops the receiver, and puts the [`Out`] in `out`.
+fn serve(node: &Node, reading: Reading, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -93,24 +126,43 @@ fn serve(node: &Node, out: Arc<Mutex<Out>>) {
         let transport = Transport::new(config, part(&own, PORT)).expect("a transport");
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
-        own.clock().sleep(READ).await;
-        let len = match poll(&mut receiver) {
-            Poll::Ready(Ok(Some(block))) => Some(block.len()),
-            _ => None,
-        };
-        let ended = matches!(poll(&mut receiver), Poll::Ready(Ok(None)));
+        let clock = own.clock();
+        if let Reading::Whole = reading {
+            clock.sleep(READ).await;
+        }
+        let (read, pending) = next(&mut receiver, &clock).await;
+        let len = read.ok().flatten().map(|block| block.len());
+        let ended = matches!(next(&mut receiver, &clock).await.0, Ok(None));
         let before = ALLOCATOR.held();
         drop(receiver);
         let kept = before.saturating_sub(ALLOCATOR.held());
-        *out.lock().expect("not poisoned") = (len, ended, kept);
+        *out.lock().expect("not poisoned") = Out {
+            len,
+            pending,
+            ended,
+            kept,
+        };
     });
     drop(started.expect("a shard"));
 }
 
-/// Polls `receiver.recv()` once.
-fn poll(receiver: &mut Receiver) -> Poll<Result<Option<Block>, Error>> {
+/// Polls one `receiver.recv()` each millisecond until it is ready. Gives the read and
+/// the polls that gave `Pending`.
+async fn next(
+    receiver: &mut Receiver,
+    clock: &Clock,
+) -> (Result<Option<Block>, Error>, usize) {
     let mut recv = pin!(receiver.recv());
-    recv.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+    let mut pending = 0;
+    loop {
+        if let Poll::Ready(read) =
+            poll_fn(|cx| Poll::Ready(recv.as_mut().poll(cx))).await
+        {
+            return (read, pending);
+        }
+        pending += 1;
+        clock.sleep(Span::MILLISECOND).await;
+    }
 }
 
 /// A block of `len` bytes from `pool`.
