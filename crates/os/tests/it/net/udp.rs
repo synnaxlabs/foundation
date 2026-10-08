@@ -595,18 +595,27 @@ fn a_first_receive_with_no_runtime_panics() {
 }
 
 #[test]
-fn an_unspecified_ipv4_source_gives_einval() {
+fn an_unspecified_source_gives_einval() {
     on_thread("udp-unspecified-source", || async {
         let net = net();
-        let (_, mut receiver) = loopback(&net);
+        let (_, mut to_v4) = loopback(&net);
+        let (_, mut to_v6) = bind(&net, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0));
         let any_v4 = IpAddr::from(Ipv4Addr::UNSPECIFIED);
+        let any_v6 = IpAddr::from(Ipv6Addr::UNSPECIFIED);
         let mapped = IpAddr::from(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped());
         let cases = [
             (IpAddr::from(LOCALHOST), any_v4),
-            (Ipv6Addr::UNSPECIFIED.into(), any_v4),
-            (Ipv6Addr::UNSPECIFIED.into(), mapped),
+            (any_v6, any_v4),
+            (any_v6, mapped),
+            (any_v6, any_v6),
+            (Ipv6Addr::LOCALHOST.into(), any_v6),
         ];
         for (local, source) in cases {
+            let receiver = if source.to_canonical().is_ipv4() {
+                &mut to_v4
+            } else {
+                &mut to_v6
+            };
             let (mut sender, _) = bind(&net, SocketAddr::new(local, 0));
             let from = Transmit {
                 source: Some(source),
@@ -617,7 +626,7 @@ fn an_unspecified_ipv4_source_gives_einval() {
             assert_eq!(refused, Err(Error::Io { code: 22 }), "{case}");
             let after = transmit(receiver.local(), b"after");
             assert_eq!(send(&mut sender, &after).await, Ok(()), "{case}");
-            let arrived = receive(&mut receiver, 1).await;
+            let arrived = receive(receiver, 1).await;
             assert_eq!(arrived[0].contents, b"after", "{case}");
         }
     });
