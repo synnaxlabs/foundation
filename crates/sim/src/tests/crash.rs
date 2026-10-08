@@ -1406,3 +1406,131 @@ fn a_sync_dir_makes_durable_only_the_changes_of_its_directory() {
     let (a, b) = (vec![PathBuf::from("a")], vec![PathBuf::from("b")]);
     assert_eq!(outcomes, BTreeSet::from([(vec![], b.clone()), (a, b)]));
 }
+
+/// The free bytes after a remove of file `a`, which a power cut kept with no
+/// `sync_dir`, then the names and whether `a` opens after a second power cut. `None`
+/// when the first cut dropped `a`.
+fn removed_after_kept(seed: u64) -> Option<(u64, Vec<PathBuf>, bool)> {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        drop(create(&node, "a", 1_024).await);
+    });
+    let free = sim
+        .run_on(&node, |node, _| async move {
+            let files = node.files();
+            files.open(Path::new("a"), Mode::Read).await.ok()?;
+            files.remove(Path::new("a")).await.unwrap();
+            Some(files.free().await.unwrap())
+        })
+        .unwrap()?;
+    sim.crash(&node, Crash::Power);
+    let (names, opened) = sim
+        .run_on(&node, |node, _| async move {
+            let files = node.files();
+            let opened = files.open(Path::new("a"), Mode::Read).await.is_ok();
+            (files.list(Path::new("")).await.unwrap(), opened)
+        })
+        .unwrap();
+    Some((free, names, opened))
+}
+
+#[test]
+fn a_file_that_a_power_cut_keeps_takes_space_until_its_remove_is_durable() {
+    let outcomes: BTreeSet<_> = (0..32).filter_map(removed_after_kept).collect();
+    let kept = BTreeSet::from([
+        (MIB - KIB, names(&[]), false),
+        (MIB - KIB, names(&["a"]), true),
+    ]);
+    assert_eq!(outcomes, kept);
+}
+
+/// Runs `body` until a process crash, then cuts the power.
+fn process_then_power<F>(
+    seed: u64,
+    body: impl FnOnce(node::Node) -> F + Send + 'static,
+) -> (Sim, node::Node)
+where
+    F: Future<Output = ()> + 'static,
+{
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Process, body);
+    sim.run_on(&node, |node, _| async move {
+        node.clock().sleep(Span::MILLISECOND).await;
+    })
+    .unwrap();
+    sim.crash(&node, Crash::Power);
+    (sim, node)
+}
+
+#[test]
+fn a_sync_dir_in_flight_at_a_process_crash_makes_its_directory_durable() {
+    let outcomes: BTreeSet<Vec<PathBuf>> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = process_then_power(seed, |node| async move {
+                drop(create(&node, "a", 1_024).await);
+                until_crash(&node).await;
+                hang(node.files().sync_dir(Path::new(""))).await;
+            });
+            sim.run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([names(&["a"])]));
+}
+
+#[test]
+fn a_sync_in_flight_at_a_process_crash_makes_its_bytes_durable() {
+    let outcomes: BTreeSet<Vec<u8>> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = process_then_power(seed, |node| async move {
+                let file = create_synced(&node).await;
+                file.write_at(0, &[block(&pool(), &[2; 1_024])])
+                    .await
+                    .unwrap();
+                until_crash(&node).await;
+                hang(file.sync()).await;
+            });
+            sectors_of(&mut sim, &node)
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([vec![2, 2]]));
+}
+
+#[test]
+fn a_power_cut_can_keep_or_drop_a_remove_in_flight() {
+    let outcomes = listed_after_power(0..32, |node| async move {
+        drop(create_synced(&node).await);
+        until_crash(&node).await;
+        hang(node.files().remove(Path::new("a"))).await;
+    });
+    assert_eq!(outcomes, BTreeSet::from([names(&[]), names(&["a"])]));
+}
+
+#[test]
+fn a_power_cut_can_keep_or_drop_a_create_dir_in_flight() {
+    let outcomes = listed_after_power(0..32, |node| async move {
+        until_crash(&node).await;
+        hang(node.files().create_dir(Path::new("d"))).await;
+    });
+    assert_eq!(outcomes, BTreeSet::from([names(&[]), names(&["d"])]));
+}
+
+#[test]
+fn a_power_cut_with_each_change_durable_keeps_the_digest_of_later_draws() {
+    // `DefaultHasher` makes the digest, so a new toolchain can change this value.
+    let (mut sim, node) = disk(3);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        drop(create_synced(&node).await);
+    });
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        until_crash(&node).await;
+        hang(
+            node.files()
+                .open(Path::new("b"), Mode::Create { len: 1_024 }),
+        )
+        .await;
+    });
+    assert_eq!(sim.digest(), 2_162_013_485_531_046_164);
+}

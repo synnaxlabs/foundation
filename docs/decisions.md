@@ -4123,9 +4123,12 @@ How to read this record:
   stays, except a `sync` or `sync_dir` in flight, which has no effect. A `sync_dir`
   makes durable only the changes of its directory. A journaled file system can commit
   more; `sim` does not, so a missing `sync_dir` shows. A file takes space while an
-  entry, a durable entry, a change in the log, or a handle names it. This supersedes the
-  #1449 rule that a `Power` crash undoes each rename since the last `sync_dir`, and the
-  commit of the #1264 amendment: a create that a `Power` crash cuts is whole or has no
+  entry, a durable entry, a change in the log, or a handle names it. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1449#issuecomment-6040629508: a
+  `Power` crash undoes each rename since the last `sync_dir`, a rename in flight too.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692: the
+  commit of a create in flight. A create that a `Power` crash cuts is whole or has no
   bytes, and the prefix decides whether its entry stays. A cut gives a state that a
   journaled file system can reach, or a state that only a missing `sync_dir` reaches.
   Lost: a log for each directory, which gives states that need no missing `sync_dir`.
