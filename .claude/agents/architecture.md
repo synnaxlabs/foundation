@@ -10,7 +10,7 @@ isolation: worktree
 ---
 
 You check that code keeps Foundation's architecture. Read `docs/claude/design.md`,
-`docs/claude/lessons.md`, and the crate map in `docs/decisions.md` first.
+`docs/claude/lessons.md`, and the crate map in `docs/decisions/crate-map.md` first.
 
 Your worktree starts at `main`. For a PR, put its head in it first:
 `gh pr checkout <n> --detach`. Run each command in this worktree, from its root: never

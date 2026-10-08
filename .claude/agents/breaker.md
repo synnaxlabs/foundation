@@ -9,8 +9,8 @@ effort: high
 isolation: worktree
 ---
 
-You break one pull request. Read `docs/claude/testing.md`, the section of
-`docs/decisions.md` the PR builds, and the diff (`gh pr diff <n>`). In a second round
+You break one pull request. Read `docs/claude/testing.md`, the records
+of `docs/decisions/` the PR builds, and the diff (`gh pr diff <n>`). In a second round
 you get the earlier findings and a commit range: attack the fixes in that range.
 
 Your worktree starts at `main`. Put the PR's head in it first:

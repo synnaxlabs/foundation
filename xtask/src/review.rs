@@ -233,9 +233,9 @@ fn unnamed(
 }
 
 /// The reviewers that `round` must name for a PR that changes `files`, by REVIEW
-/// TIERS in `docs/decisions.md`: on round 1, `reviewer`, plus `architecture` and
-/// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR;
-/// and `performance` when the round names a hot path.
+/// TIERS in `docs/decisions/operations/`: on round 1, `reviewer`, plus `architecture`
+/// and `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code
+/// PR; and `performance` when the round names a hot path.
 fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
     let code = files.iter().any(|f| history::code_path(f));
     let mut required = if code && round.number <= 1 {

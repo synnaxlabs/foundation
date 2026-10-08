@@ -22,7 +22,7 @@ fix), with Write or Edit, never with a heredoc, `sed -i`, `perl -pi`, or another
 place in Bash: auto mode blocks some of those, and three blocks in a row stop the
 session.
 
-Read `docs/claude/testing.md` and the section of `docs/decisions.md` the PR builds. Then
+Read `docs/claude/testing.md` and the records of `docs/decisions/` the PR builds. Then
 read the diff (`gh pr diff <n>`) and every file it touches. In a second round you get
 the earlier findings and a commit range: review only that range, and check that each fix
 closes its finding and adds no new defect, and that each answer with no code change
@@ -39,7 +39,7 @@ for the PR.
 Check:
 
 - Does the code do what the decisions section says? Name each difference. Does each
-  rule that the PR adds to `docs/decisions.md` cite the comment that decided it, with
+  rule that the PR adds to `docs/decisions/` cite the comment that decided it, with
   its UTC time, say only what that comment decided (the crate, the caller, and the
   behavior), and say "Supersedes <link>" for each rule it replaces (`docs/factory.md`,
   "GitHub is the record")?
@@ -53,7 +53,7 @@ Check:
   test would catch. `cargo mutants` never removes a call or widens a pattern, so its
   result does not answer this: remove each call that reports a problem, move it past the
   next early return, and widen each pattern that stops a check, then run the tests. For
-  each sentence that the PR adds to a public doc or to `docs/decisions.md` that states a
+  each sentence that the PR adds to a public doc or to `docs/decisions/` that states a
   behavior, which test fails when the code breaks it, in each place that the sentence
   covers? Does a test assert through a field or call that is not public, or compare the
   `Debug` string of the type under test, with no written reason that holds? Name the

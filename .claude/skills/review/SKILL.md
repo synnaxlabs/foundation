@@ -134,10 +134,10 @@ Breaker: skipped, the check counts no code change in the range
 When the last round has that line, the check fails if its range changes code: a `.rs`
 line that, trimmed, is not empty and does not start with `//`, or a `Cargo.toml` or
 `Cargo.lock` line. The base's code does not count, but a conflict in a code file that
-`git merge-tree` finds does. REVIEW CHECK in `docs/decisions.md` states each case, and
-the check names the one it finds. A head that is the range end plus clean merges of the
-base needs no new round. A red-team PR labeled `oracle` also needs the director's
-verdict with the line ``Director: approved at `<sha>` `` at the head.
+`git merge-tree` finds does. REVIEW CHECK in `docs/decisions/operations/` states each
+case, and the check names the one it finds. A head that is the range end plus clean
+merges of the base needs no new round. A red-team PR labeled `oracle` also needs the
+director's verdict with the line ``Director: approved at `<sha>` `` at the head.
 
 ## Second round
 
