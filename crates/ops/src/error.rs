@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use document::Span;
 use document::diagnostic::{Code, Diagnostic};
+use mesh::used::{Behind, Cause};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +14,7 @@ const UNKNOWN: Code = Code::new("ops.unknown-operation");
 const INPUT: Code = Code::new("ops.input");
 const OUTPUT: Code = Code::new("ops.output");
 const BAD_PLAN: Code = Code::new("ops.bad-plan");
+const BEHIND: Code = Code::new("ops.behind");
 const STALE_PLAN: Code = Code::new("ops.stale-plan");
 const APPLY: Code = Code::new("ops.apply");
 
@@ -34,11 +36,12 @@ pub(crate) enum Error {
     Config(Vec<Problem>),
     /// The plan file holds no plan that `plan` makes.
     Plan(config::plan::Error),
-    /// The spec is not at `base`, the spec that the plan changes. It is at `pointer`,
-    /// or the node uses no spec.
+    /// The node does not use the newest spec, so it can neither plan nor apply.
+    Behind(Box<Behind>),
+    /// The spec in use is at `pointer`, not at `base`, the spec that the plan changes.
     Stale {
         base: spec::Pointer,
-        pointer: Option<spec::Pointer>,
+        pointer: spec::Pointer,
     },
     /// The region did not apply the plan.
     Apply(mesh::Error),
@@ -53,6 +56,7 @@ impl Error {
             | Self::Plan(_) => 2,
             Self::Input { .. }
             | Self::Output { .. }
+            | Self::Behind(_)
             | Self::Stale { .. }
             | Self::Apply(_) => 1,
         }
@@ -86,6 +90,7 @@ impl Error {
                 "Make a plan with `foundation plan`, and apply it with no edits"
                     .to_owned(),
             ),
+            Self::Behind(_) => (BEHIND, "Fix the cause, then plan again".to_owned()),
             Self::Stale { .. } => (STALE_PLAN, "Plan again".to_owned()),
             Self::Apply(_) => (
                 APPLY,
@@ -246,20 +251,32 @@ impl fmt::Display for Error {
                 _ => write!(f, "the config files have {} problems", problems.len()),
             },
             Self::Plan(error) => error.fmt(f),
-            Self::Stale {
-                base,
-                pointer: Some(pointer),
-            } => write!(
+            Self::Behind(behind) => {
+                let Behind { pointer, cause } = &**behind;
+                write!(f, "the node does not use the newest spec, at {pointer}: ")?;
+                match cause {
+                    Cause::Read(error) => write!(f, "its tree does not read: {error}"),
+                    Cause::Problems(problems) => {
+                        f.write_str("it has problems at this build: ")?;
+                        for (i, problem) in problems.iter().enumerate() {
+                            let between = if i == 0 { "" } else { "; " };
+                            write!(f, "{between}{problem}")?;
+                        }
+                        Ok(())
+                    }
+                    Cause::Blob(error) => {
+                        write!(f, "a call of the store failed: {error}")
+                    }
+                    Cause::Files(error) => write!(
+                        f,
+                        "the file of the pointer in use was not made durable: {error}"
+                    ),
+                }
+            }
+            Self::Stale { base, pointer } => write!(
                 f,
                 "the spec changed: the spec is at {pointer}, not at the base {base} \
                  of the plan"
-            ),
-            Self::Stale {
-                base,
-                pointer: None,
-            } => write!(
-                f,
-                "the node uses no spec, so it cannot apply a plan of the spec at {base}"
             ),
             Self::Apply(error) => error.fmt(f),
         }

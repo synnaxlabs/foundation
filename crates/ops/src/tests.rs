@@ -449,9 +449,13 @@ fn error_codes_and_fixes_match_the_golden_file() {
             message: String::new(),
         },
         Error::Plan(config::plan::Error::Malformed { at: 0 }),
+        Error::Behind(Box::new(mesh::used::Behind {
+            pointer,
+            cause: mesh::used::Cause::Problems(Vec::new()),
+        })),
         Error::Stale {
             base: pointer,
-            pointer: None,
+            pointer,
         },
         Error::Apply(mesh::Error::NoVote),
     ];
@@ -464,6 +468,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Input { .. }
             | Error::Output { .. }
             | Error::Plan(_)
+            | Error::Behind(_)
             | Error::Stale { .. }
             | Error::Apply(_)
             | Error::Config(_) => {}
