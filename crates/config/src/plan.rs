@@ -40,10 +40,10 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   [`spec::placement::place`] cannot place.
 /// - `config.connector-home` at the `home` of a placement that wins for a connector and
 ///   names a node other than the connector's `node`.
-/// - `config.split-placement` at each index under the name of a connector when the
-///   placement that wins for the index is not the one that wins for the connector: at
-///   the label of the index's placement, or of the connector's when no placement
-///   selects the index.
+/// - `config.split-placement` at each index when the placement that wins for it is not
+///   the one that wins for its nearest connector, the connector with the longest name
+///   above it: at the label of the index's placement, or of the connector's when no
+///   placement selects the index.
 /// - `config.writer-nodes` at the `node` of the first connector on a second node that
 ///   writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
