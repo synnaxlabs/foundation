@@ -3045,8 +3045,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177); the
   class by the architect on 2026-10-07T20:31:16Z
   (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6046284871), and
-  the crate by the person on 2026-10-07
-  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6046603261).
+  the crate by the person on 2026-10-08T01:48:32Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6050501586).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
