@@ -782,15 +782,15 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_message_it_fails_and_keeps_no_chunk() {
+        fn when_stream_ends_inside_a_message_it_fails_and_keeps_no_byte() {
             let pool = pool(1 << 16);
-            let batch = Bytes::from(vec![0x05, 1, 2]);
+            let batch = Bytes::from(encode(&[vec![3; 1_000]]));
+            let end = 2 + 100;
             let mut at = 0;
-            let mut reader = Reader::new(16);
-            let source = |max: usize| {
-                let end = batch.len().min(at + max);
-                let chunk = (at < end).then(|| batch.slice(at..end));
-                at = end;
+            let mut reader = Reader::new(1_000);
+            let source = |_| {
+                let chunk = (at < end).then(|| batch.slice(at..=at));
+                at += 1;
                 Ok(Poll::Ready(chunk))
             };
             let read = reader
@@ -803,6 +803,11 @@ mod tests {
                 })
             );
             assert!(batch.is_unique(), "a chunk outlives the read");
+            // Private: only a peer that misframes ends a stream inside a message, and
+            // no heap count is exact in a binary with a test harness.
+            assert_eq!(reader.held.buffer.capacity(), 0);
+            let slots = reader.held.chunks.capacity();
+            assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
         }
 
         #[test]
@@ -816,6 +821,10 @@ mod tests {
                     reason: "the stream ended inside a message".to_owned()
                 })
             );
+            // Private: only a peer that misframes ends a stream inside a message, and
+            // no heap count is exact in a binary with a test harness.
+            let slots = reader.held.chunks.capacity();
+            assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
         }
 
         #[test]
