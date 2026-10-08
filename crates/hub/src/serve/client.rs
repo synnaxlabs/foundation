@@ -1,12 +1,12 @@
 //! The hello stream and the request streams of a client session.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use access::proof::Error as Refusal;
+use access::proof::{Admitted, Error as Refusal};
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
 use wire::hub::client::{
@@ -15,7 +15,7 @@ use wire::hub::client::{
 
 use super::{Error, alloc, halves, stop};
 use crate::State;
-use crate::link::{Served, Shared};
+use crate::link::{Served, Session};
 
 /// A request of a client, which `access` verified.
 #[derive(Debug)]
@@ -35,7 +35,6 @@ pub struct Request {
 /// link takes its next request from the start of the send, or from the drop.
 #[derive(Debug)]
 pub struct Reply {
-    state: Rc<RefCell<State>>,
     sender: Sender,
     receiver: Receiver,
     open: Open,
@@ -54,11 +53,11 @@ impl Reply {
     /// When `body` is over [`BODY_BYTES_MAX`](wire::hub::client::BODY_BYTES_MAX).
     pub async fn send(self, body: &[u8]) -> Result<(), Error> {
         let Self {
-            state,
             mut sender,
             receiver,
             open,
         } = self;
+        let state = Rc::clone(&open.0.state);
         drop(open);
         let sent = respond(&state, &mut sender, body).await;
         if let Err(error) = &sent {
@@ -68,13 +67,31 @@ impl Reply {
     }
 }
 
+/// Which streams a client session may give next: the hello stream first, then a
+/// request once a hello is admitted, one at a time.
+#[derive(Debug, Default)]
+pub(crate) struct Gate {
+    hello_taken: Cell<bool>,
+    /// The hello that the link admitted last, and its signature.
+    admitted: RefCell<Option<(Admitted, [u8; 64])>>,
+    /// A request is open: read, and its reply not yet sent or dropped.
+    open: Cell<bool>,
+}
+
+impl Gate {
+    /// Gives `true` for the first stream of the session only: the hello stream.
+    pub(crate) fn first(&self) -> bool {
+        !self.hello_taken.replace(true)
+    }
+}
+
 /// Holds the one open request of a link, until it drops.
 #[derive(Debug)]
-struct Open(Rc<Shared>);
+struct Open(Rc<Session>);
 
 impl Drop for Open {
     fn drop(&mut self) {
-        self.0.open.set(false);
+        self.0.client.open.set(false);
     }
 }
 
@@ -93,14 +110,14 @@ pub(crate) fn code(error: &Refusal) -> u32 {
     }
 }
 
-/// Serves the hello stream of `shared`, and closes the session when it ends.
+/// Serves the hello stream of `session`, and closes the session when it ends.
 pub(crate) async fn hello(
-    shared: &Rc<Shared>,
+    session: &Rc<Session>,
     incoming: Incoming,
 ) -> Result<Served, Error> {
     let served = match halves(incoming) {
         Ok((mut receiver, mut sender)) => {
-            let served = renew(shared, &mut receiver, &mut sender).await;
+            let served = renew(session, &mut receiver, &mut sender).await;
             if let Err(error) = &served {
                 stop(receiver, sender, error);
             }
@@ -109,24 +126,24 @@ pub(crate) async fn hello(
         Err(error) => Err(error),
     };
     let code = served.as_ref().err().and_then(Error::code);
-    shared.session.close(code.unwrap_or(Code(0)));
+    session.transport.close(code.unwrap_or(Code(0)));
     served
 }
 
 /// Admits the first hello, then each renewal, until the program finishes the stream
 /// or the hello expires.
 async fn renew(
-    shared: &Shared,
+    session: &Session,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<Served, Error> {
-    if !take(shared, receiver, sender).await? {
+    if !take(session, receiver, sender).await? {
         return Ok(Served::Ended);
     }
     loop {
         // A fresh wait for each renewal, since a renewal can move the expiry earlier.
-        let mut renewal = pin!(take(shared, receiver, sender));
-        let mut expiry = pin!(expiry(shared));
+        let mut renewal = pin!(take(session, receiver, sender));
+        let mut expiry = pin!(expiry(session));
         let renewed = poll_fn(|cx| match renewal.as_mut().poll(cx) {
             Poll::Ready(renewed) => Poll::Ready(renewed),
             Poll::Pending => expiry.as_mut().poll(cx).map(Err),
@@ -141,11 +158,11 @@ async fn renew(
 /// Sends a challenge, then checks the hello that answers it and keeps it. Gives
 /// `false` when the program finished the stream first.
 async fn take(
-    shared: &Shared,
+    session: &Session,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<bool, Error> {
-    let nonce = challenge(shared, sender).await?;
+    let nonce = challenge(session, sender).await?;
     let Some(message) = receiver.recv().await? else {
         return Ok(false);
     };
@@ -153,9 +170,9 @@ async fn take(
     if hello.nonce != nonce {
         return Err(Error::Stale);
     }
-    let state = shared.state.borrow();
+    let state = session.state.borrow();
     let now = state.time.now().mesh;
-    let mut admitted = shared.admitted.borrow_mut();
+    let mut admitted = session.client.admitted.borrow_mut();
     let next = match admitted.as_ref() {
         None => state.rules.admit(now, state.node, hello, &signature),
         Some((first, _)) => state.rules.renew(first, now, hello, &signature),
@@ -166,17 +183,17 @@ async fn take(
 }
 
 /// Sends a challenge with a fresh nonce and mesh time, and gives the nonce.
-async fn challenge(shared: &Shared, sender: &mut Sender) -> Result<[u8; 16], Error> {
+async fn challenge(session: &Session, sender: &mut Sender) -> Result<[u8; 16], Error> {
     let mut nonce = [0; 16];
     let message = {
-        let state = shared.state.borrow();
+        let state = session.state.borrow();
         let now = state
             .time
             .now()
             .mesh
             .ok_or(Error::Access(Refusal::Unsynced))?;
         state.entropy.fill(&mut nonce);
-        let mut block = alloc(&shared.state, Challenge::LEN)?;
+        let mut block = alloc(&session.state, Challenge::LEN)?;
         Challenge { nonce, now }.encode(&mut block);
         block.freeze()
     };
@@ -185,11 +202,11 @@ async fn challenge(shared: &Shared, sender: &mut Sender) -> Result<[u8; 16], Err
 }
 
 /// Waits until the hello that the link holds expires, and gives the refusal.
-async fn expiry(shared: &Shared) -> Error {
+async fn expiry(session: &Session) -> Error {
     loop {
         let wait = {
-            let state = shared.state.borrow();
-            let admitted = shared.admitted.borrow();
+            let state = session.state.borrow();
+            let admitted = session.client.admitted.borrow();
             let (admitted, _) = admitted
                 .as_ref()
                 .expect("invariant: the hello stream admitted a hello first");
@@ -211,20 +228,19 @@ async fn expiry(shared: &Shared) -> Error {
     }
 }
 
-/// Serves a request stream of `shared`: reads and verifies the request.
+/// Serves a request stream of `session`: reads and verifies the request.
 pub(crate) async fn request(
-    shared: &Rc<Shared>,
+    session: &Rc<Session>,
     incoming: Incoming,
 ) -> Result<Served, Error> {
     let (mut receiver, mut sender) = halves(incoming)?;
-    match read(shared, &mut receiver).await {
+    match read(session, &mut receiver).await {
         Ok(Some((admitted, body, signature, open))) => {
             Ok(Served::Request(Box::new(Request {
                 admitted,
                 body,
                 signature,
                 reply: Reply {
-                    state: Rc::clone(&shared.state),
                     sender,
                     receiver,
                     open,
@@ -245,20 +261,20 @@ pub(crate) async fn request(
 /// Reads the request and its body, and verifies it. Gives `None` when the program
 /// finished the stream before the request.
 async fn read(
-    shared: &Rc<Shared>,
+    session: &Rc<Session>,
     receiver: &mut Receiver,
 ) -> Result<Option<(Signed, Vec<u8>, [u8; 64], Open)>, Error> {
-    if shared.admitted.borrow().is_none() {
+    if session.client.admitted.borrow().is_none() {
         return Err(Error::Unadmitted);
     }
     let Some(message) = receiver.recv().await? else {
         return Ok(None);
     };
     let request = wire::hub::client::Request::decode(&message)?;
-    if shared.open.replace(true) {
+    if session.client.open.replace(true) {
         return Err(Error::Pending);
     }
-    let open = Open(Rc::clone(shared));
+    let open = Open(Rc::clone(session));
     let mut rest = request.body();
     let mut body = Vec::with_capacity(rest.remain());
     while rest.remain() > 0 {
@@ -268,12 +284,13 @@ async fn read(
         body.extend_from_slice(rest.take(&message)?);
     }
     rest.end()?;
-    let (admitted, hello) = shared
+    let (admitted, hello) = session
+        .client
         .admitted
         .borrow()
         .clone()
         .expect("invariant: a link keeps the hello that it admitted");
-    let state = shared.state.borrow();
+    let state = session.state.borrow();
     state
         .rules
         .verify(&admitted, state.time.now().mesh, &body, &request.signature)

@@ -1,11 +1,10 @@
 //! The hub's part of one transport session.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use access::proof::Admitted;
+use transport::Peer;
 use transport::stream::Incoming;
-use transport::{Peer, Session};
 
 use crate::State;
 use crate::serve::{self, Request, client};
@@ -14,7 +13,7 @@ use crate::serve::{self, Request, client};
 /// admitted hello, so the hello is checked once for the connection, and it closes the
 /// session when the hello expires.
 #[derive(Debug)]
-pub struct Link(Rc<Shared>);
+pub struct Link(Rc<Session>);
 
 /// What [`Link::serve`] ended with.
 #[derive(Debug)]
@@ -26,16 +25,13 @@ pub enum Served {
     Request(Box<Request>),
 }
 
+/// The session that each stream of a [`Link`] serves.
 #[derive(Debug)]
-pub(crate) struct Shared {
+pub(crate) struct Session {
     pub(crate) state: Rc<RefCell<State>>,
-    pub(crate) session: Session,
-    /// A client session gave its first stream, the hello stream.
-    hello_taken: Cell<bool>,
-    /// The hello that the link admitted last, and its signature.
-    pub(crate) admitted: RefCell<Option<(Admitted, [u8; 64])>>,
-    /// A request is open: read, and its reply not yet sent or dropped.
-    pub(crate) open: Cell<bool>,
+    pub(crate) transport: transport::Session,
+    /// Unused for a node peer.
+    pub(crate) client: client::Gate,
 }
 
 /// What a stream of the link carries, taken when [`Link::serve`] is called.
@@ -46,20 +42,23 @@ enum Role {
 }
 
 impl Link {
-    pub(crate) fn new(state: Rc<RefCell<State>>, session: Session) -> Self {
-        Self(Rc::new(Shared {
+    pub(crate) fn new(
+        state: Rc<RefCell<State>>,
+        transport: transport::Session,
+    ) -> Self {
+        Self(Rc::new(Session {
             state,
-            session,
-            hello_taken: Cell::new(false),
-            admitted: RefCell::new(None),
-            open: Cell::new(false),
+            transport,
+            client: client::Gate::default(),
         }))
     }
 
     /// Serves `incoming`, a hub stream of the link's session whose header the caller
     /// read. Call it in the order that `Session::accept` gives the streams: the first
     /// stream of a client session is its hello stream, and the role is taken at the
-    /// call, not at the first poll. From a node, it serves a reader session. From a
+    /// call, not at the first poll. `accept` gives streams by class, not in open
+    /// order, so this holds because a program opens no request stream before the
+    /// challenge after its hello. From a node, it serves a reader session. From a
     /// client, the hello stream lives as long as the session, and closes it when it
     /// ends; a request stream gives [`Served::Request`] once its body is read and
     /// verified.
@@ -78,19 +77,19 @@ impl Link {
         &self,
         incoming: Incoming,
     ) -> impl Future<Output = Result<Served, serve::Error>> + use<> {
-        let shared = Rc::clone(&self.0);
-        let role = match shared.session.peer() {
+        let session = Rc::clone(&self.0);
+        let role = match session.transport.peer() {
             Peer::Node(_) => Role::Reader,
-            Peer::Client if shared.hello_taken.replace(true) => Role::Request,
-            Peer::Client => Role::Hello,
+            Peer::Client if session.client.first() => Role::Hello,
+            Peer::Client => Role::Request,
         };
         async move {
             match role {
-                Role::Reader => serve::run(&shared.state, incoming)
+                Role::Reader => serve::run(&session.state, incoming)
                     .await
                     .map(|()| Served::Ended),
-                Role::Hello => client::hello(&shared, incoming).await,
-                Role::Request => client::request(&shared, incoming).await,
+                Role::Hello => client::hello(&session, incoming).await,
+                Role::Request => client::request(&session, incoming).await,
             }
         }
     }
