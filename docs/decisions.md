@@ -3975,6 +3975,14 @@ How to read this record:
   for each `UA_Server` and `UA_Client` lost: the draw functions and the security
   policy plugins take no server, so each call site changes, and LOCAL PATCHES does
   that work again at each release.
+  The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
+  with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
+  clock functions give 0, and the 5 POSIX constructors print their name and abort,
+  since our config always has an event loop (plan revision 1, accepted in
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367).
+  `build.rs` refuses a compiler other than GCC or clang before it compiles, since
+  `flags.txt` holds GCC driver flags and MSVC only warns on them (round 1 of #1893,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6061400529).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
