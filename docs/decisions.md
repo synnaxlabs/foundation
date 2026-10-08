@@ -671,8 +671,9 @@ How to read this record:
   encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
   and a view of a raw variable series relies on it. `encode`, `validate`, and `decode`
   refuse a `String` sample that is not UTF-8 (`Error::Utf8`, #556), so a reader trusts
-  each `String` from `codec`. Vector numbers in errors count across the ends and the
-  elements.
+  each `String` from `codec`: the three accept the same samples (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/issues/556#issuecomment-6055835549). Vector
+  numbers in errors count across the ends and the elements.
   `Decoder` decodes a scalar series one vector at a time, so a reader of a series from
   a peer needs room for only 1024 samples, whatever the count (#416).
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
