@@ -34,6 +34,8 @@
   2026-10-08 20:03 UTC,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912; this
   text approved by `laptop.architect` at 2026-10-08 21:16 UTC,
-  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069205640).
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069205640, and
+  `laptop.architect-2` at 2026-10-08 21:24 UTC,
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793).
   Supersedes, for that block, "unchanged, plus the files that its build generates" of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572.
