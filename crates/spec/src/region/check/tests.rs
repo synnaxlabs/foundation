@@ -145,6 +145,30 @@ fn gives_misplaced_before_a_channel_problem_at_one_key() {
     );
 }
 
+// More problems than a sort of short slices handles, so only a stable sort keeps
+// the order at each key.
+#[test]
+fn keeps_the_order_at_each_of_many_keys() {
+    let keys: Vec<String> = (0..40).map(|at| format!("plant.@x.c{at:02}")).collect();
+    let pairs: Vec<(&str, Definition)> = (100..)
+        .zip(&keys)
+        .map(|(at, key)| (key.as_str(), data(at, 9)))
+        .collect();
+    let problems = check(&prefix("plant"), &create_definitions(&pairs));
+    assert_eq!(problems.len(), 80);
+    for (key, pair) in keys.iter().zip(problems.chunks(2)) {
+        let [first, second] = pair else {
+            panic!("{key}: {pair:?}");
+        };
+        let misplaced = Problem::Misplaced {
+            name: name(key),
+            kind: Kind::Channel,
+        };
+        assert_eq!(*first, misplaced, "{key}");
+        assert!(matches!(second, Problem::Channel(_)), "{key}");
+    }
+}
+
 #[test]
 fn makes_no_child_of_a_record_above_the_prefix() {
     let definitions = create_definitions(&[
