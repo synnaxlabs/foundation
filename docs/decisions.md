@@ -1999,15 +1999,17 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911). The
   block's count changes once for each run over 1452 bytes. A short run changes no count.
   Decided by `laptop.architect-2` (#68, 2026-10-08 07:29 UTC:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6054932643). A stretch
-  of at most 1452 bytes goes to noq from the buffer, and noq copies it in the same
-  `write`. A longer one is copied into a new buffer of its length, which noq keeps until
-  the ACK. A partial write of it keeps the rest and copies nothing again. Lost: writes
-  of at most 1452 bytes, because noq-proto allocates about 3 times for each segment that
-  they fill (1.87x copy-then-send and 13 allocations over `send` for 1000 ranges of 8
-  B); and writes of at most 16 KiB, because each byte of a longer stretch is still
-  copied twice, a cut copies up to 16 KiB again, and no source gives the 16 KiB. Decided
-  by `laptop.architect-2` (#68, 2026-10-08 07:46 UTC:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6054932643). The last
+  part, when it is at most 1452 bytes with no zeros, goes to noq from the block. Each
+  other stretch of at most 1452 bytes goes to noq from the buffer, and noq copies it in
+  the same `write` (design point 2 of 6044783047). A longer one is copied into a new
+  buffer of its length, which noq keeps until the ACK. A partial write of it keeps the
+  rest and copies nothing again. Lost: writes of at most 1452 bytes, because noq-proto
+  allocates about 3 times for each segment that they fill (1.87x copy-then-send and 13
+  allocations over `send` for 1000 ranges of 8 B); and writes of at most 16 KiB, because
+  each byte of a longer stretch is still copied twice, a cut copies up to 16 KiB again,
+  and no source gives the 16 KiB. Decided by `laptop.architect-2` (#68, 2026-10-08
+  07:46 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055243052). The
   buffer is the connection's and keeps the capacity of the longest stretch, at most
   `message_bytes_max`. The stretch goes into it in one walk of its parts.
