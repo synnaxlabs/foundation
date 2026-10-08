@@ -5244,6 +5244,30 @@ mod tests {
     }
 
     #[test]
+    fn open_refuses_this_node_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[2, 3], &[2, 3]).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(1))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_wrong_private_key_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = Config {
+                key: key(1),
+                ..config(&node, &tasks, 2, &IDS, &[]).await
+            };
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
+        });
+    }
+
+    #[test]
     fn member_gives_the_record_of_a_member_and_none_for_another_node() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
