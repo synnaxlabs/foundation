@@ -2,10 +2,13 @@
 //! `cargo bench -p hub --bench reader`.
 //!
 //! Each round writes `FRAMES` frames of one sample on an index and one data channel,
-//! and times six lines:
+//! and times seven lines:
 //!
 //! - `timer`: an empty closure, the floor of each line's figure.
-//! - `write`, the control: one `Writer::write` of a frame whose draft is ready.
+//! - `first write`: the first `Writer::write` of a round, after the round before it
+//!   committed. It wakes the commit task.
+//! - `write`, the control: each later `Writer::write` of a round. The draft of each
+//!   write is ready before it is timed.
 //! - `latest next`: one poll of a latest reader's `next` right after each write, which
 //!   gives that frame before its commit.
 //! - `complete next`: one poll of a complete reader's `next` after the round's commit,
@@ -103,7 +106,7 @@ impl Line {
     }
 }
 
-async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
+async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 7] {
     let (hub, mut stamp) = common::hub(&node, tasks).await;
     let config = writer::Config {
         subject: name("bench"),
@@ -116,17 +119,19 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
     let mut latest = hub.reader(&channels, Mode::Latest).await.expect("opens");
     let mut complete = hub.reader(&channels, Mode::Complete).await.expect("opens");
     let mut timer = Line::new("timer", FRAMES);
-    let mut write = Line::new("write", FRAMES);
+    let mut first = Line::new("first write", 1);
+    let mut write = Line::new("write", FRAMES - 1);
     let mut latest_next = Line::new("latest next", FRAMES);
     let mut complete_next = Line::new("complete next", FRAMES);
     let mut grant = Line::new("complete grant", 1);
     let mut wait = Line::new("complete wait", FRAMES - 1);
     for round in 0..WARMUP + ROUNDS {
-        for _ in 0..FRAMES {
+        for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
             timer.add(timed(|| ()));
-            write.add(timed(|| common::write(&mut writer, draft)));
+            let line = if frame == 0 { &mut first } else { &mut write };
+            line.add(timed(|| common::write(&mut writer, draft)));
             latest_next.add(take(&mut latest));
         }
         node.clock().sleep(SETTLE).await;
@@ -139,6 +144,7 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
         }
         let lines = [
             &mut timer,
+            &mut first,
             &mut write,
             &mut latest_next,
             &mut complete_next,
@@ -149,7 +155,7 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
             line.close(round >= WARMUP);
         }
     }
-    [timer, write, latest_next, complete_next, grant, wait]
+    [timer, first, write, latest_next, complete_next, grant, wait]
 }
 
 /// The ns and allocations of the poll of `reader.next()` that gives the frame that
