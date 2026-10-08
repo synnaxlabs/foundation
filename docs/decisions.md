@@ -2213,8 +2213,10 @@ How to read this record:
   the two trees share, so a chunk that the store lost is found only by a put. On `Ok`,
   a put of each chunk of the new tree has returned. BLOB STORE gives what a put holds
   after a fault. Decided by `laptop.architect`, 2026-10-08T12:13:51Z
-  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), and
-  the second sentence 2026-10-08T12:23:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), which
+  supersedes the postcondition of item 2 of
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
+  second sentence 2026-10-08T12:23:54Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059781924), which
   supersedes the second sentence of the SPEC APPLY text of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551. A put
