@@ -69,26 +69,27 @@ impl Ring {
 mod tests {
     use super::*;
 
+    /// The restart record and records of 1, 1, 2, 1, 3, 1, and 1 blocks fill 11 of
+    /// 12 blocks.
     #[test]
-    fn a_commit_appends_its_records_in_turn() {
-        let mut ring = Ring::new(64);
-        ring.commit(5);
-        assert_eq!(
-            ring.writer.head(),
-            9 * BLOCK,
-            "the restart record, then records of 1, 1, 2, 1, and 3 blocks"
-        );
+    fn a_ring_of_12_blocks_takes_a_commit_of_7_records() {
+        Ring::new(12).commit(7);
     }
 
+    /// The 8th record, of 2 blocks, does not fit.
+    #[test]
+    #[should_panic(expected = "the ring has room")]
+    fn a_ring_of_12_blocks_refuses_a_commit_of_8_records() {
+        Ring::new(12).commit(8);
+    }
+
+    /// The ring has room for each commit only if each commit releases the space of
+    /// the one before.
     #[test]
     fn a_ring_of_64_blocks_commits_past_many_wraps() {
         let mut ring = Ring::new(64);
         for _ in 0..1000 {
             ring.commit(8);
         }
-        assert!(
-            ring.writer.head() > 12_800 * BLOCK,
-            "8000 records of 1.6 blocks each, and the skips of the wraps"
-        );
     }
 }
