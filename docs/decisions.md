@@ -1544,8 +1544,10 @@ How to read this record:
   sleep, such as 1 s (about 900 wakeups for each 15-minute hello on each link); a
   `Sleep` type with `reset` for a renewal; `Reader::when(at) -> Option<Monotonic>`,
   which keeps the loop in each caller; an accessor of the monotonic clock on
-  `Reader`, and `hub::Config::clock`. Decided by `laptop.architect-2`,
-  https://github.com/synnaxlabs/foundation/issues/1870.
+  `Reader`, and `hub::Config::clock`. Decided by `laptop.architect-2` in the body of
+  #1870, 2026-10-08T11:30:05Z (https://github.com/synnaxlabs/foundation/issues/1870),
+  and the plan of `Slew::reach` at 2026-10-08T11:36:10Z
+  (https://github.com/synnaxlabs/foundation/issues/1870#issuecomment-6058989780).
 
 ### 1.7 Transport
 
