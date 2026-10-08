@@ -283,6 +283,14 @@ impl Mesh {
         self.group.borrow().state.member(key).cloned()
     }
 
+    /// The key of the member whose card holds `public_key` in this node's view of the
+    /// region, or `None` when no member holds it. At most one member holds a key. It
+    /// answers also after the group stops, from the view at the stop.
+    #[must_use]
+    pub fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
+        self.group.borrow().state.holder(public_key)
+    }
+
     /// The spec pointer in this node's applied state. It answers also after the group
     /// stops, from the view at the stop. This is the agreed pointer. Its spec can have
     /// problems that keep the node on an earlier spec.
@@ -2906,10 +2914,10 @@ mod tests {
             });
         }
 
-        // Members 2 and 4 share one public key. Node 2 is a voter, and node 4 is
-        // not.
+        // Members 2 and 4 would share one public key, so that a message of node 4
+        // could pass the sender check under the key of voter 2.
         #[test]
-        fn not_voter_names_no_key_that_a_voter_holds() {
+        fn a_member_with_the_public_key_of_a_voter_does_not_start() {
             solo(|node, tasks| async move {
                 let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
                 let mut card = common::member(2).card.card().clone();
@@ -2919,12 +2927,8 @@ mod tests {
                     card,
                     ..common::member(4)
                 });
-                let mesh = Mesh::start(config).await.unwrap();
-                let heartbeat = message(4, 1, Body::Heartbeat { commit: 0 });
-                let refused = mesh.receive(public(2), heartbeat);
-                assert_eq!(refused, Err(Error::NotVoter { from: key(4) }));
-                let answer = mesh.answer(public(2), home(2)).await;
-                assert_eq!(answer, Ok(Message::NotLeader { leader: None }));
+                let held = Unfit::Held { key: key(2) };
+                assert_eq!(Mesh::start(config).await.err(), Some(Error::Member(held)));
             });
         }
 

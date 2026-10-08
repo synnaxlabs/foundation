@@ -132,3 +132,12 @@
   the group; `env::files::Files::within`, because `env` then gives two ways to scope
   the files of a crate, beside `buffer::Config::dir`. A change that wants it later
   moves `buffer` and `mesh` together.
+  `Mesh::holder(PublicKey) -> Option<node::Key>` gives the member whose card holds a
+  public key, by a scan of the members, so a caller such as `hub` admits a peer by the
+  key that its transport proves. It gives the key, not a `Member`, which a caller reads
+  with `Mesh::member` when it needs the record. A map by public key lost: it is a second
+  copy that each write of the members must keep in step. At most one member holds a
+  key: `region::State::fits` refuses a second with `Unfit::Held`, at open and at each
+  join. No change replaces a card yet; the change that first does so checks `Held`
+  against each other member. Decided by `laptop.architect` (2026-10-08T22:29:26Z):
+  https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077.
