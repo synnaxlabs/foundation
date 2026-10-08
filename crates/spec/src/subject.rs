@@ -18,15 +18,17 @@ impl Subject {
     ///
     /// # Errors
     ///
-    /// [`Error::Empty`] when `keys` is empty, and [`Error::Duplicate`] with the first
-    /// key that appears twice.
+    /// [`Error::Empty`] when `keys` is empty, and [`Error::Duplicate`] at the first
+    /// key, in the order given, that is a copy of a key before it.
     pub fn new(mut keys: Vec<PublicKey>) -> Result<Self, Error> {
         if keys.is_empty() {
             return Err(Error::Empty);
         }
         let mut seen = Set::default();
-        if let Some(&key) = keys.iter().find(|&&key| !seen.insert(key)) {
-            return Err(Error::Duplicate(key));
+        if let Some((index, &key)) =
+            keys.iter().enumerate().find(|&(_, &key)| !seen.insert(key))
+        {
+            return Err(Error::Duplicate { index, key });
         }
         keys.sort_unstable_by_key(|key| key.to_bytes());
         Ok(Self { keys })
@@ -45,8 +47,13 @@ impl Subject {
 pub enum Error {
     /// The list has no key.
     Empty,
-    /// The key appears twice in the list.
-    Duplicate(PublicKey),
+    /// A key appears twice in the list.
+    Duplicate {
+        /// Where the second copy is in the list.
+        index: usize,
+        /// The key.
+        key: PublicKey,
+    },
 }
 
 impl Error {
@@ -55,7 +62,7 @@ impl Error {
     pub const fn fix(self) -> &'static str {
         match self {
             Self::Empty => "Add at least one public key",
-            Self::Duplicate(_) => "Remove the second copy of the key",
+            Self::Duplicate { .. } => "Remove the second copy of the key",
         }
     }
 }
@@ -64,7 +71,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("the subject has no public key"),
-            Self::Duplicate(key) => write!(f, "the public key {key} appears twice"),
+            Self::Duplicate { key, .. } => {
+                write!(f, "the public key {key} appears twice")
+            }
         }
     }
 }
@@ -95,10 +104,19 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_first_key_that_appears_twice() {
+    fn refuses_the_first_copy_of_a_key_before_it() {
         let keys = vec![key(9), key(3), key(7), key(3), key(9)];
-        assert_eq!(Subject::new(keys), Err(Error::Duplicate(key(3))));
-        let error = Error::Duplicate(key(0xab));
+        assert_eq!(
+            Subject::new(keys),
+            Err(Error::Duplicate {
+                index: 3,
+                key: key(3)
+            })
+        );
+        let error = Error::Duplicate {
+            index: 1,
+            key: key(0xab),
+        };
         assert_eq!(
             error.to_string(),
             format!("the public key {} appears twice", "ab".repeat(32))
@@ -111,8 +129,10 @@ mod tests {
         fn keeps_each_list_of_distinct_keys_in_any_order(
             (sorted, keys) in prop::collection::btree_set(any::<[u8; 32]>(), 1..8)
                 .prop_flat_map(|bytes| {
-                    let sorted: Vec<_> =
-                        bytes.into_iter().filter_map(|b| PublicKey::new(b).ok()).collect();
+                    let sorted: Vec<_> = bytes
+                        .into_iter()
+                        .filter_map(|b| PublicKey::new(b).ok())
+                        .collect();
                     (Just(sorted.clone()), Just(sorted).prop_shuffle())
                 }),
         ) {

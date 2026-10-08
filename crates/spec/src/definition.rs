@@ -484,7 +484,8 @@ impl<'a> Reader<'a> {
     }
 
     fn key(&mut self) -> Result<Key, Error> {
-        self.array().map(|bytes| Key::from_u128(u128::from_le_bytes(bytes)))
+        self.array()
+            .map(|bytes| Key::from_u128(u128::from_le_bytes(bytes)))
     }
 
     fn optional_key(&mut self) -> Result<Option<Key>, Error> {
@@ -657,11 +658,7 @@ impl<'a> Reader<'a> {
         let mut keys: Vec<PublicKey> = Vec::with_capacity(n);
         for _ in 0..n {
             let at = self.at();
-            let (&bytes, rest) = self
-                .rest
-                .split_first_chunk()
-                .ok_or(Error::Truncated { at })?;
-            self.rest = rest;
+            let bytes = self.array()?;
             if keys.last().is_some_and(|last| last.to_bytes() >= bytes) {
                 return Err(Error::KeyOrder { at });
             }
@@ -671,7 +668,7 @@ impl<'a> Reader<'a> {
         }
         Subject::new(keys).map_err(|error| match error {
             subject::Error::Empty => Error::NoKeys { at: start },
-            subject::Error::Duplicate(_) => {
+            subject::Error::Duplicate { .. } => {
                 unreachable!("the keys are in strict order")
             }
         })
