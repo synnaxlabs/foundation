@@ -44,21 +44,31 @@ fn private_key() -> PrivateKey {
 }
 
 fn public_key() -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key().0).unwrap();
+    public_key_of(&private_key())
+}
+
+/// The public half of `private_key`.
+fn public_key_of(private_key: &PrivateKey) -> PublicKey {
+    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0).unwrap();
     PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
 }
 
 /// The record of the node `KEY`, with a card that the node signed.
 fn create_member() -> Member {
+    create_member_of(KEY, &private_key())
+}
+
+/// The record of the node `key`, with a card that `private_key` signed.
+fn create_member_of(key: node::Key, private_key: &PrivateKey) -> Member {
     let card = Card {
-        name: "plant.node1".parse().unwrap(),
-        public_key: public_key(),
+        name: format!("plant.node{}", key.as_u128()).parse().unwrap(),
+        public_key: public_key_of(private_key),
         seal_key: SealKey::new([9; 32]).unwrap(),
         addresses: Addresses::new(Vec::new()).unwrap(),
         version: 1,
     };
     Member {
-        card: card::Signed::sign(KEY, card, &private_key()),
+        card: card::Signed::sign(key, card, private_key),
         admission: [0; 64],
         ephemeral: None,
         status: Status::new([].into()).unwrap(),
@@ -174,29 +184,20 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
-// This node is the second member and not a voter, so no other key of the config is
-// its key.
+// This node is the middle one of three members and not a voter, so no key at an end
+// of the members or of the voters is its key.
 #[test]
 fn key_gives_the_key_of_the_config() {
     solo(|node, tasks| async move {
-        let private_key = || PrivateKey([2; 32]);
-        let pair = Ed25519KeyPair::from_seed_unchecked(&private_key().0).unwrap();
-        let public_key = pair.public_key().as_ref().try_into().unwrap();
-        let card = Card {
-            name: "plant.node2".parse().unwrap(),
-            public_key: PublicKey::new(public_key).unwrap(),
-            seal_key: SealKey::new([9; 32]).unwrap(),
-            addresses: Addresses::new(Vec::new()).unwrap(),
-            version: 1,
-        };
-        let card = card::Signed::sign(OTHER, card, &private_key());
-        let mut config = create_config_on(&node, &tasks, private_key());
+        let own = || PrivateKey([2; 32]);
+        let last = node::Key::from_u128(3);
+        let mut config = create_config_on(&node, &tasks, own());
         config.key = OTHER;
-        config.private_key = private_key();
-        config.members.push(Member {
-            card,
-            ..create_member()
-        });
+        config.private_key = own();
+        config.members.push(create_member_of(OTHER, &own()));
+        config
+            .members
+            .push(create_member_of(last, &PrivateKey([3; 32])));
         let mesh = Mesh::open(config).await.unwrap();
         assert_eq!(mesh.key(), OTHER);
     });
