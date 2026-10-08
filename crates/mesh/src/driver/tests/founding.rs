@@ -280,9 +280,8 @@ fn a_founding_of_another_version_or_form_is_refused() {
     }
 }
 
-/// A power cut at any point of a first open leaves a directory that opens again with
-/// the same founding. Once `founding` is in the directory, an open with another one is
-/// refused.
+/// A power cut in a first open before `founding` is in the directory leaves a first
+/// open, also with another founding. After it, an open with another one is refused.
 #[test]
 fn a_power_cut_in_the_first_open_keeps_a_whole_founding_or_none() {
     let (mut cut_before, mut cut_after) = (0_usize, 0_usize);
@@ -321,18 +320,21 @@ fn a_power_cut_in_the_first_open_keeps_a_whole_founding_or_none() {
                 node.files().list(Path::new("")).await.unwrap()
             })
             .unwrap();
-        if kept.contains(&PathBuf::from(FILE)) {
+        let other = region::Founding {
+            voters: [key(1)].into(),
+            ..region.clone()
+        };
+        let (stored, given) = if kept.contains(&PathBuf::from(FILE)) {
             cut_after = cut_after.saturating_add(1);
-            let given = region::Founding {
-                voters: [key(1)].into(),
-                ..region.clone()
-            };
-            let error = refused(&mut sim, &node, given.clone());
-            assert_eq!(error, mismatch(&region, &given), "step {step}");
+            (region, other)
         } else {
             cut_before = cut_before.saturating_add(1);
-        }
-        run_with(&mut sim, &node, region);
+            run_with(&mut sim, &node, other.clone());
+            (other, region)
+        };
+        let error = refused(&mut sim, &node, given.clone());
+        assert_eq!(error, mismatch(&stored, &given), "step {step}");
+        run_with(&mut sim, &node, stored);
     }
     assert_ne!(cut_before, 0, "no cut came before the founding was kept");
     assert_ne!(cut_after, 0, "no cut came after the founding was kept");
