@@ -39,10 +39,10 @@
   tab, then `]:`, with no backslash escapes. The message names the line. GitHub reads
   some of these lines in a different way, and an open `<!--` or `<details>` hides the
   text after it. A round comment that fails by this rule gets an edit that puts the
-  line in a code span, and the cutoff stays. In
-  an old round, a `Hot path:` line, or a `Reviewers:` line of a round that does not
-  parse, counts where GitHub shows it as a line of text of a paragraph, at any depth
-  and any indent. A line of a code block or an HTML block does not count. Changed by
+  line in a code span, and the cutoff stays. In an old round, a `Hot path:` line, or a
+  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
+  line of text of a paragraph, at any depth and any indent. A line of a code block or an
+  HTML block does not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783, with the rulings of the
   director at 2026-10-08T21:47:24Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
