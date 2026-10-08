@@ -8,7 +8,7 @@ use env::net::{Error, listener, tcp};
 use rustix::fs::OFlags;
 use rustix::io::{Errno, FdFlags};
 use rustix::net::{AddressFamily, SocketType, ipproto, sockopt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 use super::socket::Socket;
 use super::stream::Stream;
@@ -18,6 +18,8 @@ use super::{apply, canonical, errno, io_error};
 pub(super) struct Listener {
     socket: Socket<std::net::TcpListener, TcpListener>,
     local: SocketAddr,
+    /// Set again on each accepted stream.
+    options: tcp::Options,
 }
 
 impl Listener {
@@ -28,8 +30,9 @@ impl Listener {
         let local = config.local;
         let fd = socket(local).map_err(io_error)?;
         sockopt::set_socket_reuseaddr(&fd, true).map_err(io_error)?;
-        // Each accepted stream inherits the options, and Linux sizes the window of
-        // each stream from the buffers of the listener.
+        // The window scale of each accepted stream comes from the receive buffer of
+        // the listener. macOS does not copy it to the stream, so `accepted` sets each
+        // option again.
         apply(fd.as_fd(), &config.options).map_err(io_error)?;
         bind(fd.as_fd(), local)?;
         listen(fd.as_fd(), local, config.backlog)?;
@@ -38,6 +41,7 @@ impl Listener {
         Ok(Self {
             socket: Socket::Idle(listener),
             local: canonical(local),
+            options: config.options,
         })
     }
 }
@@ -79,11 +83,15 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
-/// A stream the kernel accepted, with the options of the listener inherited.
-fn accepted(stream: TcpStream, peer: SocketAddr) -> Result<Stream, Error> {
-    let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
+/// A stream the kernel accepted from `peer`, with `options` set.
+fn accepted(
+    stream: std::net::TcpStream,
+    peer: SocketAddr,
+    options: &tcp::Options,
+) -> Result<Stream, Error> {
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    Stream::new(stream, canonical(local), canonical(peer)).map_err(io_error)
+    Stream::new(stream, canonical(local), canonical(peer), Some(options))
+        .map_err(io_error)
 }
 
 impl listener::Driver for Listener {
@@ -101,7 +109,8 @@ impl listener::Driver for Listener {
             .map_err(io_error)?;
         let (stream, peer) =
             ready!(listener.poll_accept(cx)).map_err(|e| io_error(errno(&e)))?;
-        let stream = accepted(stream, peer)?;
+        let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
+        let stream = accepted(stream, peer, &self.options)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
 }
@@ -172,7 +181,12 @@ mod tests {
         let fd = listener.socket.fd().unwrap();
         // macOS can queue the connection after `connect` returns.
         rustix::fs::fcntl_setfl(fd, OFlags::empty()).unwrap();
-        let accepted = rustix::net::accept(fd).unwrap();
+        let fd = rustix::net::accept(fd).unwrap();
+        let peer = rustix::net::getpeername(&fd).unwrap().unwrap();
+        // A copy of the descriptor sees the options of the socket.
+        let accepted = rustix::io::dup(&fd).unwrap();
+        let peer = peer.try_into().unwrap();
+        let _stream = super::accepted(fd.into(), peer, &options()).unwrap();
         let kept = super::super::tests::kept;
         let sent = sockopt::socket_send_buffer_size(&accepted).unwrap();
         if cfg!(target_os = "macos") {

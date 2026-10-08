@@ -2,6 +2,7 @@
 
 use std::io::IoSlice;
 use std::net::SocketAddr;
+use std::os::fd::AsFd;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
 use super::socket::Socket;
-use super::{errno, io_error, stream_error};
+use super::{apply, errno, io_error, stream_error};
 
 /// A connected stream. `SO_LINGER` 0 is set from `new` until `poll_close`, so a drop
 /// before it resets the peer.
@@ -30,24 +31,58 @@ pub(super) struct Stream {
 
 impl Stream {
     /// A stream over `stream`, connected from `local` to `peer`, before its first poll.
-    /// Gives the code of a failed `SO_LINGER`.
+    /// It sets `options` when given, then `SO_LINGER` 0. When a reset ended the
+    /// socket first, the stream gives the reset.
+    ///
+    /// # Errors
+    ///
+    /// The code of a failed option. macOS refuses an option on a socket that a reset
+    /// ended with `EINVAL`, so `EINVAL` comes only with no error pending.
     pub(super) fn new(
         stream: std::net::TcpStream,
         local: SocketAddr,
         peer: SocketAddr,
+        options: Option<&tcp::Options>,
     ) -> Result<Self, Errno> {
-        sockopt::set_socket_linger(&stream, Some(Duration::ZERO))?;
+        let set = options
+            .map_or(Ok(()), |options| apply(stream.as_fd(), options))
+            .and_then(|()| sockopt::set_socket_linger(&stream, Some(Duration::ZERO)));
+        let failed = match set {
+            Ok(()) => None,
+            Err(Errno::INVAL) => match Self::pending(&stream) {
+                Some(code) => Some(stream_error(code, peer)),
+                None => return Err(Errno::INVAL),
+            },
+            Err(code) => return Err(code),
+        };
         Ok(Self {
             socket: Socket::Idle(stream),
             local,
             peer,
             closed: false,
-            failed: None,
+            failed,
         })
     }
 
+    /// A stream over `stream` that `error` ended before its first poll. It sets no
+    /// option, so that macOS does not refuse one.
+    pub(super) fn ended(
+        stream: std::net::TcpStream,
+        local: SocketAddr,
+        peer: SocketAddr,
+        error: Error,
+    ) -> Self {
+        Self {
+            socket: Socket::Idle(stream),
+            local,
+            peer,
+            closed: false,
+            failed: Some(error),
+        }
+    }
+
     /// Records `error` as the end of the stream, and gives it.
-    pub(super) fn fail(&mut self, error: Error) -> Error {
+    fn fail(&mut self, error: Error) -> Error {
         self.failed = Some(error.clone());
         error
     }
@@ -63,7 +98,7 @@ impl Stream {
     }
 
     /// The error the kernel holds for the stream, after an event no poll reported.
-    fn pending(stream: &TcpStream) -> Option<Errno> {
+    fn pending(stream: impl AsFd) -> Option<Errno> {
         match sockopt::socket_error(stream) {
             Ok(Ok(())) => None,
             Ok(Err(code)) | Err(code) => Some(code),
@@ -112,7 +147,7 @@ impl tcp::Driver for Stream {
         if self.closed {
             // A reset after the close is the stream's end. Without one, the write
             // is a misuse, as `sim` reports it.
-            return Poll::Ready(Err(match Self::pending(&stream) {
+            return Poll::Ready(Err(match Self::pending(&*stream) {
                 Some(code) => self.fail(stream_error(code, peer)),
                 None => io_error(Errno::PIPE),
             }));
@@ -130,7 +165,7 @@ impl tcp::Driver for Stream {
             return Poll::Ready(Err(failed.clone()));
         }
         if self.closed {
-            return Poll::Ready(match Self::pending(&stream) {
+            return Poll::Ready(match Self::pending(&*stream) {
                 Some(code) => Err(self.fail(stream_error(code, peer))),
                 None => Ok(()),
             });
@@ -142,7 +177,7 @@ impl tcp::Driver for Stream {
             // The connection ended with no poll that reported why. After a reset,
             // macOS refuses the linger with `EINVAL`.
             Err(code @ (Errno::NOTCONN | Errno::INVAL)) => {
-                Err(Self::pending(&stream).unwrap_or(code))
+                Err(Self::pending(&*stream).unwrap_or(code))
             }
             outcome => outcome,
         };
@@ -176,7 +211,7 @@ mod tests {
     use std::future::poll_fn;
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener};
-    use std::os::fd::{AsFd, OwnedFd};
+    use std::os::fd::OwnedFd;
 
     use tcp::Driver as _;
 
@@ -193,10 +228,20 @@ mod tests {
     }
 
     fn stream(socket: std::net::TcpStream) -> Stream {
+        let peer = socket.peer_addr().unwrap();
+        stream_to(socket, peer)
+    }
+
+    /// A stream over `socket` that names `peer`, which the kernel may no longer hold.
+    fn stream_to(socket: std::net::TcpStream, peer: SocketAddr) -> Stream {
         socket.set_nonblocking(true).unwrap();
         let local = socket.local_addr().unwrap();
-        let peer = socket.peer_addr().unwrap();
-        Stream::new(socket, local, peer).unwrap()
+        Stream::new(socket, local, peer, None).unwrap()
+    }
+
+    /// An address to name a peer the kernel no longer holds.
+    fn loopback() -> SocketAddr {
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1)
     }
 
     /// Closes a stream over `client` and drops it, and gives a descriptor that still
@@ -279,6 +324,25 @@ mod tests {
         let closed = on_runtime(|| poll_fn(|cx| stream.poll_close(cx)));
         let code = Errno::NOTCONN.raw_os_error();
         assert_eq!(closed, Err(Error::Io { code }));
+    }
+
+    /// macOS refuses the linger with `EINVAL`, and the stream takes the reset from
+    /// the socket. Linux sets it, and the read finds the reset.
+    #[test]
+    fn a_stream_over_a_socket_a_reset_ended_reads_the_reset() {
+        let (client, server) = create_pair();
+        sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
+        drop(server);
+        let mut tries = 0;
+        while client.peer_addr().is_ok() {
+            tries += 1;
+            assert!(tries < 1 << 20, "the reset arrives");
+            std::thread::yield_now();
+        }
+        let mut stream = stream_to(client, loopback());
+        let reset = Err(Error::Reset { remote: loopback() });
+        let read = on_runtime(|| poll_fn(|cx| stream.poll_read(cx, &mut [0; 8])));
+        assert_eq!(read, reset);
     }
 
     #[test]

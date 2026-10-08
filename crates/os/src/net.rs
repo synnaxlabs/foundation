@@ -72,12 +72,13 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
     let peer = peer(&stream, remote)?;
-    let mut stream = Stream::new(stream, canonical(local), peer).map_err(failed)?;
-    if let Some(reset) = reset {
+    let local = canonical(local);
+    let stream = match reset {
         // The kernel gave the reset to `take_error`, so a read would see an end of
         // stream.
-        stream.fail(reset);
-    }
+        Some(reset) => Stream::ended(stream, local, peer, reset),
+        None => Stream::new(stream, local, peer, None).map_err(failed)?,
+    };
     Ok(Box::new(stream))
 }
 
