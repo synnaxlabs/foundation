@@ -993,7 +993,6 @@ impl Share {
     /// never past it, so a class alone makes no debt or credit.
     fn took(&mut self, class: Class, bytes: usize, paired: bool) {
         let (change, other) = match class {
-            _ if bytes == 0 => return,
             Class::Latest => (LATEST_COST, Class::Complete),
             Class::Complete => (-1, Class::Latest),
             Class::Command | Class::CatchUp => return,
@@ -3320,6 +3319,34 @@ mod tests {
             share.took(Class::Latest, 50, false);
             assert_eq!(share.owed, 0);
             assert_eq!(share.order(), Order::RANK);
+        }
+
+        #[test]
+        fn a_class_is_owed_at_most_one_peer_window_of_latest() {
+            let mut share = Share {
+                window: 100,
+                ..Share::default()
+            };
+            share.took(Class::Latest, 1000, true);
+            assert_eq!(share.owed, LATEST_COST * 100);
+            share.took(Class::Complete, 1000, true);
+            assert_eq!(share.owed, -LATEST_COST * 100);
+        }
+
+        #[test]
+        fn a_class_competes_until_the_other_sends_one_peer_window() {
+            let mut share = Share {
+                window: 100,
+                ..Share::default()
+            };
+            let budget = Budget::new(10);
+            assert!(!share.competes(Class::Latest, &budget));
+            share.offered(Class::Latest);
+            share.took(Class::Complete, 99, false);
+            assert!(share.competes(Class::Latest, &budget));
+            share.took(Class::Complete, 1, false);
+            assert!(!share.competes(Class::Latest, &budget));
+            assert!(share.competes(Class::Complete, &budget));
         }
 
         #[test]
