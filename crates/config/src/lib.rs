@@ -821,26 +821,12 @@ mod tests {
     }
 
     #[test]
-    fn checks_the_budgets_of_a_policy_that_holds_a_block() {
-        let mut policy = settings(0, 0, "a", &[("select", string("site_a.*"))]);
-        policy.body.blocks.push(block(0, 50, "inner", &[], &[]));
-        assert_eq!(
-            check(&[document(vec![policy])]),
-            Err(vec![
-                refused(
-                    "document.missing-attribute",
-                    at(0, 0),
-                    "the `node_settings` block has no `disk` or `pool`",
-                    NO_BUDGET_FIX,
-                ),
-                refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `node_settings` block cannot hold the `inner` block",
-                    "Remove it",
-                ),
-            ])
-        );
+    fn refuses_a_block_inside_each_kind_but_a_connector() {
+        for (kind, _) in KINDS {
+            if kind != definition::Kind::Connector {
+                assert_inner_blocks_refused(kind.as_str(), &[]);
+            }
+        }
     }
 
     #[test]
@@ -856,6 +842,7 @@ mod tests {
             vec![select(), ("disk", string("nope"))],
             vec![select(), ("pool", Kind::Integer(7))],
             vec![select(), ("disk", string("0B"))],
+            vec![select(), ("disk", string("1GiB")), ("size", string("1GiB"))],
         ];
         for attributes in cases {
             assert_inner_blocks_refused("node_settings", &attributes);
@@ -1394,51 +1381,6 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_placement() {
-            let [mut documents] =
-                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `placement` block cannot hold the `inner` block",
-                    "Remove it",
-                )])
-            );
-        }
-
-        #[test]
-        fn checks_a_placement_that_holds_a_block_as_a_whole() {
-            let [mut documents] = placement(&[("select", string("edge.*"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "config.empty-placement",
-                        at(0, 0),
-                        "the `placement` block names no home, no standby, and no copy",
-                        "Name a `home`, a `standby`, or a node in `copies`",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_an_attribute_that_a_placement_does_not_have() {
             let attributes = [
                 ("select", string("edge.*")),
@@ -1453,36 +1395,6 @@ mod tests {
                     "`node` is not an attribute of the `placement` block",
                     "Use `select`, `home`, `standby`, or `copies`, or remove it",
                 )])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_placement_with_an_unknown_attribute() {
-            let [mut documents] = placement(&[
-                ("select", string("edge.*")),
-                ("home", string("edge")),
-                ("node", string("edge")),
-            ]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.unknown-attribute",
-                        at(0, 14),
-                        "`node` is not an attribute of the `placement` block",
-                        "Use `select`, `home`, `standby`, or `copies`, or remove it",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
             );
         }
 
@@ -1503,6 +1415,7 @@ mod tests {
                     ("home", string("n_1")),
                     ("standby", string("n_1")),
                 ],
+                vec![select(), ("home", string("edge")), ("node", string("edge"))],
             ];
             for attributes in cases {
                 assert_inner_blocks_refused("placement", &attributes);
@@ -1652,82 +1565,6 @@ mod tests {
         }
 
         #[test]
-        fn checks_a_retention_that_holds_a_block_as_a_whole() {
-            let [mut documents] =
-                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.negative-span",
-                        at(0, 13),
-                        "the span -1s is below zero",
-                        "Write a span of zero or more",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_retention() {
-            let [mut documents] =
-                retention(&[("select", string("edge.**")), ("keep", string("3d"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `retention` block cannot hold the `inner` block",
-                    "Remove it",
-                )])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_retention_with_an_unknown_attribute() {
-            let [mut documents] = retention(&[
-                ("select", string("edge.**")),
-                ("keep", string("3d")),
-                ("hold", string("1d")),
-            ]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.unknown-attribute",
-                        at(0, 14),
-                        "`hold` is not an attribute of the `retention` block",
-                        "Use `select` or `keep`, or remove it",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_a_block_inside_a_retention_with_any_attributes() {
             let select = || ("select", string("edge.**"));
             let cases = [
@@ -1739,6 +1576,7 @@ mod tests {
                 vec![select(), ("keep", Kind::Integer(3))],
                 vec![select(), ("keep", string("nope"))],
                 vec![select(), ("keep", string("-3d"))],
+                vec![select(), ("keep", string("3d")), ("hold", string("1d"))],
             ];
             for attributes in cases {
                 assert_inner_blocks_refused("retention", &attributes);
