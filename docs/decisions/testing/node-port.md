@@ -62,9 +62,8 @@
   failed sync of an earlier start can leave a key that a read sees but a power cut
   loses. A node that joins by ticket (#336) makes its key the same way at its first
   start. A file of another length, tag, or checksum gives `Error::Key`, which
-  `Node::join` ranks above `Error::Blob`, `Error::Mesh`, `Error::Transport`, and
-  `Error::Group`; the node never writes over it, because a new key is a new node to its
-  region. Each other file error on `node.key` gives `Error::Directory`. The form is not
+  `Node::join` ranks above `Error::Blob` and `Error::Mesh`; the node never writes over
+  it, because a new key is a new node to its region. Each other file error on `node.key` gives `Error::Directory`. The form is not
   a contract: only `node` reads it. The seal key goes into `node.key` with its first
   caller, as the tag `foundation/key/2` with 32 more bytes. `admin.key` (#1744 PR 1b)
   shares this code when it lands. #1988 makes `os` give each file the mode `0600` and
