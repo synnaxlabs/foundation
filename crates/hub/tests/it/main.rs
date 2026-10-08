@@ -28,6 +28,7 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
+mod client;
 mod serve;
 
 /// The node key of the hub under test.

@@ -21,8 +21,8 @@ use types::time::Span;
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::{
-    CAPPED, CHANGED, Challenge, EXPIRED, FromGateway, Program, REFUSED, Request, STALE,
-    Signed, UNSYNCED, VIA,
+    CAPPED, CHANGED, Challenge, EXPIRED, REFUSED, Request, Response, STALE, Signed,
+    UNSYNCED, VIA,
 };
 
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
@@ -102,7 +102,7 @@ where
             test.sync().await;
         }
         test.hub.rules(rules());
-        let transport = transport(&node, &tasks, &own_pool(), HOME);
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");
         let link = test.hub.link(session.clone());
         while let Ok(mut incoming) = session.accept().await {
@@ -158,7 +158,6 @@ where
             pool: std::rc::Rc::clone(&pool),
             sender,
             receiver,
-            program: Program::default(),
         };
         hello.send(&wire::header::encode(Protocol::Hub)).await;
         let agent = Agent {
@@ -191,7 +190,6 @@ struct Stream {
     pool: std::rc::Rc<block::Pool>,
     sender: Sender,
     receiver: Receiver,
-    program: Program,
 }
 
 impl Stream {
@@ -210,22 +208,19 @@ impl Stream {
     async fn challenge(&mut self) -> Challenge {
         let message = self.receiver.recv().await.expect("a message");
         let message = message.expect("a challenge before the finish");
-        match self.program.decode(&message) {
-            Ok(FromGateway::Challenge(challenge)) => challenge,
-            other => panic!("a challenge, not {other:?}"),
-        }
+        Challenge::decode(&message).expect("a challenge")
     }
 
     /// The response and its body, once the node finished the stream.
     async fn response(&mut self) -> Vec<u8> {
+        let message = self.receiver.recv().await.expect("a message");
+        let message = message.expect("a response before the finish");
+        let mut rest = Response::decode(&message).expect("a response").body();
         let mut body = Vec::new();
         while let Some(message) = self.receiver.recv().await.expect("a message") {
-            match self.program.decode(&message).expect("a valid message") {
-                FromGateway::Response(_) => {}
-                FromGateway::Body { bytes, .. } => body.extend_from_slice(bytes),
-                FromGateway::Challenge(challenge) => panic!("{challenge:?}"),
-            }
+            body.extend_from_slice(rest.take(&message).expect("a body message"));
         }
+        rest.end().expect("the whole body");
         body
     }
 }
@@ -257,10 +252,12 @@ impl Agent {
         self.hello.send(&signed(hello, key)).await;
     }
 
-    /// Takes the challenge and answers it with a valid hello.
-    async fn admit(&mut self) {
+    /// Takes the challenge, answers it with a valid hello, and gives the next
+    /// challenge, which the node sends once it admitted the hello.
+    async fn admit(&mut self) -> Challenge {
         let challenge = self.hello.challenge().await;
         self.send_hello(Self::hello(challenge), &AGENT).await;
+        self.hello.challenge().await
     }
 
     /// Opens a request stream and sends its header.
@@ -271,7 +268,6 @@ impl Agent {
             pool: std::rc::Rc::clone(&self.pool),
             sender,
             receiver,
-            program: Program::default(),
         };
         stream.send(&wire::header::encode(Protocol::Hub)).await;
         stream
@@ -327,7 +323,6 @@ fn reset_with(code: u32) -> Result<Option<Vec<u8>>, transport::Error> {
 fn answers_a_request_of_an_admitted_hello() {
     let home = session(80, true, |mut agent| async move {
         agent.admit().await;
-        agent.hello.challenge().await;
         let mut stream = agent.request(4, b"ping").await;
         assert_eq!(stream.response().await, b"gnip");
         agent.hello.sender.finish().expect("finishes");
@@ -390,7 +385,7 @@ fn refuses_a_hello_of_a_key_the_spec_does_not_list_and_closes_the_session() {
     );
     assert_eq!(
         serve::Error::Access(Refusal::Signature).to_string(),
-        "access refused the program: the signature does not verify"
+        "access refused the program: the signature is not of the message by the key"
     );
 }
 
@@ -490,8 +485,7 @@ fn keeps_the_session_past_the_first_expiry_after_a_renewal() {
 #[test]
 fn refuses_a_renewal_on_another_connection() {
     let home = session(89, true, |mut agent| async move {
-        agent.admit().await;
-        let challenge = agent.hello.challenge().await;
+        let challenge = agent.admit().await;
         let mut hello = Agent::hello(challenge);
         hello.connection = connection::Key([8; 16]);
         agent.send_hello(hello, &AGENT).await;
@@ -508,10 +502,11 @@ fn refuses_a_renewal_on_another_connection() {
 #[test]
 fn stops_a_request_before_the_hello_is_admitted() {
     let home = session(90, true, |mut agent| async move {
-        agent.hello.challenge().await;
+        let challenge = agent.hello.challenge().await;
         let mut early = agent.request(2, b"ab").await;
         assert_eq!(early.recv().await, reset_with(MALFORMED));
-        agent.admit().await;
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        agent.hello.challenge().await;
         let mut stream = agent.request(2, b"cd").await;
         assert_eq!(stream.response().await, b"dc");
     });
@@ -546,6 +541,7 @@ fn stops_a_second_request_while_one_is_open() {
             Err(serve::Error::Pending),
             Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
             Ok(Got::Request(name(SUBJECT), b"ef".to_vec())),
+            Err(serve::Error::Stream(closed_with(0))),
         ]
     );
     assert_eq!(
@@ -568,6 +564,7 @@ fn takes_each_request_sent_once_the_last_reply_ends() {
     });
     let expected: Vec<_> = (0..COUNT)
         .map(|i| Ok(Got::Request(name(SUBJECT), vec![i, 0])))
+        .chain([Err(serve::Error::Stream(closed_with(0)))])
         .collect();
     assert_eq!(home.served, expected);
 }
@@ -589,13 +586,10 @@ fn stops_a_hello_on_a_request_stream() {
     assert_eq!(
         home.served,
         [
-            Err(serve::Error::Hello),
+            Err(serve::Error::Message(wire::hub::Error::Kind { kind: 4 })),
             Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
+            Err(serve::Error::Stream(closed_with(0))),
         ]
-    );
-    assert_eq!(
-        serve::Error::Hello.to_string(),
-        "the program sent a hello on a stream after the first"
     );
 }
 
@@ -615,10 +609,17 @@ fn stops_a_request_whose_body_did_not_come() {
         stream.sender.finish().expect("finishes");
         assert_eq!(stream.recv().await, reset_with(MALFORMED));
     });
-    assert_eq!(home.served, [Err(serve::Error::Unfinished { remain: 6 })]);
+    let unfinished = wire::hub::Error::Unfinished { remain: 6 };
     assert_eq!(
-        serve::Error::Unfinished { remain: 6 }.to_string(),
-        "the program finished a request with 6 bytes of its body unsent"
+        home.served,
+        [
+            Err(serve::Error::Message(unfinished.clone())),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
+    );
+    assert_eq!(
+        serve::Error::Message(unfinished).to_string(),
+        "a hub message is not valid: the stream ended with 6 bytes of its body to come"
     );
 }
 
@@ -665,13 +666,12 @@ fn ends_a_request_stream_that_finished_before_its_request() {
 fn closes_the_session_on_a_request_on_the_hello_stream() {
     let home = session(95, true, |mut agent| async move {
         agent.admit().await;
-        agent.hello.challenge().await;
         agent.hello.send(&empty_request()).await;
         assert_eq!(agent.closed().await, closed_with(MALFORMED));
     });
     assert_eq!(
         home.served,
-        [Err(serve::Error::Message(wire::hub::Error::Mixed {
+        [Err(serve::Error::Message(wire::hub::Error::Kind {
             kind: 5
         }))]
     );
@@ -686,7 +686,12 @@ fn closes_the_session_on_a_request_before_the_first_hello() {
         agent.hello.send(&empty_request()).await;
         assert_eq!(agent.closed().await, closed_with(MALFORMED));
     });
-    assert_eq!(home.served, [Err(serve::Error::Unadmitted)]);
+    assert_eq!(
+        home.served,
+        [Err(serve::Error::Message(wire::hub::Error::Kind {
+            kind: 5
+        }))]
+    );
 }
 
 /// A request with no body and a signature that does not verify.

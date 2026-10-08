@@ -213,7 +213,7 @@ pub(crate) async fn request(
     shared: &Rc<Shared>,
     incoming: Incoming,
 ) -> Result<Served, Error> {
-    let (mut receiver, sender) = halves(incoming)?;
+    let (mut receiver, mut sender) = halves(incoming)?;
     match read(shared, &mut receiver).await {
         Ok(Some((admitted, body, signature, open))) => {
             Ok(Served::Request(Box::new(Request {
@@ -228,7 +228,10 @@ pub(crate) async fn request(
                 },
             })))
         }
-        Ok(None) => Ok(Served::Ended),
+        Ok(None) => {
+            sender.finish()?;
+            Ok(Served::Ended)
+        }
         Err(error) => {
             stop(receiver, sender, &error);
             Err(error)
