@@ -1099,13 +1099,21 @@ fn defines_a_data_channel_before_its_index_in_one_call() {
 }
 
 #[test]
-fn defines_no_channel_from_a_definition_of_another_kind() {
+fn defines_each_channel_and_no_other_kind_of_definition() {
     run(2, |test| async move {
         let select = types::name::Selector::new(["plant.**"]).expect("a selector");
         let policy = spec::time::Policy::new(select, spec::time::Peers::Voters);
-        let other = name("plant.time");
-        test.hub.define([(&other, &Definition::Time(policy))]);
-        let writer = test.hub.writer(config("a", &["plant.time"])).await;
+        let (other, temp, time) =
+            (name("plant.clock"), name("plant.temp"), name("plant.time"));
+        test.hub.define([
+            (&other, &Definition::Time(policy)),
+            (&temp, &definition(7, DataType::Sample(I64), 6)),
+            (&time, &definition(6, DataType::Sample(STAMP), 6)),
+        ]);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+        let writer = test.hub.writer(config("a", &["plant.clock"])).await;
         let error = writer.expect_err("an error");
         assert_eq!(error, writer::Error::Unknown(other));
     });
