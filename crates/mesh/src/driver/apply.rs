@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use spec::Pointer;
 use spec::definition::Definition;
 use spec::tree::{self, Chunks, Update};
 use types::digest::Digest;
@@ -11,7 +12,6 @@ use types::node;
 use super::{Mesh, put};
 use crate::change::{CHUNKS_MAX, Change};
 use crate::error::Error;
-use crate::pointer::Pointer;
 use crate::region::{self, Refused};
 
 impl Mesh {

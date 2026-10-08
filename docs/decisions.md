@@ -2326,11 +2326,15 @@ How to read this record:
   committed spec with problems moves the pointer, and the node keeps the last spec it
   used (#1741). The pointer before the first change is version 0 at the root of the tree
   of `Config::founding`. No BQ12 signature check on the change in this milestone
-  (#1213). Trigger: #1887 moves `mesh::Pointer` to `spec::Pointer` before a `wire`
-  message carries it (`laptop.architect`, 2026-10-08T13:26:52Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734).
-  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region
-  state, and a check at each open stops a node on a later build whose checks find more
+  (#1213). The pointer is `spec::Pointer`, and `mesh` has no pointer type of its own
+  (#1887; `laptop.architect`, 2026-10-08T13:26:52Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734, and the
+  removal at 2026-10-08T16:04:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
+  supersedes the `mesh::Pointer` of
+  https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836.
+  `Mesh::open` runs no check of `Config::founding`: the founding is agreed region state,
+  and a check at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
@@ -2342,7 +2346,7 @@ How to read this record:
   founding definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
-  the trigger for `Pointer`, 2026-10-08T08:22:08Z
+  the move of `Pointer` to a layer 1 crate, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
   check of the founding at open, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
@@ -3309,9 +3313,9 @@ How to read this record:
   `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`,
   and `transport` in its line of the crate map. `Config::founding` adds
   `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
-  `Pointer`, whose root is a `types::digest::Digest`. So a crate that opens a region
-  also has `spec` in its line. Decided by `laptop.architect`: the founding definitions,
-  2026-10-08T06:12:36Z
+  `spec::Pointer`, whose root is a `types::digest::Digest`. So a crate that opens a
+  region also has `spec` in its line. Decided by `laptop.architect`: the founding
+  definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   pointer, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); this
@@ -6310,7 +6314,7 @@ Storage classes used in the table:
 | Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40), with a version per name in the associated data. Every node takes a write or a delete only at the newest version plus one, and a re-seal only at the newest version, from and to nodes of the secret's placement. A delete is a version with no value. The newest version of a name is never compacted away, also after the spec removes the secret | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it in `secret::store::Sealed`, which refuses a value that does not open at its version | `mesh` (record), `secret` (seal and open) |
 | Join ticket record | Region state: options and use count. The ticket itself is a secret, never in files | Admin through `ops` | Voters at join | `mesh`, `ops` |
 | Delegation record | The parent region's spec: `{ prefix, epoch, initial voters }` | Parent voters | Nodes (epoch fencing) | `mesh` |
-| Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `mesh` |
+| Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `spec` (type), `mesh` (record, compare-and-swap) |
 | Spec tree | Prolly tree chunks in the `blob` store on each node's disk | `apply` writes chunks | Nodes fetch the ranges they use | `spec` (tree), `blob` (chunks) |
 | Changes channel | The region's Raft log presented as a channel; seq is the log index; one per region (X29) | Voters | Any node, `plan`, agents | `mesh` (served through `hub`) |
 | Desired version, rollout lock, format flag | Desired version in the spec; lock and flag in region state (multi-region scope: 5.1) | `ops upgrade`; voters | `node` (binary swap); `codec`, `wire`, `buffer` get the flag injected | `mesh`, `ops`, `node` |
