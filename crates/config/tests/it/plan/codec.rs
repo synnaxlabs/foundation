@@ -118,6 +118,29 @@ fn gives_a_dangling_edge_a_key_that_the_region_check_refuses() {
     assert_eq!(problems, [region::Problem::Channel(dangling)]);
 }
 
+#[test]
+fn gives_an_edge_to_a_channel_that_the_plan_removes_a_new_key() {
+    let mut spec = Spec::create_empty();
+    spec.apply(&spec.plan(&[PLANT], &["n"]).expect("no problems"));
+    let plant = PLANT.replace("\"f64\"", "\"f32\"");
+    let mut plan = spec.plan(&[&plant], &["n"]).expect("no problems");
+    let removed = spec.plan(&[], &["n"]).expect("no problems");
+    let removal = removed
+        .changes
+        .into_iter()
+        .find(|change| change.name == name("a.time"));
+    plan.changes
+        .insert(0, removal.expect("the removal of a.time"));
+    let definitions = plan.definitions(&spec.definitions(), keys(spec.made));
+    let problems = region::check(&Prefix::ROOT, &definitions);
+    let dangling = Problem::Dangling {
+        from: name("a.value"),
+        edge: Edge::Index,
+        to: Key::from_u128((7 << 76) | (spec.made + 1)),
+    };
+    assert_eq!(problems, [region::Problem::Channel(dangling)]);
+}
+
 /// The bytes of a plan at version 0 of the empty spec with `changes`, each one
 /// already encoded, and no home.
 fn bytes(changes: &[Vec<u8>]) -> Vec<u8> {
@@ -238,6 +261,22 @@ fn refuses_homes_out_of_name_order() {
         error,
         Error::Malformed {
             at: CHANGES + 8 + 8 + 6 + 8 + 1
+        }
+    );
+}
+
+#[test]
+fn refuses_homes_in_falling_name_order() {
+    let mut found = bytes(&[]);
+    found.truncate(found.len() - 8);
+    found.extend_from_slice(&2_u64.to_le_bytes());
+    let first = [text("b.time"), text("n")].concat();
+    found.extend([first.clone(), text("a.time"), text("n")].concat());
+    let error = Plan::decode(&found).expect_err("out of order");
+    assert_eq!(
+        error,
+        Error::Malformed {
+            at: CHANGES + 8 + first.len()
         }
     );
 }
