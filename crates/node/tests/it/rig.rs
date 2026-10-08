@@ -359,7 +359,8 @@ fn a_run_past_its_limit_kills_the_command_and_panics_with_its_output() {
 }
 
 /// Runs `script`, which starts a `sleep 60` that keeps one pipe of the command and
-/// prints its PID, and asserts that the run panics at its limit. Then kills the `sleep`.
+/// prints its PID, and asserts that the run panics at its limit. Then kills the
+/// `sleep`.
 #[cfg(unix)]
 fn assert_a_run_ends_at_its_limit(script: &str, input: &[u8]) {
     let mut command = Command::new("sh");
