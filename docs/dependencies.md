@@ -16,7 +16,7 @@ approval; pin the version you build against there.
 | `rustix` | `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
 | `tokio` | `os`, `transport`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
-| `aws-lc-rs` | `transport`, signing, `mesh` (grants), `secret` (sealing) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
+| `aws-lc-rs` | `transport`, signing, `mesh` (grants), `secret` (sealing), `types` (`PrivateKey::public`, `PublicKey::verify`), `access` (tests only, to sign) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `crc32c` | `buffer`, the `buffer_open` fuzz target | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
 | `bytes` | `transport`, `connector` (`http`), `connector-influx` (feature `sim`) | The buffer type of `noq-proto`'s stream and datagram calls (#55), and of the body of each `connector` HTTP request and response, as `hyper` takes it (R7), also in the simulated HTTP servers | MIT | 1.12.1 | 2026-10-04 |

@@ -66,8 +66,7 @@ use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
-use types::ed25519::PublicKey;
-use types::node::PrivateKey;
+use types::ed25519::{PrivateKey, PublicKey};
 use types::time::Span;
 
 pub use address::Address;
@@ -119,7 +118,7 @@ impl Transport {
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         config.check()?;
         let clock = config.clock.clone();
-        let public_key = tls::public(&config.private_key);
+        let public_key = config.private_key.public();
         Ok(Self {
             carrier: quic::Carrier::new(config, part),
             clock,
@@ -231,7 +230,7 @@ impl fmt::Debug for Transport {
 /// use std::rc::Rc;
 ///
 /// use transport::Config;
-/// use types::node::PrivateKey;
+/// use types::ed25519::PrivateKey;
 /// use types::time::Span;
 ///
 /// fn config(
@@ -313,12 +312,11 @@ mod tests {
     use std::rc::Rc;
 
     use block::{Heap, Pool};
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use super::{Config, Error, Transport};
     use crate::testing::{self, Shard};
-    use crate::tls::public;
     use crate::{Address, Code, Peer, Port};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
@@ -486,7 +484,7 @@ mod tests {
         let at = testing::address(&server);
         testing::transport(&server, SERVER, |transport, _| async move {
             let session = transport.accept().await.expect("a session");
-            let peer = Peer::Node(public(&CLIENT));
+            let peer = Peer::Node(CLIENT.public());
             assert_eq!(session.peer(), peer);
             assert_eq!(
                 format!("{session:?}"),
@@ -497,9 +495,9 @@ mod tests {
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
-            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
@@ -518,7 +516,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(Span::SECOND).await;
             session.close(Code(5));
@@ -528,7 +526,7 @@ mod tests {
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 100))
                 .await;
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let reason =
                 "aborted by peer: the server refused to accept a new connection";
             let reason = String::from(reason);
@@ -550,14 +548,14 @@ mod tests {
             node.clock().sleep(testing::spans(testing::IDLE, 4)).await;
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             assert_eq!(dialed.err(), Some(Error::TimedOut));
         });
         assert_eq!(sim.run(), Ok(()));

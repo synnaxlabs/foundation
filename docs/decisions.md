@@ -343,9 +343,13 @@ How to read this record:
   pressure, but at `0s` a reader a few milliseconds behind loses each sample it reads
   from disk, and each read needs `keep` and a clock. Stale commands are the job of
   `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
-  `keep` reads with `document::read::span` (`document.bad-span`), where a negative span
-  reads, and `config` refuses it with `config.negative-span` at the `keep` value. The
-  code names the defect, so a later span bound (a reader `hold`, S10) uses it too.
+  `keep` reads with `document::read::span`, which refuses a negative span with
+  `document.negative-span` at the `keep` value, as it does a reader `hold` (S10,
+  DOCUMENT KEYS; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes the `config.negative-span` code and the clause "A negative span reads, and
+  each caller owns its bound" of the ruling at 2026-10-07T11:44:51Z,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
@@ -531,22 +535,30 @@ How to read this record:
   session gets no frame, so no later grant would replace a lost one. The home drops a
   grant for a session it closed. The home sends a whole frame while the bytes it has
   spent are below the limit, so it passes the limit by less than one frame and never
-  splits a frame. After a refusal, the session gets no later frame until it has the
-  refused one; frames from catch-up spend credit too. A frame costs its charge,
-  `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
-  `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  costs its length plus the header and at most 64 bytes or a quarter of its length more,
-  and a frame with only empty series still costs its headers. The charge depends only on
-  the frame's length, so the home and the `hub` compute the same charge for the same
-  frame. A remote complete reader gets only the series of its view (M2): the home sends
-  a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
-  that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
-  frames"), #267. Each complete session has a `delivery::complete::Charge`: `Whole` (a
-  local reader) spends the home's frame, and `Places` (a remote reader) spends the
-  frame of one series for each slot it lists that the frame holds, in listing order,
-  the first listing of a slot only. Catch-up uses the same `Charge`. So a remote
-  session pins home blocks up to its window times the ratio of the home's frame to its
-  view. laptop.architect decided this on 2026-10-07T22:47:54Z:
+  splits a frame. A frame that finds the limit spent waits at the home, and so does each
+  later frame; the session takes it while the bytes it spent are below a later grant. A
+  frame that still waits when the home releases the next commit with frames of its index
+  is refused. A grant wakes no session: the task that grants takes after it. So a reader
+  that takes the frames of each commit before the next such commit ends is never
+  refused, whatever the size of the commit. laptop.architect decided this on
+  2026-10-08T07:23:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1170#issuecomment-6054827276 (#1170).
+  After a refusal, the session gets no later frame until it has the refused one; frames
+  from catch-up spend credit too. A frame costs its charge, `Frame::charge`: the bytes a
+  block of the frame's length takes from a pool. That is `block`'s header plus the whole
+  frame (M3), rounded up to its size class, so a frame costs its length plus the header
+  and at most 64 bytes or a quarter of its length more, and a frame with only empty
+  series still costs its headers. The charge depends only on the frame's length, so the
+  home and the `hub` compute the same charge for the same frame. A remote complete
+  reader gets only the series of its view (M2): the home sends a frame of those series
+  in the reader's entry order (HUB WIRE), and both ends charge that frame. The person
+  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. Each
+  complete session has a `delivery::complete::Charge`: `Whole` (a local reader) spends
+  the home's frame, and `Places` (a remote reader) spends the frame of one series for
+  each slot it lists that the frame holds, in listing order, the first listing of a slot
+  only. Catch-up uses the same `Charge`. So a remote session pins home blocks up to its
+  window times the ratio of the home's frame to its view. laptop.architect decided this
+  on 2026-10-07T22:47:54Z:
   https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
   `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
   it, so `hub` does not depend on `delivery`. The `Charge` adds about 7 ns per frame to
@@ -578,9 +590,12 @@ How to read this record:
   message. It sizes one window per reader from the link's bandwidth-delay product,
   adapts it, and divides it among the indexes the reader reads. Each session with room
   can pass its limit by one frame, so the `hub` counts one largest frame per such
-  session against the window, and a reader pins at most its window. Replaces r11 5.2 (a
-  window beyond the acknowledged position): flow control stays apart from durable acks.
-  Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
+  session against the window, and a reader pins at most its window, plus the frames of
+  the last release of each index it reads that wait for it. The sessions of an index
+  share those frames, which memory held until that release; on a quiet index they stay
+  until each session takes them or closes. Replaces r11 5.2 (a window beyond the
+  acknowledged position): flow control stays apart from durable acks. Basis: B3, M3,
+  MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync. The current value is
@@ -1016,23 +1031,27 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
-- **HOME TYPE REFUSAL (#963)** `Shard::open_writer` refuses a key set with a series of
-  a type the home does not write yet, with `writer::Error::Type` (the slot and the type
-  of the first such series). It decides after `Unsynced` and `Lease`, and changes no
-  state. `hub` adds no check of its own; it maps the variant to its own error and names
-  the channel. This is a patch: #1145 makes the home write every `sample::Type` and
-  removes the variant. Lost: a documented precondition on `hub` (a user can break it,
-  and each `hub` caller must keep it); a refusal in `config check` (a second place that
-  must track the home). Decided by the architect, #963
-  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HOME EVERY TYPE (#1145)** `Shard::open_writer` takes a key set with series of any
+  `sample::Type`, and the home writes and reads a series of each: `codec` checks and
+  encodes it as S3 says, and STORED BODY stores its type. `codec` does not check that
+  a `String` sample is UTF-8 (#556). Neither `home` nor `hub` has a
+  `writer::Error::Type`. Supersedes HOME TYPE REFUSAL (#963,
+  https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785), the
+  patch that refused a series of a type other than a scalar until this change. Lost:
+  an allow list in `home` that grows one type per PR, because it copies the list that
+  `codec` owns; a variant that no path gives, because it misleads each caller that
+  matches on it. Decided by `laptop.architect` (2026-10-08T06:36:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861). The
+  surface was approved by `laptop.architect` (2026-10-08T07:01:09Z:
+  https://github.com/synnaxlabs/foundation/pull/1824#issuecomment-6054411394).
 - **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
   nothing outside a Tokio runtime. A complete session that misses a frame (one that
-  comes when the frames it has not given back, held or untaken, reach a window) gets no
-  later frame, as there is no catch-up from the buffer yet. The director chose that
-  `delivery` reports the miss and wakes the session, and that `next` then ends with an
-  error (2026-10-07T06:01:39Z:
+  still waits for credit when the next commit with frames of its index is released,
+  CREDIT RULES) gets no later frame, as there is no catch-up from the buffer yet. The
+  director chose that `delivery` reports the miss and wakes the session, and that `next`
+  then ends with an error (2026-10-07T06:01:39Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032004737). So
   `delivery::Readers::release` also names a session that missed a frame and has none
   waiting, and `Readers::take` gives `Next::Behind` after the frames before the miss.
@@ -1042,37 +1061,39 @@ How to read this record:
   second list to drain for an event that happens once per session. A `delivery` model
   property test and a 32-run `sim` test stand in for loom and shuttle: the wake never
   crosses a thread. Decided by `laptop.architect` (2026-10-07T06:36:57Z:
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901).
-  `take` gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind`
-  and `Shard::behind` go. Supersedes
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901). `take`
+  gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind` and
+  `Shard::behind` go. Supersedes
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901 in its lost
   design "an error from `take`": a third case is not an error, each caller of `take`
   uses one path for both modes, and #274 may give a gap from `take`. Lost: `woken` names
   a reader that is behind in a second list, which keeps the two steps and moves the
   state into the hub. Decided by `laptop.architect` (2026-10-08T01:43:19Z:
-  https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671).
-  A waiting hub reader has given back every frame, as it grants at each `next` call,
-  so no hub test reaches the wake of a session that missed a frame with none waiting.
-  The `delivery` tests and the home `sim` test
+  https://github.com/synnaxlabs/foundation/issues/1718#issuecomment-6050444671). A
+  waiting hub reader has given back every frame, as it grants at each `next` call, so no
+  hub test reaches the wake of a session that missed a frame with none waiting. The
+  `delivery` tests and the home `sim` test
   `names_a_complete_reader_once_when_it_misses_a_frame_with_none_waiting` reach it, and
   `does_not_name_a_complete_reader_that_misses_a_frame_while_one_waits` checks that a
-  miss while a frame waits gives no wake. The hub `sim` test is
-  `ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window`: one
-  commit of more than a window wakes a waiting reader, which gets each frame before the
-  miss, then `Ended::Behind`, with no hang. Decided by `laptop.architect`
-  (2026-10-07T07:24:41Z:
-  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119). #1170
-  sizes the window to one commit. After a warmup, a write and `next` make no heap
-  allocation, while frames wait, while a reader waits, and in the write that wakes a
-  latest reader, which a counting allocator test binary checks (COUNTING ALLOCATOR); it
-  does not count the commit task. `next` gives a `types::frame::View` of the reader's
-  channels and their index (M2), never the frame. The view borrows the reader, which
-  releases the frame at the next call, not at its first poll, and grants credit for it
-  there (CREDIT RULES): `next` is a plain `fn` that returns a future. A caller that
-  keeps data copies it. A session that ends gives `reader::Ended`. `Hub::define` stands.
-  A writer on a channel of a type the home does not write gets `writer::Error::Type`
-  with the channel's name (HOME TYPE REFUSAL). Decided by `laptop.architect`
-  (2026-10-07T05:53:24Z:
+  miss while a frame waits gives no wake. The hub `sim` test
+  `gives_a_waiting_complete_reader_each_frame_of_a_commit_past_its_window` checks that
+  one commit of about three windows wakes a waiting reader, which gets each frame, with
+  no hang. The hub `sim` test
+  `ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame` checks that a
+  reader that takes no frame until a second commit past its window ends gets each frame
+  before the miss, then `Ended::Behind`. Decided by `laptop.architect`
+  (2026-10-08T07:23:30Z:
+  https://github.com/synnaxlabs/foundation/issues/1170#issuecomment-6054827276).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6033084119.
+  After a warmup, a write and `next` make no heap allocation, while frames wait, while a
+  reader waits, and in the write that wakes a latest reader, which a counting allocator
+  test binary checks (COUNTING ALLOCATOR); it does not count the commit task. `next`
+  gives a `types::frame::View` of the reader's channels and their index (M2), never the
+  frame. The view borrows the reader, which releases the frame at the next call, not at
+  its first poll, and grants credit for it there (CREDIT RULES): `next` is a plain `fn`
+  that returns a future. A caller that keeps data copies it. A session that ends gives
+  `reader::Ended`. `Hub::define` stands.
+  Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051; and
@@ -1195,18 +1216,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6031655359 and
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
-  pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
-  that falls behind is served from disk. When the pool is full, a live write records a
-  gap and backfill waits. The current value of B4 pins one block per index that had a
-  live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
-  person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
-  resident. A purge of a block smaller than a page gives no page back, so it frees no
-  budget. When an allocation finds no room, the pool gives back the whole carved range
-  and budget of size classes whose carved blocks are all free, until the allocation
-  fits. Under this pressure, at most two partial pages per class stay resident, and
-  `Config::budget` states that slack. An idle class that no allocation presses keeps
-  its pages until the purge after idle. A class that a reader keeps partly in use
-  keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  pages lazily, and purge after idle. Credits cap the blocks a reader can pin, apart
+  from the frames of the last release of each index that wait for a grant (CREDIT
+  RULES). A reader that falls behind is served from disk. When the pool is full, a live
+  write records a gap and backfill waits. The current value of B4 pins one block per
+  index that had a live frame, with no reader open and no cap. A smaller copy is a 5.3
+  tunable. The person decided on 2026-10-05: "Accept it" (#139). The budget counts what
+  stays resident. A purge of a block smaller than a page gives no page back, so it frees
+  no budget. When an allocation finds no room, the pool gives back the whole carved
+  range and budget of size classes whose carved blocks are all free, until the
+  allocation fits. Under this pressure, at most two partial pages per class stay
+  resident, and `Config::budget` states that slack. An idle class that no allocation
+  presses keeps its pages until the purge after idle. A class that a reader keeps partly
+  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
   wait in a follow-up issue. When the system refuses to commit pages, the pool gives
   back one idle size at a time, in the order a purge for room in the budget uses,
@@ -2030,6 +2052,35 @@ How to read this record:
   Ed25519 public key of a node and of a subject. Decided by `laptop.architect` at
   2026-10-08T04:03:21Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
+  `types::ed25519::PrivateKey` holds the Ed25519 private key of a node and of a
+  subject (ruling above). It moved in its own mechanical PR before the PR that gives
+  `hub::client` the private key of a subject. Ordered by `laptop.director` at
+  2026-10-08T05:41:28Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
+  `types::ed25519::PrivateKey::public` is the one place that derives the public key
+  from the private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
+  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
+  crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
+  Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
+  and the copies, which grow with each crate that needs the key. Decided by
+  `laptop.architect` (2026-10-07T14:16:15Z):
+  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
+  `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
+  `BadSignature` for a signature that is not of the message by the key. A verify on
+  `PublicKey` uses a key that is not of small order by construction. `mesh` calls it,
+  and `access::admit` will (#1747). Lost: a `bool`, which a caller can invert or drop
+  with no word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the
+  length; and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858). The
+  TLS CertificateVerify is the exception: rustls checks it with the Ed25519 of
+  `aws-lc-rs`, as a step of the TLS 1.3 handshake, and `transport` takes the
+  certificate's key only as a `PublicKey`, so a key of small order ends the handshake.
+  If `PublicKey::verify` gets a check that `aws-lc-rs` does not make, both TLS verifiers
+  call it. Lost: a call of `PublicKey::verify` in each TLS verifier, which moves the
+  check of the scheme and of the signature out of rustls, a mature library that makes
+  them, and adds no check that the handshake does not make. Decided by
+  `laptop.architect` at 2026-10-08T08:04:32Z
+  (https://github.com/synnaxlabs/foundation/pull/1812#issuecomment-6055539099).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -2043,6 +2094,47 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
+- **SPEC CHANGE (#1083)** A `Spec` change record (kind 4) moves a region's spec
+  pointer by compare-and-swap. It holds the base pointer, the new root, and the digests
+  of the new tree's chunks, never their bytes, so `mesh` moves the pointer without the
+  chunks. Byte form: the base version (8 bytes, little-endian), the base root (32), the
+  new root (32), the chunk count (2 bytes, little-endian), then each digest (32), in
+  strictly rising order. The new version is `base.version + 1`. Lost: a version in the
+  record, which can disagree with the base. A record lists at most `CHUNKS_MAX` = 1024
+  digests, about 32 KiB, so that one record fits in an append of 64 KiB, a node's
+  limit; decode refuses a larger count. An entry over a member's limit is never sent,
+  and `raft` sends it again with no end (#1361). `raft` bounds an `Append` by its count
+  of entries, not by its bytes, so two records at the bound in one `Append` go over
+  64 KiB. #1361 bounds it by bytes before a milestone applies a spec change to a region
+  of more than one member. #1741
+  decides how a change of more new chunks applies. Every member applies a change whose
+  base is the pointer, and refuses one whose base is not (`Refused::Stale`), so of two
+  changes from one base only the first applies. The state machine never reads chunks
+  and never runs a check: a committed spec with problems moves the pointer, and the
+  node keeps the last spec it used (#1741). The pointer before the first change is
+  version 0 at the root of the tree of `Config::founding`. No BQ12 signature check on
+  the change in this milestone (#1213). Trigger: `mesh::Pointer` moves to a layer 1
+  crate in a refactor PR before a `wire` message carries it. `Mesh::open` runs no check
+  of `Config::founding`: the founding is agreed region state, and a check at each open
+  stops a node on a later build whose checks find more problems. The node that founds
+  the region checks the founding with the `spec` function of #1841, and does not found
+  a region whose founding has problems (#1744). A founding with problems at a later
+  build follows the rule of a committed spec with problems (#1741). Decided by
+  `laptop.architect`: chunks through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a
+  spec with problems, 2026-10-07T07:03:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
+  founding definitions, 2026-10-08T06:12:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
+  kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
+  the trigger for `Pointer`, 2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
+  check of the founding at open, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
+  bound of an `Append` in bytes, 2026-10-08T08:44:55Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with
+  "member" for "voter", 2026-10-08T08:46:16Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056189352).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
@@ -2512,6 +2604,15 @@ How to read this record:
   file. A search past the end for a record lost: a body can hold the bytes of a record,
   so a power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+  `mesh::testing::round_trip_log_record` and `seal_log_record`, behind the `sim`
+  feature, give the fuzz target `mesh_log` the decode and encode of one record; the
+  seal writes the length and both checks, with the log's own check (approved by the
+  architect, 2026-10-08T01:49:20Z:
+  https://github.com/synnaxlabs/foundation/issues/1711#issuecomment-6050509924; the
+  doc of the seal that writes the length, 2026-10-08T03:38:57Z:
+  https://github.com/synnaxlabs/foundation/pull/1740#issuecomment-6051674927. Supersedes
+  https://github.com/synnaxlabs/foundation/issues/1711#issuecomment-6050509924 for the
+  doc of the seal).
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
   `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
   that a follower forwards to the leader, and its two answers (the position of the
@@ -2878,6 +2979,11 @@ How to read this record:
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): each task that sends ends
+  at once after the group stops or the last `Mesh` drops. A dial or a send in
+  progress stops, so it never holds `Mesh::ended` for a dial timeout. Decided by
+  `laptop.architect`, 2026-10-08T04:00:49Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -2898,20 +3004,35 @@ How to read this record:
   such a type reads it only through `Display` and `Debug`. A caller that must match one
   gets the crate in its line through an `interface` issue first. `mesh` does not
   re-export such a type: a re-export makes each change to `raft` a change to the surface
-  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
-  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
-  gives it each stream of a peer with `Mesh::serve`. The three are public since the
-  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
-  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
-  rulings: #1460 gave the module its new name. `Error` adds `raft::Error` and
-  `transport::Error` to the types of other crates. `Config` and `serve` add types that
-  the caller builds: `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, of an `Ended` is
+  `Ended { .. }`, and of a `Watch` is its index only. The text of `Ended`: decided by
+  `laptop.architect` (2026-10-08T04:42:48Z):
+  https://github.com/synnaxlabs/foundation/pull/1791#issuecomment-6052417077. It
+  supersedes the `#[derive(Debug)]` of `Ended` in
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643. A crate
+  outside `mesh` opens a region with `Config` and `Mesh::open`, and gives it each stream
+  of a peer with `Mesh::serve`. The three are public since the senders (#1410). `Error`,
+  `claim::Error`, and `region::Unfit` are public with them, because `open` and `serve`
+  give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the module
+  its new name. `Error` adds `raft::Error` and `transport::Error` to the types of other
+  crates. `Config` and `serve` add types that the caller builds:
+  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
-  `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
-  So a crate that opens a region has `env`, `block`, and `transport` in its line of the
-  crate map. `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no
-  `Status`: no public call reads the one or gives the two. The join answer of #336
-  decides, with its caller, where a join that no voter stamps goes (MEMBER RECORD).
+  `transport::stream::Incoming`, `types::name::Prefix`, and
+  `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`,
+  and `transport` in its line of the crate map. `Config::founding` adds
+  `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
+  `Pointer`, whose root is a `types::digest::Digest`. So a crate that opens a region
+  also has `spec` in its line. Decided by `laptop.architect`: the founding definitions,
+  2026-10-08T06:12:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
+  pointer, 2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); this
+  text, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
+  `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no `Status`: no
+  public call reads the one or gives the two. The join answer of #336 decides, with its
+  caller, where a join that no voter stamps goes (MEMBER RECORD).
   Decided by `laptop.architect` (2026-10-07T22:33:29Z):
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
@@ -2954,6 +3075,24 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
   three types.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir` is the
+  mesh's directory, relative to the data directory. The mesh makes it and syncs its
+  parent, and the log goes in `log` in it. Its parent must be there and durable. `node`
+  gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each task of
+  the mesh has ended: the group's task and each task that sends. It holds no clone, so
+  it does not keep the group running. Once it resolves, the mesh holds no file, and a
+  new open of its directory can take the log. Decided by `laptop.architect`,
+  2026-10-08T04:00:49Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after
+  the ruling on PR 3b, 2026-10-08T03:37:20Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475, and the
+  field over a `Files` call by `laptop.architect-2`, 2026-10-08T03:54:37Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866. Lost: a
+  counting `Tasks` driver in `node`, because `node` then watches the tasks of another
+  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end
+  the group; `env::files::Files::within`, because `env` then gives two ways to scope
+  the files of a crate, beside `buffer::Config::dir`. A change that wants it later
+  moves `buffer` and `mesh` together.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -3352,10 +3491,16 @@ How to read this record:
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
   reader is complete, has the connector's name, and holds nothing. A second `reader`
-  block is `config.repeated-block`, and `read` reads only the first, where a label is
-  `config.label-count`. A negative `hold` is `config.negative-span` (READER RULES, #94).
+  block is `document.repeated-block`, and `read` reads only the first, where a label is
+  `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
+  #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes `config.repeated-block` and `config.label-count` of
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967
+  (2026-10-08T03:59:47Z), and `config.negative-span` for a `hold` of
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
   A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
-  holds. #1785 moves the three `config.*` checks into `document::read`.
+  holds.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3819,6 +3964,10 @@ How to read this record:
   through `document::read::name` (#474). `read::names` reads one name or a list, in
   order with repeats, and `read::label` reads a block label (architect, #1150,
   [ruling](https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151)).
+  `value::Kind::text` gives the text of a string or of a reference, so each place that
+  reads the two as the same text matches them once (`laptop.architect-2`, #1702,
+  2026-10-08T06:05:28Z,
+  https://github.com/synnaxlabs/foundation/issues/1702#issuecomment-6053513102).
   `export` and `discover` write every name as a string (`"site_a.pt_1"`): they need no
   HCL rule, and a generated file reads back as exactly the Document it came from. This
   replaces the #363 ruling that a file writes a reserved name only as a string. The
@@ -3833,30 +3982,47 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
-- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
-  a body that its reader does not take, with the attribute keys and the block keywords
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of a
+  body that its reader does not take, with the attribute keys and the block keywords
   apart, so a key that names an attribute never passes as a block. One function holds
   both checks, so a kind cannot forget one half. When a body takes blocks and no
   attribute, as a file does, the fix of an attribute is to move it into one of those
-  blocks. `read::missing` reports a body with none of some keys, and panics on an
-  empty list, which is a defect of the caller. `read::required` reads one key or gives
-  that diagnostic. `config` uses them, also at the top level of a file, and so does each
-  kind, so one mistake has one code: `document.unknown-attribute`,
+  blocks. `read::missing` reports a body with none of some keys, and panics through
+  `one_of` on an empty list, which is a defect of the caller. `read::required` reads one
+  key or gives that diagnostic. `config` uses them, also at the top level of a file, and
+  so does each kind, so one mistake has one code: `document.unknown-attribute`,
   `document.unknown-block`, and `document.missing-attribute`. Decided by
   `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
   2026-10-08 03:05 UTC) and on #1772
   (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
   2026-10-08 03:27 UTC, and
-  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
-  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
-  rest at `finish`, which drops the diagnostics when a caller returns early;
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111, 2026-10-08
+  03:29 UTC). Lost: a `Body` value that records each key read and reports the rest at
+  `finish`, which drops the diagnostics when a caller returns early;
   `unknown_attributes` and `unknown_blocks` as two functions; a public
   `UNKNOWN_ATTRIBUTE` code for a caller to match on. `read::one_of` lists words in
-  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list, as
-  `missing` does. It is public for the `config.bad-action` fix, so no copy goes into
-  `config`. Decided by `laptop.architect-2` at 2026-10-08T03:54:12Z
+  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list. It is
+  public for the `config.bad-action` fix, so no copy goes into `config`. Decided by
+  `laptop.architect-2` at 2026-10-08T03:54:12Z
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
+  `read::labels::<N>` checks that a block has `N` labels (`document.label-count`),
+  `read::repeated` reports each block of a keyword that takes one after the first
+  (`document.repeated-block`), and `read::span` refuses a span below zero
+  (`document.negative-span`), since each attribute that reads a span needs zero or
+  more. The first attribute that takes a negative span adds its own reader, named for
+  its meaning, such as an offset. `config` and `connector::reader` use them, and the
+  `config.*` codes for these went. Lost: `read::duration` beside `read::span`, since
+  A9 names `Span` of any sign a duration; `unknown` with a count for each block, which
+  changes each caller of `unknown` for one caller of `repeated`. Decided by
+  `laptop.architect-2` at 2026-10-08T07:04:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes the clause "A negative span reads, and each caller owns its bound" of
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886, and its
+  fix for `time::Error::Long`, "Use a span from "-106751d" to "106751d"": that fix is
+  now "Use a span from "0s" to "106751d"", since each span it names reads. Decided by
+  `laptop.architect-2` at 2026-10-08T07:36:01Z
+  (https://github.com/synnaxlabs/foundation/pull/1828#issuecomment-6055037900).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -4178,15 +4344,62 @@ How to read this record:
   PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
   2026-10-08T06:42:17Z
   (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085).
+  `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
+  that key from the hello's subject with `spec::definition::Kind::key`, so no caller
+  builds it and only `spec` holds the key form. A subject that makes no key gives
+  `Error::Unknown`. Lost: a public `Kind::label` in `spec`, which only `access` calls.
+  The first ruling kept each subject by `<name>` (`laptop.architect`,
+  2026-10-08T06:56:19Z,
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
+  tree key was decided by `laptop.architect` at 2026-10-08T08:10:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), which
+  supersedes the `<name>` of the first.
+- **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
+  `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
+  builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
+  request. `verify` finds the key in the spec again and checks the time again, so a
+  spec that removes the key stops the next request, and no caller writes its own
+  expiry check. The signed bytes are a contract for each SDK; each integer is
+  little-endian:
+  - hello: the 18 bytes `foundation/hello/1`, the subject length (1 byte), the
+    subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
+    UUID text), the connection key (16), the nonce (16), and `expires` in nanoseconds
+    (8);
+  - request or session open: the 20 bytes `foundation/request/1`, the connection key
+    (16), and the exact bytes that the program sent.
+
+  The tags take the MESH LOG form, so each SDK reads one form, and no tag is a prefix
+  of another (`laptop.architect`, 2026-10-08T07:39:12Z,
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055096691). A
+  request is checked with the key of the hello over its connection key, so a request
+  signed with another key or for another connection gives `Error::Signature`, and no
+  connection check exists. `peer` is the node that carried the hello: this node when the
+  program connected to it, else the node whose transport session forwarded it. A hello
+  is live while the latest mesh time is before `expires`, and `expires` may be at most
+  `proof::CAP` (15 minutes) past the earliest mesh time. Lost: `access` decodes the
+  signed bytes of the hello itself (design B), because `access` then owns a decoder of
+  outside input and the hello's wire form, which HUB WIRE gives to `wire`; a free
+  `verify` of any `&Hello`, which accepts a key that the program picked when a caller
+  skips `admit`; and `Error::Connection`, which the signature makes needless. `admit`
+  does not check `nonce`: the node that `via` names checks that it is the challenge
+  that it sent (#1748; `laptop.architect`, 2026-10-08T08:10:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). A
+  hosted proof waits on #1832. Decided by `laptop.architect` at
+  2026-10-08T07:35:46Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
-  picks out the policies and connectors itself. A policy reaches a name when
+  picks out the policies, connectors, and subjects itself. A policy reaches a name when
   `Prefix::contains` holds, so no caller writes the root case. Decided by
   `laptop.architect` on 2026-10-07T12:47:19Z
   ([#1383](https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777));
   applied in #1402. The trees in place of the policies: `laptop.architect`,
   2026-10-08T03:01:36Z
   ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
+  The subjects: `laptop.architect`, 2026-10-08T06:56:19Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636), by
+  their tree key at 2026-10-08T08:10:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -5307,6 +5520,7 @@ How to read this record:
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
+| HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 
 ---
@@ -6022,7 +6236,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public and private keys, with the derive and the verify, subject hellos, connection keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -6032,7 +6246,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
-| 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
+| 1 | `access` | Decides whether a proof is of its subject (signed hellos and requests), and whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |

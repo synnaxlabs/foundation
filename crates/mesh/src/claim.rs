@@ -5,10 +5,10 @@
 
 use std::fmt;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+use aws_lc_rs::signature::Ed25519KeyPair;
 use raft::{Body, Claim, Message, Raft, Ready, Signature};
-use types::ed25519::PublicKey;
-use types::node::{self, PrivateKey};
+use types::ed25519::{PrivateKey, PublicKey};
+use types::node;
 
 use crate::bytes::{put_grant, put_key, put_keys, put_position};
 use crate::ed25519;
@@ -29,11 +29,6 @@ impl Signer {
             key,
             pair: ed25519::pair(private),
         }
-    }
-
-    /// Whether `public` checks the claims that this signer signs.
-    pub(crate) fn owns(&self, public: PublicKey) -> bool {
-        self.pair.public_key().as_ref() == public.to_bytes()
     }
 
     /// Signs each grant and change in `ready` that has no signature, before the
@@ -179,7 +174,7 @@ fn verify(
 fn holds(public: PublicKey, claim: &Claim<'_>, signature: Option<Signature>) -> bool {
     let Signature(bytes) =
         signature.expect("invariant: decode gives each claim a signature");
-    ed25519::holds(public, &statement(claim), &bytes)
+    public.verify(&statement(claim), &bytes).is_ok()
 }
 
 /// Why a claim in a message does not hold.

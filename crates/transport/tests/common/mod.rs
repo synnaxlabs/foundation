@@ -5,12 +5,10 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::node::Node;
 use transport::{Config, Port};
-use types::ed25519::PublicKey;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
 pub(crate) const CLIENT: PrivateKey = PrivateKey([1; 32]);
@@ -41,13 +39,6 @@ pub(crate) fn part(node: &Node, port: u16) -> transport::port::Part {
     let at = SocketAddr::new(node.addresses()[0], port);
     let port = Port::bind(&node.net(), at).expect("a port");
     port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-/// The public key of `key`.
-pub(crate) fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }
 
 /// A block of `len` bytes from `pool`.

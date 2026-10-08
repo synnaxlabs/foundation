@@ -21,7 +21,8 @@ pub(crate) struct Woken {
     pub(crate) readers: Vec<home::reader::Key>,
     /// The keys that the caller gives `woken`.
     pub(crate) keys: Vec<home::reader::Key>,
-    set: Arc<KeySet>,
+    /// The key set of each frame.
+    pub(crate) set: Arc<KeySet>,
     writer: home::writer::Key,
     /// Each series of a frame on every index.
     series: Vec<(usize, usize)>,

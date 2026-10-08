@@ -100,6 +100,21 @@ fn refuses_a_kind_that_the_table_does_not_have() {
 }
 
 #[test]
+fn hides_the_problems_of_the_config_when_the_kind_is_not_a_name() {
+    let text = "connector \"x\" {\n  kind = 3\n  node = \"edge\"\n  port = 1\n}\n";
+    assert_eq!(
+        problems(text),
+        [problem(
+            text,
+            "document.bad-name",
+            "3",
+            "a name is a string or a reference, not an integer",
+            "Write a name such as \"site_a.node_1\"",
+        )]
+    );
+}
+
+#[test]
 fn refuses_a_connector_with_no_kind_or_no_node() {
     let text = "connector \"a\" {\n  node = \"edge\"\n}\n\
                 connector \"b\" {\n  kind = \"influx\"\n}\n";

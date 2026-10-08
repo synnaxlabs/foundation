@@ -428,7 +428,7 @@ async fn open(plan: Plan, at: Address, config: Config, node: Node, shared: Share
     };
     let part = testing::part(&node.net(), testing::address(&node));
     let transport = Transport::new(config, part).expect("a transport");
-    let server = crate::tls::public(&testing::SERVER);
+    let server = testing::SERVER.public();
     let session = loop {
         match transport.dial(server, slice::from_ref(&at)).await {
             Ok(session) => break session,
