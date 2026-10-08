@@ -666,8 +666,8 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Opens the endpoint, then runs each task given with a hub over `home`, and
-    /// serves the node's port, until `guard` completes or the transport stops. A
+    /// Opens the endpoint, then runs each task given with a hub over `home` that knows
+    /// each channel of the region's founding spec, and serves the node's port, until `guard` completes or the transport stops. A
     /// transport that stops goes into `failed` before any task drops. Then drops the
     /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
     /// and waits for each task of the mesh to end, the last of which drops the
@@ -690,16 +690,26 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let (transport, mesh) =
-            match self.endpoint.open(files, pool, tasks.clone()).await {
-                Ok(opened) => opened,
-                Err(error) => return fail(error),
-            };
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
             tasks: tasks.clone(),
         });
+        if let Some(region) = &self.endpoint.region {
+            hub.define(region.definitions.iter().filter_map(|(name, definition)| {
+                match definition {
+                    spec::definition::Definition::Channel(channel) => {
+                        Some((name, channel))
+                    }
+                    _ => None,
+                }
+            }));
+        }
+        let (transport, mesh) =
+            match self.endpoint.open(files, pool, tasks.clone()).await {
+                Ok(opened) => opened,
+                Err(error) => return fail(error),
+            };
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // The port's future holds the mesh, so it drops before the wait.
         {
