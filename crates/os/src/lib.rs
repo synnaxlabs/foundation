@@ -119,9 +119,9 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 ///
 /// # Panics
 ///
-/// A poll of [`env::net::Net::connect`], or the first poll of a stream, listener, UDP
-/// sender, or UDP receiver other than a stream write of no bytes, on a thread with no
-/// Tokio runtime or with no I/O driver.
+/// A poll of [`env::net::Net::connect`], or the first poll, other than a stream write
+/// of no bytes, of a stream, listener, UDP sender, or UDP receiver, on a thread with
+/// no Tokio runtime or with no I/O driver.
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
 pub fn net() -> env::net::Net {
