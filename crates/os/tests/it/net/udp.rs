@@ -14,6 +14,9 @@ use env::net::{Ecn, Error, Net};
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
+#[cfg(target_os = "linux")]
+mod gso;
+
 use super::{
     BOUND, Counted, LOCALHOST, assert_joins, net, on_thread, runtime,
     runtime_with_no_io,
@@ -243,42 +246,6 @@ fn a_refused_transmit_leaves_gso_and_ecn_on() {
     });
 }
 
-/// Turns off the UDP checksum of the socket bound to `local`, so that Linux refuses
-/// each GSO send on it with `EINVAL`, as a card that cannot segment does.
-#[cfg(target_os = "linux")]
-#[expect(
-    unsafe_code,
-    reason = "the socket of `os` is reached by its descriptor"
-)]
-fn refuse_gso(local: SocketAddr) {
-    use std::os::fd::BorrowedFd;
-    let fds = std::fs::read_dir("/proc/self/fd").expect("procfs is mounted");
-    let fd = fds
-        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-        .find(|&fd| {
-            // SAFETY: the descriptor stays open for this call: the test holds the
-            // socket, and another descriptor that closes gives only an error.
-            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::net::getsockname(fd)
-                .ok()
-                .and_then(|name| SocketAddr::try_from(name).ok())
-                == Some(local)
-        })
-        .expect("the socket is open");
-    let one: libc::c_int = 1;
-    // SAFETY: `one` outlives the call, and its size is the length given.
-    let rc = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_NO_CHECK,
-            (&raw const one).cast(),
-            libc::socklen_t::try_from(size_of::<libc::c_int>()).expect("an int fits"),
-        )
-    };
-    assert_eq!(rc, 0, "SO_NO_CHECK is set");
-}
-
 /// A kernel that refuses GSO still gets each datagram of a batch, with its ECN mark.
 #[test]
 #[cfg(target_os = "linux")]
@@ -286,7 +253,7 @@ fn a_batch_arrives_when_the_kernel_refuses_gso() {
     on_thread("udp-no-gso", || async {
         let net = net();
         let (mut sender, _) = loopback(&net);
-        refuse_gso(sender.local());
+        gso::refuse(sender.local());
         let (_, mut receiver) = loopback(&net);
         let contents = [5; 300];
         let batch = Transmit {

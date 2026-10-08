@@ -16,6 +16,10 @@ use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
 
+#[cfg(target_os = "linux")]
+#[path = "../tests/it/net/udp/gso.rs"]
+mod gso;
+
 /// The size of each datagram of a batch: a QUIC packet on a 1,280-byte path.
 const SEGMENT: usize = 1_200;
 /// The datagrams of a batch: the most of `SEGMENT` bytes that one transmit takes.
@@ -165,45 +169,9 @@ fn os_batch(bencher: Bencher<'_, '_>) {
 #[divan::bench(sample_count = SAMPLES)]
 fn os_batch_without_gso(bencher: Bencher<'_, '_>) {
     let (sender, receiver) = pair();
-    refuse_gso(sender.local());
+    gso::refuse(sender.local());
     let contents = vec![7; SEGMENT * DATAGRAMS];
     bench_os(bencher, (sender, receiver), &contents, SEGMENT, 1, None);
-}
-
-/// Turns off the UDP checksum of the socket bound to `local`, so that Linux refuses
-/// each GSO send on it with `EINVAL`, as a card that cannot segment does.
-#[cfg(target_os = "linux")]
-#[expect(
-    unsafe_code,
-    reason = "the socket of `os` is reached by its descriptor"
-)]
-fn refuse_gso(local: SocketAddr) {
-    use std::os::fd::BorrowedFd;
-    let fds = std::fs::read_dir("/proc/self/fd").expect("procfs is mounted");
-    let fd = fds
-        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-        .find(|&fd| {
-            // SAFETY: the descriptor stays open for this call: the bench holds the
-            // socket, and another descriptor that closes gives only an error.
-            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::net::getsockname(fd)
-                .ok()
-                .and_then(|name| SocketAddr::try_from(name).ok())
-                == Some(local)
-        })
-        .expect("the socket is open");
-    let one: libc::c_int = 1;
-    // SAFETY: `one` outlives the call, and its size is the length given.
-    let rc = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_NO_CHECK,
-            (&raw const one).cast(),
-            libc::socklen_t::try_from(size_of::<libc::c_int>()).expect("an int fits"),
-        )
-    };
-    assert_eq!(rc, 0, "SO_NO_CHECK is set");
 }
 
 /// The datagrams of [`os_batch`], sent one per call.
