@@ -3528,7 +3528,7 @@ mod tests {
                 }
                 let first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
                 let clock = node.clock();
-                let end = clock.now() + Span::MILLISECOND;
+                let end = clock.now().checked_add(Span::MILLISECOND).unwrap();
                 let mut opens = Vec::new();
                 while clock.now() < end {
                     match open(&node, &tasks, 1, &[1], &[1]).await {
@@ -3584,12 +3584,11 @@ mod tests {
                 drop(mesh);
                 let again = open(&node, &tasks, 1, &[1], &[1]).await;
                 let first = again.as_ref().err().cloned();
-                let mesh = match again {
-                    Ok(mesh) => mesh,
-                    Err(_) => {
-                        clock.sleep(TICK).await;
-                        open(&node, &tasks, 1, &[1], &[1]).await.unwrap()
-                    }
+                let mesh = if let Ok(mesh) = again {
+                    mesh
+                } else {
+                    clock.sleep(TICK).await;
+                    open(&node, &tasks, 1, &[1], &[1]).await.unwrap()
                 };
                 let mut watch = mesh.watch(INDEX);
                 lead(&mesh, &clock, home(3)).await;
