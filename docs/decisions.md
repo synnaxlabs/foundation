@@ -4053,8 +4053,14 @@ How to read this record:
   reads a code block so: a fence of three or more backticks or tildes, after at most
   three spaces, opens it, and a like fence closes it, or it runs to the end of the
   comment. It does not see an HTML block or HTML comment, or a fence after a list marker
-  or a quote mark; https://github.com/synnaxlabs/foundation/issues/1783 reads the
-  comment as GitHub does. A round comment posted before the cutoff `CUTOFF` in
+  or a quote mark. In an old round, it does not see a `Reviewers:` or `Hot path:` line
+  with four or more spaces of indent that continues a paragraph or is a paragraph in a
+  list item, which GitHub shows as text; such a `Hot path:` line does not ask for
+  `performance`. On 2026-10-08, no old round of the 28 open PRs hit either case
+  (58 rounds read). Decided by the director at 2026-10-08T05:13:45Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052814147).
+  https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
+  does. A round comment posted before the cutoff `CUTOFF` in
   `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
   free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
   text that names a function still needs `performance`. Decided by the director at
@@ -4065,8 +4071,9 @@ How to read this record:
   (2026-10-07T06:32:32Z). For this rule, an old round that parses names
   `performance` in its `Reviewers:` field, read as before. One that does not parse
   names it in any `Reviewers:` line of its text. A `Hot path:` line counts anywhere in
-  its text. Each such line has at most three spaces of indent, because GitHub shows a
-  line with more as code. Decided by the director at 2026-10-08T04:42:33Z
+  its text. Each `Reviewers:` line of a round that does not parse, and each `Hot path:`
+  line, has at most three spaces of indent. Decided by the director at
+  2026-10-08T04:42:33Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062).
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean

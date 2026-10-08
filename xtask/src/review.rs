@@ -454,7 +454,7 @@ fn named(paragraphs: &[Vec<&str>]) -> bool {
 }
 
 /// `line` with its indent removed, or `None` when the indent is more than three
-/// spaces: GitHub shows such a line as code.
+/// spaces.
 fn unindented(line: &str) -> Option<&str> {
     let text = line.trim_start_matches(' ');
     (line.len() - text.len() <= 3).then_some(text)
