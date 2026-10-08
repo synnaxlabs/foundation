@@ -1207,10 +1207,12 @@ How to read this record:
   `tasks.spawn`, which gives no way to drop it. Decided by the architect
   (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641).
-  Amended by HUB LINK (#1946): `Hub::serve` is gone. A `Link`, the future of
-  `Link::serve`, and a `Reply` each hold the hub's state, so each is a session of the
-  hub here, and `node` drops each where `keep` drops the future, before it awaits the
-  commit.
+  Changed by HUB LINK (#1946): `Hub::serve` is gone. A `Link`, the future of
+  `Link::serve`, and a `Reply` each hold the hub's state, so this entry counts each as
+  a session of the hub. `node` drops each where `keep` drops the future, before it
+  awaits the commit, and never runs a future of `Link::serve` with `tasks.spawn`.
+  Decided by `laptop.architect` (2026-10-08T18:16:38Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -5069,21 +5071,26 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697).
   Supersedes item 5 (`serve::Error::Hello`) of
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738.
+  `Link` is not `Clone`. Lost: a `Config::clock` beside `time`, with a loop in `hub`
+  that knows the slew; more than one open request, which no wire needs now. Decided
+  by `laptop.architect` at 2026-10-08T11:24:07Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
   `Hub::rules` sets the `access::Rules` that each later hello and request is checked
   against, and `node` calls it with the rules of each spec (#1951). Until then, a hub
   has `access::Rules::default()`, which knows no subject, so each hello gets
-  `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, since the
+  `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, because the
   rules change at run time through `Mesh::apply`. Decided by `laptop.architect`
   (2026-10-08T18:05:25Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140).
-  A program sends its first request once the challenge after its hello comes, since
-  the node sends it only after it admits the hello. `Session::accept` gives streams
-  by class, not in open order, so this rule also makes the hello stream the first
-  that the node takes. `Link` is not `Clone`. Lost: a
-  `Config::clock` beside `time`, with a loop in `hub` that knows the slew; more than
-  one open request, which no wire needs now. Decided by `laptop.architect` at
-  2026-10-08T11:24:07Z
-  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
+  A rule of the client wire, which each SDK follows: a program sends its first request
+  once the challenge after its hello comes, because the node sends it only after it
+  admits the hello. `Session::accept` gives streams by class, not in open order, so
+  this rule also makes the hello stream the first that the node takes. A program that
+  breaks it gets `Unadmitted` or `Message` with `Kind`. Lost: a node that holds each
+  request stream until it admits a hello, which adds a queue, its bound, and its
+  timeout to `hub` to save one round trip for each session. Decided by
+  `laptop.architect` (2026-10-08T18:16:38Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
   transport and the mesh, and never a zero key: #1660 changes only where `node` gets
   the key (`laptop.architect`, by message to `box1.builder-2`, 2026-10-08).
