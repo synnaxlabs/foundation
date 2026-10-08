@@ -1447,6 +1447,52 @@ mod tests {
     }
 
     #[test]
+    fn a_stretch_that_the_window_takes_in_parts_arrives_whole() {
+        let narrow = |config| Config {
+            message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
+            window_bytes: 16_000,
+            ..config
+        };
+        // One stretch of short runs, after a message that takes half the window.
+        let parts: Vec<Part> = (0..2000)
+            .map(|index| Part {
+                range: index * 16..index * 16 + 8,
+                zeros: 0,
+            })
+            .collect();
+        let body: Vec<u8> = (0..32_000u32)
+            .map(|index| (index % 251).to_le_bytes()[0])
+            .collect();
+        let sent: Vec<u8> = parts
+            .iter()
+            .flat_map(|part| body[part.range.clone()].to_vec())
+            .collect();
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            move |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(&[7; 8000])).await.expect("sent");
+                let block = side.block(&body);
+                sender.send_parts(block, &parts).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            move |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; 8000])));
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                assert_eq!(bytes(receiver.recv().await), Ok(None));
+                side.session.close(Code(0));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_message_of_long_and_short_runs_larger_than_the_window_arrives_whole() {
         let body: Vec<u8> =
             (0..25_200u32).map(|index| index.to_le_bytes()[0]).collect();
