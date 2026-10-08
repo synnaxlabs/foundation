@@ -10,12 +10,18 @@ cargo-fuzz = true
 # Outside the root workspace: the targets need the pinned nightly.
 [workspace]
 
+# The local patches of the root `Cargo.toml`: docs/dependencies.md.
+[patch.crates-io]
+noq-proto = { path = "../patches/noq-proto" }
+
 [dependencies]
 block = { path = "../crates/block" }
 buffer = { path = "../crates/buffer" }
 codec = { path = "../crates/codec" }
 config = { path = "../crates/config" }
 config-hcl = { path = "../crates/config-hcl" }
+connector = { path = "../crates/connector" }
+connector-influx = { path = "../crates/connector-influx" }
 connector-modbus = { path = "../crates/connector-modbus" }
 crc32c = "0.6.8"
 document = { path = "../crates/document" }
@@ -40,6 +46,13 @@ bench = false
 [[bin]]
 name = "codec_encoder"
 path = "fuzz_targets/codec_encoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_string"
+path = "fuzz_targets/codec_string.rs"
 test = false
 doc = false
 bench = false
@@ -110,6 +123,13 @@ bench = false
 [[bin]]
 name = "mesh_entries"
 path = "fuzz_targets/mesh_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_log"
+path = "fuzz_targets/mesh_log.rs"
 test = false
 doc = false
 bench = false
@@ -243,6 +263,20 @@ bench = false
 [[bin]]
 name = "wire_hub_home"
 path = "fuzz_targets/wire_hub_home.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_hub_client"
+path = "fuzz_targets/wire_hub_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_blob"
+path = "fuzz_targets/wire_blob.rs"
 test = false
 doc = false
 bench = false

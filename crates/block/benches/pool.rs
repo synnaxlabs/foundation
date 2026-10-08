@@ -1,5 +1,5 @@
-//! Benchmarks of a pool: a block that is used again, and a block that takes the
-//! budget of another size under pressure.
+//! Benchmarks of a pool: a block that is used again, a copy of given bytes, and a
+//! block that takes the budget of another size under pressure.
 
 use block::{Config, Heap, Pool};
 use divan::Bencher;
@@ -19,6 +19,14 @@ fn create_pool(budget: usize) -> Pool {
 fn alloc_free(bencher: Bencher<'_, '_>) {
     let pool = create_pool(1 << 16);
     bencher.bench_local(|| drop(pool.alloc(1000).expect("the budget has room")));
+}
+
+/// A frozen block of `len` given bytes, dropped and used again.
+#[divan::bench(args = [16, 64, 1200, 16384])]
+fn copy(bencher: Bencher<'_, '_>, len: usize) {
+    let pool = create_pool(1 << 16);
+    let bytes = vec![7_u8; len];
+    bencher.bench_local(|| drop(pool.copy(&bytes).expect("the budget has room")));
 }
 
 /// A fresh block each time, with room for it. A full pool is replaced.

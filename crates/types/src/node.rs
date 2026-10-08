@@ -96,17 +96,6 @@ const X25519_SMALL_ORDER: [[u8; 32]; 5] = [
     ],
 ];
 
-/// A node's Ed25519 private key. Its `Debug` never writes the key, and it has no
-/// `Display` and no equality, so a log line or a timing difference cannot show it.
-#[derive(Clone)]
-pub struct PrivateKey(pub [u8; 32]);
-
-impl fmt::Debug for PrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PrivateKey(..)")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -178,12 +167,6 @@ mod tests {
             prop_assume!(key[31] != 0x7f && !X25519_SMALL_ORDER.contains(&key));
             prop_assert_eq!(SealKey::new(key).map(SealKey::to_bytes), Ok(key));
         }
-    }
-
-    #[test]
-    fn hides_a_private_key_in_debug() {
-        let text = format!("{:?}", PrivateKey([0xcd; 32]));
-        assert_eq!(text, "PrivateKey(..)");
     }
 
     #[test]

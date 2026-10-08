@@ -26,7 +26,7 @@ use types::time::Span;
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
-use crate::log::{self, Logs, Mark, Tail};
+use crate::log::{self, Found, Logs, Mark, Tail};
 use crate::read::{Read, Reading};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
@@ -238,8 +238,8 @@ impl From<header::Error> for Error {
 /// `tasks`. The task idles while nothing is queued and no commit runs. A drop ends
 /// the task at once when it idles, else at the end of its last commit, which writes
 /// each entry queued at the drop, or earlier at the first file call that fails.
-/// Await a [`Commit`] held past the drop before a reopen, and before the shard ends,
-/// which cancels the task.
+/// Await an [`End`] past the drop, then drop it, before a reopen and before the shard
+/// ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -282,12 +282,19 @@ struct State {
     taken: u64,
     /// How many deadlines ended with no error.
     commits: u64,
+    /// The waiting [`Commit`]s, which the end of each commit and of the task wakes.
     wakers: Vec<Waker>,
+    /// The waker of each waiting [`End`] by its key. Only the end of the task wakes
+    /// them, and the drop of an `End` takes its waker out.
+    ending: Vec<(u64, Waker)>,
+    /// The key of the next [`End`].
+    next_end: u64,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
-    /// Whether the task ended. A [`Commit`] held past the drop waits for it.
+    /// Whether the task ended. An [`End`], and a [`Commit`] held past the drop, wait
+    /// for it.
     ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
@@ -307,6 +314,19 @@ impl State {
         } else {
             self.taken + 1
         }
+    }
+
+    /// Marks the task ended and moves each waiter into `woken`.
+    fn end(&mut self, woken: &mut Vec<Waker>) {
+        self.ended = true;
+        woken.append(&mut self.wakers);
+        woken.extend(self.ending.drain(..).map(|(_, waker)| waker));
+    }
+
+    /// Takes the waker of the [`End`] with `key` out of `ending`.
+    fn forget(&mut self, key: u64) -> Option<Waker> {
+        let at = self.ending.iter().position(|(held, _)| *held == key)?;
+        Some(self.ending.swap_remove(at).1)
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -396,6 +416,8 @@ impl Buffer {
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
+                ending: Vec::new(),
+                next_end: 0,
                 parked: None,
                 closed: false,
                 ended: false,
@@ -434,16 +456,16 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
-    /// The durable entries of `path` of the index at `slot` from `from`, in
-    /// order, until their blocks take `budget` pool bytes, by
-    /// [`block::footprint`] of each, a skip ahead starts, or the pool has no block
-    /// for the next entry. The last entry may pass the budget. An entry that holds
-    /// `from` comes whole. A read from a mark at or in the seqs a skip ahead left
-    /// out reports them as `gap` and goes on after them. The first read starts at
-    /// `Mark::at(0)`; each read continues at `next`, which a read that gives
-    /// nothing does not move. A read makes one file read for the table of each
-    /// record it visits, two when the record header and table pass 4 KiB, and one
-    /// per entry with bytes.
+    /// The durable entries of `path` of the index at `slot` from `from`, in order,
+    /// until their blocks take `budget` pool bytes, by [`block::footprint`] of each,
+    /// seqs that the path no longer has start, or the pool has no block for the next
+    /// entry. The last entry may pass the budget. An entry that holds `from` comes
+    /// whole. A read from a mark at or in seqs that the path no longer has reports them
+    /// as `gap` and goes on after them. When the path holds no entry after them, the
+    /// read gives the gap and no entry. The first read starts at `Mark::at(0)`; each
+    /// read continues at `next`, which a read that gives no entry and no gap does not
+    /// move. A read makes one file read for the table of each record it visits, two
+    /// when the record header and table pass 4 KiB, and one per entry with bytes.
     ///
     /// # Errors
     ///
@@ -478,12 +500,17 @@ impl Buffer {
         path: Path,
     ) -> Result<(), Error> {
         while let Some(from) = reading.next() {
-            let found = self.shared.state.borrow().logs.run(slot, path, from);
-            let Some((index, run)) = found else {
-                break;
-            };
-            if !reading.record(index, run).await? {
-                break;
+            let found = self.shared.state.borrow().logs.find(slot, path, from);
+            match found {
+                Found::Run(index, run) => {
+                    if !reading.record(index, run).await? {
+                        break;
+                    }
+                }
+                Found::End(end) => {
+                    reading.end(end);
+                    break;
+                }
             }
         }
         Ok(())
@@ -572,6 +599,20 @@ impl Buffer {
         Commit {
             shared: Rc::clone(&self.shared),
             until: self.shared.state.borrow().durable_at(),
+        }
+    }
+
+    /// Resolves once the commit task ended: after the drop, once nothing is queued,
+    /// or at a failed file call. Gives the error of that call, so `Ok` means that
+    /// each entry appended before the drop is durable.
+    #[must_use]
+    pub fn ended(&self) -> End {
+        let mut state = self.shared.state.borrow_mut();
+        let key = state.next_end;
+        state.next_end += 1;
+        End {
+            shared: Rc::clone(&self.shared),
+            key,
         }
     }
 }
@@ -829,8 +870,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         .await;
         if ended {
             let mut state = shared.state.borrow_mut();
-            state.ended = true;
-            woken.append(&mut state.wakers);
+            state.end(&mut woken);
             drop(state);
             for waker in woken.drain(..) {
                 waker.wake();
@@ -864,7 +904,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             Ok(()) => state.synced(sealed.drain(..)),
             Err(error) => {
                 state.failed = Some(error);
-                state.ended = true;
+                state.end(&mut woken);
             }
         }
         woken.append(&mut state.wakers);
@@ -918,8 +958,46 @@ impl Future for Commit {
     }
 }
 
+/// The future of [`Buffer::ended`]. It does not borrow the buffer, and it holds the
+/// ring open until it drops.
+#[derive(Debug)]
+pub struct End {
+    shared: Rc<Shared>,
+    /// Its key in `ending`.
+    key: u64,
+}
+
+impl Future for End {
+    type Output = Result<(), files::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.shared.state.borrow_mut();
+        if state.ended {
+            return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
+        }
+        let replaced = state.forget(self.key);
+        state.ending.push((self.key, cx.waker().clone()));
+        // A waker's drop can drop another `End`, which borrows the state.
+        drop(state);
+        drop(replaced);
+        Poll::Pending
+    }
+}
+
+impl Drop for End {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.borrow_mut();
+        let held = state.forget(self.key);
+        // A waker's drop can drop another `End`, which borrows the state.
+        drop(state);
+        drop(held);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+    use std::pin::pin;
     use std::sync::{Arc, Mutex};
 
     use block::Heap;
@@ -1073,5 +1151,149 @@ mod tests {
         // is three records of two blocks.
         let tail = tail.lock().expect("no panic held the lock");
         assert_eq!(tail.map(crate::wal::Position::offset), Some(3 * 4096));
+    }
+
+    /// Three commits put [0, 3), [3, 6), and [6, 9) of one path in the records at
+    /// 4096, 8192, and 12288. Gives the slot of the path.
+    async fn create_three_records(
+        buffer: &Buffer,
+        slots: &mut Slots,
+        pool: &Pool,
+    ) -> Slot {
+        let one = slots.assign(channel::Key::from_u128(1));
+        let part = pool.alloc(100).expect("a block").freeze();
+        for commit in 0..3 {
+            let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
+            buffer.append(batch).expect("the ring has room");
+            buffer.committed().await.expect("commits");
+        }
+        one
+    }
+
+    /// The gap, the first seq of each entry, and the next mark of a read of the
+    /// live path at `slot` from `from`.
+    async fn read_from(
+        buffer: &Buffer,
+        slot: Slot,
+        from: u64,
+    ) -> (Option<Range<u64>>, Vec<u64>, Mark) {
+        let read = buffer
+            .read(slot, Path::Live, Mark::at(from), usize::MAX)
+            .await
+            .expect("reads");
+        let firsts = read.entries.iter().map(|entry| entry.first).collect();
+        (read.gap, firsts, read.next)
+    }
+
+    /// No commit trims yet, so the test moves the tail of the logs as a trim will.
+    #[test]
+    fn a_read_gives_the_seqs_of_the_records_that_a_trim_hid_as_its_gap() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let found = Arc::clone(&reads);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = create_three_records(&buffer, &mut slots, &pool).await;
+                let mut reads = Vec::new();
+                buffer.shared.state.borrow_mut().logs.hide(8192);
+                reads.push(read_from(&buffer, one, 0).await);
+                reads.push(read_from(&buffer, one, 1).await);
+                reads.push(read_from(&buffer, one, 3).await);
+                buffer.shared.state.borrow_mut().logs.hide(16384);
+                reads.push(read_from(&buffer, one, 0).await);
+                reads.push(read_from(&buffer, one, 8).await);
+                reads.push(read_from(&buffer, one, 9).await);
+                *found.lock().expect("no panic held the lock") = reads;
+                buffer
+            },
+        );
+        let reads = reads.lock().expect("no panic held the lock");
+        let expected = [
+            (Some(0..3), vec![3, 6], Mark::at(9)),
+            (Some(1..3), vec![3, 6], Mark::at(9)),
+            (None, vec![3, 6], Mark::at(9)),
+            (Some(0..9), vec![], Mark::at(9)),
+            (Some(8..9), vec![], Mark::at(9)),
+            (None, vec![], Mark::at(9)),
+        ];
+        assert_eq!(*reads, expected);
+    }
+
+    /// The durable end counts the entries with no samples at its seq. A read that
+    /// gives only a gap goes on after them. A read from their seq loses no sample:
+    /// it gives no gap and does not move.
+    #[test]
+    fn a_read_goes_on_after_the_hidden_entries_with_no_samples() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let found = Arc::clone(&reads);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.assign(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                let empty = || Entry {
+                    len: 0,
+                    ..entry(1, one, Path::Live, 3, &part)
+                };
+                let batch = [entry(1, one, Path::Live, 0, &part), empty(), empty()];
+                buffer.append(batch).expect("the ring has room");
+                buffer.committed().await.expect("commits");
+                buffer.shared.state.borrow_mut().logs.hide(8192);
+                let reads = vec![
+                    read_from(&buffer, one, 0).await,
+                    read_from(&buffer, one, 3).await,
+                ];
+                *found.lock().expect("no panic held the lock") = reads;
+                buffer
+            },
+        );
+        let reads = reads.lock().expect("no panic held the lock");
+        let end = Mark { seq: 3, given: 2 };
+        let expected = [(Some(0..3), vec![], end), (None, vec![], Mark::at(3))];
+        assert_eq!(*reads, expected);
+    }
+
+    /// The test hides the later records, as a trim will, while a read waits on its
+    /// first record. The read gives the entry it holds, and the next read gives the
+    /// gap.
+    #[test]
+    fn a_read_that_holds_entries_stops_before_the_seqs_that_a_trim_hid() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let found = Arc::clone(&reads);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = create_three_records(&buffer, &mut slots, &pool).await;
+                let mut reads = Vec::new();
+                {
+                    let mut read = pin!(read_from(&buffer, one, 0));
+                    let first = poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+                    assert!(first.is_pending(), "the read waits on a file read");
+                    buffer.shared.state.borrow_mut().logs.hide(16384);
+                    reads.push(read.await);
+                }
+                reads.push(read_from(&buffer, one, 3).await);
+                *found.lock().expect("no panic held the lock") = reads;
+                buffer
+            },
+        );
+        let reads = reads.lock().expect("no panic held the lock");
+        let expected = [
+            (None, vec![0], Mark::at(3)),
+            (Some(3..9), vec![], Mark::at(9)),
+        ];
+        assert_eq!(*reads, expected);
     }
 }

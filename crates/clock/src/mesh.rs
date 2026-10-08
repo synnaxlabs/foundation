@@ -2,9 +2,12 @@ use estimate::combine::{self, combine};
 use estimate::discipline::{Cause, Discipline};
 use estimate::{Filter, Measurement, Slew};
 use types::hash::Map;
-use types::time::{Interval, Monotonic};
+use types::time::{Interval, Monotonic, Span, Stamp};
 
 use crate::{DRIFT, cell, source};
+
+/// How often a wait with no mesh time reads again.
+const RETRY: Span = Span::SECOND;
 
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
@@ -151,6 +154,35 @@ impl Reader {
                 .map(|slew| slew.at(monotonic, DRIFT).interval());
             Time { monotonic, mesh }
         })
+    }
+
+    /// Waits until the latest edge of mesh time is at or after `at`, and is never
+    /// early: a read of mesh time inside the wait gave such an edge. A later read can
+    /// give an earlier edge, when the error shrinks. Before the first mesh time, it
+    /// waits for it. A drop cancels the wait.
+    ///
+    /// # Panics
+    ///
+    /// As [`env::clock::Clock::sleep_until`] does, on a thread that `env` did not
+    /// start.
+    pub fn reach(&self, at: Stamp) -> impl Future<Output = ()> + use<> {
+        let reader = self.clone();
+        async move {
+            loop {
+                let wake = reader.cell.read(|discipline| {
+                    let now = reader.monotonic.now();
+                    let Some(slew) = discipline.slew() else {
+                        return Some(now + RETRY);
+                    };
+                    let first = slew.reach(now, at, DRIFT);
+                    (first > now).then_some(first)
+                });
+                let Some(wake) = wake else {
+                    return;
+                };
+                reader.monotonic.sleep_until(wake).await;
+            }
+        }
     }
 
     /// What the clock follows now, with mesh time at the call. It holds the result of

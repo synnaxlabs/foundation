@@ -35,16 +35,7 @@ pub struct Config {
 pub enum Error {
     /// No channel has this name.
     Unknown(Name),
-    /// The home does not write samples of the channel's type yet.
-    Type {
-        /// A channel of such a type: of several, the one the home finds first, which
-        /// need not be the first in [`Config::channels`].
-        name: Name,
-        /// The channel's type.
-        data_type: Type,
-    },
-    /// The home refused the writer for another reason. It is never
-    /// [`crate::home::writer::Error::Type`], which gives [`Error::Type`].
+    /// The home refused the writer.
     Home(::home::writer::Error),
     /// The writer names no channel.
     Empty,
@@ -54,12 +45,6 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown(name) => write!(f, "no channel is named {name}"),
-            Self::Type { name, data_type } => {
-                write!(
-                    f,
-                    "the home does not write channel {name} of {data_type:?} yet"
-                )
-            }
             Self::Home(error) => error.fmt(f),
             Self::Empty => f.write_str("a writer names at least one channel"),
         }
@@ -125,22 +110,7 @@ impl Writer {
             lease,
             set: Arc::clone(&set),
         };
-        let key = borrowed
-            .home
-            .open_writer(writer)
-            .map_err(|error| match error {
-                ::home::writer::Error::Type { slot, data_type } => {
-                    let key = set.entries().iter().find(|entry| entry.slot == slot);
-                    let key = key.expect("the home refuses a slot of the key set").key;
-                    let channel = borrowed.channels.values().find(|c| c.key == key);
-                    let name = channel
-                        .expect("the key set holds known channels")
-                        .name
-                        .clone();
-                    Error::Type { name, data_type }
-                }
-                error => Error::Home(error),
-            })?;
+        let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
         borrowed.commit.appended();
         Ok(Self {
             state: Rc::clone(state),

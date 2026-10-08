@@ -2,7 +2,9 @@
 
 use std::future::poll_fn;
 use std::ops::Range;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, ready};
 
 use block::Block;
 
@@ -26,6 +28,61 @@ pub struct Part {
     pub range: Range<usize>,
     /// The zero bytes to send after them.
     pub zeros: u8,
+}
+
+impl Part {
+    /// All of `block`, with no zeros.
+    pub(crate) fn whole(block: &Block) -> Self {
+        Self {
+            range: 0..block.len(),
+            zeros: 0,
+        }
+    }
+}
+
+/// The zeros of every [`Part`].
+pub(crate) const ZEROS: &[u8; 255] = &[0; 255];
+
+/// The size of a message of `parts` of a block of `bytes`.
+///
+/// # Panics
+///
+/// When a range starts after its end or ends past the block.
+pub(crate) fn size(parts: &[Part], bytes: usize) -> usize {
+    if let [Part { range, zeros: 0 }] = parts
+        && *range == (0..bytes)
+    {
+        return bytes;
+    }
+    // When no sum can overflow, one pass with no branch per part. A range in the
+    // block that starts after its end wraps its length past `bytes`.
+    let bound = bytes.checked_add(usize::from(u8::MAX));
+    if bound
+        .and_then(|bound| bound.checked_mul(parts.len()))
+        .is_some()
+    {
+        let (size, most) =
+            parts.iter().fold((0, 0), |(size, most): (usize, _), part| {
+                let len = part.range.end.wrapping_sub(part.range.start);
+                let size = size.wrapping_add(len).wrapping_add(usize::from(part.zeros));
+                (
+                    size,
+                    most.max(len).max(part.range.start).max(part.range.end),
+                )
+            });
+        if most <= bytes {
+            return size;
+        }
+    }
+    parts.iter().fold(0, |size: usize, part| {
+        let Range { start, end } = part.range;
+        assert!(
+            start <= end && end <= bytes,
+            "the range {start}..{end} of a part is not in a block of {bytes} bytes"
+        );
+        size.saturating_add(end - start)
+            .saturating_add(usize::from(part.zeros))
+    })
 }
 
 /// The sending half of a stream. Dropping it without [`finish`](Self::finish) resets
@@ -115,24 +172,7 @@ impl Sender {
     /// }
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
-        let mut sending = Sending {
-            session: &self.session,
-            stream: &self.stream,
-            message: Some(message),
-            done: false,
-        };
-        let sent = poll_fn(|cx| {
-            let Sending {
-                session,
-                stream,
-                message,
-                ..
-            } = &mut sending;
-            session.poll_write(cx, stream, message)
-        })
-        .await;
-        sending.done = true;
-        sent
+        Sending::new(self, message, None).await
     }
 
     /// Sends `message` whole when the stream can take it now, and never waits. Gives
@@ -165,7 +205,8 @@ impl Sender {
     /// }
     /// ```
     pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
-        self.session.try_write(&self.stream, message)
+        let whole = Part::whole(&message);
+        self.try_send_parts(message, &[whole])
     }
 
     /// Sends one message: for each of `parts`, in order, the bytes of its range of
@@ -201,8 +242,7 @@ impl Sender {
         block: Block,
         parts: &[Part],
     ) -> Result<(), Error> {
-        drop((block, parts));
-        todo!("#68")
+        Sending::new(self, block, Some(parts)).await
     }
 
     /// [`send_parts`](Self::send_parts) when the stream can take the message now, as
@@ -231,8 +271,7 @@ impl Sender {
         block: Block,
         parts: &[Part],
     ) -> Result<Option<Block>, Error> {
-        drop((block, parts));
-        todo!("#68")
+        self.session.try_write(&self.stream, block, parts)
     }
 
     /// Ends the stream after the messages already sent. The peer's
@@ -278,14 +317,44 @@ impl Drop for Sender {
     }
 }
 
-/// A [`Sender::send`] in progress. Dropping it before it is done ends its wait, and
-/// cancels the message once the stream took it.
+/// A [`Sender::send`] or [`Sender::send_parts`] in progress. Dropping it before it is
+/// done ends its wait, and cancels the message once the stream took it.
 struct Sending<'a> {
     session: &'a quic::Session,
     stream: &'a quic::stream::Sender,
     /// `None` once the stream took it.
     message: Option<Block>,
+    /// The parts of `message`, or `None` for one part, the whole block.
+    parts: Option<&'a [Part]>,
     done: bool,
+}
+
+impl<'a> Sending<'a> {
+    fn new(sender: &'a Sender, message: Block, parts: Option<&'a [Part]>) -> Self {
+        Self {
+            session: &sender.session,
+            stream: &sender.stream,
+            message: Some(message),
+            parts,
+            done: false,
+        }
+    }
+}
+
+impl Future for Sending<'_> {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        let whole = this.message.as_ref().map(Part::whole);
+        let parts = this.parts.unwrap_or(whole.as_slice());
+        let sent = this
+            .session
+            .poll_write(cx, this.stream, &mut this.message, parts);
+        let sent = ready!(sent);
+        this.done = true;
+        Poll::Ready(sent)
+    }
 }
 
 impl Drop for Sending<'_> {
@@ -481,6 +550,7 @@ impl Incoming {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::ops::Range;
     use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -497,6 +567,7 @@ mod tests {
     use sim::node::Node;
     use types::time::Span;
 
+    use super::Part;
     use crate::testing::{self, IDLE, MESSAGE_BYTES_MAX, poll_once, spans};
     use crate::{Address, Class, Code, Config, Error, Transport};
 
@@ -817,6 +888,56 @@ mod tests {
                 reply.send(side.block(b"b")).await.expect("sent");
                 let reply = incoming.sender.as_mut().expect("a reply half");
                 reply.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                assert_eq!(until_error(&mut incoming.receiver).await, CANCELLED);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_send_cut_by_the_window_and_dropped_gives_back_its_block() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(b"a")).await.expect("sent");
+                // The peer accepts the stream only once a byte of it arrives.
+                side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+                let body = vec![7; 60_000];
+                let mut sent = 0;
+                let at = loop {
+                    let block = side.block(&body);
+                    let at = block.as_ptr();
+                    match poll_once(pin!(sender.send(block))).await {
+                        Some(done) => done.expect("sent"),
+                        None => break at,
+                    }
+                    sent += 1;
+                };
+                assert!((1..=17).contains(&sent), "{sent}");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                // The sender lives, so only the reset can have dropped the block.
+                let mut held = Vec::new();
+                let found = loop {
+                    let Ok(next) = side.pool.alloc(body.len()) else {
+                        break false;
+                    };
+                    if next.as_ptr() == at {
+                        break true;
+                    }
+                    held.push(next);
+                };
+                assert!(found, "the reset drops the block that the window cut");
+                drop((held, sender));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 assert_eq!(until_error(&mut incoming.receiver).await, CANCELLED);
                 side.session.close(Code(4));
@@ -1185,6 +1306,463 @@ mod tests {
             },
         );
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_size_of_parts_is_the_sum_of_their_bytes_or_names_the_first_outside(
+            drawn in proptest::collection::vec(
+                (0..20_usize, 0..20_usize, proptest::bool::ANY, 0..4_u8),
+                0..6,
+            ),
+            wide in proptest::bool::ANY,
+        ) {
+            // A block of `usize::MAX` bytes sums with no bound on the sum.
+            let bytes = if wide { usize::MAX } else { 16 };
+            let parts: Vec<_> = drawn
+                .into_iter()
+                .map(|(start, end, huge, zeros)| {
+                    let start = if huge { usize::MAX - start } else { start };
+                    Part { range: start..end, zeros }
+                })
+                .collect();
+            let outside = parts.iter().find(|part| {
+                part.range.start > part.range.end || part.range.end > bytes
+            });
+            let sized = std::panic::catch_unwind(|| super::size(&parts, bytes));
+            match outside {
+                None => {
+                    let sum = parts.iter().map(|part| part.range.len()).sum::<usize>();
+                    let zeros = parts.iter().map(|part| usize::from(part.zeros));
+                    let zeros = zeros.sum::<usize>();
+                    proptest::prop_assert_eq!(sized.ok(), Some(sum + zeros));
+                }
+                Some(part) => {
+                    let Range { start, end } = part.range;
+                    let message = format!(
+                        "the range {start}..{end} of a part is not in a block of \
+                         {bytes} bytes"
+                    );
+                    let given = sized.expect_err("a panic");
+                    let given = given.downcast_ref::<String>();
+                    proptest::prop_assert_eq!(given, Some(&message));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_message_of_parts_carries_each_range_then_its_zeros() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let block = || side.block(b"0123456789abcdef");
+                let parts = [
+                    Part {
+                        range: 0..2,
+                        zeros: 0,
+                    },
+                    Part {
+                        range: 4..7,
+                        zeros: 3,
+                    },
+                    Part {
+                        range: 9..9,
+                        zeros: 2,
+                    },
+                    Part {
+                        range: 15..16,
+                        zeros: 255,
+                    },
+                ];
+                sender.send_parts(block(), &parts).await.expect("sent");
+                sender.send_parts(block(), &[]).await.expect("sent");
+                let whole = [Part {
+                    range: 0..16,
+                    zeros: 3,
+                }];
+                sender.send_parts(block(), &whole).await.expect("sent");
+                let one = [Part {
+                    range: 10..16,
+                    zeros: 1,
+                }];
+                assert!(
+                    sender
+                        .try_send_parts(block(), &one)
+                        .expect("sent")
+                        .is_none()
+                );
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                let mut read = Vec::new();
+                while let Some(message) = receiver.recv().await.expect("a message") {
+                    read.push(message.to_vec());
+                }
+                let first = [b"01456".as_slice(), &[0; 5], b"f", &[0; 255]].concat();
+                let whole = b"0123456789abcdef\0\0\0".to_vec();
+                assert_eq!(read, [first, Vec::new(), whole, b"abcdef\0".to_vec()]);
+                side.session.close(Code(0));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_sent_block_goes_back_to_the_pool_once_the_stream_drops_it() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                // A message of at most 1452 bytes is copied, so the stream drops its
+                // block at once. A longer one is a slice of its block until the ACK.
+                for (len, held) in [(100, false), (1452, false), (1453, true)] {
+                    let block = side.block(&vec![7; len]);
+                    let at = block.as_ptr();
+                    sender.send(block).await.expect("sent");
+                    let next = side.pool.alloc(len).expect("room");
+                    assert_eq!(next.as_ptr() != at, held, "a message of {len} bytes");
+                    if held {
+                        side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                        let after = side.pool.alloc(len).expect("room");
+                        assert_eq!(
+                            after.as_ptr(),
+                            at,
+                            "a message of {len} bytes, acked"
+                        );
+                    }
+                }
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                for len in [100, 1452, 1453] {
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; len])));
+                }
+                assert_eq!(bytes(receiver.recv().await), Ok(None));
+                side.session.close(Code(0));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_of_parts_larger_than_the_window_arrives_whole() {
+        // The stream header leaves the window short of the message.
+        let narrow = |config| Config {
+            message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
+            window_bytes: 16_000,
+            ..config
+        };
+        let parts: Vec<Part> = (0..1000)
+            .map(|index| Part {
+                range: index..index + 7,
+                zeros: 9,
+            })
+            .collect();
+        let body: Vec<u8> = (0..1100u32).map(|index| index.to_le_bytes()[0]).collect();
+        let sent: Vec<u8> = parts
+            .iter()
+            .flat_map(|part| [&body[part.range.clone()], &[0; 9]].concat())
+            .collect();
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            move |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let block = side.block(&body);
+                sender.send_parts(block, &parts).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            move |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                assert_eq!(bytes(receiver.recv().await), Ok(None));
+                side.session.close(Code(0));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_stretch_that_the_window_takes_in_parts_arrives_whole() {
+        let narrow = |config| Config {
+            message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
+            window_bytes: 16_000,
+            ..config
+        };
+        // One stretch of short runs, after a message that takes half the window.
+        let parts: Vec<Part> = (0..2000)
+            .map(|index| Part {
+                range: index * 16..index * 16 + 8,
+                zeros: 0,
+            })
+            .collect();
+        let body: Vec<u8> = (0..32_000u32)
+            .map(|index| (index % 251).to_le_bytes()[0])
+            .collect();
+        let sent: Vec<u8> = parts
+            .iter()
+            .flat_map(|part| body[part.range.clone()].to_vec())
+            .collect();
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            move |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.send(side.block(&[7; 8000])).await.expect("sent");
+                let block = side.block(&body);
+                sender.send_parts(block, &parts).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            move |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; 8000])));
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                assert_eq!(bytes(receiver.recv().await), Ok(None));
+                side.session.close(Code(0));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_message_of_long_and_short_runs_larger_than_the_window_arrives_whole() {
+        let body: Vec<u8> =
+            (0..25_200u32).map(|index| index.to_le_bytes()[0]).collect();
+        // In each 2100 bytes, a run of 2000 bytes, then two short runs and zeros. The
+        // second message ends in a long run.
+        let mut parts: Vec<Part> = (0..12)
+            .flat_map(|index| {
+                let at = index * 2100;
+                [
+                    Part {
+                        range: at..at + 2000,
+                        zeros: 0,
+                    },
+                    Part {
+                        range: at + 2010..at + 2018,
+                        zeros: 5,
+                    },
+                    Part {
+                        range: at + 2030..at + 2090,
+                        zeros: 0,
+                    },
+                ]
+            })
+            .collect();
+        let tail = parts.len() - 2;
+        for ended in [false, true] {
+            if ended {
+                parts.truncate(tail);
+            }
+            let sent: Vec<u8> = parts
+                .iter()
+                .flat_map(|part| {
+                    let zeros = vec![0; part.zeros.into()];
+                    [&body[part.range.clone()], &zeros].concat()
+                })
+                .collect();
+            // The stream header leaves the window short of the message.
+            let len = NonZeroUsize::new(sent.len()).expect("not zero");
+            let narrow = move |config| Config {
+                message_bytes_max: len,
+                window_bytes: len.get(),
+                ..config
+            };
+            let (body, parts) = (body.clone(), parts.clone());
+            let (mut sim, ..) = testing::sessions(
+                0,
+                narrow,
+                move |side| async move {
+                    let opened = side.session.open_sender(Class::Complete).await;
+                    let mut sender = opened.expect("a stream");
+                    let block = side.block(&body);
+                    sender.send_parts(block, &parts).await.expect("sent");
+                    sender.finish().expect("finished");
+                    let closed = Error::PeerClosed { code: Code(0) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+                move |side| async move {
+                    let mut receiver =
+                        side.session.accept().await.expect("a stream").receiver;
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                    assert_eq!(bytes(receiver.recv().await), Ok(None));
+                    side.session.close(Code(0));
+                },
+            );
+            assert_eq!(sim.run(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_message_of_parts_is_too_large_by_the_sum_of_its_parts() {
+        let small = |config| Config {
+            message_bytes_max: NonZeroUsize::new(1472).expect("not zero"),
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            small,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let large = Error::TooLarge {
+                    bytes: 1473,
+                    bytes_max: 1472,
+                };
+                let block = || side.block(&[7; 4000]);
+                let over = [Part {
+                    range: 0..1218,
+                    zeros: 255,
+                }];
+                assert_eq!(sender.send_parts(block(), &over).await, Err(large.clone()));
+                let given = sender.try_send_parts(block(), &over);
+                assert_eq!(given.map(|given| given.is_some()), Err(large));
+                let within = [Part {
+                    range: 2000..3217,
+                    zeros: 255,
+                }];
+                sender.send_parts(block(), &within).await.expect("sent");
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let read = incoming.receiver.recv().await;
+                assert_eq!(read.map(|m| m.map(|b| b.len())), Ok(Some(1472)));
+                assert_eq!(bytes(incoming.receiver.recv().await), Ok(None));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_try_send_of_parts_counts_the_parts_not_the_block() {
+        let narrow = |config| Config {
+            message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
+            window_bytes: 16_000,
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let block = || side.block(&vec![7; 40_000]);
+                let parts = [Part {
+                    range: 30_000..38_000,
+                    zeros: 0,
+                }];
+                for _ in 0..2 {
+                    let given = sender.try_send_parts(block(), &parts);
+                    assert_eq!(given.map(|given| given.is_none()), Ok(true));
+                }
+                let given = sender.try_send_parts(block(), &parts);
+                assert_eq!(
+                    given.map(|given| given.map(|block| block.len())),
+                    Ok(Some(40_000))
+                );
+                sender.finish().expect("finished");
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut receiver =
+                    side.session.accept().await.expect("a stream").receiver;
+                for _ in 0..2 {
+                    let read = receiver.recv().await;
+                    assert_eq!(bytes(read), Ok(Some(vec![7; 8000])));
+                }
+                assert_eq!(bytes(receiver.recv().await), Ok(None));
+                side.session.close(Code(0));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// Sends `parts` of a block of 4 bytes on a stream that finished, with
+    /// `try_send_parts` when `tried`, and gives the run.
+    fn after_finish(parts: Vec<Part>, tried: bool) -> Result<(), sim::Error> {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            move |side| async move {
+                let opened = side.session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                sender.finish().expect("finished");
+                let block = side.block(b"abcd");
+                if tried {
+                    drop(sender.try_send_parts(block, &parts));
+                } else {
+                    drop(sender.send_parts(block, &parts).await);
+                }
+            },
+            |side| async move {
+                drop(side.session.closed().await);
+            },
+        );
+        sim.run()
+    }
+
+    #[test]
+    fn a_range_outside_the_block_panics_ahead_of_the_panic_after_finish() {
+        // The part at 0 first catches a sum that divides by its start.
+        let past = after_finish(
+            vec![
+                Part {
+                    range: 0..1,
+                    zeros: 0,
+                },
+                Part {
+                    range: 1..5,
+                    zeros: 0,
+                },
+            ],
+            false,
+        );
+        let (start, end) = (3, 2);
+        let reversed = after_finish(
+            vec![Part {
+                range: start..end,
+                zeros: 0,
+            }],
+            true,
+        );
+        let panicked = |message: &str| {
+            Err(sim::Error::Panicked {
+                thread: "transport".into(),
+                message: message.into(),
+                seed: 0,
+            })
+        };
+        let message = "the range 1..5 of a part is not in a block of 4 bytes";
+        assert_eq!(past, panicked(message));
+        let message = "the range 3..2 of a part is not in a block of 4 bytes";
+        assert_eq!(reversed, panicked(message));
     }
 
     #[test]
@@ -1962,7 +2540,7 @@ mod tests {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), testing::address(&node));
             let transport = Transport::new(config, part).expect("a transport");
-            let server = crate::tls::public(&testing::SERVER);
+            let server = testing::SERVER.public();
             let ended = transport.dial(server, &at).await.expect("a session");
             let waiting = transport.dial(server, &at).await.expect("a session");
             let messages = [(&waiting, 0), (&waiting, 1), (&ended, 2)];
@@ -2112,7 +2690,7 @@ mod tests {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), testing::address(&node));
             let transport = Transport::new(config, part).expect("a transport");
-            let server = crate::tls::public(&testing::SERVER);
+            let server = testing::SERVER.public();
             let mut held = Vec::new();
             for _ in 0..sessions {
                 let session = transport.dial(server, &at).await.expect("a session");

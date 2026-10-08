@@ -2,9 +2,9 @@
 
 use std::fmt;
 
-use types::ed25519::PublicKey;
+use types::ed25519::{BadSignature, Pair, PrivateKey, PublicKey};
 use types::name::{Name, Prefix};
-use types::node::{self, PrivateKey};
+use types::node;
 use types::time::{Span, Stamp};
 
 use crate::bytes::{
@@ -12,7 +12,6 @@ use crate::bytes::{
     take_optional_span, take_stamp,
 };
 use crate::card;
-use crate::ed25519;
 
 const TAG: &[u8] = b"foundation/admission/1";
 
@@ -93,7 +92,7 @@ impl Ticket {
     /// The public half of the key pair: the key of the ticket's record.
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
-        ed25519::public(&ed25519::pair(&self.private_key))
+        self.private_key.public()
     }
 
     /// The prefix of the ticket's region.
@@ -112,7 +111,7 @@ impl Ticket {
     /// the card's node key, and the card's byte form.
     #[must_use]
     pub fn admission(&self, card: &card::Signed) -> [u8; 64] {
-        ed25519::sign(&ed25519::pair(&self.private_key), &statement(card))
+        Pair::new(&self.private_key).sign(&statement(card))
     }
 }
 
@@ -160,12 +159,12 @@ impl Record {
         at: Stamp,
     ) -> Result<(), Refused> {
         let public_key = self.public_key;
-        if !ed25519::holds(public_key, &statement(card), admission) {
-            return Err(Refused::Forged {
+        public_key.verify(&statement(card), admission).map_err(
+            |_bad: BadSignature| Refused::Forged {
                 node: card.key(),
                 public_key,
-            });
-        }
+            },
+        )?;
         let name = &card.card().name;
         if !name.starts_with(&self.options.prefix) {
             return Err(Refused::Scope {
@@ -329,7 +328,7 @@ mod tests {
         statement.extend(key(3).as_u128().to_le_bytes());
         card.card().encode(&mut statement);
         let admission = ticket(7).admission(&card);
-        assert!(ed25519::holds(public(7), &statement, &admission));
+        assert_eq!(public(7).verify(&statement, &admission), Ok(()));
     }
 
     #[test]

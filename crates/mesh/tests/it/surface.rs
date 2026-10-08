@@ -9,20 +9,22 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
 use mesh::status::Status;
-use mesh::{Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, region};
+use mesh::{
+    Config, Error, Member, Mesh, Pointer, Stopped, Watch, change, claim, log, region,
+};
 use raft::{Position, Term};
 use sim::Sim;
+use spec::definition::Definition;
 use transport::stream::Incoming;
 use transport::{Address, Class, Code, Peer, Port, Transport};
 use types::channel;
-use types::ed25519::PublicKey;
-use types::name::Prefix;
-use types::node::{self, PrivateKey, SealKey};
+use types::ed25519::{PrivateKey, PublicKey};
+use types::name::{Name, Prefix};
+use types::node::{self, SealKey};
 use types::time::Span;
 use wire::Protocol;
 
@@ -48,6 +50,11 @@ fn assert_sets<'a, F: Future<Output = Result<(), Error>>>(
 ) {
 }
 
+fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
+    _: fn(&'a Mesh, Pointer, BTreeMap<Name, Definition>) -> F,
+) {
+}
+
 fn assert_error<E: std::error::Error>(_: &E) {}
 
 fn key(id: u8) -> node::Key {
@@ -59,8 +66,7 @@ fn private_key(id: u8) -> PrivateKey {
 }
 
 fn public_key(id: u8) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key(id).0).unwrap();
-    PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
+    private_key(id).public()
 }
 
 /// The record of node `id`, with a card that the node signed and that holds
@@ -113,22 +119,22 @@ fn create_transport(
 }
 
 /// The config of the region `plant`, whose one member and one voter is the node `KEY`.
-fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
-    create_voter_config(node, tasks, 1, vec![create_member(1, Vec::new())])
+async fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
+    create_voter_config(node, tasks, 1, vec![create_member(1, Vec::new())]).await
 }
 
 /// The config of node `id` of the region `plant`. Each of `members` is a voter.
-fn create_voter_config(
+async fn create_voter_config(
     node: &sim::node::Node,
     tasks: &Tasks,
     id: u8,
     members: Vec<Member>,
 ) -> Config {
-    create_config_on(node, tasks, id, members, private_key(id))
+    create_config_on(node, tasks, id, members, private_key(id)).await
 }
 
 /// That config, on a transport that proves the public key of `transport_key`.
-fn create_config_on(
+async fn create_config_on(
     node: &sim::node::Node,
     tasks: &Tasks,
     id: u8,
@@ -137,18 +143,28 @@ fn create_config_on(
 ) -> Config {
     let pool = create_pool();
     let transport = create_transport(node, tasks, &pool, transport_key);
+    let store = blob::Store::open(blob::Config {
+        files: node.files(),
+        dir: "blob".into(),
+        pool: Rc::clone(&pool),
+    })
+    .await
+    .unwrap();
     Config {
         key: key(id),
         private_key: private_key(id),
         region: "plant".parse::<Prefix>().unwrap(),
         voters: members.iter().map(|member| member.card.key()).collect(),
         members,
+        founding: BTreeMap::new(),
         files: node.files(),
+        dir: PathBuf::new(),
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),
         transport: Rc::new(transport),
         pool,
+        store: Rc::new(store),
     }
 }
 
@@ -190,9 +206,16 @@ fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
 }
 
 #[test]
-fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
+fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
     solo(|node, tasks| async move {
-        let mesh = Mesh::open(create_config(&node, &tasks)).await.unwrap();
+        let mesh = Mesh::open(create_config(&node, &tasks).await)
+            .await
+            .unwrap();
+        let founding = Pointer {
+            version: 0,
+            root: spec::tree::empty(),
+        };
+        assert_eq!(mesh.pointer(), founding);
         assert_eq!(mesh.member(KEY), Some(create_member(1, Vec::new())));
         assert_eq!(mesh.member(OTHER), None);
         let mut watch = mesh.watch(INDEX);
@@ -214,7 +237,7 @@ fn key_gives_the_key_of_the_config() {
                 let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
                 let config = Config {
                     voters: voters.map(key).collect(),
-                    ..create_voter_config(&node, &tasks, place, members.into())
+                    ..create_voter_config(&node, &tasks, place, members.into()).await
                 };
                 let mesh = Mesh::open(config).await.unwrap();
                 assert_eq!(mesh.key(), key(place));
@@ -227,7 +250,8 @@ fn key_gives_the_key_of_the_config() {
 fn open_panics_on_a_transport_that_proves_another_key() {
     let ran = run(|node, tasks| async move {
         let members = vec![create_member(1, Vec::new())];
-        let config = create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32]));
+        let config =
+            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32])).await;
         drop(Mesh::open(config).await);
     });
     assert_eq!(ran, mismatch(PUBLIC_3, PUBLIC_1));
@@ -238,7 +262,7 @@ fn open_panics_on_a_transport_that_proves_another_key() {
 #[test]
 fn open_panics_on_a_private_key_that_its_transport_does_not_prove() {
     let ran = run(|node, tasks| async move {
-        let mut config = create_config(&node, &tasks);
+        let mut config = create_config(&node, &tasks).await;
         config.private_key = PrivateKey([3; 32]);
         drop(Mesh::open(config).await);
     });
@@ -250,7 +274,7 @@ fn open_gives_wrong_key_when_the_transport_proves_the_private_key() {
     solo(|node, tasks| async move {
         let members = vec![create_member(1, Vec::new())];
         let mut config =
-            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32]));
+            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32])).await;
         config.private_key = PrivateKey([3; 32]);
         assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
     });
@@ -303,7 +327,7 @@ fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
     for (id, node) in IDS.into_iter().zip(&nodes) {
         let (own, members, read) = (node.clone(), members.clone(), Arc::clone(&read));
         let main = move |tasks: Tasks| async move {
-            let config = create_voter_config(&own, &tasks, id, members);
+            let config = create_voter_config(&own, &tasks, id, members).await;
             let transport = Rc::clone(&config.transport);
             let mesh = Mesh::open(config).await.unwrap();
             tasks.spawn(accept(mesh.clone(), transport, tasks.clone()));
@@ -337,7 +361,7 @@ fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
 #[test]
 fn a_region_with_two_records_of_one_node_does_not_open() {
     solo(|node, tasks| async move {
-        let mut config = create_config(&node, &tasks);
+        let mut config = create_config(&node, &tasks).await;
         config.members.push(create_member(1, Vec::new()));
         let unfit = region::Unfit::Duplicate { key: KEY };
         assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
@@ -347,7 +371,7 @@ fn a_region_with_two_records_of_one_node_does_not_open() {
 #[test]
 fn the_debug_of_a_config_does_not_show_the_private_key() {
     solo(|node, tasks| async move {
-        let debug = format!("{:?}", create_config(&node, &tasks));
+        let debug = format!("{:?}", create_config(&node, &tasks).await);
         assert!(debug.contains("private_key: PrivateKey(..)"), "{debug}");
     });
 }
@@ -366,7 +390,7 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
     };
     let (node, result) = (nodes[0].clone(), Arc::clone(&served));
     let main = move |tasks: Tasks| async move {
-        let config = create_config(&node, &tasks);
+        let config = create_config(&node, &tasks).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let session = transport.accept().await.unwrap();
@@ -406,13 +430,15 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 }
 
 #[test]
-fn key_watch_member_next_serve_and_set_home_have_the_signatures_that_a_caller_holds() {
+fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
     let _: fn(&Mesh) -> node::Key = Mesh::key;
+    let _: fn(&Mesh) -> Pointer = Mesh::pointer;
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
     assert_gives_a_home(Watch::next);
     assert_serves(Mesh::serve);
     assert_sets(Mesh::set_home);
+    assert_applies(Mesh::apply);
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -423,6 +449,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Raft(_)
         | Error::Spoofed { .. }
         | Error::NotVoter { .. }
+        | Error::Removed { .. }
         | Error::PeerNotVoter { .. }
         | Error::Claim(_)
         | Error::NotMember(_)
@@ -432,7 +459,12 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Pool(_)
         | Error::Malformed
         | Error::Stream(_)
-        | Error::Stopped(_) => {}
+        | Error::Stopped(_)
+        | Error::Stale { .. }
+        | Error::Large { .. }
+        | Error::Problems(_)
+        | Error::Quorum { .. }
+        | Error::Blob(_) => {}
     };
     let _: fn(&Error) = cases;
 }
@@ -464,6 +496,11 @@ fn an_error_of_open_or_serve_names_its_cause() {
     assert_eq!(
         Error::Stopped(Stopped::Dropped).to_string(),
         "the group stopped: each mesh of the group dropped"
+    );
+    assert_eq!(
+        Error::Removed { from: OTHER }.to_string(),
+        "node 00000000-0000-0000-0000-000000000002 sent a request, but a committed \
+         configuration removed it"
     );
 }
 
@@ -504,5 +541,10 @@ fn a_stop_names_its_cause() {
     assert_eq!(
         Stopped::Dropped.to_string(),
         "each mesh of the group dropped"
+    );
+    assert_eq!(
+        Stopped::Removed { by: OTHER }.to_string(),
+        "voter 00000000-0000-0000-0000-000000000002 answered removed: a committed \
+         configuration lacks this node"
     );
 }

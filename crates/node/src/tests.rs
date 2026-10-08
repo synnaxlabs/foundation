@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use env::thread;
 use sim::shard::Fault;
 use types::byte::Size;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
 use crate::{Config, Error, Node};
@@ -21,8 +21,10 @@ struct Run {
 
 /// The port of [`config`].
 const PORT: u16 = 7000;
-/// The node's key in [`config`].
+/// The node's private key in [`config`].
 const KEY: PrivateKey = PrivateKey([2; 32]);
+/// The node's key in [`config`].
+const OWN: types::node::Key = types::node::Key::from_u128(1);
 
 /// A disk budget of two rings of 64 MiB, with their header blocks.
 const DISK: Size = Size::from_bytes(2 * (8192 + (64 << 20)));
@@ -53,7 +55,7 @@ fn refuse(refused: usize, error: os::memory::Error) -> Memory {
 }
 
 /// The seams of `host`, with a pool budget of `budget` from `memory`, a disk budget
-/// of [`DISK`], key [`KEY`], and the port at [`listen`].
+/// of [`DISK`], keys [`OWN`] and [`KEY`], and the port at [`listen`].
 fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block::Heap> {
     Config {
         shards: host.shards(),
@@ -73,6 +75,8 @@ fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block:
         net: host.net(),
         listen: listen(host),
         private_key: KEY,
+        key: OWN,
+        region: None,
     }
 }
 
@@ -378,7 +382,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
              budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, \
-             listen: {listen:?}, .. }}",
+             listen: {listen:?}, key: {OWN:?}, region: None, .. }}",
             listen = config.listen,
         )
     );
@@ -491,48 +495,20 @@ fn fate(fate: &Mutex<Fate>) -> Fate {
     *fate.lock().unwrap()
 }
 
-/// `join` gives the node's own failure, else the first shard error by core, else the
-/// first panic by core, and joins every shard.
+/// A private call: in `sim` a shard panics before its open or after each open, so no
+/// run gives this order. On real threads, the mesh clock of shard 0 can panic while a
+/// later shard opens.
 #[test]
-fn join_gives_errors_in_order_of_precedence() {
-    let panicked = |core: usize| thread::Panicked {
-        name: format!("shard-{core}"),
+fn join_gives_a_later_shard_error_over_an_earlier_panic() {
+    let panicked = thread::Panicked {
+        name: "shard-0".to_owned(),
     };
-    let memory = Error::Memory {
-        core: 2,
-        error: os::memory::Error::Refused,
+    let shards = Error::Shards {
+        stored: 2,
+        cores: 3,
     };
-    let shards = |stored: usize| Error::Shards { stored, cores: 3 };
-    let mut joined = 0;
-    let all = [
-        (Err(panicked(0)), Some(shards(2))),
-        (Ok(()), Some(shards(4))),
-    ];
-    let all = all.into_iter().inspect(|_| joined += 1);
-    assert_eq!(crate::error(Some(memory.clone()), all), Err(memory));
-    assert_eq!(joined, 2);
-    let cases = [
-        (
-            vec![(Err(panicked(0)), None), (Ok(()), Some(shards(2)))],
-            shards(2),
-        ),
-        (
-            vec![(Ok(()), Some(shards(2))), (Ok(()), Some(shards(4)))],
-            shards(2),
-        ),
-        (
-            vec![
-                (Ok(()), None),
-                (Err(panicked(1)), None),
-                (Err(panicked(2)), None),
-            ],
-            Error::Panicked(panicked(1)),
-        ),
-    ];
-    for (shards, error) in cases {
-        assert_eq!(crate::error(None, shards.into_iter()), Err(error));
-    }
-    assert_eq!(crate::error(None, [(Ok(()), None)].into_iter()), Ok(()));
+    let all = vec![(Err(panicked), None), (Ok(()), Some(shards.clone()))];
+    assert_eq!(crate::error(None, all), Err(shards));
 }
 
 mod buffer {
@@ -907,7 +883,21 @@ mod buffer {
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
-            assert_eq!(run_on(&mut sim, &host), Ok(()), "at {after:?}");
+            // A smaller budget makes a ring with no checkpoint again at its new part,
+            // so only a whole ring keeps its size.
+            let restart = run_on_disk(&mut sim, &host, 3 * RING);
+            assert_eq!(restart, Ok(()), "at {after:?}");
+            for core in 0..3 {
+                let dir = PathBuf::from(format!("shard-{core}"));
+                // `DISK` splits into three whole parts, with no remainder.
+                let len = if listed.contains(&dir) {
+                    DISK.bytes() / 3
+                } else {
+                    RING
+                };
+                let ring = ring_len(&mut sim, &host, core);
+                assert_eq!(ring, len, "{dir:?} at {after:?}");
+            }
         }
         assert_eq!(seen[2..], [true; 4], "a stop after each step");
     }
@@ -1066,6 +1056,9 @@ mod buffer {
 }
 
 mod directory {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
 
     /// Makes the record of a node of `stored` shards in `host`'s data directory.
@@ -1422,6 +1415,40 @@ mod directory {
             seen, [true; 2],
             "a panic before and after the claim started"
         );
+    }
+
+    /// On the real OS, shard 0 runs while the later shards get their memory, so its
+    /// claim can fail before a shard gets no memory. `join` gives the shard with no
+    /// memory.
+    #[test]
+    fn join_gives_a_shard_with_no_memory_over_a_claim_that_failed_first() {
+        let error = os::memory::Error::Refused;
+        for seed in 0..32 {
+            let sim = Rc::new(RefCell::new(sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            })));
+            let host = host(&mut sim.borrow_mut(), 3);
+            record(&mut sim.borrow_mut(), &host, 2);
+            let (mut core, run) = (0, Rc::clone(&sim));
+            let memory: Memory = Box::new(move |len| {
+                core += 1;
+                if core < 3 {
+                    return heap(len);
+                }
+                let claim = Span::from_nanos(5_000_000);
+                assert_eq!(run.borrow_mut().run_for(claim), Ok(()));
+                Err(error)
+            });
+            let node = Node::start(config(&host, Size::MEBIBYTE, memory));
+            assert_eq!(sim.borrow_mut().run(), Ok(()), "seed {seed}");
+            // The claim took the lock, then refused the count: no `shards-3`.
+            let claimed = listed(&mut sim.borrow_mut(), &host, "");
+            let made = ["lock", "shards-2"].map(PathBuf::from);
+            assert_eq!(claimed, made, "seed {seed}");
+            let memory = Error::Memory { core: 2, error };
+            assert_eq!(node.join(), Err(memory), "seed {seed}");
+        }
     }
 }
 
@@ -2249,10 +2276,8 @@ mod port {
         };
         let own = peer.clone();
         let started = peer.shards().start(shard, move |tasks| async move {
-            // The node's public key, from a transport made with its private key.
-            let node = transport(&own, tasks.clone(), KEY).0.public_key();
             let (transport, pool) = transport(&own, tasks, CLIENT);
-            let dialed = transport.dial(node, &[Address::Udp(listen)]).await;
+            let dialed = transport.dial(KEY.public(), &[Address::Udp(listen)]).await;
             let session = match dialed {
                 Ok(session) => session,
                 Err(error) => {
@@ -2304,20 +2329,11 @@ mod port {
             .expect("the dial reaches the node")
     }
 
-    /// The node's key, as a peer sees it.
-    fn node_key(sim: &mut sim::Sim) -> types::ed25519::PublicKey {
-        let host = sim.node(sim::node::Config::default());
-        let key = sim.run_on(&host, |host, tasks| async move {
-            transport(&host, tasks, KEY).0.public_key()
-        });
-        key.expect("the run ends")
-    }
-
     /// The node stops a stream it serves no protocol for, and resets its reply half,
     /// with the code of a rejected header. The node proves its key.
     #[test]
     fn a_stream_of_a_known_protocol_is_rejected() {
-        let key = node_key(&mut sim::Sim::new(sim::Config::default()));
+        let key = KEY.public();
         let header = wire::header::encode(wire::Protocol::Mesh);
         let code = Code(wire::header::REJECTED);
         let Seen {
@@ -2450,7 +2466,7 @@ mod port {
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
-            peer: node_key(&mut sim::Sim::new(sim::Config::default())),
+            peer: KEY.public(),
             attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)],
         };
         assert_eq!(seen, Err(unreachable));
@@ -2530,5 +2546,496 @@ mod port {
             error: env::net::Error::Io { code: 5 },
         };
         assert_eq!(node.join(), Err(Error::Transport(error)));
+    }
+
+    /// A stream whose header is late delays no other stream of the same session. On a
+    /// slow link, stream A sends a first message of 60 KiB and stream B a header
+    /// only: B's reply half resets before A's.
+    #[test]
+    fn a_late_header_delays_no_other_stream() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let slow = sim::link::Config {
+            rate: Some(std::num::NonZeroU64::new(20_000).unwrap()),
+            ..sim::link::Config::default()
+        };
+        sim.link(&peer, &host, slow);
+        let listen = listen(&host);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&order);
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let (transport, pool) = transport(&own, tasks.clone(), CLIENT);
+            let session = transport
+                .dial(KEY.public(), &[Address::Udp(listen)])
+                .await
+                .expect("a session");
+            let message = |bytes: &[u8]| {
+                let mut block = pool.alloc(bytes.len()).unwrap();
+                block.copy_from_slice(bytes);
+                block.freeze()
+            };
+            let header = wire::header::encode(wire::Protocol::Mesh);
+            let mut late = header.to_vec();
+            late.resize(60 << 10, 0);
+            let (mut a, a_reply) = session.open(Class::Complete).await.expect("a");
+            a.send(message(&late)).await.expect("a sends");
+            let (mut b, b_reply) = session.open(Class::Complete).await.expect("b");
+            b.send(message(&header)).await.expect("b sends");
+            for (name, mut reply) in [("a", a_reply), ("b", b_reply)] {
+                let seen = Arc::clone(&seen);
+                tasks.spawn(async move {
+                    let read = reply.recv().await.map(|m| m.map(|b| b.to_vec()));
+                    seen.lock().unwrap().push((name, read));
+                });
+            }
+            session.closed().await;
+            drop((a, b, transport));
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(
+            sim.run_for(Span::from_nanos(8 * Span::SECOND.nanos())),
+            Ok(())
+        );
+        let code = Code(wire::header::REJECTED);
+        let reset = Err(transport::Error::Reset { code });
+        assert_eq!(*order.lock().unwrap(), [("b", reset.clone()), ("a", reset)]);
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    mod mesh {
+        use std::collections::BTreeMap;
+
+        use ::mesh::card::addresses::Addresses;
+        use ::mesh::card::{self, Card};
+        use ::mesh::status::Status;
+        use std::future::poll_fn;
+        use std::pin::pin;
+        use std::task::Poll;
+
+        use ::mesh::Member;
+        use types::channel;
+        use types::node::SealKey;
+
+        use super::*;
+        use crate::{Endpoint, Region, route};
+
+        /// The key and private key of a second node.
+        const OTHER: (types::node::Key, PrivateKey) =
+            (types::node::Key::from_u128(2), PrivateKey([3; 32]));
+        const INDEX: channel::Key = channel::Key::from_u128(7);
+        /// A channel whose home the peer sets after the node starts again.
+        const AFTER: channel::Key = channel::Key::from_u128(8);
+        const TEN: Span = Span::from_nanos(10 * Span::SECOND.nanos());
+        const TWENTY: Span = Span::from_nanos(20 * Span::SECOND.nanos());
+
+        /// The code of a mesh message that the mesh refuses.
+        const REFUSED: Code = Code(16);
+
+        /// The first file of the mesh's log.
+        const LOG: &str = "mesh/log/log-0";
+
+        /// The member `key` with `private_key`, whose node listens on `host`.
+        fn member(
+            key: types::node::Key,
+            private_key: &PrivateKey,
+            host: &sim::node::Node,
+        ) -> Member {
+            let card = Card {
+                name: format!("plant.node{key}").parse().unwrap(),
+                public_key: private_key.public(),
+                seal_key: SealKey::new([9; 32]).unwrap(),
+                addresses: Addresses::new(vec![Address::Udp(listen(host))]).unwrap(),
+                version: 1,
+            };
+            Member {
+                card: card::Signed::sign(key, card, private_key),
+                admission: [0; 64],
+                ephemeral: None,
+                status: Status::new(BTreeMap::new()).unwrap(),
+            }
+        }
+
+        /// The region `plant`, where each of `members` is a voter.
+        fn region(members: &[Member]) -> Region {
+            Region {
+                prefix: "plant".parse().unwrap(),
+                members: members.to_vec(),
+                voters: members.iter().map(|member| member.card.key()).collect(),
+            }
+        }
+
+        /// Starts the node `key` on `host` with `private_key` and `region`.
+        fn start(
+            host: &sim::node::Node,
+            (key, private_key): (types::node::Key, PrivateKey),
+            region: Region,
+        ) -> Node {
+            Node::start(Config {
+                key,
+                private_key,
+                region: Some(region),
+                ..config(host, Size::MEBIBYTE, Box::new(heap))
+            })
+        }
+
+        /// The node with key [`OWN`] on `host`, the one member and voter of its region.
+        fn start_alone(host: &sim::node::Node) -> Node {
+            start(host, (OWN, KEY), region(&[member(OWN, &KEY, host)]))
+        }
+
+        /// Starts the member [`OTHER`] of `members` on `host`: an endpoint with no
+        /// node, which opens and serves the mesh as a node's does. Runs `act` with the
+        /// mesh, then drops the mesh and its port.
+        fn peer<F: Future<Output = ()> + 'static>(
+            host: &sim::node::Node,
+            members: Vec<Member>,
+            act: impl FnOnce(::mesh::Mesh, sim::node::Node) -> F + Send + 'static,
+        ) {
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = host.clone();
+            let started = host.shards().start(shard, move |tasks| async move {
+                let bound =
+                    transport::Port::bind(&own.net(), listen(&own)).expect("a port");
+                let endpoint = Endpoint {
+                    part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
+                    private_key: OTHER.1,
+                    key: OTHER.0,
+                    region: Some(region(&members)),
+                    clock: own.clock(),
+                    entropy: own.entropy(),
+                };
+                let pool = block::Config { budget: 1 << 20 };
+                let memory = block::Heap::new(pool.reservation());
+                let pool = Rc::new(block::Pool::new(pool, memory));
+                let (transport, mesh) = endpoint
+                    .open(own.files(), pool, tasks.clone())
+                    .await
+                    .expect("the mesh opens");
+                let mesh = mesh.expect("the peer has a region");
+                let port = route::accept(transport, Some(mesh.clone()), tasks);
+                let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
+                poll_fn(|cx| {
+                    let stopped = port.as_mut().poll(cx);
+                    assert!(stopped.is_pending(), "the peer's transport stopped");
+                    act.as_mut().poll(cx)
+                })
+                .await;
+            });
+            drop(started.expect("the peer starts"));
+        }
+
+        /// The members of the region of the node [`OWN`] on `hosts[0]` and the peer
+        /// [`OTHER`] on `hosts[1]`, which are its two voters.
+        fn pair(hosts: &[sim::node::Node; 2]) -> Vec<Member> {
+            vec![
+                member(OWN, &KEY, &hosts[0]),
+                member(OTHER.0, &OTHER.1, &hosts[1]),
+            ]
+        }
+
+        /// A home that the peer sets commits only with the node's vote: the node
+        /// serves the mesh streams of its port, and its mesh answers on its
+        /// transport.
+        #[test]
+        fn a_home_commits_with_the_vote_of_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let members = pair(&hosts);
+            let node = start(&hosts[0], (OWN, KEY), region(&members));
+            let set = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&set);
+            peer(&hosts[1], members, move |mesh, _| async move {
+                let set = mesh.set_home(INDEX, OTHER.0).await;
+                out.lock().unwrap().push(set);
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(*set.lock().unwrap(), [Ok(())]);
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// What a peer that is not a member sees when it sends `header` to a node
+        /// with a region.
+        fn sent(header: &[u8]) -> Seen {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            let seen = dial(&mut sim, &host, header);
+            assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let seen = seen.lock().unwrap().take();
+            seen.expect("the peer ran")
+                .expect("the dial reaches the node")
+        }
+
+        /// The mesh serves a mesh stream: at the first message that is not a mesh
+        /// message, it stops the stream and resets its reply half with the code of
+        /// a malformed message.
+        #[test]
+        fn the_mesh_serves_a_mesh_stream() {
+            let header = wire::header::encode(wire::Protocol::Mesh);
+            let Seen { sent, read, .. } = sent(&header);
+            let code = Code(wire::header::MALFORMED);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// The error of the first send that fails, when a peer that is not a member
+        /// opens a one-way mesh stream to the node [`OWN`] of a region with [`OTHER`],
+        /// then sends `message` up to 100 times, or `None` when no send fails.
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "a sim error is a test failure, not a send that did not fail"
+        )]
+        fn sent_one_way(message: &[u8]) -> Option<transport::Error> {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let peer = sim.node(sim::node::Config::default());
+            let members = [member(OWN, &KEY, &host), member(OTHER.0, &OTHER.1, &peer)];
+            let node = start(&host, (OWN, KEY), region(&members));
+            let listen = listen(&host);
+            let message = message.to_vec();
+            let out = Arc::new(Mutex::new(None));
+            let seen = Arc::clone(&out);
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = peer.clone();
+            let started = peer.shards().start(shard, move |tasks| async move {
+                let (transport, pool) = transport(&own, tasks, CLIENT);
+                let dialed =
+                    transport.dial(KEY.public(), &[Address::Udp(listen)]).await;
+                let session = dialed.expect("the dial reaches the node");
+                let sender = session.open_sender(Class::Complete).await;
+                let mut sender = sender.expect("a stream");
+                let block = |bytes: &[u8]| {
+                    let mut block = pool.alloc(bytes.len()).unwrap();
+                    block.copy_from_slice(bytes);
+                    block.freeze()
+                };
+                let header = wire::header::encode(wire::Protocol::Mesh);
+                let mut sent = sender.send(block(&header)).await;
+                for _ in 0..100 {
+                    if sent.is_err() {
+                        break;
+                    }
+                    own.clock().sleep(Span::MILLISECOND).await;
+                    sent = sender.send(block(&message)).await;
+                }
+                *seen.lock().unwrap() = Some(sent.err());
+                session.closed().await;
+            });
+            drop(started.expect("the peer starts"));
+            assert_eq!(sim.run_for(Span::HOUR), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let sent = out.lock().unwrap().take();
+            sent.expect("the peer ran")
+        }
+
+        /// A peer outside the region that sends a mesh message in the name of a member
+        /// is refused: the mesh stops the stream with the code of a refused message.
+        #[test]
+        fn a_message_in_the_name_of_a_member_is_refused() {
+            // A `raft` heartbeat reply from [`OTHER`] to [`OWN`] in term 0, which
+            // needs no proof, with no chain.
+            let mut reply = vec![1];
+            reply.extend(OTHER.0.as_u128().to_le_bytes());
+            reply.extend(OWN.as_u128().to_le_bytes());
+            reply.extend(0_u64.to_le_bytes());
+            reply.push(0);
+            reply.extend(0_u64.to_le_bytes());
+            reply.push(6);
+            let code = REFUSED;
+            assert_eq!(
+                sent_one_way(&reply),
+                Some(transport::Error::Stopped { code })
+            );
+        }
+
+        /// A header with a byte after it names no protocol, so a node with a mesh
+        /// rejects the stream too.
+        #[test]
+        fn a_header_with_a_byte_after_it_is_rejected() {
+            let mut header = wire::header::encode(wire::Protocol::Mesh).to_vec();
+            header.push(0);
+            let code = Code(wire::header::REJECTED);
+            let Seen { sent, read, .. } = sent(&header);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// A mesh that does not open stops the node, and `join` gives why.
+        #[test]
+        fn a_mesh_that_does_not_open_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new(LOG), env::files::Operation::Open);
+            let node = start_alone(&host);
+            assert_eq!(sim.run(), Ok(()));
+            let error =
+                ::mesh::Error::Log(::mesh::log::Error::Files(env::files::Error::Io {
+                    path: PathBuf::from(LOG),
+                    operation: env::files::Operation::Open,
+                    code: 5,
+                }));
+            assert_eq!(node.join(), Err(Error::Mesh(error.clone())));
+            assert_eq!(
+                Error::Mesh(error.clone()).to_string(),
+                format!("the node's mesh did not open: {error}")
+            );
+        }
+
+        /// A chunk store that does not open stops the node, and `join` gives why.
+        #[test]
+        fn a_chunk_store_that_does_not_open_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("blob"), env::files::Operation::List);
+            let node = start_alone(&host);
+            assert_eq!(sim.run(), Ok(()));
+            let error = blob::Error::Files(env::files::Error::Io {
+                path: PathBuf::from("blob"),
+                operation: env::files::Operation::List,
+                code: 5,
+            });
+            assert_eq!(node.join(), Err(Error::Blob(error.clone())));
+            assert_eq!(
+                Error::Blob(error.clone()).to_string(),
+                format!("cannot open the node's chunk store: {error}")
+            );
+        }
+
+        /// Takes the lock of `host` as soon as it is free, then opens the mesh's log
+        /// to write. Gives whether the lock was held, and the open of the log.
+        fn probe(
+            sim: &mut sim::Sim,
+            host: &sim::node::Node,
+        ) -> (bool, Result<(), env::files::Error>) {
+            sim.run_on(host, |host, _| async move {
+                let files = host.files();
+                let clock = host.clock();
+                let mut waited = false;
+                let lock = loop {
+                    let mode = env::files::Mode::Create { len: 0 };
+                    match files.open(Path::new("lock"), mode).await {
+                        Err(env::files::Error::Busy { .. }) => {
+                            waited = true;
+                            clock.sleep(Span::from_nanos(1_000)).await;
+                        }
+                        opened => break opened.expect("the lock opens"),
+                    }
+                };
+                let mode = env::files::Mode::Write;
+                let log = files.open(Path::new(LOG), mode).await.map(drop);
+                drop(lock);
+                (waited, log)
+            })
+            .expect("the probe ends")
+        }
+
+        /// A stop at any point of the start and the run of a node whose mesh writes
+        /// its log for each home that the peer sets, then a probe that takes the
+        /// lock as soon as it is free: the mesh's log is never busy then. The order
+        /// of the two closes waits on #1835. The peer ends once a set waits [`TEN`],
+        /// so the probe's run ends.
+        #[test]
+        fn the_log_of_the_mesh_is_free_once_the_lock_is() {
+            let (mut held, mut logged) = (false, false);
+            // The mesh opens at about 1.5 ms, and from 1.6 s the log writes a home
+            // about each 0.7 ms.
+            let opens = (0..200).map(|step| step * 13_000);
+            let writes = (0..100).map(|step| 1_700_000_000 + step * 7_000);
+            for after in opens.chain(writes) {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+                let members = pair(&hosts);
+                let node = start(&hosts[0], (OWN, KEY), region(&members));
+                peer(&hosts[1], members, |mesh, host| async move {
+                    let clock = host.clock();
+                    for key in 100.. {
+                        let key = channel::Key::from_u128(key);
+                        let mut set = pin!(mesh.set_home(key, OTHER.0));
+                        let mut late = pin!(clock.sleep(TEN));
+                        let set = poll_fn(|cx| match set.as_mut().poll(cx) {
+                            Poll::Ready(set) => Poll::Ready(set.is_ok()),
+                            Poll::Pending => late.as_mut().poll(cx).map(|()| false),
+                        });
+                        if !set.await {
+                            break;
+                        }
+                    }
+                });
+                let after = Span::from_nanos(after);
+                assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
+                node.stop();
+                let (waited, log) = probe(&mut sim, &hosts[0]);
+                held |= waited;
+                logged |= log.is_ok();
+                let busy = matches!(log, Err(env::files::Error::Busy { .. }));
+                assert!(!busy, "at {after:?}: {log:?}");
+                // A probe that takes the lock before the claim refuses the node.
+                let refused = Error::Directory(env::files::Error::Busy {
+                    path: PathBuf::from("lock"),
+                });
+                let joined = node.join();
+                assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
+            }
+            assert!(held && logged);
+        }
+
+        /// A node that starts again with its region, at once after a stop or a power
+        /// cut, opens its mesh and votes again: a home that the peer sets after the
+        /// restart commits.
+        #[test]
+        fn a_restart_opens_the_mesh_and_votes_again() {
+            for cut in [false, true] {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+                let members = pair(&hosts);
+                let node = start(&hosts[0], (OWN, KEY), region(&members));
+                let set = Arc::new(Mutex::new(Vec::new()));
+                let out = Arc::clone(&set);
+                peer(&hosts[1], members.clone(), move |mesh, host| async move {
+                    let set = mesh.set_home(INDEX, OTHER.0).await;
+                    out.lock().unwrap().push(set);
+                    host.clock().sleep(TEN).await;
+                    let set = mesh.set_home(AFTER, OTHER.0).await;
+                    out.lock().unwrap().push(set);
+                });
+                assert_eq!(sim.run_for(TEN), Ok(()), "cut {cut}");
+                assert_eq!(*set.lock().unwrap(), [Ok(())], "cut {cut}");
+                if cut {
+                    sim.crash(&hosts[0], sim::Crash::Power);
+                } else {
+                    node.stop();
+                    assert_eq!(sim.run_for(Span::SECOND), Ok(()), "cut {cut}");
+                    assert_eq!(node.join(), Ok(()), "cut {cut}");
+                }
+                let node = start(&hosts[0], (OWN, KEY), region(&members));
+                assert_eq!(sim.run_for(TWENTY), Ok(()), "cut {cut}");
+                assert_eq!(*set.lock().unwrap(), [Ok(()), Ok(())], "cut {cut}");
+                node.stop();
+                assert_eq!(sim.run(), Ok(()), "cut {cut}");
+                assert_eq!(node.join(), Ok(()), "cut {cut}");
+            }
+        }
     }
 }

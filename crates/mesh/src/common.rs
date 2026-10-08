@@ -10,17 +10,18 @@ use raft::{
 };
 use transport::Address;
 use types::channel;
-use types::ed25519::PublicKey;
+use types::digest::Digest;
+use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
-use types::node::{self, PrivateKey, SealKey};
+use types::node::{self, SealKey};
 use types::time::{Span, Stamp};
 
 use crate::bytes::{put_channel, put_count, put_name};
 use crate::card::{self, Card};
 use crate::change::{Change, Join};
 use crate::claim::Signer;
-use crate::ed25519;
 use crate::member::Member;
+use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{Options, Ticket, Voter};
 
@@ -44,7 +45,7 @@ pub(crate) fn signer(id: u8) -> Signer {
 }
 
 pub(crate) fn public(id: u8) -> PublicKey {
-    ed25519::public(&ed25519::pair(&private(id)))
+    private(id).public()
 }
 
 /// The card of node `id` with `name`, which the node signed.
@@ -284,6 +285,24 @@ pub(crate) fn home(i: u128, h: u128) -> Change {
     Change::Home {
         index: index(i),
         home: node::Key::from_u128(h),
+    }
+}
+
+pub(crate) fn digest(byte: u8) -> Digest {
+    Digest([byte; 32])
+}
+
+/// A spec change on version `version` at root `[base; 32]`, to root `[root; 32]`, with
+/// each chunk `[chunk; 32]` of `chunks`, held by node 1.
+pub(crate) fn spec(version: u64, base: u8, root: u8, chunks: &[u8]) -> Change {
+    Change::Spec {
+        base: Pointer {
+            version,
+            root: digest(base),
+        },
+        root: digest(root),
+        chunks: chunks.iter().copied().map(digest).collect(),
+        holders: [key(1)].into(),
     }
 }
 

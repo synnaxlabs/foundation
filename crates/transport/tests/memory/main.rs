@@ -6,7 +6,11 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod failed;
 mod held;
+mod kept;
+mod opened;
+mod stretch;
 
 use block::{Pool, Unique};
 
@@ -15,6 +19,10 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
 fn main() {
     held::main();
+    kept::main();
+    opened::main();
+    failed::main();
+    stretch::main();
 }
 
 /// Takes every block of `pool` that could hold a message of `len` bytes.

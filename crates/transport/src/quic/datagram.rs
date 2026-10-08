@@ -73,7 +73,7 @@ mod tests {
     use crate::quic::pair::{self, Pair, Side};
     use crate::quic::{Datagrams, Endpoint};
     use crate::testing;
-    use crate::{Code, Config, Error, tls};
+    use crate::{Code, Config, Error};
 
     /// The link delay each way.
     const DELAY: Duration = Duration::from_millis(10);
@@ -83,9 +83,12 @@ mod tests {
     /// A connected pair whose server has `config`.
     fn dial_with(shard: &testing::Shard, config: &Config) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-        pair.server.endpoint =
-            Endpoint::new(config, pair::SERVER_SHARD, NonZeroUsize::MIN);
-        pair.dial(tls::public(&pair::SERVER_KEY));
+        pair.server.endpoint = Endpoint::new(
+            &testing::setup(config),
+            pair::SERVER_SHARD,
+            NonZeroUsize::MIN,
+        );
+        pair.dial(pair::SERVER_KEY.public());
         pair.run(RUN);
         pair
     }
@@ -174,7 +177,7 @@ mod tests {
     fn take_up_to_the_path_limit() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             // The client connects at 47 ms, after a retry. Its first MTU probe
             // returns at 67 ms.
             pair.run(Duration::from_millis(50));
@@ -202,22 +205,6 @@ mod tests {
             // The largest MTU that discovery tries, less the same headers.
             assert_eq!(datagrams(&mut pair.client).bytes_max(), 1_414);
             assert_eq!(datagrams(&mut pair.server).bytes_max(), 1_414);
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "config message_bytes_max must be at least 1472")]
-    fn a_largest_message_below_one_packet_panics() {
-        testing::run(1, |shard| {
-            let config = Config {
-                message_bytes_max: NonZeroUsize::new(1_471).expect("not zero"),
-                ..shard.config(pair::SERVER_KEY, Span::SECOND)
-            };
-            drop(Endpoint::new(
-                &config,
-                pair::SERVER_SHARD,
-                NonZeroUsize::MIN,
-            ));
         });
     }
 
@@ -340,11 +327,11 @@ mod tests {
             let (pool, _filled) = small();
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.server.endpoint = Endpoint::new(
-                &with_pool(shard, &pool),
+                &testing::setup(&with_pool(shard, &pool)),
                 pair::SERVER_SHARD,
                 NonZeroUsize::MIN,
             );
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             let client = pair.client.key.expect("a key");
             assert!(pair.client.endpoint.datagrams(client).is_none());
             pair.run(RUN);

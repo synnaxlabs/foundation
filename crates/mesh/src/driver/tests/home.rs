@@ -3,8 +3,8 @@
 
 use std::future::pending;
 
+use transport::Class;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code};
 
 use super::send::{self, LIMIT, Peer, create_config, stop};
 use super::*;
@@ -17,7 +17,7 @@ impl Cluster {
 
     /// Starts a cluster in which each node proposed itself as the home for 5 s, and
     /// gives the leader, a follower, and the position of the entry of that home.
-    fn led(run: u64) -> (Self, u8, u8, Position) {
+    pub(super) fn led(run: u64) -> (Self, u8, u8, Position) {
         let mut cluster = Self::new(run);
         cluster.script(home);
         cluster.start();
@@ -31,7 +31,7 @@ impl Cluster {
     }
 
     /// Sets the chance that a datagram between `node` and each other node is lost.
-    fn link_each(&mut self, node: u8, loss: f64) {
+    pub(super) fn link_each(&mut self, node: u8, loss: f64) {
         for other in IDS.into_iter().filter(|&id| id != node) {
             self.link(node, other, loss);
         }
@@ -117,7 +117,7 @@ fn a_call_on_a_follower_that_is_cut_off_returns_after_the_links_heal() {
 #[test]
 fn a_member_that_is_not_a_voter_sets_no_home() {
     let mut cluster = Cluster::new(5);
-    cluster.board.lock().unwrap().learner = Some(3);
+    cluster.board.lock().unwrap().learners = [3].into();
     cluster.script(home);
     cluster.start();
     cluster.run(seconds(5));
@@ -270,7 +270,7 @@ fn set_home_proposes_again_while_the_pool_has_no_block() {
         let pool = small_pool();
         let config = Config {
             pool: Rc::clone(&pool),
-            ..config(&node, &tasks, 1, &[1], &[1])
+            ..config(&node, &tasks, 1, &[1], &[1]).await
         };
         let mesh = Mesh::start(config).await.unwrap();
         let clock = node.clock();
@@ -353,6 +353,39 @@ fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
         let cause = Unknown::Kind { kind: 9 };
         let stopped = Stopped::Change { at: bad, cause };
         assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+    });
+}
+
+// One reply of node 2 commits a spec change and, after it, an entry that is not a
+// change.
+#[test]
+fn the_pointer_after_a_stop_is_the_pointer_at_the_stop() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let first = elect(&mesh).await;
+        let base = mesh.pointer();
+        let change = Change::Spec {
+            base,
+            root: common::digest(1),
+            chunks: [common::digest(1)].into(),
+            holders: IDS.map(key).into(),
+        };
+        mesh.propose_data(encoded(&change)).await.unwrap();
+        let bad = mesh.propose_data(vec![9]).await.unwrap();
+        let reply = raft::Message {
+            term: first.term,
+            ..message(2, 1, Body::AppendReply { last: bad.index })
+        };
+        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+        node.clock().sleep(Span::MILLISECOND).await;
+        let cause = Unknown::Kind { kind: 9 };
+        let stopped = Stopped::Change { at: bad, cause };
+        assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        assert_eq!(mesh.pointer(), moved);
     });
 }
 
@@ -553,7 +586,7 @@ where
     let called = Arc::new(Mutex::new(None));
     let result = Arc::clone(&called);
     let mesh = move |node: sim::node::Node, tasks: Tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, streams) = (mesh.clone(), tasks.clone());

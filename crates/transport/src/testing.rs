@@ -15,10 +15,10 @@ use env::net::Net;
 use env::tasks::Tasks;
 use sim::Sim;
 use sim::node::Node;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
-use crate::{Address, Config, Port, Session, Transport, port, quic};
+use crate::{Address, Config, Port, Session, Transport, client, port, quic};
 
 /// The most streams of each kind a peer may open, in [`Shard::config`].
 pub(crate) const STREAMS_MAX: u32 = 16;
@@ -93,6 +93,16 @@ impl Shard {
         }
     }
 
+    /// A config for a program on this shard.
+    pub(crate) fn client(&self) -> client::Config {
+        client::Config {
+            clock: self.clock.clone(),
+            entropy: self.entropy.clone(),
+            tasks: self.tasks.clone(),
+            pool: Rc::clone(&self.pool),
+        }
+    }
+
     /// A block from [`Shard::pool`] that holds `bytes`.
     pub(crate) fn block(&self, bytes: &[u8]) -> Block {
         block(&self.pool, bytes)
@@ -150,15 +160,40 @@ pub(crate) fn shard<F: Future<Output = ()> + 'static>(
     key: PrivateKey,
     main: impl FnOnce(Config, Node) -> F + Send + 'static,
 ) {
+    start(node, move |shard, node| main(shard.config(key, IDLE), node));
+}
+
+/// Starts a shard on `node` that runs `main` with what the shard gives.
+pub(crate) fn start<F: Future<Output = ()> + 'static>(
+    node: &Node,
+    main: impl FnOnce(Shard, Node) -> F + Send + 'static,
+) {
     let own = node.clone();
     let config = env::shards::Config {
         name: "transport".into(),
         core: None,
     };
     let started = node.shards().start(config, move |tasks| async move {
-        main(Shard::new(&own, tasks).config(key, IDLE), own).await;
+        main(Shard::new(&own, tasks), own).await;
     });
     drop(started.expect("a shard"));
+}
+
+/// The setup of `config`.
+///
+/// # Panics
+///
+/// When [`Transport::new`] refuses `config`, with its error.
+pub(crate) fn setup(config: &Config) -> quic::Setup {
+    let config = Config {
+        private_key: config.private_key.clone(),
+        clock: config.clock.clone(),
+        entropy: config.entropy.clone(),
+        tasks: config.tasks.clone(),
+        pool: Rc::clone(&config.pool),
+        ..*config
+    };
+    config.setup().unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Starts a shard on `node` that runs `main` with a QUIC carrier for `key` at
@@ -170,7 +205,7 @@ pub(crate) fn carrier<F: Future<Output = ()> + 'static>(
 ) {
     shard(node, key, |config, node| async move {
         let part = part(&node.net(), address(&node));
-        main(quic::Carrier::new(config, part), node).await;
+        main(quic::Carrier::new(setup(&config), part), node).await;
     });
 }
 
@@ -257,9 +292,7 @@ where
         let part = part(&node.net(), address(&node));
         let transport = Transport::new(config, part).expect("a transport");
         let addresses = [Address::Udp(at)];
-        let dialed = transport
-            .dial(crate::tls::public(&SERVER), &addresses)
-            .await;
+        let dialed = transport.dial(SERVER.public(), &addresses).await;
         let session = dialed.expect("a session");
         let clock = node.clock();
         client(Side {

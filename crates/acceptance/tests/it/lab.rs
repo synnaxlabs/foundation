@@ -155,7 +155,9 @@ impl Lab {
             disk: types::byte::Size::GIBIBYTE,
             net: host.net(),
             listen: SocketAddr::new(host.addresses()[0], PORT),
-            private_key: types::node::PrivateKey([key; 32]),
+            private_key: types::ed25519::PrivateKey([key; 32]),
+            key: types::node::Key::from_u128(u128::from(key)),
+            region: None,
         });
         self.members.push(Member {
             name: name.into(),
@@ -178,7 +180,7 @@ impl Lab {
 
     /// Makes `nodes` the members of one mesh, without a ticket.
     pub(crate) fn mesh(&mut self, _nodes: &[Node]) {
-        todo!("waits on #462")
+        todo!("waits on #585")
     }
 
     /// Creates the `f64` channel `channel`, whose home is `home`.
