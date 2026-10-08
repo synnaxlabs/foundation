@@ -20,7 +20,7 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -75,7 +75,7 @@ pub struct Config<M> {
     /// the port carries TCP (#77).
     pub listen: SocketAddr,
     /// The node's private key. Its transport proves the key to each peer.
-    pub private_key: types::node::PrivateKey,
+    pub private_key: types::ed25519::PrivateKey,
     /// The node's key. It stays the same when the private key changes. A patch until
     /// the node reads it from its data directory (#1660).
     pub key: types::node::Key,
@@ -617,7 +617,7 @@ struct Serve {
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
-    private_key: types::node::PrivateKey,
+    private_key: types::ed25519::PrivateKey,
     key: types::node::Key,
     region: Option<Region>,
     clock: env::clock::Clock,
@@ -658,6 +658,8 @@ impl Endpoint {
             region: region.prefix,
             members: region.members,
             voters: region.voters,
+            // A region has no founding definitions until #1744 gives them.
+            founding: BTreeMap::new(),
             files,
             dir: directory::mesh(),
             clock: self.clock,

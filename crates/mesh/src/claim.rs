@@ -7,8 +7,8 @@ use std::fmt;
 
 use aws_lc_rs::signature::Ed25519KeyPair;
 use raft::{Body, Claim, Message, Raft, Ready, Signature};
-use types::ed25519::PublicKey;
-use types::node::{self, PrivateKey};
+use types::ed25519::{PrivateKey, PublicKey};
+use types::node;
 
 use crate::bytes::{put_grant, put_key, put_keys, put_position};
 use crate::ed25519;
@@ -20,7 +20,6 @@ const CHANGE: &[u8] = b"foundation/voters/1";
 pub(crate) struct Signer {
     key: node::Key,
     pair: Ed25519KeyPair,
-    public: PublicKey,
 }
 
 impl Signer {
@@ -29,13 +28,7 @@ impl Signer {
         Self {
             key,
             pair: ed25519::pair(private),
-            public: private.public(),
         }
-    }
-
-    /// Whether `public` checks the claims that this signer signs.
-    pub(crate) fn owns(&self, public: PublicKey) -> bool {
-        self.public == public
     }
 
     /// Signs each grant and change in `ready` that has no signature, before the

@@ -66,8 +66,7 @@ use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
-use types::ed25519::PublicKey;
-use types::node::PrivateKey;
+use types::ed25519::{PrivateKey, PublicKey};
 use types::time::Span;
 
 pub use address::Address;
@@ -231,7 +230,7 @@ impl fmt::Debug for Transport {
 /// use std::rc::Rc;
 ///
 /// use transport::Config;
-/// use types::node::PrivateKey;
+/// use types::ed25519::PrivateKey;
 /// use types::time::Span;
 ///
 /// fn config(
@@ -313,7 +312,7 @@ mod tests {
     use std::rc::Rc;
 
     use block::{Heap, Pool};
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use super::{Config, Error, Transport};

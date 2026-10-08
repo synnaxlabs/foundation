@@ -2,10 +2,6 @@
 
 use std::fmt;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-
-use crate::ed25519::PublicKey;
-
 /// A node's stable identity, a UUIDv7. It stays the same when the node rotates its
 /// public key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,33 +96,6 @@ const X25519_SMALL_ORDER: [[u8; 32]; 5] = [
     ],
 ];
 
-/// A node's Ed25519 private key. Its `Debug` never writes the key, and it has no
-/// `Display` and no equality, so a log line or a timing difference cannot show it.
-#[derive(Clone)]
-pub struct PrivateKey(pub [u8; 32]);
-
-impl PrivateKey {
-    /// The Ed25519 public key of this private key. Each call derives it again.
-    #[must_use]
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "the public half of any 32 bytes is not of small order"
-    )]
-    pub fn public(&self) -> PublicKey {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&self.0)
-            .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let bytes = pair.public_key().as_ref().try_into();
-        PublicKey::new(bytes.expect("invariant: an Ed25519 public key is 32 bytes"))
-            .expect("invariant: the public half of a private key is not of small order")
-    }
-}
-
-impl fmt::Debug for PrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PrivateKey(..)")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -197,31 +166,6 @@ mod tests {
             key[31] &= 0x7f;
             prop_assume!(key[31] != 0x7f && !X25519_SMALL_ORDER.contains(&key));
             prop_assert_eq!(SealKey::new(key).map(SealKey::to_bytes), Ok(key));
-        }
-    }
-
-    #[test]
-    fn hides_a_private_key_in_debug() {
-        let text = format!("{:?}", PrivateKey([0xcd; 32]));
-        assert_eq!(text, "PrivateKey(..)");
-    }
-
-    /// RFC 8032, section 7.1, test 1.
-    #[test]
-    fn derives_the_public_key_of_the_rfc_vector() {
-        let private = PrivateKey(bytes(
-            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-        ));
-        let public =
-            bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
-        assert_eq!(private.public().to_bytes(), public);
-    }
-
-    proptest! {
-        #[test]
-        fn derives_a_key_for_any_private_key(private: [u8; 32]) {
-            let key = PrivateKey(private).public();
-            prop_assert_eq!(PublicKey::new(key.to_bytes()), Ok(key));
         }
     }
 

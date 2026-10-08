@@ -14,6 +14,7 @@ block = { path = "../block" }
 clock = { path = "../clock" }
 env = { path = "../env" }
 raft = { path = "../raft" }
+spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
 wire = { path = "../wire" }

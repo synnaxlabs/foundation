@@ -15,7 +15,7 @@ use env::net::Net;
 use env::tasks::Tasks;
 use sim::Sim;
 use sim::node::Node;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
 use crate::{Address, Config, Port, Session, Transport, port, quic};

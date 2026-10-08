@@ -1,13 +1,13 @@
-//! Ed25519 public keys.
+//! Ed25519 keys.
 
 use std::fmt;
 
-use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
+use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 /// An Ed25519 public key, of a node or of a subject. The value that holds it gives its
 /// role. It is never a point of small order: a signature for such a key passes with
-/// no private key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// no private key. Keys order by their bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
@@ -78,6 +78,34 @@ impl fmt::Display for BadSignature {
 }
 
 impl std::error::Error for BadSignature {}
+
+/// An Ed25519 private key, of a node or of a subject. Its `Debug` never writes the
+/// key, and it has no `Display` and no equality, so a log line or a timing difference
+/// cannot show it.
+#[derive(Clone)]
+pub struct PrivateKey(pub [u8; 32]);
+
+impl PrivateKey {
+    /// The Ed25519 public key of this private key. Each call derives it again.
+    #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the public half of any 32 bytes is not of small order"
+    )]
+    pub fn public(&self) -> PublicKey {
+        let pair = Ed25519KeyPair::from_seed_unchecked(&self.0)
+            .expect("invariant: any 32 bytes are an Ed25519 private key");
+        let bytes = pair.public_key().as_ref().try_into();
+        PublicKey::new(bytes.expect("invariant: an Ed25519 public key is 32 bytes"))
+            .expect("invariant: the public half of a private key is not of small order")
+    }
+}
+
+impl fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PrivateKey(..)")
+    }
+}
 
 /// The y of each Ed25519 point of small order, and p and p + 1, which a decoder that
 /// does not refuse y >= p reads as 0 and 1.
@@ -180,6 +208,14 @@ mod tests {
             prop_assume!(ENCODINGS.iter().all(|&hex| bytes(hex) != key));
             prop_assert_eq!(PublicKey::new(key).map(PublicKey::to_bytes), Ok(key));
         }
+
+        #[test]
+        fn orders_keys_by_their_bytes(a: [u8; 32], b: [u8; 32]) {
+            let (Ok(x), Ok(y)) = (PublicKey::new(a), PublicKey::new(b)) else {
+                return Ok(());
+            };
+            prop_assert_eq!(x.cmp(&y), a.cmp(&b));
+        }
     }
 
     /// The public key and signature of RFC 8032, section 7.1, test 1, whose message
@@ -250,5 +286,30 @@ mod tests {
         let text = PublicKey::new(bytes).unwrap().to_string();
         assert_eq!(text.len(), 64);
         assert_eq!(&text[..6], "01abab");
+    }
+
+    #[test]
+    fn hides_a_private_key_in_debug() {
+        let text = format!("{:?}", PrivateKey([0xcd; 32]));
+        assert_eq!(text, "PrivateKey(..)");
+    }
+
+    /// RFC 8032, section 7.1, test 1.
+    #[test]
+    fn derives_the_public_key_of_the_rfc_vector() {
+        let private = PrivateKey(bytes(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        ));
+        let public =
+            bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        assert_eq!(private.public().to_bytes(), public);
+    }
+
+    proptest! {
+        #[test]
+        fn derives_a_key_for_any_private_key(private: [u8; 32]) {
+            let key = PrivateKey(private).public();
+            prop_assert_eq!(PublicKey::new(key.to_bytes()), Ok(key));
+        }
     }
 }
