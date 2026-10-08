@@ -476,6 +476,11 @@ connector \"w2\" {
     assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("w"))]));
 }
 
+/// The fix of `config.unplaced` when the node of a connector has a second role in the
+/// placement that wins for the name.
+const OVERLAP: &str = "Move the node to `home` when it is the one node of the placement, \
+                       else remove it from the placement";
+
 #[test]
 fn refuses_each_index_that_cannot_be_placed() {
     let text = "\
@@ -540,7 +545,7 @@ connector \"w\" {
             "e.time",
             "the node `n` of a connector is the home and has another role in the \
              placement `e`",
-            "Remove the node from the placement",
+            OVERLAP,
         ),
     ];
     assert_eq!(found, expected);
@@ -1008,7 +1013,7 @@ connector \"d\" {
             (0, label(text, "d")),
             "the node `n` of a connector is the home and has another role in the \
              placement `on_d`",
-            "Remove the node from the placement",
+            OVERLAP,
         ),
     ];
     assert_eq!(found, expected);
@@ -1661,7 +1666,7 @@ connector \"e\" {
             (0, label(text, "e.time")),
             "the node `n` of a connector is the home and has another role in the \
              placement `e`",
-            "Remove the node from the placement",
+            OVERLAP,
         ),
         split(
             text,
@@ -1673,6 +1678,43 @@ connector \"e\" {
         ),
     ];
     assert_eq!(found, expected);
+}
+
+#[test]
+fn plans_after_the_overlap_fix_and_the_split_placement_fix() {
+    let text = |placement: &str| {
+        format!(
+            "\
+channel \"a.time\" {{
+  kind = \"index\"
+}}
+connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}}
+placement \"p\" {{
+{placement}}}
+"
+        )
+    };
+    let cases = [
+        (
+            "  select = [\"a.time\"]\n  standby = \"n\"\n",
+            "  select = [\"a\", \"a.time\"]\n  home = \"n\"\n",
+        ),
+        (
+            "  select = [\"a.time\"]\n  standby = \"n\"\n  copies = [\"k\"]\n",
+            "  select = [\"a\", \"a.time\"]\n  copies = [\"k\"]\n",
+        ),
+    ];
+    let expected = [
+        ("config.unplaced", OVERLAP.to_owned()),
+        ("config.split-placement", win("p", "a")),
+    ];
+    for (refused, fixed) in cases {
+        plans_after(&text(refused), &expected, &text(fixed));
+    }
 }
 
 #[test]

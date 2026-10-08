@@ -124,7 +124,10 @@ impl Unplaced {
                 "Select the index with a placement that names a `home`, or write it \
                  with a connector"
             }
-            Self::Overlap { .. } => "Remove the node from the placement",
+            Self::Overlap { .. } => {
+                "Move the node to `home` when it is the one node of the placement, else \
+                 remove it from the placement"
+            }
         }
     }
 }
@@ -388,7 +391,11 @@ mod tests {
             "the node `n_1` of a connector is the home and has another role in the \
              placement `p`"
         );
-        assert_eq!(overlap.fix(), "Remove the node from the placement");
+        assert_eq!(
+            overlap.fix(),
+            "Move the node to `home` when it is the one node of the placement, else \
+             remove it from the placement"
+        );
     }
 
     fn pattern() -> impl Strategy<Value = String> {
