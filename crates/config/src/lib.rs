@@ -2245,6 +2245,22 @@ mod tests {
         }
 
         #[test]
+        fn checks_no_unit_after_an_unknown_edge() {
+            let documents = value(&[
+                ("data_type", string("string")),
+                ("index", string("nope")),
+                ("unit", string("kPa")),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![unknown(
+                    at(0, 113),
+                    "no `channel` block defines the index channel `nope`",
+                )])
+            );
+        }
+
+        #[test]
         fn refuses_an_unknown_edge_beside_a_bad_unit() {
             let documents = value(&[
                 ("data_type", string("f64")),
