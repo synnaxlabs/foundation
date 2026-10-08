@@ -2144,10 +2144,11 @@ How to read this record:
   whose durable put of the listed chunks the proposer counted; until #1231 they are only
   the proposer. A record lists at most `HOLDERS_MAX` = 64 holders, and decode refuses a
   larger count, so a record at both bounds is 33 869 bytes. A majority of each half must
-  fit in `HOLDERS_MAX` holders, so each half of a joint configuration has at most 63
-  voters, and a configuration with one set at most 127; this binds only after #1231.
-  Decided by `laptop.architect`, 2026-10-08T12:17:04Z
-  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161). Before
+  fit in `HOLDERS_MAX` holders, and a holder in both halves counts in each. So a
+  configuration with one set has at most 127 voters. Two halves that share no voter fit
+  when their majorities sum to at most 64. This binds only after #1231. Decided by
+  `laptop.architect`, 2026-10-08T12:38:01Z
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060034191). Before
   #1231 counts peers as holders, the rule of a majority of each half moves to
   `raft::Voters::quorum` (#1875). Every member refuses, at apply, a change whose
   holders are not a majority of each half of the voters as of the entry
