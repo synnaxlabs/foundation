@@ -2775,6 +2775,31 @@ mod tests {
     }
 
     #[test]
+    fn refuses_an_empty_file_before_garbage_and_another_version() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            put(&node, "log-0", 0, &encode(0, None, &[bytes(1, 10)])).await;
+            for name in ["log-1", "log-2", "log-3"] {
+                let mode = Mode::Create { len: SEGMENT };
+                drop(node.files().open(&file(name), mode).await.unwrap());
+            }
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+            put(&node, "log-2", 0, &[0xAB; 40]).await;
+            let mut other = encode(1, None, &[bytes(2, 10)]);
+            other[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+            seal(&mut other);
+            put(&node, "log-3", 0, &other).await;
+        })
+        .unwrap();
+        let expected = Error::Corrupt {
+            path: file("log-1"),
+            offset: 0,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    #[test]
     fn refuses_an_empty_file_after_a_torn_end_before_another_version() {
         let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
