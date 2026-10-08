@@ -3854,16 +3854,17 @@ mod tests {
             let now = pair.now();
             let parts: Vec<_> = (0..200)
                 .map(|at| Part {
-                    range: at * 10..at * 10 + 8,
+                    range: at * 20..at * 20 + 8,
                     zeros: 0,
                 })
                 .collect();
-            let block = shard.block(&[3; 2_000]);
+            let block = shard.block(&[3; 4_000]);
             let given = pair.client.endpoint.try_write(now, &sender, block, &parts);
             assert!(matches!(given, Ok(None)), "{given:?}");
             let key = key(&pair.client);
             let connection =
                 crate::quic::find(&mut pair.client.endpoint.connections, key);
+            // Private: the capacity of the buffer shows in no public count.
             let buffer = &connection.expect("a connection").streams.sending.buffer;
             assert!(buffer.capacity() < 2 * 1_600, "{}", buffer.capacity());
         });
