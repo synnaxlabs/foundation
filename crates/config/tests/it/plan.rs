@@ -53,8 +53,8 @@ impl Kind for Writer {
 
     fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
         Ok(Channels {
-            reads: Vec::new(),
-            writes: writes.clone(),
+            reads: writes.clone(),
+            writes: Vec::new(),
         })
     }
 
