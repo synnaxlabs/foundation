@@ -3280,16 +3280,25 @@ How to read this record:
   `plan` (#1082) maps a key to its region with the function of `spec::region`, and
   keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
   https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
-  check of the key form accepts a reserved label only for a subject and an access
-  policy, the kinds of the founding definitions (FIRST ADMIN). Each other kind at a
-  reserved label is `Misplaced`, so a region there makes no child region. A file
+  check of the key form accepts a reserved label only at a founding key (FIRST ADMIN;
+  `laptop.architect`, 2026-10-08T12:51:04Z,
+  https://github.com/synnaxlabs/foundation/pull/1880#issuecomment-6060256808). Each
+  other definition at a reserved label is `Misplaced`, so a region there makes no
+  child region. Supersedes "only for a subject and an access policy, the kinds of the
+  founding definitions" (`laptop.architect-2`, 2026-10-08T09:51:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316), as
+  `ops.@x.@subject` then passed (#1877;
+  `laptop.architect`, 2026-10-08T12:36:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621). A file
   still cannot hold a reserved label (`Kind::key`).
   Lost: a check that skips each reserved key, as a channel at `@admin.@subject` is
   then no problem and the check needs `spec::key::reserved`. Decided by
   `laptop.architect-2`, 2026-10-08T09:15:07Z
   (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056664804), and
   the kinds 2026-10-08T09:51:31Z
-  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316).
+  (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316),
+  superseded by
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621.
   Supersedes: the panic for two channels with one key (architect, #756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890), and
   `Problem::Shared` with the fix "Give each channel its own key", which replaced it
@@ -4599,7 +4608,15 @@ How to read this record:
   `Rules::new` skips a subject definition at a key that gives no label
   (`laptop.architect`, 2026-10-08T11:11:39Z,
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907; built
-  for #1866). The first ruling kept each subject by `<name>` (`laptop.architect`,
+  for #1866). `Rules::new` takes only trees with no problem from
+  `spec::region::check` at their prefix, and checks nothing itself: `Mesh::spec` gives
+  only such trees (SPEC CHANGE, #1741), and `node` builds `Rules` only from it (#1744).
+  Lost: a governs check in `Rules::new`, a second guard that puts the rule of
+  `spec::region` in a second crate; a checked tree type, which proves each tree but not
+  that the trees are the regions of one mesh (#1882; `laptop.architect`,
+  2026-10-08T12:59:50Z,
+  https://github.com/synnaxlabs/foundation/issues/1882#issuecomment-6060416943). The
+  first ruling kept each subject by `<name>` (`laptop.architect`,
   2026-10-08T06:56:19Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
   tree key, which `admit` built with `Kind::key`, was decided by `laptop.architect` at
@@ -4749,8 +4766,20 @@ How to read this record:
   at `@admin.@access`, which allows the subjects `@admin` every action on `**` with no
   authority, so its writes cap at `Authority(0)` (ACCESS BLOCK). A policy in a file can
   give the admin more. Their labels are reserved, so no file holds them: `Kind::key`
-  refuses a reserved label, and `Kind::label` gives one only for a subject or an access
-  policy. A definition whose label (`definition.kind().label(key)`) is reserved is
+  refuses a reserved label, and `Kind::label` gives one only at a founding key: a key
+  of `create`, or one that an earlier build made (`laptop.architect`,
+  2026-10-08T12:51:04Z,
+  https://github.com/synnaxlabs/foundation/pull/1880#issuecomment-6060256808). A
+  private table in `spec::founding` holds the founding labels by kind. A later build can
+  add an entry and never removes one, as a committed spec holds the keys of an earlier
+  build. Supersedes "only a subject or an access policy can have a reserved label"
+  (`laptop.architect-2`, 2026-10-08T10:56:38Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6058336549), as a
+  client's plan could then add a signing subject such as `ops.@x` that no plan shows
+  (#1877;
+  `laptop.architect`, 2026-10-08T12:36:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621). A
+  definition whose label (`definition.kind().label(key)`) is reserved is
   Foundation's, and `plan` leaves it out. `access::Rules` finds a subject by its label,
   so it admits `@admin` (SUBJECT KEYS). Lost: `Kind::key` takes a reserved label behind
   a flag, so `node` writes the definitions and `config` can make a reserved key by
