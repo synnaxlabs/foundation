@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-use spec::definition::Kind;
 use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
@@ -140,16 +139,14 @@ impl Rules {
         live(hello, now)
     }
 
-    /// Refuses `hello` unless the spec lists its key for its subject. A subject that
-    /// makes no tree key has no definition.
+    /// Refuses `hello` unless the spec lists its key for its subject.
     fn listed(&self, hello: &Hello) -> Result<(), Error> {
-        let subject = Kind::Subject
-            .key(hello.subject.as_str())
-            .ok()
-            .and_then(|key| self.subjects.get(&key))
-            .ok_or_else(|| Error::Unknown {
-                subject: hello.subject.clone(),
-            })?;
+        let subject =
+            self.subjects
+                .get(&hello.subject)
+                .ok_or_else(|| Error::Unknown {
+                    subject: hello.subject.clone(),
+                })?;
         subject
             .keys()
             .binary_search(&hello.key)

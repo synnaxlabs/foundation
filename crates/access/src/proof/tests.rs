@@ -230,6 +230,20 @@ mod admit {
     }
 
     #[test]
+    fn admits_the_founding_admin() {
+        let tree = spec::founding::create(public(&pair(TEST_1)));
+        let rules = Rules::new([(types::name::Prefix::ROOT, &tree)]);
+        let hello = Hello {
+            subject: name("@admin"),
+            ..create_hello()
+        };
+
+        let admitted = admit(&rules, NOW, hello.clone()).unwrap();
+
+        assert_eq!(admitted.hello(), &hello);
+    }
+
+    #[test]
     fn refuses_a_subject_that_the_spec_does_not_have() {
         let rules = rules(&[("ops.bob", &[public(&pair(TEST_1))])]);
 
