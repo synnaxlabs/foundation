@@ -3915,6 +3915,10 @@ How to read this record:
   look-alike shows. The `config-hcl` writer keeps its own rule, because a person edits
   what it writes. Lost: Rust's `Debug` form, which no file reads; `$$` and `%%`, which
   only HCL reads. Decided by the architect (#941).
+  Until `types::text::Quoted` is on `main` (#941), a producer quotes text from a file
+  with `{:?}`, and #941 changes each such quote to `Quoted`. Decided by the architect
+  at 2026-10-08T05:49:29Z
+  (https://github.com/synnaxlabs/foundation/issues/941#issuecomment-6053293087).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -4035,6 +4039,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
+  After a bad `kind`, `check` gives `document.unknown-attribute` for each attribute that
+  no kind knows, and leaves each other attribute, the edges too: each belongs to one
+  kind, so its problem depends on the kind. Decided by `laptop.architect-2`
+  (2026-10-08T05:54:24Z,
+  https://github.com/synnaxlabs/foundation/pull/1806#issuecomment-6053360334).
+  Supersedes clause 1 of the #1758 ruling, "the edges, as now" (2026-10-08T02:41:50Z,
+  https://github.com/synnaxlabs/foundation/issues/1758).
 - **ACCESS BLOCK (2026-10-08)** `access "<name>" { subjects, select, allow, authority }`
   (C8) gives a `spec::access::Policy` at `<name>.@access`. `subjects` and `select` are
   selectors. `allow` is one action or a list of actions, each a string or a bare word,

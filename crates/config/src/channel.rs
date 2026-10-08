@@ -18,9 +18,9 @@ const DATA_KEYS: [&str; 5] = ["kind", "data_type", "index", "quality", "unit"];
 /// The check of the attributes of one kind of channel.
 type Attributes = fn(&mut Found<'_>, &Block) -> Option<Kind<Name>>;
 
-/// Checks a `channel` block and gives its channel, with each edge as a name. A bad
-/// `kind` stops the check of each attribute but the edges, because the others depend
-/// on it.
+/// Checks a `channel` block and gives its channel, with each edge as a name. After a
+/// bad `kind`, it reports each attribute that no kind knows, and leaves each other
+/// attribute, since its problem depends on the kind.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let attributes = found.attribute(block, "kind", |value| -> Result<Attributes, _> {
         match text(value, BAD_CHANNEL_KIND, "the channel kind", "\"index\"")? {
@@ -35,12 +35,10 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         }
     });
     let Ok(attributes) = attributes else {
-        // A bad kind hides which attributes are unknown, but not the blocks inside.
-        let keys: Vec<&str> = block.body.attributes.iter().map(|a| &*a.key).collect();
+        let mut keys: Vec<&str> = INDEX_KEYS.into_iter().chain(DATA_KEYS).collect();
+        keys.sort_unstable();
+        keys.dedup();
         drop(found.unknown(block, &keys));
-        for each in [Edge::Index, Edge::Quality, Edge::Error, Edge::Control] {
-            drop(edge(found, block, each));
-        }
         return None;
     };
     let attributes = attributes.unwrap_or(data);
