@@ -897,6 +897,84 @@ mod tests {
                 };
                 assert_eq!(groups, [(1, Err(error))]);
             }
+
+            #[test]
+            fn refuses_a_variable_series_that_codec_refuses_in_either_form() {
+                let element = Scalar::U64;
+                let set = create_interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[
+                        (key(Slot::new(2)), Type::String),
+                        (key(Slot::new(3)), Type::List { element, max: 1 }),
+                    ],
+                }]);
+                let index = [10_u64, 20].map(u64::to_le_bytes).concat();
+                let text =
+                    [&3_u32.to_le_bytes()[..], &1_u32.to_le_bytes(), b"abc"].concat();
+                let wide = Type::List { element, max: 5 };
+                let ends = [0_u32, 2].map(u32::to_le_bytes).concat();
+                let raw =
+                    [&ends[..], &[4_u64, 5].map(u64::to_le_bytes).concat()].concat();
+                let mut list = vec![0; codec::max_len(wide, raw.len())];
+                let len = codec::Encoder::new(wide)
+                    .encode(2, &raw, &mut list)
+                    .expect("valid at max 5");
+                list.truncate(len);
+                let pool = create_pool(1 << 16);
+                let draft = |form: Form, entries: &[(usize, &[u8])]| {
+                    let lens: Vec<_> =
+                        entries.iter().map(|(e, b)| (*e, b.len())).collect();
+                    let mut draft = Draft::new(&pool, &set, form, &lens).expect("room");
+                    for (entry, series) in draft.iter_mut() {
+                        let (_, bytes) = entries
+                            .iter()
+                            .find(|(e, _)| *e == entry)
+                            .expect("an entry");
+                        series.copy_from_slice(bytes);
+                    }
+                    draft.set_count(0, 2);
+                    draft
+                };
+                let encoded_index = encoded(&set, 0, 2, &index);
+                let ends = codec::Error::Ends {
+                    sample: 1,
+                    end: 1,
+                    previous: 3,
+                };
+                let long = codec::Error::Long {
+                    sample: 1,
+                    len: 2,
+                    max: 1,
+                };
+                assert_eq!(
+                    ends.to_string(),
+                    "sample 1 ends at element 1, before the end of the sample before \
+                     it at 3"
+                );
+                assert_eq!(
+                    long.to_string(),
+                    "sample 1 holds 2 elements, more than its type's 1"
+                );
+                let cases = [
+                    (draft(Form::Raw, &[(0, &index), (1, &text)]), 2, ends),
+                    (
+                        draft(Form::Encoded, &[(0, &encoded_index), (2, &list)]),
+                        3,
+                        long,
+                    ),
+                ];
+                for (draft, slot, error) in cases {
+                    let mut scratch = Scratch::default();
+
+                    let mut split = scratch.split(&set, draft);
+
+                    let channel = key(Slot::new(slot));
+                    assert_eq!(
+                        groups(&mut split),
+                        [(0, Err(Error { channel, error }))]
+                    );
+                }
+            }
         }
     }
 
