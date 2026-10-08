@@ -538,7 +538,9 @@ fn build<'a>(
                 .args(flags.lines())
                 .args(["-g", "-O0"])
                 .args(mode);
-            spawn(cc.arg(source))
+            // `./` keeps a source that starts with `-` from being a flag.
+            let dot = if source.starts_with('-') { "./" } else { "" };
+            spawn(cc.arg(format!("{dot}{source}")))
         };
         let compile = cc(&["-c", "-o", &object.to_string_lossy()])?;
         children.push((source, object, compile, cc(&["-E", "-dI"])?));
@@ -1438,6 +1440,21 @@ End of search list.
             ])
         );
         assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_copies_a_source_whose_name_starts_with_a_dash() {
+        let (root, repo, result) = run_on("dash-source", |repo| {
+            create_files(repo, &[("-gen.c", "int gen;\n")]);
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap()
+                + "target_sources(open62541-object PRIVATE -gen.c)\n";
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(check(&root), Ok(()));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
