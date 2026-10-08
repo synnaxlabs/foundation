@@ -280,8 +280,7 @@ enum Premise {
     /// A send waits.
     Waits,
     /// A `Latest` send and a `Complete` send each end while a send of the other
-    /// class waits. Over the timed rounds, the bytes of the timed `Complete` sends
-    /// must also be from 2.5 to 3.5 times those of the timed `Latest` sends.
+    /// class waits.
     Competes,
     /// As `Competes`, and a send waits for room in the send budget, as the
     /// transport's `Status::budget_waits` counts.
