@@ -112,21 +112,15 @@ queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHA
   commit. Do it before that PR's first review round where you can, so that it shares
   that round.
 - **Found by review:** a finding whose fix is a small change in a crate or a file that
-  the PR changes is fixed in that PR, not deferred. Another one is an item, as below.
+  the PR changes is fixed in that PR, not deferred. Another one follows the bullets
+  below.
 - **Else, an item:** a small change that you cannot fold in (from an audit, a weekly
   pass, or a crate that you do not build) is an item of an open issue in its crate: a
   comment that states the change, the test that pins it, and its source. Choose the
   issue whose PR has had no review round, by preference one in progress, else the next
   one in that crate. Its builder folds the item into its PR and lists it in the PR body.
-- **Outside a crate:** a small change to a file in no crate, which no PR that you
-  build changes, goes into the records PR of the file's owner (below): the architect
-  of the crate that a decision covers (else `laptop.architect`) for
-  `docs/decisions.md`, the red-team for `docs/security.md` and fuzz inputs,
-  `laptop.monitor` for `docs/factory.md` and `docs/coordination.md`, and the director
-  for the rules in `CLAUDE.md` and `.claude/`.
 - **Alone:** a small change gets its own issue and PR only when no open issue in its
-  crate fits and no records PR above takes it, when it fixes a broken `main`, or when
-  other work waits on it.
+  crate fits, when it fixes a broken `main`, or when other work waits on it.
 - **Records:** each architect, red-team, and `laptop.monitor` keeps one PR open for its
   own small changes (decisions, threat model notes, fuzz inputs, factory docs), and
   sends it to review at most once a day, or at once when other work waits on it. A
