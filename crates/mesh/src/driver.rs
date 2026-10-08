@@ -206,6 +206,12 @@ impl Mesh {
         })
     }
 
+    /// This node: [`Config::key`].
+    #[must_use]
+    pub fn key(&self) -> node::Key {
+        self.group.borrow().raft.key()
+    }
+
     /// A watch of the home of `index`.
     #[must_use]
     pub fn watch(&self, index: channel::Key) -> Watch {

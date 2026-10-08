@@ -175,6 +175,16 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
 }
 
 #[test]
+fn key_gives_the_key_of_the_config() {
+    solo(|node, tasks| async move {
+        let config = create_config(&node, &tasks);
+        let key = config.key;
+        let mesh = Mesh::open(config).await.unwrap();
+        assert_eq!(mesh.key(), key);
+    });
+}
+
+#[test]
 fn open_panics_on_a_transport_that_proves_another_key() {
     let ran = run(|node, tasks| async move {
         let config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
