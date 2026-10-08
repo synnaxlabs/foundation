@@ -659,9 +659,6 @@ const RETRY_MAX: Span = Span::from_nanos(2 * RETRY.nanos());
 /// number of retries, so a retry of another span comes at another time.
 const ROOM: Span = Span::from_nanos(25 * RETRY.nanos() + RETRY.nanos() / 2);
 
-/// The mesh time of each challenge of a test that does not set one.
-const ZERO: Stamp = Stamp::from_nanos(0);
-
 /// Half of `LIFE`, as the record states it.
 const HALF: Span = Span::from_nanos(5 * Span::MINUTE.nanos());
 
@@ -698,7 +695,7 @@ async fn admit(hello: &mut Incoming, clock: &env::clock::Clock) -> Span {
     let mut came = [Span::from_nanos(0); 2];
     for slot in &mut came {
         let sent = clock.now();
-        challenge(hello, ZERO).await;
+        challenge(hello, Stamp::EPOCH).await;
         take(hello).await;
         *slot = clock.now() - sent;
     }
@@ -763,10 +760,10 @@ fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
         140,
         |session, mut hello, node| async move {
             let clock = node.clock();
-            challenge(&mut hello, ZERO).await;
+            challenge(&mut hello, Stamp::EPOCH).await;
             take(&mut hello).await;
             let sent = clock.now();
-            challenge(&mut hello, ZERO).await;
+            challenge(&mut hello, Stamp::EPOCH).await;
             let renewal = take(&mut hello).await;
             let came = clock.now() - sent;
             let late = Span::from_nanos(came.nanos() - HALF.nanos());
@@ -777,7 +774,7 @@ fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
             );
             // The challenge gives a mesh time of zero, so a hello whose wait for a
             // block took none of its life expires `LIFE` after it came.
-            let life = renewal.hello.expires - (Stamp::from_nanos(0) + came);
+            let life = renewal.hello.expires - (Stamp::EPOCH + came);
             assert!(
                 life <= LIFE && life.nanos() > LIFE.nanos() - RETRY_MAX.nanos(),
                 "the wait for a block takes none of the hello's life: {life:?}"
@@ -810,9 +807,9 @@ fn ends_the_wait_for_a_block_when_the_session_closes() {
     raw(
         144,
         |session, mut hello, node| async move {
-            challenge(&mut hello, ZERO).await;
+            challenge(&mut hello, Stamp::EPOCH).await;
             take(&mut hello).await;
-            challenge(&mut hello, ZERO).await;
+            challenge(&mut hello, Stamp::EPOCH).await;
             node.clock().sleep(QUIET).await;
             session.close(Code(BUSY));
             node.clock().sleep(QUIET).await;
@@ -842,7 +839,7 @@ fn ends_the_life_of_a_hello_at_the_end_of_time() {
             assert_eq!(take(&mut hello).await.hello.expires, end);
             challenge(&mut hello, Stamp::from_nanos(i64::MAX - 1)).await;
             assert_eq!(take(&mut hello).await.hello.expires, end);
-            challenge(&mut hello, ZERO).await;
+            challenge(&mut hello, Stamp::EPOCH).await;
             node.clock().sleep(QUIET).await;
             drop(session);
         },
