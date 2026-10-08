@@ -54,9 +54,9 @@ pub trait Kind: Send + Sync + 'static {
 /// What a checked connector reads and writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Channels {
-    /// The channels it reads from the device.
+    /// The channels it reads from the device, which it writes to the mesh.
     pub reads: Vec<Name>,
-    /// The channels it writes to the device.
+    /// The channels it writes to the device, which it reads from the mesh.
     pub writes: Vec<Name>,
 }
 
