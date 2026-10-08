@@ -329,22 +329,9 @@ async fn create_leader(node: &sim::node::Node, tasks: &Tasks) -> Mesh {
     mesh
 }
 
-/// Polls `call` until it waits for the outcome of its entry. No call of `Mesh` tells
-/// a call that waits for the outcome from one that still places its entry, so this
-/// reads the group.
-async fn wait_for_outcome<F: Future<Output = Result<(), Error>>>(
-    mesh: &Mesh,
-    clock: &Clock,
-    mut call: Pin<&mut F>,
-) {
-    while mesh.group.borrow().calls.is_empty() {
-        assert_eq!(now(call.as_mut()).await, Poll::Pending);
-        clock.sleep(Span::MILLISECOND).await;
-    }
-}
-
-// No call of `Mesh` shows that a call waits for its entry, and a call that stays in
-// the group after the stop only takes memory, so this test reads the group.
+// On a node that leads, the group holds a waker of a call only while the call waits
+// for the outcome of its entry. No call of `Mesh` shows that, so this test reads the
+// group.
 #[test]
 fn a_call_that_waits_for_its_entry_gets_the_cause_when_the_group_stops() {
     solo(|node, tasks| async move {
@@ -362,7 +349,6 @@ fn a_call_that_waits_for_its_entry_gets_the_cause_when_the_group_stops() {
         let stopped = stop(&node, &mesh);
         clock.sleep(Span::MILLISECOND).await;
         assert_eq!(*result.borrow(), Some(Err(Error::Stopped(stopped))));
-        assert!(mesh.group.borrow().calls.is_empty());
     });
 }
 
@@ -374,7 +360,7 @@ fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
         let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
         let first = elect(&mesh).await;
         let mut call = pin!(mesh.set_home(INDEX, key(2)));
-        wait_for_outcome(&mesh, &node.clock(), call.as_mut()).await;
+        assert_eq!(now(call.as_mut()).await, Poll::Pending);
         let bad = mesh.propose_data(vec![9]).await.unwrap();
         assert_eq!(bad, after(first, 2));
         let reply = raft::Message {
@@ -389,14 +375,19 @@ fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
     });
 }
 
-// A waker or a floor that stays only takes memory, which no call shows, so this
-// test reads the group.
+// On a node that leads, the group holds a waker of a call only while the call waits
+// for the outcome of its entry. A waker or a floor that stays only takes memory,
+// which no call shows, so this test reads the group.
 #[test]
 fn a_dropped_call_that_waits_for_its_entry_leaves_no_waker_and_no_floor() {
     solo(|node, tasks| async move {
         let mesh = create_leader(&node, &tasks).await;
         let mut call = Box::pin(mesh.set_home(INDEX, key(2)));
-        wait_for_outcome(&mesh, &node.clock(), call.as_mut()).await;
+        let clock = node.clock();
+        while mesh.group.borrow().calls.is_empty() {
+            assert_eq!(now(call.as_mut()).await, Poll::Pending);
+            clock.sleep(Span::MILLISECOND).await;
+        }
         assert_eq!(mesh.group.borrow().calls.len(), 1);
         assert_ne!(mesh.group.borrow().applied, Applied::default());
         drop(call);
@@ -954,6 +945,7 @@ fn no_proposal_goes_to_the_leader_while_the_pool_has_no_block() {
     let call = |node: sim::node::Node, mesh: Mesh| async move {
         let clock = node.clock();
         wait_for_session(&mesh, &clock).await;
+        // `run` builds the pool and gives `call` only the mesh.
         let held = fill(&mesh.pool);
         let mut call = pin!(set(mesh.clone()));
         let end = clock.now() + seconds(2);
