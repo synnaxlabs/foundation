@@ -57,6 +57,7 @@ pub(super) async fn open(
             members: vec![member(NODE, &HOME, Vec::new()), member(OTHER, &PEER, other)],
             voters: [NODE].into(),
             definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
         },
         files: node.files(),
         dir: "mesh".into(),

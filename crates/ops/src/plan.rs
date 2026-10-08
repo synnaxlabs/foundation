@@ -21,7 +21,7 @@ mod tests;
 /// # Errors
 ///
 /// [`Error::Config`] with each problem of [`front_end::read`], else with each problem
-/// of [`config::plan`].
+/// of [`config::plan::plan`].
 ///
 /// # Panics
 ///
@@ -43,12 +43,12 @@ pub(crate) fn plan(
         Error::Config(problems)
     };
     let documents = front_end::read(files, front_ends).map_err(failed)?;
-    let plan =
-        config::plan(&documents, base, applied, members, kinds).map_err(failed)?;
+    let plan = config::plan::plan(&documents, base, applied, members, kinds)
+        .map_err(failed)?;
     let mut changes: Vec<(Order, Change)> = plan
         .changes
         .iter()
-        .map(|change| Change::of(change, applied, &paths))
+        .map(|(name, change)| Change::of(name, change, applied, &paths))
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
@@ -93,14 +93,20 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    /// One line for each change, then the counts.
+    /// One line for each change, with a `key` line under it for each fingerprint, then
+    /// the counts.
     pub(crate) fn text(&self) -> String {
         let lines: Vec<String> = self
             .changes
             .iter()
             .map(|change| {
                 let (symbol, kind) = (change.action.symbol(), &change.kind);
-                format!("{symbol} {kind} {}\n", change.name)
+                let lines: String = change
+                    .fingerprints
+                    .iter()
+                    .flat_map(|fingerprint| ["    key ", fingerprint, "\n"])
+                    .collect();
+                format!("{symbol} {kind} {}\n{lines}", change.name)
             })
             .collect();
         format!(
@@ -134,6 +140,10 @@ pub(crate) struct Change {
     /// Where the label is in the files. A removal has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) place: Option<Place>,
+    /// The `SHA256:` fingerprint of each key of a subject, as `ssh-keygen -l` writes
+    /// it: after the apply, or before it for a removal. Empty for each other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) fingerprints: Vec<String>,
 }
 
 /// Adds and changes in file order, then removals in tree key order.
@@ -141,14 +151,17 @@ type Order = (bool, Option<(Source, u32)>, Name);
 
 impl Change {
     fn of(
-        change: &config::Change,
+        name: &Name,
+        change: &config::plan::Change,
         applied: &BTreeMap<Name, Definition>,
         paths: &[PathBuf],
     ) -> (Order, Self) {
-        let (action, kind, span) = if let Some(entry) = &change.new {
-            let kind = match &entry.definition {
-                config::Definition::Spec(definition) => definition.kind(),
-                config::Definition::Channel(_) => Kind::Channel,
+        let (action, kind, span, definition) = if let Some(entry) = &change.new {
+            let (kind, definition) = match &entry.definition {
+                config::Definition::Spec(definition) => {
+                    (definition.kind(), Some(definition))
+                }
+                config::Definition::Channel(_) => (Kind::Channel, None),
                 _ => unreachable!("invariant: `ops` knows each kind of definition"),
             };
             let action = if change.old.is_some() {
@@ -156,23 +169,32 @@ impl Change {
             } else {
                 Action::Add
             };
-            (action, kind, entry.label_span)
+            (action, kind, entry.label_span, definition)
         } else {
             let stored = applied
-                .get(&change.name)
+                .get(name)
                 .expect("invariant: a removal is of an applied definition");
-            (Action::Remove, stored.kind(), None)
+            (Action::Remove, stored.kind(), None, Some(stored))
+        };
+        let fingerprints = match definition {
+            Some(Definition::Subject(subject)) => subject
+                .keys()
+                .iter()
+                .map(|&key| config::openssh::fingerprint(key))
+                .collect(),
+            _ => Vec::new(),
         };
         let label = kind
-            .label(&change.name)
+            .label(name)
             .expect("invariant: a planned change is at a tree key of its kind");
         let at = span.map(|span| (span.source(), span.start().offset));
-        let order = (at.is_none(), at, change.name.clone());
+        let order = (at.is_none(), at, name.clone());
         let change = Self {
             action,
             kind: kind.as_str().to_owned(),
             name: label.to_string(),
             place: span.map(|span| place(span, paths)),
+            fingerprints,
         };
         (order, change)
     }
@@ -204,7 +226,10 @@ fn place(span: Span, paths: &[PathBuf]) -> Place {
         .expect("invariant: a span is in a file of the plan");
     let start = span.start();
     Place {
-        file: path.display().to_string(),
+        file: path
+            .to_str()
+            .expect("invariant: `read` refuses a path that is not UTF-8")
+            .to_owned(),
         line: start.line + 1,
         column: start.column + 1,
     }
