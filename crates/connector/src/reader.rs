@@ -1,7 +1,7 @@
 //! The reader settings that each out connector reads from its config.
 
 use document::diagnostic::{Code, Diagnostic};
-use document::value::{Kind, Value};
+use document::value::Value;
 use document::{Block, Document};
 use hub::reader::Mode;
 use types::name::{Name, Selector};
@@ -168,17 +168,16 @@ fn hold(value: &Value) -> Result<Span, Diagnostic> {
 
 /// Reads `"complete"` or `"latest"`, as a string or a reference.
 fn mode(value: &Value) -> Result<Mode, Diagnostic> {
-    let text = match &value.kind {
-        Kind::String(text) => text,
-        Kind::Reference(name) => name.as_str(),
-        kind => {
-            return Err(Diagnostic::new(
-                BAD_MODE,
-                value.span,
-                format!("a mode is a string or a reference, not {}", kind.noun()),
-                "Write \"complete\" or \"latest\"".into(),
-            ));
-        }
+    let Some(text) = value.kind.text() else {
+        return Err(Diagnostic::new(
+            BAD_MODE,
+            value.span,
+            format!(
+                "a mode is a string or a reference, not {}",
+                value.kind.noun()
+            ),
+            "Write \"complete\" or \"latest\"".into(),
+        ));
     };
     match text {
         "complete" => Ok(Mode::Complete),

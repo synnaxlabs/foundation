@@ -132,15 +132,6 @@ fn channels(documents: &[Document]) -> BTreeSet<Name> {
         .collect()
 }
 
-/// The text of a string or a reference, as the file wrote it.
-fn written(value: &Value) -> Option<&str> {
-    match &value.kind {
-        document::value::Kind::String(text) => Some(text),
-        document::value::Kind::Reference(name) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
 /// The channel names of the Documents, the connector kinds, and what `check` has
 /// found so far.
 #[derive(Debug)]

@@ -177,20 +177,16 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
     let patterns = items(value);
     let mut texts = Vec::with_capacity(patterns.len());
     for pattern in patterns {
-        let text: &str = match &pattern.kind {
-            Kind::String(text) => text,
-            Kind::Reference(name) => name.as_str(),
-            kind => {
-                return Err(Diagnostic::new(
-                    BAD_SELECTOR,
-                    pattern.span,
-                    format!(
-                        "a pattern is a string or a reference, not {}",
-                        kind.noun()
-                    ),
-                    "Write a string such as \"site_a.*\"".into(),
-                ));
-            }
+        let Some(text) = pattern.kind.text() else {
+            return Err(Diagnostic::new(
+                BAD_SELECTOR,
+                pattern.span,
+                format!(
+                    "a pattern is a string or a reference, not {}",
+                    pattern.kind.noun()
+                ),
+                "Write a string such as \"site_a.*\"".into(),
+            ));
         };
         // `Selector::new` does not say which pattern it refuses, so each reads alone
         // first. Alone, an exclusion includes no names, which is not its error.
