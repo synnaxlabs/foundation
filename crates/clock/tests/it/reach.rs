@@ -80,7 +80,7 @@ fn waits_for_the_first_mesh_time() {
     let (mut clock, reader) = Clock::new(node.clock());
     let (at, start) = (Stamp::from_nanos(1_000), node.clock().now());
     let done = wait(&node, &reader, at);
-    sim.run_for(Span::from_nanos(500_000_000)).expect("runs");
+    sim.run_for(Span::from_nanos(300_000_000)).expect("runs");
     assert_eq!(*done.lock().expect("not poisoned"), None);
     push(&node, &mut clock, Span::ZERO);
     let pushed = node.clock().now();
