@@ -627,7 +627,7 @@ fn prepare_msg(
     hdr: &mut libc::msghdr,
     iov: &mut libc::iovec,
     ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
-    #[allow(unused_variables)] // only used on FreeBSD & macOS
+    #[allow(unused_variables)] // only used on the BSDs and Solaris
     encode_src_ip: bool,
     sendmsg_einval: bool,
 ) {
@@ -673,7 +673,8 @@ fn prepare_msg(
     if let Some(ip) = &transmit.src_ip {
         match ip {
             IpAddr::V4(v4) => {
-                #[cfg(any(target_os = "linux", target_os = "android"))]
+                // macOS ignores the source in IP_RECVDSTADDR, with no error.
+                #[cfg(any(target_os = "linux", target_os = "android", apple))]
                 {
                     let pktinfo = libc::in_pktinfo {
                         ipi_ifindex: 0,
@@ -684,7 +685,7 @@ fn prepare_msg(
                     };
                     encoder.push(libc::IPPROTO_IP, libc::IP_PKTINFO, pktinfo);
                 }
-                #[cfg(any(bsd, apple, solarish))]
+                #[cfg(any(bsd, solarish))]
                 {
                     if encode_src_ip {
                         let addr = libc::in_addr {
