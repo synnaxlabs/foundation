@@ -7,7 +7,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll, ready};
 
 use ::home::reader::Next;
 use types::channel;
@@ -323,8 +323,7 @@ pub(crate) struct Session {
     slots: Box<[channel::Slot]>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
     mask: Option<(Arc<KeySet>, Mask)>,
-    /// Frames given in a row since `take` last returned `Pending`.
-    streak: u32,
+    streak: Streak,
 }
 
 impl Session {
@@ -369,7 +368,7 @@ impl Session {
             key,
             slots,
             mask: None,
-            streak: 0,
+            streak: Streak::default(),
         }
     }
 
@@ -387,27 +386,10 @@ impl Session {
     /// this hub made.
     pub(crate) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Stop> {
         let frame = poll_fn(|cx| {
-            let mut state = self.state.borrow_mut();
-            let state = &mut *state;
-            if self.streak == STREAK {
-                self.streak = 0;
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            match state.home.take(self.key) {
-                Next::Frame(frame) => {
-                    self.streak += 1;
-                    return Poll::Ready(Ok(frame));
-                }
-                Next::Behind => return Poll::Ready(Err(Stop::Behind)),
-                Next::Empty => {}
-            }
-            if let Some(error) = &state.failed {
-                return Poll::Ready(Err(Stop::Buffer(error.clone())));
-            }
-            self.streak = 0;
-            state.wakers.insert(self.key, cx.waker().clone());
-            Poll::Pending
+            ready!(self.streak.poll(cx));
+            let polled = poll_take(&mut self.state.borrow_mut(), self.key, cx);
+            self.streak.count(&polled);
+            polled
         })
         .await?;
         let key = frame.key_set();
@@ -423,6 +405,47 @@ impl Session {
             }
         };
         Ok((frame, set, mask))
+    }
+}
+
+/// The next frame of the session `key`, or the waker of `cx` kept to wake once one
+/// waits.
+fn poll_take(
+    state: &mut State,
+    key: ::home::reader::Key,
+    cx: &Context<'_>,
+) -> Poll<Result<Frame, Stop>> {
+    match state.home.take(key) {
+        Next::Frame(frame) => return Poll::Ready(Ok(frame)),
+        Next::Behind => return Poll::Ready(Err(Stop::Behind)),
+        Next::Empty => {}
+    }
+    if let Some(error) = &state.failed {
+        return Poll::Ready(Err(Stop::Buffer(error.clone())));
+    }
+    state.wakers.insert(key, cx.waker().clone());
+    Poll::Pending
+}
+
+/// The frames that a source gave in a row since it last waited.
+#[derive(Debug, Default)]
+pub(super) struct Streak(u32);
+
+impl Streak {
+    /// `Pending` once, with a wake, after [`STREAK`] frames in a row, so the shard's
+    /// other tasks run; else `Ready`.
+    fn poll(&mut self, cx: &Context<'_>) -> Poll<()> {
+        if self.0 < STREAK {
+            return Poll::Ready(());
+        }
+        self.0 = 0;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    /// Counts one poll of the source: a wait starts the count again.
+    fn count<T>(&mut self, polled: &Poll<T>) {
+        self.0 = if polled.is_pending() { 0 } else { self.0 + 1 };
     }
 }
 

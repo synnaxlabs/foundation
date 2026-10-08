@@ -6,7 +6,7 @@ use std::future::poll_fn;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use block::Block;
 use transport::stream::{Receiver, Sender};
@@ -16,7 +16,7 @@ use types::frame::{Draft, Form, Frame, Layout, Mask};
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 
-use super::{Ended, Error, Mode, STREAK, WINDOW};
+use super::{Ended, Error, Mode, Streak, WINDOW};
 use crate::State;
 
 /// A reader session on one stream to the home. Each partial frame and each credit on
@@ -30,8 +30,7 @@ pub(super) struct Remote {
     /// complete reader.
     credit: Option<(u64, u64)>,
     ended: Option<Ended>,
-    /// Frames given in a row since `take` last waited.
-    streak: u32,
+    streak: Streak,
 }
 
 /// The receiving half of the stream, and the frame that arrives on it.
@@ -116,7 +115,7 @@ impl Remote {
             },
             credit,
             ended: None,
-            streak: 0,
+            streak: Streak::default(),
         })
     }
 
@@ -128,7 +127,7 @@ impl Remote {
     }
 
     /// The next frame, its key set, and the mask of every entry in it. After
-    /// [`STREAK`] frames in a row, it yields once.
+    /// [`STREAK`](super::STREAK) frames in a row, it yields once.
     ///
     /// # Errors
     ///
@@ -137,40 +136,27 @@ impl Remote {
         if let Some(ended) = &self.ended {
             return Err(ended.clone());
         }
-        if self.streak == STREAK {
-            self.streak = 0;
-            let mut yielded = false;
-            poll_fn(|cx| {
-                if yielded {
-                    return Poll::Ready(());
-                }
-                yielded = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            })
-            .await;
-        }
-        let mut waited = false;
         let next = match self.grant() {
             Ok(()) => {
                 let Self {
                     out,
                     inbound,
                     credit,
+                    streak,
                     ..
                 } = &mut *self;
                 let mut next = pin!(inbound.next());
                 poll_fn(|cx| {
+                    ready!(streak.poll(cx));
                     poll_credit(out, credit, cx);
-                    let next = next.as_mut().poll(cx);
-                    waited |= next.is_pending();
-                    next
+                    let polled = next.as_mut().poll(cx);
+                    streak.count(&polled);
+                    polled
                 })
                 .await
             }
             Err(ended) => Err(ended),
         };
-        self.streak = if waited { 0 } else { self.streak + 1 };
         match next {
             Ok(frame) => Ok((frame, &self.inbound.set, &self.inbound.mask)),
             Err(ended) => {
