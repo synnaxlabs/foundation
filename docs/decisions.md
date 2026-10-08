@@ -6313,7 +6313,7 @@ How to read this record:
 - **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
   on `Config::net` before any shard starts; a failed bind starts no shard, and
   `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which
-  builds the transport with `Config::private_key` once the last shard has opened its
+  builds the transport with the node's private key once the last shard has opened its
   buffer (X42), so the node takes no session before that. Its limits are patches until
   #1662 makes them settings, as LIMITS of SHARD HOMES is: window 1 MiB, 64 streams of
   each kind, idle 30 s, and messages of the smaller of 64 KiB and the pool's largest
@@ -6323,8 +6323,7 @@ How to read this record:
   stops the stream with `Code(wire::header::REJECTED)` and resets the reply half with
   the same code, as for a header that does not decode, or for a first message with bytes
   after the header. The node reads no datagram until the first protocol that takes
-  datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
-  reads the key from its data directory (#1660). The node admits every peer that
+  datagrams has a server (#1661). The node admits every peer that
   completes the handshake; the mesh checks each message of a mesh stream (NODE MESH).
   At the stop, each session and stream future drops, then the transport. The bound on
   the wait for a header is #1628.
@@ -6362,17 +6361,36 @@ How to read this record:
   session and stream future drops, then the mesh, and the transport drops when the
   last task of the mesh ends, before `lock` drops:
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
-- **NODE MESH (#585, 2026-10-08)** `Config::key` is the node's key, beside
-  `Config::private_key`; both are patches until #1660 moves them to node-local disk.
-  `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
-  member of: its prefix, its members (one card has `Config::key`), the voters before the
-  first entry of the log, and its founding definitions. The caller gives the same
-  region at each start: the node keeps no copy of it. `None` opens no mesh. The `Option`
-  is a dark patch: the `None` stays in `node`, and no lower crate gets an `Option` of
-  the mesh. PR 4 of #585, which gives the mesh to the hub, makes the region required,
-  unless #1660 and #1744 have already taken it out of `Config`. The long-term path takes
-  it out of `Config`: the node keeps its membership in its data directory when it founds
-  or joins, and reads it at each start.
+  Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
+  Once each buffer has opened, shard 0 reads the node's key and private key from the
+  file `node.key` in the data directory, before the transport and the mesh open. The
+  file is 68 bytes: the tag `foundation/key/1`, the node key (UUIDv7, big-endian), the
+  Ed25519 private key, and the CRC32C of those 64 bytes (little-endian). It is one
+  sector, which a crash keeps whole or old. At the first start, shard 0 makes the file
+  with `Mode::Create`; 68 zero bytes are a key not yet written, so shard 0 makes a key
+  (`types::node::Key::v7` from `Config::wall` and `Config::entropy`, and 32 random
+  bytes), writes it, and syncs the file and the directory before the transport proves
+  it. A node that joins by ticket (#336) makes its key the same way at its first start.
+  A file of another length, tag, or checksum gives `Error::Key`, which `Node::join`
+  ranks above `Error::Blob` and `Error::Mesh`; the node never writes over it, since a
+  new key is a new node to its region. Each other file error on `node.key` gives
+  `Error::Directory`. The form is not a contract: only `node` reads it. The seal key
+  goes into `node.key` with its first caller, as the tag `foundation/key/2` with 32 more
+  bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. `os` makes each file
+  `0600` and each directory `0700` (#1988):
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
+  plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563.
+- **NODE MESH (#585, 2026-10-08)** The node's key and private key come from the file
+  `node.key` (NODE PORT, amended for #1660). `Config::region:
+  Option<mesh::region::Founding>` gives the region that the node is a member of: its
+  prefix, its members (one card has the node's key), the voters before the first entry
+  of the log, and its founding definitions. The caller gives the same region at each
+  start: the node keeps no copy of it. `None` opens no mesh. The `Option` is a dark
+  patch: the `None` stays in `node`, and no lower crate gets an `Option` of the mesh. PR
+  4 of #585, which gives the mesh to the hub, makes the region required, unless #1660
+  and #1744 have already taken it out of `Config`. The long-term path takes it out of
+  `Config`: the node keeps its membership in its data directory when it founds or joins,
+  and reads it at each start.
   With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last shard
   has opened its buffer and before it takes the first session. Its directory is `mesh`
   in the data directory (`mesh::Config::dir`; the directory by `laptop.architect`,
@@ -6781,7 +6799,7 @@ Storage classes used in the table:
 | Time sources | Binary: a source table built in `node`; adapters probe for hardware | Adapters feed measurements | The estimator | `clock` (adapters), estimator crate (X11) |
 | Mesh clock state | Memory per node; any shard reads its time and status (`Reader::now`, `Reader::status`); published as `<node>.clock.offset`, `.clock.error`, and the status | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
-| Node key material | Node-local disk | `node` at join | `transport`, `node` | `node` |
+| Node key material | `node.key` on node-local disk | `node` at its first start | `transport`, `node` | `node` |
 | Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
 
