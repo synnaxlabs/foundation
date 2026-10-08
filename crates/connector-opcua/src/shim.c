@@ -125,7 +125,8 @@ static UA_StatusCode el_start(UA_EventLoop *el) {
     return UA_STATUSCODE_GOOD;
 }
 
-/* Runs the due timers, then the delayed callbacks queued before the call. */
+/* Runs the due timers, then the delayed callbacks queued before the call or by those
+ * timers. */
 static UA_StatusCode el_run(UA_EventLoop *el, UA_UInt32 timeout) {
     (void)timeout;
     struct shim_loop *loop = loop_of(el);
@@ -272,6 +273,9 @@ void shim_loop_free(UA_EventLoop *el) {
     while(loop->queued) {
         UA_DelayedCallback *dc = loop->queued;
         loop->queued = dc->next;
+        /* Before the call, since the callback may queue another. */
+        if(!loop->queued)
+            loop->tail = &loop->queued;
         dc->next = NULL;
         dc->callback(dc->application, dc->context);
     }

@@ -360,6 +360,17 @@ fn the_drop_runs_the_queued_delayed_callbacks() {
 }
 
 #[test]
+fn the_drop_runs_a_callback_that_a_queued_callback_queues() {
+    let f = Fixture::new();
+    let mut later = f.delayed(record, number(1));
+    let mut first = f.delayed(queue, ptr::from_mut(&mut later).cast());
+    f.queue(&mut first);
+    let Fixture { events, probe, .. } = f;
+    drop(events);
+    assert_eq!(probe.ran.take(), [0, 1]);
+}
+
+#[test]
 fn a_client_runs_its_housekeeping_on_the_loop() {
     let mut f = Fixture::new();
     let start = f.now();
