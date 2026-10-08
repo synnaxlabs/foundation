@@ -210,8 +210,7 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
 ///
 /// Returns a `document.unknown-attribute` diagnostic at the key of each such
 /// attribute, and a `document.unknown-block` diagnostic at the keyword of each such
-/// block. Each fix names the keys it takes. When `body` takes blocks and no
-/// attribute, the fix of an attribute is to move it into one of those blocks.
+/// block. Each fix names the keys and blocks it takes.
 #[must_use]
 pub fn unknown(
     body: &Document,
