@@ -24,6 +24,8 @@ types = { path = "../types" }
 unicode-properties.workspace = true
 
 [dev-dependencies]
+# Turns on `sim` for the bench, since the bench host runs no features.
+connector-influx = { path = ".", features = ["sim"] }
 counting = { path = "../counting" }
 divan.workspace = true
 env = { path = "../env" }
@@ -34,7 +36,6 @@ sim = { path = "../sim" }
 name = "sim"
 harness = false
 test = true
-required-features = ["sim"]
 
 [[test]]
 name = "memory"
