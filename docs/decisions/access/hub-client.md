@@ -14,24 +14,24 @@
   response begins or the stream ends, because the node holds it open until then.
   `Config` holds its own `pool`, which a program may share with the transport. The
   stream holds each block of a body until the node has it, so a request needs room for
-  the part of its body that the node's flow control lets the stream hold, and gives
-  `Error::Pool` when the pool has none. `Client` is `Clone`, and a clone is the same
-  session. When the last clone drops, the client closes the session with `Code(0)`. A
-  node's stop and close with a code are one error:
-  `Error::Refused(wire::hub::client::Refusal)`, a closed set in `wire` with `from_code`
-  and `code`, of each code that a node stops a client stream or closes a client session
-  with (`MALFORMED`, `BUSY`, and `REFUSED` to `CHANGED`). Each meaning of a code is
-  stated once, in `wire`, and its `Display` gives the cause. A close with 0 or a code
-  outside the set stays `Error::Transport`. Lost: one dial for each request (a handshake
-  for each request, and `foundation status` needs a session that lives); `&mut self`
-  with the renewal inside `request` (an idle program loses its session at the expiry); a
-  queue in a task that owns the session; a lock of a library (`tokio::sync` is FIFO, but
-  `hub` does not depend on Tokio (HUB SESSIONS), and `futures::lock::Mutex` wakes the
-  first waiter of its slab, not the oldest, and lets a new `lock` take the lock ahead of
-  it, which starves a waiter); `Error::Stopped` with a `u32` code, which gives `hub` a
-  meaning for each code. The plan
-  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069186434) was
-  approved with the `Refusal` change by `laptop.architect` at 2026-10-08T21:25:05Z
+  the bytes that the session holds in flight, up to the node's
+  `transport::Config::window_bytes`, and gives `Error::Pool` when the pool has none.
+  `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
+  client closes the session with `Code(0)`. A node's stop and close with a code are one
+  error: `Error::Refused(wire::hub::client::Refusal)`, a closed set in `wire` with
+  `from_code` and `code`, of each code that a node stops a client stream or closes a
+  client session with (`MALFORMED`, `BUSY`, and `REFUSED` to `CHANGED`). Each meaning of
+  a code is stated once, in `wire`, and its `Display` gives the cause. A close with 0 or
+  a code outside the set stays `Error::Transport`. Lost: one dial for each request (a
+  handshake for each request, and `foundation status` needs a session that lives); `&mut
+  self` with the renewal inside `request` (an idle program loses its session at the
+  expiry); a queue in a task that owns the session; a lock of a library
+  (`tokio::sync::Semaphore` is FIFO, but it adds a dependency to `hub` for one lock on
+  one thread, and `futures::lock::Mutex` wakes the first waiter of its slab, not the
+  oldest, and lets a new `lock` take the lock ahead of it, which starves a waiter);
+  `Error::Stopped` with a `u32` code, which gives `hub` a meaning for each code. The
+  plan (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069186434)
+  was approved with the `Refusal` change by `laptop.architect` at 2026-10-08T21:25:05Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6069345374).
   `laptop.architect` approved the surface and the shared `pool` at 2026-10-08T21:32:05Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056) and
@@ -41,3 +41,5 @@
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
   approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128).
+  Supersedes the sentence "Any pool works" of
+  https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.
