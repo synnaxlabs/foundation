@@ -819,7 +819,10 @@ How to read this record:
   applies its text to the doc of `env::tasks::Driver` and to ENV SEAMS. The feature is
   `sim`, since a hook that only a bench or a fuzz target uses is test-only (#1570), by
   `laptop.architect-2` (2026-10-08 00:56 UTC):
-  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049939448.
+  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049939448. It
+  supersedes
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976 in its
+  clause that the feature is `bench`.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
