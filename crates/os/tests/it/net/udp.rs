@@ -181,6 +181,128 @@ fn a_batch_arrives_as_one_batch() {
     });
 }
 
+/// Receives one batch, and gives its length, stride, and ECN mark.
+async fn receive_batch(receiver: &mut Receiver) -> (usize, usize, Option<Ecn>) {
+    let mut buffer = vec![0; receiver.batch_max().get() * DATAGRAM_BYTES_MAX];
+    let mut meta = [Meta::default()];
+    let mut buffers = [IoSliceMut::new(&mut buffer)];
+    let batches = timeout(
+        BOUND,
+        poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta)),
+    )
+    .await;
+    assert_eq!(batches.expect("the batch arrives"), Ok(1));
+    let [meta] = meta;
+    (meta.len, meta.stride, meta.ecn)
+}
+
+/// A transmit that the kernel refuses leaves GSO and the IPv4 ECN mark on.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_refused_transmit_leaves_gso_and_ecn_on() {
+    on_thread("udp-refused", || async {
+        let net = net();
+        let any_v6 = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let to_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9);
+        let far_v6 = IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+        let cases = [
+            (Some(far_v6), to_v6),
+            (None, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0)),
+            (None, SocketAddr::new(LOCALHOST.into(), 0)),
+            (Some(LOCALHOST.into()), to_v6),
+        ];
+        let (_, mut receiver) = loopback(&net);
+        let contents = [5; 300];
+        let batch = Transmit {
+            ecn: Some(Ecn::Ce),
+            segment: NonZeroUsize::new(100),
+            ..transmit(receiver.local(), &contents)
+        };
+        for (source, destination) in cases {
+            let (mut sender, _) = bind(&net, any_v6);
+            let refused = Transmit {
+                source,
+                ..transmit(destination, b"x")
+            };
+            assert_eq!(
+                send(&mut sender, &refused).await,
+                Err(Error::Io { code: 22 }),
+                "source {source:?}, to {destination}"
+            );
+            assert_eq!(send(&mut sender, &batch).await, Ok(()));
+            assert_eq!(
+                receive_batch(&mut receiver).await,
+                (300, 100, Some(Ecn::Ce)),
+                "after source {source:?}, to {destination}"
+            );
+        }
+    });
+}
+
+/// Turns off the UDP checksum of the socket bound to `local`, so that Linux refuses
+/// each GSO send on it with `EINVAL`, as a card that cannot segment does.
+#[cfg(target_os = "linux")]
+#[expect(
+    unsafe_code,
+    reason = "the socket of `os` is reached by its descriptor"
+)]
+fn refuse_gso(local: SocketAddr) {
+    use std::os::fd::BorrowedFd;
+    let fds = std::fs::read_dir("/proc/self/fd").expect("procfs is mounted");
+    let fd = fds
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .find(|&fd| {
+            // SAFETY: the descriptor stays open for this call: the test holds the
+            // socket, and another descriptor that closes gives only an error.
+            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            rustix::net::getsockname(fd)
+                .ok()
+                .and_then(|name| SocketAddr::try_from(name).ok())
+                == Some(local)
+        })
+        .expect("the socket is open");
+    let one: libc::c_int = 1;
+    // SAFETY: `one` outlives the call, and its size is the length given.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NO_CHECK,
+            (&raw const one).cast(),
+            libc::socklen_t::try_from(size_of::<libc::c_int>()).expect("an int fits"),
+        )
+    };
+    assert_eq!(rc, 0, "SO_NO_CHECK is set");
+}
+
+/// A kernel that refuses GSO still gets each datagram of a batch, with its ECN mark.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_batch_arrives_when_the_kernel_refuses_gso() {
+    on_thread("udp-no-gso", || async {
+        let net = net();
+        let (mut sender, _) = loopback(&net);
+        refuse_gso(sender.local());
+        let (_, mut receiver) = loopback(&net);
+        let contents = [5; 300];
+        let batch = Transmit {
+            ecn: Some(Ecn::Ce),
+            segment: NonZeroUsize::new(100),
+            ..transmit(receiver.local(), &contents)
+        };
+        for round in ["first", "second"] {
+            assert_eq!(send(&mut sender, &batch).await, Ok(()), "{round} batch");
+            for _ in 0..3 {
+                assert_eq!(
+                    receive_batch(&mut receiver).await,
+                    (100, 100, Some(Ecn::Ce)),
+                    "{round} batch"
+                );
+            }
+        }
+    });
+}
+
 #[test]
 fn a_datagram_of_the_byte_max_arrives() {
     on_thread("udp-max", || async {
