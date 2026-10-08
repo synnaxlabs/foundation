@@ -452,8 +452,8 @@ impl Endpoint {
         receiver: &mut Receiver,
         mut take: impl FnMut(&Pool, usize) -> Option<Unique>,
     ) -> Result<Poll<Option<Block>>, Error> {
-        self.land(now, receiver, |reader, pool, len| {
-            reader.fill(take(pool, len)).map(Ok)
+        self.read_with(now, receiver, |reader, pool, len| {
+            reader.fill(take(pool, len))
         })
     }
 
@@ -472,8 +472,9 @@ impl Endpoint {
         receiver: &mut Receiver,
         buffer: &mut [u8],
     ) -> Result<Poll<Option<usize>>, Error> {
-        self.land(now, receiver, |reader, _, len| {
+        let read = self.read_with(now, receiver, |reader, _, len| {
             if len > buffer.len() {
+                reader.hold();
                 let bytes_max = buffer.len();
                 return Poll::Ready(Err(Error::TooLarge {
                     bytes: len,
@@ -482,30 +483,36 @@ impl Endpoint {
             }
             reader.copy(&mut buffer[..len]);
             Poll::Ready(Ok(len))
-        })
+        })?;
+        match read {
+            Poll::Ready(Some(landed)) => landed.map(|len| Poll::Ready(Some(len))),
+            Poll::Ready(None) => Ok(Poll::Ready(None)),
+            Poll::Pending => Ok(Poll::Pending),
+        }
     }
 
     /// What `land(reader, pool, len)` makes of the next whole message of
     /// `receiver`'s stream, as [`Endpoint::read`] gives it. `land` takes the message
-    /// from `reader`, or gives `Pending` or [`Error::TooLarge`] and takes nothing.
-    fn land<T>(
+    /// from `reader`, or holds it there for the next read.
+    fn read_with<T>(
         &mut self,
         now: Monotonic,
         receiver: &mut Receiver,
-        mut land: impl FnMut(&mut Reader, &Pool, usize) -> Poll<Result<T, Error>>,
+        mut land: impl FnMut(&mut Reader, &Pool, usize) -> Poll<T>,
     ) -> Result<Poll<Option<T>>, Error> {
         if let Some(ended) = receiver.ended() {
             return ended;
         }
         let (key, closed) = (receiver.key().connection, receiver.closed().cloned());
         let read = self.streams(now, key, closed, |streams, inner, pool, events| {
-            let land = |reader: &mut Reader, len| land(reader, pool, len);
-            streams.read(inner, receiver, land, events)
+            streams.read(
+                inner,
+                receiver,
+                |reader, len| land(reader, pool, len),
+                events,
+            )
         });
-        // `land`'s `TooLarge` keeps the message.
-        if let Err(error) = &read
-            && !matches!(error, Error::TooLarge { .. })
-        {
+        if read.is_err() {
             receiver.clear();
         }
         read

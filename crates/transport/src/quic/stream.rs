@@ -1533,14 +1533,14 @@ impl Streams {
     /// what `land(reader, len)` makes of it. `Ready(None)` at the end.
     /// `Pending` when no whole message is here yet, the next has no room in the
     /// receive budget or waits behind a stream of its class or a higher class, or
-    /// `land` gives `Pending`. The receivers that get the freed room get
+    /// `land` gives `Pending`. A message that `land` leaves in `reader` keeps its
+    /// room for the next read. The receivers that get the freed room get
     /// [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
     /// [`Error::Reset`] when the peer reset the stream, and [`Error::Broken`] when the
-    /// peer broke the framing or reset with a code over 32 bits. Else the error of
-    /// `land`, which keeps the message and its room for the next read.
+    /// peer broke the framing or reset with a code over 32 bits.
     #[expect(
         clippy::unwrap_in_result,
         reason = "a receiver never reads its stream after the end"
@@ -1549,7 +1549,7 @@ impl Streams {
         &mut self,
         inner: &mut noq_proto::Connection,
         receiver: &mut Receiver,
-        mut land: impl FnMut(&mut Reader, usize) -> Poll<Result<T, Error>>,
+        mut land: impl FnMut(&mut Reader, usize) -> Poll<T>,
         events: &mut VecDeque<Event>,
     ) -> Result<Poll<Option<T>>, Error> {
         let Receiver {
@@ -1580,13 +1580,9 @@ impl Streams {
                         reader.admit();
                     }
                     Ok(Step::Block(len)) => match land(reader, len) {
-                        Poll::Ready(Ok(landed)) => {
-                            empty = len == 0;
-                            break (Ok(Poll::Ready(Some(landed))), false);
-                        }
-                        Poll::Ready(Err(error)) => {
-                            kept = true;
-                            break (Err(error), true);
+                        Poll::Ready(landed) => {
+                            (empty, kept) = (len == 0, reader.whole());
+                            break (Ok(Poll::Ready(Some(landed))), kept);
                         }
                         Poll::Pending => break (Ok(Poll::Pending), true),
                     },
@@ -2477,6 +2473,39 @@ mod tests {
                 // Private: a buffer left after the read shows in no public count.
                 assert_eq!(receiver.reader.held(), (None, 0));
             }
+        });
+    }
+
+    #[test]
+    fn a_too_large_read_into_leaves_no_view_of_a_chunk() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let body = [4; 100];
+            let prefix = message::prefix(body.len());
+            let bytes = [[byte(Class::Complete)].as_slice(), &*prefix, &body].concat();
+            pair.server.kept = Some(Vec::new());
+            raw(pair.client.connection(), Dir::Uni, &bytes, false);
+            pair.run(RUN);
+            let mut receiver = accept(&mut pair.server).receiver;
+            let kept = pair.server.kept.replace(Vec::new()).expect("kept");
+            let now = pair.now();
+            let mut short = [0; 99];
+            let read = pair
+                .server
+                .endpoint
+                .read_into(now, &mut receiver, &mut short);
+            let over = Error::TooLarge {
+                bytes: 100,
+                bytes_max: 99,
+            };
+            assert_eq!(read, Err(over));
+            // Else noq or the endpoint copied the bytes, and the test is vacuous.
+            assert!(!kept.is_empty());
+            assert!(
+                kept.iter().all(Bytes::is_unique),
+                "a chunk of the message keeps a receive buffer alive past the read"
+            );
+            assert_eq!(receiver.reader.held(), (Some((100, 100)), 0));
         });
     }
 

@@ -238,20 +238,15 @@ impl Reader {
     }
 
     /// Copies the whole message that [`Step::Block`] gave into `block` and gives
-    /// it, so that the next read starts the next message. With `None`, it copies
-    /// the message's chunks into its own buffer and gives `Pending`, and the next
-    /// read gives `Block` again.
+    /// it, so that the next read starts the next message. With `None`, it holds the
+    /// message as [`Reader::hold`] does and gives `Pending`.
     ///
     /// # Panics
     ///
     /// When the reader has no whole message, or `block` is not its length.
     pub(crate) fn fill(&mut self, block: Option<Unique>) -> Poll<Block> {
-        let State::Body { len, have, buffer } = &mut self.state else {
-            panic!("a reader fills only a whole message");
-        };
-        assert!(have == len, "a reader fills only a whole message");
         let Some(mut block) = block else {
-            spill(buffer, &mut self.chunks, *len);
+            self.hold();
             return Poll::Pending;
         };
         self.copy(&mut block);
@@ -265,11 +260,8 @@ impl Reader {
     ///
     /// When the reader has no whole message, or `into` is not its length.
     pub(crate) fn copy(&mut self, into: &mut [u8]) {
-        let State::Body { len, have, buffer } = &self.state else {
-            panic!("a reader copies only a whole message");
-        };
-        assert!(have == len, "a reader copies only a whole message");
-        assert_eq!(into.len(), *len, "the copy is the message's length");
+        let (len, buffer) = body(&mut self.state);
+        assert_eq!(into.len(), len, "the copy is the message's length");
         let (buffered, mut rest) = into.split_at_mut(buffer.len());
         buffered.copy_from_slice(buffer);
         for chunk in self.chunks.drain(..) {
@@ -278,6 +270,23 @@ impl Reader {
             rest = after;
         }
         self.state = START;
+    }
+
+    /// Keeps the whole message that [`Step::Block`] gave for the next read, which
+    /// gives `Block` again. It copies the message's chunks into the reader's own
+    /// buffer, so that it holds no receive buffer of the source.
+    ///
+    /// # Panics
+    ///
+    /// When the reader has no whole message.
+    pub(crate) fn hold(&mut self) {
+        let (len, buffer) = body(&mut self.state);
+        spill(buffer, &mut self.chunks, len);
+    }
+
+    /// Whether the reader holds a whole message that no read took.
+    pub(crate) fn whole(&self) -> bool {
+        matches!(&self.state, State::Body { len, have, .. } if have == len)
     }
 
     /// Drops the message in hand, so that the reader holds no bytes of it. For a
@@ -320,6 +329,20 @@ fn sized(len: u64, bytes_max: usize) -> State {
 /// Copies `chunks` into `buffer`, the buffer of a message of `len` bytes, and drops
 /// them. The first chunk makes the buffer, so a message with no chunks holds no
 /// heap.
+/// The length of the whole message in `state`, and the buffer that holds its first
+/// bytes.
+///
+/// # Panics
+///
+/// When `state` holds no whole message.
+fn body(state: &mut State) -> (usize, &mut Vec<u8>) {
+    let State::Body { len, have, buffer } = state else {
+        panic!("a reader fills only a whole message");
+    };
+    assert!(have == len, "a reader fills only a whole message");
+    (*len, buffer)
+}
+
 fn spill(buffer: &mut Vec<u8>, chunks: &mut Vec<Bytes>, len: usize) {
     for chunk in chunks.drain(..) {
         if buffer.capacity() == 0 {
