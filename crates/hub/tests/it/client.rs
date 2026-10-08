@@ -10,7 +10,7 @@ use access::proof::{Error as Refusal, Field};
 use hub::{Served, serve};
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
-use transport::stream::{Receiver, Sender};
+use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code, Port, Session};
 use types::connection;
 use types::ed25519::{Pair, PrivateKey};
@@ -97,6 +97,62 @@ fn session_with<P>(
 where
     P: Future<Output = ()> + 'static,
 {
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let closed = Arc::new(Mutex::new(None));
+    let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, pool, synced).await;
+        if let Some(rules) = rules {
+            test.hub.set_rules(rules);
+        }
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        while let Ok(mut incoming) = session.accept().await {
+            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
+            tasks.spawn(async move {
+                header(&mut incoming).await;
+                let got = answer(link.serve(incoming), &clock).await;
+                kept.lock().expect("not poisoned").push(got);
+            });
+        }
+        *ended.lock().expect("not poisoned") = Some(session.closed().await);
+        drop((link, test));
+    };
+    run(seed, home, program);
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let closed = closed.lock().expect("not poisoned").take();
+    Home {
+        served,
+        closed: closed.expect("the session closed"),
+    }
+}
+
+/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
+async fn home(
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    pool: usize,
+    synced: bool,
+) -> Test {
+    let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
+    let mut test = Test::new(node.clone(), tasks.clone(), layout, pool).await;
+    if synced {
+        test.sync().await;
+    }
+    test
+}
+
+/// Runs `home` on one simulated node, and `program` on another, which dials the
+/// first as a program.
+fn run<H, P>(
+    seed: u64,
+    home: impl FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -107,37 +163,8 @@ where
         name: name.into(),
         core: None,
     };
-    let served = Arc::new(Mutex::new(Vec::new()));
-    let closed = Arc::new(Mutex::new(None));
-    let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let node = nodes[0].clone();
-    let main = move |tasks: env::tasks::Tasks| async move {
-        let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout, pool).await;
-        if synced {
-            test.sync().await;
-        }
-        if let Some(rules) = rules {
-            test.hub.set_rules(rules);
-        }
-        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let session = transport.accept().await.expect("a session");
-        let link = test.hub.link(session.clone());
-        while let Ok(mut incoming) = session.accept().await {
-            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
-            tasks.spawn(async move {
-                let header = incoming.receiver.recv().await.expect("a header");
-                let header = header.expect("the header comes before the finish");
-                let decoded = wire::header::decode(&header);
-                assert_eq!(decoded, Ok((Protocol::Hub, &[][..])));
-                drop(header);
-                let got = answer(link.serve(incoming), &clock).await;
-                kept.lock().expect("not poisoned").push(got);
-            });
-        }
-        *ended.lock().expect("not poisoned") = Some(session.closed().await);
-        drop((link, test));
-    };
+    let main = move |tasks: env::tasks::Tasks| home(node, tasks);
     drop(
         nodes[0]
             .shards()
@@ -159,12 +186,13 @@ where
             .expect("starts"),
     );
     sim.run().expect("the run ends");
-    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
-    let closed = closed.lock().expect("not poisoned").take();
-    Home {
-        served,
-        closed: closed.expect("the session closed"),
-    }
+}
+
+/// Reads the header of `incoming`, and checks that it names the hub.
+async fn header(incoming: &mut Incoming) {
+    let header = incoming.receiver.recv().await.expect("a header");
+    let header = header.expect("the header comes before the finish");
+    assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
 }
 
 /// What `serve` gave for one stream, once it replied to a request with its body
@@ -935,4 +963,34 @@ fn refuses_a_hello_that_expired_before_it_came() {
         "{:?}",
         home.served
     );
+}
+
+/// `serve` takes the role of a stream at the call: the second stream given to it is a
+/// request stream, also when its future runs first. This program breaks the client
+/// wire rule, with a request stream before its hello.
+#[test]
+fn takes_the_role_of_a_stream_at_the_call() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, POOL, true).await;
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut first = session.accept().await.expect("a stream");
+        let mut second = session.accept().await.expect("a stream");
+        header(&mut first).await;
+        header(&mut second).await;
+        let hello = link.serve(first);
+        let request = link.serve(second);
+        let served = answer(request, &node.clock()).await;
+        *kept.lock().expect("not poisoned") = Some(served);
+        drop((hello, link, test));
+    };
+    run(107, home, |agent| async move {
+        let _request = agent.open().await;
+        agent.sleep(QUIET).await;
+    });
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Err(serve::Error::Unadmitted)));
 }
