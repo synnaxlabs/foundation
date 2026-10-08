@@ -3,10 +3,11 @@
 
 #[cfg(feature = "open62541")]
 mod alloc;
-// Only `link` calls it until the event loop of #435 does.
-#[cfg(test)]
 #[cfg(feature = "open62541")]
 mod ffi;
+#[cfg(feature = "open62541")]
+#[doc(hidden)]
+pub mod fuzz;
 #[cfg(test)]
 #[cfg(feature = "open62541")]
 mod link;
