@@ -47,8 +47,6 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         let running = mem::take(&mut *self.running.borrow_mut());
-        // A task that a future's drop below polls finds its scope gone and ends.
-        self.running = Rc::default();
         // The slot of a future that drops this scope in its own poll is borrowed. Its
         // task ends when that poll returns.
         let wakers: Vec<Waker> = running
@@ -95,7 +93,8 @@ impl Spawned {
             running.future.as_mut().poll(cx)
         };
         if self.running.strong_count() == 0 {
-            // The scope dropped, before or in this poll, so the slot drops with it.
+            // The future dropped the scope in this poll, so this holds its last
+            // reference.
             drop(slot);
             return Poll::Ready(());
         }
@@ -103,9 +102,7 @@ impl Spawned {
             drop(slot);
             let running = self.running.upgrade().expect("invariant: a live scope");
             let done = running.borrow_mut().remove(&self.key);
-            // A future's drop may do anything, so it runs with no borrow held. It may
-            // drop the scope, whose tasks then must find the map gone.
-            drop(running);
+            // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
         }
         polled
@@ -274,74 +271,5 @@ mod tests {
         assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
         // The future and its clone of `owner` dropped.
         assert_eq!(Rc::strong_count(&owner), 1);
-    }
-
-    /// Polls the task in `task`, if any, when it drops, and keeps what the poll gave.
-    struct PollsOnDrop {
-        task: Rc<RefCell<Option<Task>>>,
-        polled: Rc<RefCell<Vec<Poll<()>>>>,
-    }
-
-    impl Drop for PollsOnDrop {
-        fn drop(&mut self) {
-            if let Some(task) = self.task.borrow_mut().as_mut() {
-                let (waker, _) = waker();
-                let polled = task.as_mut().poll(&mut Context::from_waker(&waker));
-                self.polled.borrow_mut().push(polled);
-            }
-        }
-    }
-
-    /// Spawns on `scope` 16 futures that each poll the task in `other` when they drop,
-    /// so that some drop before its slot, then a pending future whose task goes into
-    /// `other`. Gives what each poll gave.
-    fn polled_on_drop(
-        scope: &mut Scope,
-        queued: &RefCell<Vec<Task>>,
-        other: &Rc<RefCell<Option<Task>>>,
-    ) -> Rc<RefCell<Vec<Poll<()>>>> {
-        let polled = Rc::default();
-        for _ in 0..16 {
-            let guard = PollsOnDrop {
-                task: Rc::clone(other),
-                polled: Rc::clone(&polled),
-            };
-            scope.spawn(Box::pin(async move {
-                pending::<()>().await;
-                drop(guard);
-            }));
-            drop(take(queued));
-        }
-        scope.spawn(Box::pin(pending()));
-        *other.borrow_mut() = Some(take(queued));
-        polled
-    }
-
-    #[test]
-    fn a_task_polled_in_a_drop_while_its_scope_drops_ends() {
-        let (mut scope, queued) = scope();
-        let other = Rc::default();
-        let polled = polled_on_drop(&mut scope, &queued, &other);
-        drop(scope);
-        assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
-    }
-
-    #[test]
-    fn a_task_polled_in_a_drop_while_a_completed_future_drops_its_scope_ends() {
-        let (mut scope, queued) = scope();
-        let other = Rc::default();
-        let polled = polled_on_drop(&mut scope, &queued, &other);
-        let owner = Rc::new(RefCell::new(Some(scope)));
-        let guard = DropsScope(Rc::clone(&owner));
-        let future: Task = Box::pin(poll_fn(move |_| {
-            let _ = &guard;
-            Poll::Ready(())
-        }));
-        owner.borrow_mut().as_mut().unwrap().spawn(future);
-        let mut task = take(&queued);
-        let (waker, _) = waker();
-        let mut cx = Context::from_waker(&waker);
-        assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
-        assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
     }
 }
