@@ -12,20 +12,39 @@ mod compiler;
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::compiler;
+
+    /// Gives the tool that `cc` picks for `path`. No such file exists, so `cc` takes
+    /// the family from the name, as it does for a compiler it cannot run.
+    fn tool(path: &str) -> cc::Tool {
+        cc::Build::new()
+            .compiler(path)
+            .target("x86_64-unknown-linux-gnu")
+            .host("x86_64-unknown-linux-gnu")
+            .opt_level(0)
+            .cargo_metadata(false)
+            .cargo_warnings(false)
+            .get_compiler()
+    }
 
     #[test]
     fn check_refuses_a_compiler_that_does_not_read_gcc_flags() {
-        assert_eq!(
-            compiler::check(Path::new("cl.exe"), false),
-            Err(
-                "connector-opcua: the compiler cl.exe is not GCC or clang; flags.txt \
-                 holds GCC driver flags, so only GCC and clang can build open62541"
-                    .to_owned()
-            )
-        );
-        assert_eq!(compiler::check(Path::new("cc"), true), Ok(()));
+        for path in ["/missing/cl.exe", "/missing/clang-cl"] {
+            assert_eq!(
+                compiler::check(&tool(path)),
+                Err(format!(
+                    "connector-opcua: the compiler {path} is not GCC or clang; \
+                     flags.txt holds GCC driver flags, so only GCC and clang can \
+                     build open62541"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn check_accepts_gcc_and_clang() {
+        for path in ["/missing/gcc", "/missing/clang"] {
+            assert_eq!(compiler::check(&tool(path)), Ok(()));
+        }
     }
 }

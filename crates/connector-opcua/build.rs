@@ -18,9 +18,7 @@ fn main() {
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     };
     let mut build = cc::Build::new();
-    let compiler = build.get_compiler();
-    let gcc_flags = compiler.is_like_gnu() || compiler.is_like_clang();
-    if let Err(e) = compiler::check(compiler.path(), gcc_flags) {
+    if let Err(e) = compiler::check(&build.get_compiler()) {
         panic!("{e}");
     }
     for flag in read("flags.txt").lines() {

@@ -11,5 +11,8 @@ open62541 = ["dep:cc"]
 [build-dependencies]
 cc = { workspace = true, optional = true }
 
+[dev-dependencies]
+cc = { workspace = true }
+
 [lints]
 workspace = true
