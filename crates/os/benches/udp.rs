@@ -1,6 +1,7 @@
 //! The cost of UDP over the loopback through `os::net`: one datagram against a plain
 //! Tokio socket, and a batch sent in one call against the same datagrams sent one by
-//! one. Each sample sends and then receives all the bytes, except in `register`.
+//! one, also on a socket that cannot use GSO. Each sample sends and then receives all
+//! the bytes, except in `register`.
 
 use std::future::poll_fn;
 use std::io::IoSliceMut;
@@ -79,13 +80,13 @@ async fn receive(
 /// sample.
 fn bench_os(
     bencher: Bencher<'_, '_>,
+    (mut sender, mut receiver): (Sender, Receiver),
     contents: &[u8],
     segment: usize,
     calls: usize,
     source: Option<IpAddr>,
 ) {
     let runtime = runtime();
-    let (mut sender, mut receiver) = pair();
     let mut storage = vec![vec![0; SEGMENT * receiver.batch_max().get()]; 4];
     let mut buffers: Vec<_> = storage.iter_mut().map(|b| IoSliceMut::new(b)).collect();
     let mut meta = [Meta::default(); 4];
@@ -107,13 +108,20 @@ fn bench_os(
 /// One 64-byte datagram through `os::net`.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_datagram(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; 64], 0, 1, None);
+    bench_os(bencher, pair(), &[7; 64], 0, 1, None);
 }
 
 /// The same datagram from a given source address.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_datagram_source(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; 64], 0, 1, Some(Ipv4Addr::LOCALHOST.into()));
+    bench_os(
+        bencher,
+        pair(),
+        &[7; 64],
+        0,
+        1,
+        Some(Ipv4Addr::LOCALHOST.into()),
+    );
 }
 
 /// The same datagram through a plain Tokio socket, for comparison.
@@ -141,13 +149,67 @@ fn tokio_datagram(bencher: Bencher<'_, '_>) {
 /// A batch of `DATAGRAMS` datagrams of `SEGMENT` bytes, sent in one call.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_batch(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &vec![7; SEGMENT * DATAGRAMS], SEGMENT, 1, None);
+    bench_os(
+        bencher,
+        pair(),
+        &vec![7; SEGMENT * DATAGRAMS],
+        SEGMENT,
+        1,
+        None,
+    );
+}
+
+/// The batch of [`os_batch`] on a socket whose kernel refuses GSO, so that it goes
+/// out a datagram at a time.
+#[cfg(target_os = "linux")]
+#[divan::bench(sample_count = SAMPLES)]
+fn os_batch_without_gso(bencher: Bencher<'_, '_>) {
+    let (sender, receiver) = pair();
+    refuse_gso(sender.local());
+    let contents = vec![7; SEGMENT * DATAGRAMS];
+    bench_os(bencher, (sender, receiver), &contents, SEGMENT, 1, None);
+}
+
+/// Turns off the UDP checksum of the socket bound to `local`, so that Linux refuses
+/// each GSO send on it with `EINVAL`, as a card that cannot segment does.
+#[cfg(target_os = "linux")]
+#[expect(
+    unsafe_code,
+    reason = "the socket of `os` is reached by its descriptor"
+)]
+fn refuse_gso(local: SocketAddr) {
+    use std::os::fd::BorrowedFd;
+    let fds = std::fs::read_dir("/proc/self/fd").expect("procfs is mounted");
+    let fd = fds
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .find(|&fd| {
+            // SAFETY: the descriptor stays open for this call: the bench holds the
+            // socket, and another descriptor that closes gives only an error.
+            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            rustix::net::getsockname(fd)
+                .ok()
+                .and_then(|name| SocketAddr::try_from(name).ok())
+                == Some(local)
+        })
+        .expect("the socket is open");
+    let one: libc::c_int = 1;
+    // SAFETY: `one` outlives the call, and its size is the length given.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NO_CHECK,
+            (&raw const one).cast(),
+            libc::socklen_t::try_from(size_of::<libc::c_int>()).expect("an int fits"),
+        )
+    };
+    assert_eq!(rc, 0, "SO_NO_CHECK is set");
 }
 
 /// The datagrams of [`os_batch`], sent one per call.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_one_by_one(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; SEGMENT], 0, DATAGRAMS, None);
+    bench_os(bencher, pair(), &[7; SEGMENT], 0, DATAGRAMS, None);
 }
 
 /// The registration that a sender makes at each `EAGAIN`: a write interest on its
