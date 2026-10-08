@@ -108,12 +108,12 @@ queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHA
 
 - **Small change:** a fix, a test pin, a doc or comment fix, a rename, or a record, of
   under about 50 lines.
-- **Fold it in:** when the PR that you build changes its crate, put it there as its own
-  commit. Do it before that PR's first review round where you can, so that it shares
-  that round.
+- **Fold it in:** when the PR that you build changes its crate or its file, put it
+  there as its own commit. Do it before that PR's first review round where you can, so
+  that it shares that round.
 - **Found by review:** a finding whose fix is a small change in a crate or a file that
-  the PR changes is fixed in that PR, not deferred. Another one follows the bullets
-  below.
+  the PR changes is fixed in that PR, not deferred. Another small one follows the
+  bullets below.
 - **Else, an item:** a small change that you cannot fold in (from an audit, a weekly
   pass, or a crate that you do not build) is an item of an open issue in its crate: a
   comment that states the change, the test that pins it, and its source. Choose the

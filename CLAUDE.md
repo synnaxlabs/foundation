@@ -198,8 +198,8 @@ default, template, and system instruction.
 
 - Each PR merges into `main` on its own and leaves `main` green.
 - Aim for a few hundred lines. A change of under about 50 lines goes into the PR that
-  you build in its crate, or is an item of an open issue in its crate, not a PR of its
-  own (`docs/coordination.md`, "Small changes", gives the exceptions).
+  you build in its crate or its file, or is an item of an open issue in its crate, not
+  a PR of its own (`docs/coordination.md`, "Small changes", gives the exceptions).
 - Mechanical changes (renames, format runs, regenerated code) ship alone. A small one
   follows the bullet above, as its own commit.
 - A fix and the refactor it needs are two PRs. The refactor lands first. A small

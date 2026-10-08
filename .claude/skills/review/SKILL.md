@@ -65,7 +65,7 @@ command outside that worktree. Remove each worktree when its agent returns
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A finding whose fix is a small change in a crate or a
-   file that this PR changes is fixed in this PR. Another one follows
+   file that this PR changes is fixed in this PR. Another small one follows
    `docs/coordination.md`, "Small changes". Search the open issues for the item of a
    deferral before it files a new issue:
    `gh issue list --state open --search '<function or file>'`. A deferral to an existing
