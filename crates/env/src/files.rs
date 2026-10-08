@@ -482,9 +482,10 @@ impl File {
 
     /// Removes the file of this handle from its directory, then closes the handle as
     /// [`File::close`]. Until the remove ends, also after a drop of the future, a
-    /// write open of the path gives [`Error::Busy`]. The removal is not durable until
-    /// [`Files::sync_dir`] on its directory ends. Count the file's room as used until
-    /// then.
+    /// write open of the path gives [`Error::Busy`]. A drop of the future can stop the
+    /// remove before it starts; the file then stays, and the handle closes. The
+    /// removal is not durable until [`Files::sync_dir`] on its directory ends. Count
+    /// the file's room as used until then.
     ///
     /// # Errors
     ///

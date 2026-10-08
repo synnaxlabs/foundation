@@ -293,20 +293,8 @@ impl Descriptor for Open {
 
     fn remove(
         self: Box<Self>,
-        path: PathBuf,
+        _: PathBuf,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>>>> {
-        let mut files = lock(&self.files);
-        let result = match files.get(&key(&path)) {
-            Some(bytes) if Arc::ptr_eq(bytes, &self.bytes) => {
-                files.remove(&key(&path));
-                Ok(())
-            }
-            _ => Err(Error::NotFound { path }),
-        };
-        drop(files);
-        Box::pin(async move {
-            drop(self);
-            result
-        })
+        unreachable!("the buffer tests remove no file through a handle")
     }
 }
