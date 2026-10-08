@@ -1566,18 +1566,26 @@ How to read this record:
   place order, with its bounds in the home's `Frame::body` and its end in the reader's
   frame; `Places::charge` is the `Frame::charge` of that frame, in O(1) when the places
   name each entry of the key set, in any order: each block payload is a multiple of 8
-  bytes, so the padding of the last series does not change the footprint (the
-  architect, 2026-10-08T00:25:50Z,
-  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049589885.
-  Supersedes "in entry order" in
-  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122). Lost: a free function that lays one
-  frame, with each caller keeping its own state for each key set, so `delivery` and
-  `serve` each repeat it. Also lost: one `Places` for each remote session, whose layout
-  `release` keeps with each frame for `serve`: each frame in the queue would hold its
-  layout. So a remote session holds two. Decided by laptop.architect:
+  bytes, so the padding of the last series does not change the footprint (the architect,
+  2026-10-08T00:25:50Z,
+  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049589885. Supersedes
+  "in entry order" in
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122). Lost: a
+  free function that lays one frame, with each caller keeping its own state for each key
+  set, so `delivery` and `serve` each repeat it. Also lost: one `Places` for each remote
+  session, whose layout `release` keeps with each frame for `serve`: each frame in the
+  queue would hold its layout. So a remote session holds two. Decided by
+  laptop.architect:
   https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
-  Supersedes: "At the open it makes the list of each place and its home entry, sorted
-  by place" above; `Places` makes it at the first frame of each key set.
+  Supersedes: "At the open it makes the list of each place and its home entry, sorted by
+  place" above; `Places` makes it at the first frame of each key set. `lay` walks the
+  places for a frame with at least one series at the places for each 16 entries that
+  they name, and sorts the series of a sparser frame. Lost: walk only (10 series of 100k
+  places took 140 to 420 µs, not 0.5 to 0.7 µs), and sort only (a scattered frame of
+  100k series took 3.9 to 6.0 ms, not 1.6 to 1.7 ms). The architect accepted the cost of
+  the dense walk against 1e658b7a, up to the head numbers of #1695 (laptop.architect,
+  2026-10-08T01:36:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050376022).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
   the same port number, however many shards it runs, so each site's firewall needs one
   known port per conduit. Each QUIC connection belongs to one shard, and every

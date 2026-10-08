@@ -6,7 +6,7 @@
 //! through a full, a narrow, an almost full, and a half full mask and walk it, to walk
 //! a narrow view one series at a time, to make a narrow and an almost full mask, and
 //! to lay and charge the frame of a reader's places, for a dense frame and for frames
-//! of 100,000 channels.
+//! of 100,000 channels, and to lay a frame whose series are mostly outside the places.
 
 use std::fmt;
 use std::hint::black_box;
@@ -455,6 +455,29 @@ fn scattered_lay(bencher: Bencher<'_, '_>, case: &Case) {
     slots.sort_by_key(|slot| u64::from(slot.get()).wrapping_mul(0x9e37_79b9_7f4a_7c15));
     let mut places = Places::new(slots.into());
     bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
+}
+
+/// Lays out a frame of the index and 50k channels for places of 50k other channels,
+/// last first, and the index: one series of the frame is at a place.
+#[divan::bench(sample_count = 1000)]
+fn outside_lay(bencher: Bencher<'_, '_>) {
+    let mut interner = Interner::new();
+    let data: Vec<_> = (1..100_000).map(|n| (key(n), F64)).collect();
+    let set = interner.intern(&[Group {
+        index: key(0),
+        data: &data,
+    }]);
+    let pool = pool();
+    let lens: Vec<_> = [(0, 8)]
+        .into_iter()
+        .chain((50_000..100_000).map(|entry| (entry, 8)))
+        .collect();
+    let frame = Draft::new(&pool, &set, Form::Encoded, &lens)
+        .expect("the pool holds the frame")
+        .freeze(Path::Live);
+    let slots = set.entries()[..50_000].iter().rev();
+    let mut places = Places::new(slots.map(|entry| entry.slot).collect());
+    bencher.bench_local(|| places.lay(black_box(&frame), &set).len());
 }
 
 /// Charges a frame for places of each channel, last first.
