@@ -3068,6 +3068,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866, and
   approved by `laptop.architect`, 2026-10-08T04:00:49Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
+  Amended (2026-10-08, PR 1 of #1741): with a region, `node` opens the chunk store in
+  `blob` in the data directory before the mesh, and gives it as
+  `mesh::Config::chunks`. A store that does not open stops the node with
+  `Error::Mesh(mesh::Error::Blob)`.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -5360,7 +5364,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. One
   shard writes each name in the data directory: shard `i` writes `shard-<i>` and each
   name in it, and shard 0 also writes `lock`, `shards-<n>`, and, with a region, `mesh`
-  and each name in it (#585, by `laptop.architect`, 2026-10-08 03:37 UTC:
+  and `blob` and each name in them (#585, by `laptop.architect`, 2026-10-08 03:37 UTC:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). A change
   that gives a name a second writer first changes the check of FILE RENAME, which relies
   on this (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:

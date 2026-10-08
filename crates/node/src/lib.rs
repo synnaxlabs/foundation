@@ -626,8 +626,9 @@ struct Endpoint {
 
 impl Endpoint {
     /// Opens the node's transport on `pool` and `tasks`, then, when the node has a
-    /// region, the mesh of that region over it, in directory [`directory::mesh`] of
-    /// `files`. Gives the error of a mesh that did not open.
+    /// region, the chunk store in directory [`directory::blob`] of `files`, and the
+    /// mesh of that region over both, in directory [`directory::mesh`]. Gives the
+    /// error of a store or a mesh that did not open.
     async fn open(
         self,
         files: env::files::Files,
@@ -652,6 +653,13 @@ impl Endpoint {
         let Some(region) = self.region else {
             return Ok((transport, None));
         };
+        let chunks = blob::Store::open(blob::Config {
+            files: files.clone(),
+            dir: directory::blob(),
+            pool: Rc::clone(&pool),
+        })
+        .await
+        .map_err(mesh::Error::Blob)?;
         let config = mesh::Config {
             key: self.key,
             private_key: self.private_key,
@@ -667,6 +675,7 @@ impl Endpoint {
             tasks,
             pool,
             transport: Rc::clone(&transport),
+            chunks: Rc::new(chunks),
         };
         let mesh = mesh::Mesh::open(config).await?;
         Ok((transport, Some(mesh)))

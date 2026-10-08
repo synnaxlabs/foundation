@@ -2903,6 +2903,23 @@ mod port {
             );
         }
 
+        /// A chunk store that does not open stops the node, and `join` gives why.
+        #[test]
+        fn a_chunk_store_that_does_not_open_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("blob"), env::files::Operation::List);
+            let node = start_alone(&host);
+            assert_eq!(sim.run(), Ok(()));
+            let error =
+                ::mesh::Error::Blob(blob::Error::Files(env::files::Error::Io {
+                    path: PathBuf::from("blob"),
+                    operation: env::files::Operation::List,
+                    code: 5,
+                }));
+            assert_eq!(node.join(), Err(Error::Mesh(error)));
+        }
+
         /// Takes the lock of `host` as soon as it is free, then opens the mesh's log
         /// to write. Gives whether the lock was held, and the open of the log.
         fn probe(
