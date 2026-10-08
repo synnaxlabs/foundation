@@ -3169,7 +3169,10 @@ How to read this record:
   the kinds 2026-10-08T09:51:31Z
   (https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6057256316).
   Supersedes: the panic for two channels with one key (architect, #756,
-  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890).
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890), and
+  `Problem::Shared` with the fix "Give each channel its own key", which replaced it
+  (architect, 2026-10-07T06:47:45Z,
+  https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6032581487).
   Decided by `laptop.architect-2`: the check, 2026-10-08T08:41:52Z
   (https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056118794); the
   tree, 2026-10-08T08:47:57Z
@@ -5606,7 +5609,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls `region::check`, which runs it; commits). Two channels with one key are `channel::Problem::Duplicate`, not a panic (REGION CHECK; it supersedes the panic of the architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890) |
+| Channel | Files, then Spec as `spec::channel::Channel { key, kind }`, keyed by its name (architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type, edge checks: `channel::check` over the channels keyed by name; an index's control channel is on another index, X18), `config` (calls it on the planned set, where a new name gets a provisional key that never shows) and `mesh` (calls `region::check`, which runs it; commits). Two channels with one key are `channel::Problem::Duplicate`, not a panic (REGION CHECK; it supersedes the panic of the architect, #756: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031836890, and the `Problem::Shared` that replaced it: https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6032581487) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
 | Data channel | Spec: `Kind::Data(Data)`, where `Data::new(index, quality, data_type, unit)` refuses a unit on a type that holds no number. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
