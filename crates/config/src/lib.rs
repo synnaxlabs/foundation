@@ -1,13 +1,19 @@
 //! Checks core definitions in Documents, expands templates, hands connector blocks to
 //! kinds, and computes plans, explains, and exports.
 
+mod access;
 mod channel;
+mod connector;
 mod node_settings;
+mod openssh;
 mod placement;
+mod private_key;
 mod retention;
+mod subject;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
+use ::connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
@@ -15,7 +21,6 @@ use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-const LABEL_COUNT: Code = Code::new("config.label-count");
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
@@ -25,11 +30,14 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
-const KINDS: [(Kind, Check); 4] = [
+const KINDS: [(Kind, Check); 7] = [
+    (Kind::Access, access::check),
     (Kind::Channel, channel::check),
+    (Kind::Connector, connector::check),
     (Kind::NodeSettings, node_settings::check),
     (Kind::Placement, placement::check),
     (Kind::Retention, retention::check),
+    (Kind::Subject, subject::check),
 ];
 
 /// What one block defines. A channel's edges are names until `plan` gives each
@@ -54,28 +62,55 @@ pub struct Entry {
 }
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
-/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for a policy.
-/// Each order of `documents` gives the same entries, or each gives problems.
+/// gives each by its tree key: the name of a channel or a connector, or
+/// `<label>.@<kind>` for each other block. The kind in `kinds` that a `connector`
+/// block names checks its config. Each order of `documents` gives the same entries,
+/// or each gives problems.
 ///
 /// # Errors
 ///
-/// Every problem in the Documents, in the order of `documents`, then in source order.
+/// A private key anywhere in the Documents gives only `config.private-key`, once for
+/// each string that holds one.
+/// Each other problem in the Documents, in the order of `documents`, then in source
+/// order.
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there. A block inside a policy does not stop
-/// that check: a policy holds no block, so each block inside one is a separate problem.
-pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+/// and reads, and the ones it needs are there. A block inside a policy or a subject
+/// does not stop that check: neither holds a block, so each block inside one is a
+/// separate problem.
+/// A bad `kind` of channel hides the problems of each other attribute that a kind of
+/// channel knows. A `kind` of connector that is missing, is not a name, or is not in
+/// `kinds` hides each problem of the connector's config, and so does a config nested
+/// deeper than `document::encoding::Checked` takes.
+pub fn check(
+    documents: &[Document],
+    kinds: &Table,
+) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+    let alarms = private_key::alarms(documents);
+    if !alarms.is_empty() {
+        return Err(alarms);
+    }
     let mut found = Found {
-        channels: channels(documents),
-        ..Found::default()
+        entries: BTreeMap::new(),
+        diagnostics: Vec::new(),
+        labels: BTreeMap::new(),
+        channels: names(documents, Kind::Channel)
+            .map(|(name, _)| name)
+            .collect(),
+        connectors: BTreeMap::new(),
+        kinds,
     };
-    let kinds = KINDS.map(|(kind, _)| kind.as_str());
+    for (name, label) in names(documents, Kind::Connector) {
+        let lower = name.as_str().to_ascii_lowercase().into();
+        found.connectors.entry(lower).or_insert(label);
+    }
+    let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
         found
             .diagnostics
-            .extend(read::unknown(document, "a file", &[], &kinds));
+            .extend(read::unknown(document, "a file", &[], &keywords));
         for block in &document.blocks {
             let Some((kind, check_block)) = KINDS
                 .iter()
@@ -104,29 +139,34 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
     }
 }
 
-/// The name of each `channel` block in `documents` whose one label reads as a name.
-/// `check` reports each other label.
-fn channels(documents: &[Document]) -> BTreeSet<Name> {
+/// The name and the label of each block of `kind` in `documents` whose one label
+/// reads as a name. `check` reports each other label.
+fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Label)> {
     let blocks = documents.iter().flat_map(|document| &document.blocks);
     blocks
-        .filter(|block| &*block.keyword == Kind::Channel.as_str())
+        .filter(move |block| &*block.keyword == kind.as_str())
         .filter_map(|block| match block.labels.as_slice() {
-            [label] => read::label(label).ok(),
+            [label] => Some((read::label(label).ok()?, label)),
             _ => None,
         })
-        .collect()
 }
 
-/// The channel names of the Documents, and what `check` has found so far.
-#[derive(Debug, Default)]
+/// The channel and connector names of the Documents, the connector kinds, and what
+/// `check` has found so far.
+#[derive(Debug)]
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// The label of each tree key so far, by the key in lowercase, so that keys that
-    /// differ only in case collide.
-    labels: BTreeMap<Box<str>, &'a Label>,
+    /// The label of each tree key so far and the kind of its block, by the key in
+    /// lowercase, so that keys that differ only in case collide.
+    labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
+    /// The label of the first connector that a `connector` block in any Document
+    /// defines at each name, by the name in lowercase.
+    connectors: BTreeMap<Box<str>, &'a Label>,
+    /// The kinds that check each `connector` block's config.
+    kinds: &'a Table,
 }
 
 /// A problem that is already in the diagnostics.
@@ -138,7 +178,8 @@ impl<'a> Found<'a> {
     /// unique in any case, and the label's span.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
         let keyword = kind.as_str();
-        let label = self.label(block)?;
+        let fix = "Give the block one label, its name, such as \"site_a.budget\"";
+        let [label] = self.report(read::labels::<1>(block, fix.into())).ok()?;
         let key = match kind.key(&label.text) {
             Ok(key) => key,
             Err(key::Error::Long { most }) => {
@@ -172,23 +213,28 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        let first = match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
-            btree_map::Entry::Occupied(first) => *first.get(),
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert(label);
-                return Some((key, label.span));
-            }
+        let (first, earlier) =
+            match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
+                btree_map::Entry::Occupied(first) => *first.get(),
+                btree_map::Entry::Vacant(entry) => {
+                    entry.insert((label, kind));
+                    return Some((key, label.span));
+                }
+            };
+        let earlier = earlier.as_str();
+        let blocks = if earlier == keyword {
+            format!("`{keyword}`")
+        } else {
+            format!("`{earlier}` and `{keyword}`")
         };
         let mut diagnostic = Diagnostic::new(
             DUPLICATE_NAME,
             label.span,
             format!(
-                "the name {:?} repeats the earlier `{keyword}` name {:?}",
+                "the name {:?} repeats the earlier `{earlier}` name {:?}",
                 label.text, first.text
             ),
-            format!(
-                "Give each `{keyword}` block a name that differs by more than case"
-            ),
+            format!("Give each {blocks} block a name that differs by more than case"),
         );
         diagnostic.notes.extend(first.span.map(|span| Note {
             span,
@@ -196,28 +242,6 @@ impl<'a> Found<'a> {
         }));
         self.diagnostics.push(diagnostic);
         None
-    }
-
-    /// The one label of a block.
-    fn label(&mut self, block: &'a Block) -> Option<&'a Label> {
-        let [label] = block.labels.as_slice() else {
-            let at = block
-                .labels
-                .get(1)
-                .map_or(block.keyword_span, |label| label.span);
-            self.diagnostics.push(Diagnostic::new(
-                LABEL_COUNT,
-                at,
-                format!(
-                    "the `{}` block has {} labels, and it needs one, its name",
-                    block.keyword,
-                    block.labels.len()
-                ),
-                "Give the block one label, its name, such as \"site_a.budget\"".into(),
-            ));
-            return None;
-        };
-        Some(label)
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -307,6 +331,11 @@ mod tests {
     use types::byte;
 
     use super::*;
+
+    /// Checks `documents` with no connector kinds.
+    fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+        super::check(documents, &Table::new())
+    }
 
     /// The position at `offset`, in a file of lines that are 100 bytes long.
     fn position(offset: u32) -> Position {
@@ -507,8 +536,8 @@ mod tests {
                 "document.unknown-block",
                 at(0, 0),
                 "a file cannot hold the `nodes` block",
-                "Use `channel`, `node_settings`, `placement`, or `retention`, or \
-                 remove it",
+                "Use `access`, `channel`, `connector`, `node_settings`, `placement`, \
+                 `retention`, or `subject`, or remove it",
             )])
         );
     }
@@ -533,8 +562,9 @@ mod tests {
                 "document.unknown-attribute",
                 at(0, 3),
                 "`disk` is not an attribute of a file",
-                "Move it into the `channel`, `node_settings`, `placement`, or \
-                 `retention` block that it sets, or remove it",
+                "Move it into the `access`, `channel`, `connector`, `node_settings`, \
+                 `placement`, `retention`, or `subject` block that it sets, or remove \
+                 it",
             )])
         );
     }
@@ -551,17 +581,15 @@ mod tests {
             check(&documents),
             Err(vec![
                 refused(
-                    "config.label-count",
+                    "document.label-count",
                     at(0, 0),
-                    "the `node_settings` block has 0 labels, and it needs one, its \
-                     name",
+                    "the `node_settings` block has no labels, and it takes 1 label",
                     fix,
                 ),
                 refused(
-                    "config.label-count",
+                    "document.label-count",
                     at(0, 102),
-                    "the `node_settings` block has 3 labels, and it needs one, its \
-                     name",
+                    "the `node_settings` block has 3 labels, and it takes 1 label",
                     fix,
                 ),
             ])
@@ -1439,10 +1467,10 @@ mod tests {
             assert_eq!(
                 check(&documents),
                 Err(vec![refused(
-                    "config.negative-span",
+                    "document.negative-span",
                     at(0, 13),
-                    "a retention keeps -1s, which is below zero",
-                    "Write a keep time of zero or more",
+                    "the span -1s is below zero",
+                    "Write a span of zero or more",
                 )])
             );
         }
@@ -1482,7 +1510,7 @@ mod tests {
         }
 
         #[test]
-        fn refuses_only_the_unknown_attribute_of_a_retention_with_a_negative_keep() {
+        fn refuses_the_unknown_attribute_and_the_negative_keep_of_a_retention() {
             let documents = retention(&[
                 ("select", string("edge.**")),
                 ("keep", string("-1s")),
@@ -1490,12 +1518,20 @@ mod tests {
             ]);
             assert_eq!(
                 check(&documents),
-                Err(vec![refused(
-                    "document.unknown-attribute",
-                    at(0, 14),
-                    "`hold` is not an attribute of the `retention` block",
-                    "Use `select` or `keep`, or remove it",
-                )])
+                Err(vec![
+                    refused(
+                        "document.negative-span",
+                        at(0, 13),
+                        "the span -1s is below zero",
+                        "Write a span of zero or more",
+                    ),
+                    refused(
+                        "document.unknown-attribute",
+                        at(0, 14),
+                        "`hold` is not an attribute of the `retention` block",
+                        "Use `select` or `keep`, or remove it",
+                    ),
+                ])
             );
         }
 
@@ -1511,10 +1547,10 @@ mod tests {
                 check(&[documents]),
                 Err(vec![
                     refused(
-                        "config.negative-span",
+                        "document.negative-span",
                         at(0, 13),
-                        "a retention keeps -1s, which is below zero",
-                        "Write a keep time of zero or more",
+                        "the span -1s is below zero",
+                        "Write a span of zero or more",
                     ),
                     refused(
                         "document.unknown-block",
@@ -1591,6 +1627,355 @@ mod tests {
             for attributes in cases {
                 assert_inner_blocks_refused("retention", &attributes);
             }
+        }
+    }
+
+    mod accesses {
+        use spec::access::{Action, Actions, Policy};
+        use types::authority::Authority;
+
+        use super::*;
+
+        const ACTION_FIX: &str = "Use `read`, `write`, `plan`, `apply`, `secret`, or \
+                                  `admin`";
+        const AUTHORITY_FIX: &str = "Write an integer from 0 to 255";
+
+        /// An `access` block in file 0 at offset 0, labeled `edge`.
+        fn access(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(0, 0, "access", &["edge"], attributes)])]
+        }
+
+        /// A list of `items`, the item `i` at offset `50 + i`.
+        fn list(items: Vec<Kind>) -> Kind {
+            let items = (50..).zip(items).map(|(offset, kind)| Value {
+                kind,
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        fn reference(text: &str) -> Kind {
+            Kind::Reference(text.parse().unwrap())
+        }
+
+        /// The attributes of a policy that allows `allow`, with `authority` when given.
+        fn attributes(
+            allow: Kind,
+            authority: Option<i128>,
+        ) -> Vec<(&'static str, Kind)> {
+            let mut attributes = vec![
+                ("subjects", string("site_a.operators.*")),
+                ("select", string("edge.**")),
+                ("allow", allow),
+            ];
+            attributes.extend(authority.map(|n| ("authority", Kind::Integer(n))));
+            attributes
+        }
+
+        /// The one entry of an access policy labeled `edge`.
+        fn allowed(actions: &[Action], authority: u8) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(
+                selector(&["site_a.operators.*"]),
+                selector(&["edge.**"]),
+                actions.iter().copied().collect(),
+                Authority(authority),
+            );
+            let entry = Entry {
+                definition: Definition::Spec(definition::Definition::Access(policy)),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@access"), entry)])
+        }
+
+        fn policy(entries: &BTreeMap<Name, Entry>) -> &Policy {
+            match &entries[&key("edge.@access")].definition {
+                Definition::Spec(definition::Definition::Access(policy)) => policy,
+                definition => panic!("not an access policy: {definition:?}"),
+            }
+        }
+
+        #[test]
+        fn reads_an_access_policy_from_strings_and_bare_words() {
+            let both = [Action::Read, Action::Write];
+            let cases = [
+                (list(vec![string("read"), string("write")]), &both[..]),
+                (list(vec![reference("read"), reference("write")]), &both[..]),
+                (list(vec![string("write"), reference("read")]), &both[..]),
+                (string("read"), &[Action::Read][..]),
+                (string("write"), &[Action::Write][..]),
+                (string("plan"), &[Action::Plan][..]),
+                (reference("apply"), &[Action::Apply][..]),
+                (string("secret"), &[Action::Secret][..]),
+                (reference("admin"), &[Action::Admin][..]),
+                (
+                    list(vec![string("read"), reference("read")]),
+                    &[Action::Read][..],
+                ),
+            ];
+            for (allow, actions) in cases {
+                let written = actions.contains(&Action::Write).then_some(200);
+                let documents = access(&attributes(allow.clone(), written));
+                assert_eq!(check(&documents), Ok(allowed(actions, 200)), "{allow:?}");
+            }
+            let every = ["read", "write", "plan", "apply", "secret", "admin"];
+            let documents = access(&attributes(
+                list(every.iter().map(|word| string(word)).collect()),
+                Some(255),
+            ));
+            let all = [
+                Action::Read,
+                Action::Write,
+                Action::Plan,
+                Action::Apply,
+                Action::Secret,
+                Action::Admin,
+            ];
+            assert_eq!(check(&documents), Ok(allowed(&all, 255)));
+        }
+
+        #[test]
+        fn caps_a_write_at_the_least_authority_by_default() {
+            let read = check(&access(&attributes(string("write"), None))).unwrap();
+            assert_eq!(read, allowed(&[Action::Write], 0));
+            assert_eq!(policy(&read).authority(), Some(Authority(0)));
+            let zero = check(&access(&attributes(string("write"), Some(0)))).unwrap();
+            assert_eq!(zero, read);
+        }
+
+        #[test]
+        fn reads_no_authority_without_write_as_none() {
+            let read = check(&access(&attributes(string("read"), None))).unwrap();
+            assert_eq!(policy(&read).authority(), None);
+            assert_eq!(
+                policy(&read).allow(),
+                Actions::NONE.union([Action::Read].into_iter().collect())
+            );
+        }
+
+        #[test]
+        fn refuses_an_authority_without_write() {
+            let message = "the policy has an `authority` and no `write` in `allow`, \
+                           and only a write uses an authority";
+            let fix = "Add `write` to `allow`, or remove `authority`";
+            for (allow, authority) in [
+                (string("read"), 200),
+                (list(vec![string("read"), reference("plan")]), 0),
+            ] {
+                assert_eq!(
+                    check(&access(&attributes(allow, Some(authority)))),
+                    Err(vec![refused(
+                        "config.authority-without-write",
+                        at(0, 17),
+                        message,
+                        fix,
+                    )]),
+                    "{authority}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_only_a_missing_subjects_beside_an_authority_without_write() {
+            let documents = access(&[
+                ("select", string("edge.**")),
+                ("allow", string("read")),
+                ("authority", Kind::Integer(5)),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.missing-attribute",
+                    at(0, 0),
+                    "the `access` block has no `subjects`",
+                    "Add a `subjects` attribute with the subjects that it allows, \
+                     such as \"site_a.operators.*\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_only_the_action_of_a_bad_allow_with_an_authority() {
+            assert_eq!(
+                check(&access(&attributes(string("erase"), Some(5)))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "\"erase\" is not an action",
+                    ACTION_FIX,
+                )])
+            );
+        }
+
+        #[test]
+        fn quotes_a_word_that_is_not_an_action_so_that_it_cannot_name_another() {
+            assert_eq!(
+                check(&access(&attributes(string("x` or `read"), None))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "\"x` or `read\" is not an action",
+                    ACTION_FIX,
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_word_that_is_not_an_action() {
+            let cases = [
+                (string("erase"), at(0, 15), "\"erase\" is not an action"),
+                (reference("Read"), at(0, 15), "\"Read\" is not an action"),
+                (
+                    reference("site_a.read"),
+                    at(0, 15),
+                    "\"site_a.read\" is not an action",
+                ),
+                (
+                    list(vec![string("read"), string("erase")]),
+                    at(0, 51),
+                    "\"erase\" is not an action",
+                ),
+                (
+                    list(vec![Kind::Integer(1), string("erase")]),
+                    at(0, 50),
+                    "an action is a string or a reference, not an integer",
+                ),
+                (
+                    Kind::Bool(true),
+                    at(0, 15),
+                    "an action is a string or a reference, not a bool",
+                ),
+            ];
+            for (allow, span, message) in cases {
+                assert_eq!(
+                    check(&access(&attributes(allow, None))),
+                    Err(vec![refused(
+                        "config.bad-action",
+                        span,
+                        message,
+                        ACTION_FIX
+                    )]),
+                    "{message}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_empty_allow() {
+            assert_eq!(
+                check(&access(&attributes(list(vec![]), None))),
+                Err(vec![refused(
+                    "config.empty-allow",
+                    at(0, 15),
+                    "the `allow` list holds no action",
+                    "Add one or more actions, such as \"read\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_authority_that_is_not_from_0_to_255() {
+            for (authority, message) in [
+                (Kind::Integer(256), "the authority 256 is not from 0 to 255"),
+                (Kind::Integer(-1), "the authority -1 is not from 0 to 255"),
+                (string("high"), "an authority is an integer, not a string"),
+            ] {
+                let mut attributes = attributes(string("write"), None);
+                attributes.push(("authority", authority));
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![refused(
+                        "config.bad-authority",
+                        at(0, 17),
+                        message,
+                        AUTHORITY_FIX,
+                    )]),
+                    "{message}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_access_without_subjects_select_or_allow() {
+            let subjects = refused(
+                "document.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `subjects`",
+                "Add a `subjects` attribute with the subjects that it allows, such as \
+                 \"site_a.operators.*\"",
+            );
+            let select = refused(
+                "document.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `select`",
+                "Add a `select` attribute with the names that it allows them to use, \
+                 such as \"site_a.**\"",
+            );
+            let allow = refused(
+                "document.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `allow`",
+                "Add an `allow` attribute with the actions that it allows, such as \
+                 \"read\"",
+            );
+            let full = attributes(string("read"), None);
+            for (i, diagnostic) in [subjects.clone(), select.clone(), allow.clone()]
+                .into_iter()
+                .enumerate()
+            {
+                let mut attributes = full.clone();
+                attributes.remove(i);
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![diagnostic.clone()]),
+                    "{diagnostic:?}"
+                );
+            }
+            assert_eq!(
+                check(&access(&[("authority", Kind::Integer(1))])),
+                Err(vec![subjects, select, allow])
+            );
+        }
+
+        #[test]
+        fn refuses_what_an_access_block_cannot_hold() {
+            // An unknown attribute also hides an `authority` with no `write`.
+            for (authority, key) in [(None, 16), (Some(5), 18)] {
+                let mut attributes = attributes(string("read"), authority);
+                attributes.push(("deny", string("write")));
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![refused(
+                        "document.unknown-attribute",
+                        at(0, key),
+                        "`deny` is not an attribute of the `access` block",
+                        "Use `subjects`, `select`, `allow`, or `authority`, or remove \
+                         it",
+                    )])
+                );
+            }
+            assert_inner_blocks_refused(
+                "access",
+                &self::attributes(string("read"), None),
+            );
+        }
+
+        #[test]
+        fn reads_an_access_and_a_node_settings_with_one_label() {
+            let documents = [document(vec![
+                block(0, 0, "access", &["edge"], &attributes(string("read"), None)),
+                settings(
+                    0,
+                    100,
+                    "edge",
+                    &[("select", string("edge.*")), ("disk", string("1GiB"))],
+                ),
+            ])];
+            let keys: Vec<String> = check(&documents)
+                .unwrap()
+                .keys()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(keys, ["edge.@access", "edge.@node_settings"]);
         }
     }
 
@@ -2026,7 +2411,41 @@ mod tests {
         }
 
         #[test]
-        fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
+        fn refuses_an_edge_that_is_not_a_name() {
+            let documents =
+                value(&[("index", Kind::Integer(7)), ("data_type", string("f64"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 111),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_error_edge_of_an_index_that_is_not_a_name() {
+            let time = channel(
+                0,
+                0,
+                "edge.time",
+                &[("kind", string("index")), ("error", Kind::Integer(7))],
+            );
+            assert_eq!(
+                check(&[document(vec![time])]),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 13),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn leaves_the_edges_after_a_bad_kind() {
             let documents = value(&[
                 ("kind", string("stream")),
                 ("other", string("x")),
@@ -2044,23 +2463,32 @@ mod tests {
                         "\"stream\" is not a kind of channel",
                         "Write \"index\" or \"data\"",
                     ),
-                    unknown(
-                        at(0, 115),
-                        "no `channel` block defines the index channel `edge.tim`",
-                    ),
-                    unknown(
-                        at(0, 117),
-                        "no `channel` block defines the quality channel `edge.q`",
-                    ),
-                    unknown(
-                        at(0, 119),
-                        "no `channel` block defines the error channel `edge.e`",
-                    ),
-                    unknown(
-                        at(0, 121),
-                        "no `channel` block defines the control channel `edge.c`",
+                    refused(
+                        "document.unknown-attribute",
+                        at(0, 112),
+                        "`other` is not an attribute of the `channel` block",
+                        "Use `control`, `data_type`, `error`, `index`, `kind`, \
+                         `quality`, or `unit`, or remove it",
                     ),
                 ])
+            );
+        }
+
+        #[test]
+        fn leaves_an_attribute_that_a_kind_knows_after_a_bad_kind() {
+            let documents = value(&[
+                ("kind", string("stream")),
+                ("data_type", string("f65")),
+                ("control", Kind::Integer(7)),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.bad-channel-kind",
+                    at(0, 111),
+                    "\"stream\" is not a kind of channel",
+                    "Write \"index\" or \"data\"",
+                ),])
             );
         }
 
@@ -2173,9 +2601,9 @@ mod tests {
                 check(&documents),
                 Err(vec![
                     refused(
-                        "config.label-count",
+                        "document.label-count",
                         at(0, 2),
-                        "the `channel` block has 2 labels, and it needs one, its name",
+                        "the `channel` block has 2 labels, and it takes 1 label",
                         "Give the block one label, its name, such as \"site_a.budget\"",
                     ),
                     unknown(
@@ -2303,6 +2731,398 @@ mod tests {
                     ),
                 ])
             );
+        }
+    }
+
+    mod subjects {
+        use base64ct::{Base64, Encoding};
+        use spec::subject::Subject;
+        use types::ed25519::PublicKey;
+
+        use super::*;
+
+        /// A line that `ssh-keygen -t ed25519` wrote.
+        const ALICE: &str = concat!(
+            "ssh-ed25519 ",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg",
+            " alice@laptop",
+        );
+        const ALICE_KEY: [u8; 32] = [
+            0x65, 0x55, 0xb8, 0xe4, 0x7c, 0x24, 0xa6, 0x29, 0x01, 0xc5, 0x8b, 0x31,
+            0x4b, 0xde, 0x69, 0xd9, 0x89, 0xd7, 0x05, 0x00, 0x99, 0x81, 0xa0, 0x20,
+            0x3b, 0x6a, 0x96, 0x11, 0x5e, 0xed, 0x88, 0x60,
+        ];
+        const BAD_FIX: &str = "Use the one line of a `.pub` file, such as \
+                               `ssh-ed25519 AAAA... alice@laptop`";
+        const NOT_A_LINE: &str = "the public key is not the line of a `.pub` file";
+        const NOT_ED25519: &str = "the base64 of the public key is not an Ed25519 key";
+
+        /// A `subject` block in file 0 at offset 0, labeled `alice`.
+        fn subject(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(
+                0,
+                0,
+                "subject",
+                &["alice"],
+                attributes,
+            )])]
+        }
+
+        /// A list of `items`, the item `i` at offset `50 + i`.
+        fn list(items: &[Kind]) -> Kind {
+            let items = (50..).zip(items).map(|(offset, kind)| Value {
+                kind: kind.clone(),
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        /// The one entry of a subject labeled `alice` with `keys`.
+        fn keyed(keys: &[[u8; 32]]) -> BTreeMap<Name, Entry> {
+            let keys = keys.iter().map(|&key| PublicKey::new(key).unwrap());
+            let subject = Subject::new(keys.collect()).unwrap();
+            let entry = Entry {
+                definition: Definition::Spec(definition::Definition::Subject(subject)),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("alice.@subject"), entry)])
+        }
+
+        /// A `.pub` line of `algorithm` whose base64 holds `blob`.
+        fn line(algorithm: &str, blob: &[u8]) -> String {
+            let mut text = [0; 128];
+            let encoded = Base64::encode(blob, &mut text).unwrap();
+            format!("{algorithm} {encoded} bob@site_a")
+        }
+
+        /// The `.pub` line of the Ed25519 key `key`.
+        fn ed25519(key: [u8; 32]) -> String {
+            line(
+                "ssh-ed25519",
+                &[&b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..], &key].concat(),
+            )
+        }
+
+        fn bad(span: Option<Span>, message: &str) -> Diagnostic {
+            refused("config.bad-public-key", span, message, BAD_FIX)
+        }
+
+        #[test]
+        fn reads_the_line_of_a_pub_file() {
+            let bare = ALICE.trim_end_matches(" alice@laptop");
+            let cases = [
+                string(ALICE),
+                string(bare),
+                string(&format!("  {ALICE}\n")),
+                string(&format!("{bare} a comment with words")),
+                list(&[string(ALICE)]),
+            ];
+            for keys in cases {
+                let documents = subject(&[("keys", keys.clone())]);
+                assert_eq!(check(&documents), Ok(keyed(&[ALICE_KEY])), "{keys:?}");
+            }
+            assert_eq!(ed25519(ALICE_KEY).split(' ').nth(1), bare.split(' ').nth(1));
+        }
+
+        #[test]
+        fn reads_a_list_of_keys_in_byte_order() {
+            let keys = list(&[string(&ed25519([9; 32])), string(ALICE)]);
+            assert_eq!(
+                check(&subject(&[("keys", keys)])),
+                Ok(keyed(&[[9; 32], ALICE_KEY]))
+            );
+        }
+
+        #[test]
+        fn refuses_a_subject_without_keys() {
+            assert_eq!(
+                check(&subject(&[])),
+                Err(vec![refused(
+                    "document.missing-attribute",
+                    at(0, 0),
+                    "the `subject` block has no `keys`",
+                    "Add a `keys` attribute with the line of a `.pub` file, such as \
+                     \"ssh-ed25519 AAAA... alice@laptop\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_empty_list_at_the_list() {
+            assert_eq!(
+                check(&subject(&[("keys", Kind::List(Vec::new()))])),
+                Err(vec![refused(
+                    "config.no-public-keys",
+                    at(0, 11),
+                    "the subject has no public key",
+                    "Add at least one public key",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_repeated_key_at_its_second_copy() {
+            let again = ALICE.replace("alice@laptop", "alice@desk");
+            let keys =
+                list(&[string(ALICE), string(&ed25519([9; 32])), string(&again)]);
+            let mut twice = refused(
+                "config.duplicate-public-key",
+                at(0, 52),
+                "a public key repeats an earlier one",
+                "Remove the second copy of the key",
+            );
+            twice.notes.push(Note {
+                span: at(0, 50).unwrap(),
+                text: "the earlier key".into(),
+            });
+            assert_eq!(check(&subject(&[("keys", keys)])), Err(vec![twice]));
+        }
+
+        #[test]
+        fn refuses_a_private_key_and_quotes_none_of_it() {
+            let openssh = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+                           b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMw\n\
+                           -----END OPENSSH PRIVATE KEY-----\n";
+            let rsa = "  -----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n";
+            let ssh2 = "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\n\
+                        Comment: \"rsa-key-20261008\"\nP2/56wAAA+wAAAA3aWYtbW9kbntz\n";
+            let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n\
+                       Comment: alice@laptop\nPublic-Lines: 2\n";
+            let comment = format!("{ALICE} PRIVATE KEY");
+            let cases = [
+                (string(openssh), at(0, 11)),
+                (string(rsa), at(0, 11)),
+                (string(ssh2), at(0, 11)),
+                (string(ppk), at(0, 11)),
+                (string(&comment), at(0, 11)),
+                (list(&[string(ALICE), string(openssh)]), at(0, 51)),
+                (list(&[Kind::Integer(7), string(openssh)]), at(0, 51)),
+            ];
+            for (keys, span) in cases {
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![refused(
+                        "config.private-key",
+                        span,
+                        "the value is a private key, which must never be in a file",
+                        "Remove the private key from this file now, and use the one \
+                         line of its `.pub` file",
+                    )]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_private_key_at_any_depth() {
+            let private = Value {
+                kind: string("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n"),
+                span: at(0, 70),
+            };
+            let call = Kind::Call(document::value::Call {
+                function: "secret".into(),
+                function_span: at(0, 60),
+                arguments: vec![private.clone()],
+            });
+            let map = Map::new(vec![Attribute {
+                key: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n".into(),
+                key_span: at(0, 70),
+                value: Value {
+                    kind: Kind::Integer(1),
+                    span: at(0, 80),
+                },
+            }])
+            .unwrap();
+            let in_value = Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: at(0, 60),
+                value: private.clone(),
+            }])
+            .unwrap();
+            let cases = [
+                list(&[Kind::List(vec![private])]),
+                list(&[string(ALICE), call]),
+                Kind::Map(map.clone()),
+                list(&[Kind::Map(map)]),
+                Kind::Map(in_value),
+            ];
+            for keys in cases {
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![refused(
+                        "config.private-key",
+                        at(0, 70),
+                        "the value is a private key, which must never be in a file",
+                        "Remove the private key from this file now, and use the one \
+                         line of its `.pub` file",
+                    )]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_key_of_another_algorithm_by_its_name() {
+            let cases = [
+                "ssh-rsa",
+                "ssh-dss",
+                "ecdsa-sha2-nistp256",
+                "ecdsa-sha2-nistp384",
+                "ecdsa-sha2-nistp521",
+                "sk-ecdsa-sha2-nistp256@openssh.com",
+                "sk-ssh-ed25519@openssh.com",
+                "ssh-rsa-cert-v01@openssh.com",
+                "ssh-dss-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+                "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+                "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
+                "ssh-ed25519-cert-v01@openssh.com",
+                "sk-ssh-ed25519-cert-v01@openssh.com",
+                "ssh-xmss@openssh.com",
+                "ssh-xmss-cert-v01@openssh.com",
+            ];
+            for algorithm in cases {
+                let keys = string(&line(algorithm, &[0; 51]));
+                assert_eq!(
+                    check(&subject(&[("keys", keys)])),
+                    Err(vec![refused(
+                        "config.public-key-algorithm",
+                        at(0, 11),
+                        &format!(
+                            "the public key is \"{algorithm}\", and a subject takes \
+                             only `ssh-ed25519`"
+                        ),
+                        "Make an Ed25519 key with `ssh-keygen -t ed25519`, and use the \
+                         line of its `.pub` file",
+                    )]),
+                    "{algorithm}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_value_that_is_not_the_line_of_an_ed25519_key() {
+            let start = &b"\0\0\0\x0bssh-ed25519\0\0\0\x20"[..];
+            let mut identity = [0; 32];
+            identity[0] = 1;
+            let cases = [
+                (Kind::Integer(7), "a public key is a string, not an integer"),
+                (string(""), NOT_A_LINE),
+                (string("ssh-ed25519"), NOT_A_LINE),
+                (string("ssh-\x1b[2Jok AAAA"), NOT_A_LINE),
+                (string("sk-proj-0123456789abcdef AAAA"), NOT_A_LINE),
+                (string("ssh-rsa2 AAAA"), NOT_A_LINE),
+                (string(&ALICE[12..]), NOT_A_LINE),
+                (
+                    string("-----BEGIN PUBLIC KEY----- MCowBQYDK2VwAyEA"),
+                    NOT_A_LINE,
+                ),
+                (
+                    string("---- BEGIN SSH2 PUBLIC KEY ----\nAAAAC3NzaC1lZDI1NTE5"),
+                    NOT_A_LINE,
+                ),
+                (string("ssh-ed25519 !!!!"), NOT_ED25519),
+                (string(&ALICE.replace(" alice", "= alice")), NOT_ED25519),
+                (
+                    string(&line("ssh-ed25519", &[start, &[9; 31]].concat())),
+                    NOT_ED25519,
+                ),
+                (
+                    string(&line("ssh-ed25519", &[start, &[9; 33]].concat())),
+                    NOT_ED25519,
+                ),
+                (
+                    string(&line("ssh-ed25519", &[&start[..18], &[9; 33]].concat())),
+                    NOT_ED25519,
+                ),
+                (string(&line("ssh-ed25519", &[9; 51])), NOT_ED25519),
+                (
+                    string(&ed25519(identity)),
+                    "the public key is a point of small order",
+                ),
+            ];
+            for (keys, message) in cases {
+                let documents = subject(&[("keys", keys.clone())]);
+                assert_eq!(
+                    check(&documents),
+                    Err(vec![bad(at(0, 11), message)]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_two_lines_split_by_any_line_break() {
+            for split in ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}']
+            {
+                let keys = string(&format!("{ALICE}{split}{}", ed25519([9; 32])));
+                assert_eq!(
+                    check(&subject(&[("keys", keys)])),
+                    Err(vec![bad(at(0, 11), "the public key is more than one line")]),
+                    "{split:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_the_first_bad_item_of_a_list_at_the_item() {
+            let keys = list(&[string(ALICE), Kind::Integer(7), string("ssh-ed25519")]);
+            assert_eq!(
+                check(&subject(&[("keys", keys)])),
+                Err(vec![bad(
+                    at(0, 51),
+                    "a public key is a string, not an integer"
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_attribute_that_a_subject_does_not_have() {
+            let documents =
+                subject(&[("keys", string(ALICE)), ("name", string("Alice"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.unknown-attribute",
+                    at(0, 12),
+                    "`name` is not an attribute of the `subject` block",
+                    "Use `keys`, or remove it",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_a_block_inside_a_subject_with_any_attributes() {
+            let cases = [
+                vec![("keys", string(ALICE))],
+                vec![],
+                vec![("keys", Kind::List(Vec::new()))],
+                vec![("keys", string("ssh-rsa AAAA"))],
+                vec![("keys", string(ALICE)), ("name", string("Alice"))],
+            ];
+            for attributes in cases {
+                assert_inner_blocks_refused("subject", &attributes);
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn reads_distinct_keys_in_any_order(
+                (sorted, keys) in prop::collection::btree_set(any::<[u8; 32]>(), 1..6)
+                    .prop_filter_map("a key of small order", |keys| {
+                        let valid = keys.iter().all(|&key| PublicKey::new(key).is_ok());
+                        valid.then(|| keys.into_iter().collect::<Vec<_>>())
+                    })
+                    .prop_flat_map(|sorted| {
+                        (Just(sorted.clone()), Just(sorted).prop_shuffle())
+                    }),
+            ) {
+                let items: Vec<_> =
+                    keys.iter().map(|&key| string(&ed25519(key))).collect();
+                let documents = subject(&[("keys", list(&items))]);
+                prop_assert_eq!(check(&documents), Ok(keyed(&sorted)));
+            }
         }
     }
 }

@@ -58,6 +58,17 @@ impl Kind {
             Self::Call(_) => "a call",
         }
     }
+
+    /// The text of a string, or of a reference as the file wrote it: the two read as
+    /// the same text (HCL REFERENCES). `None` for each other kind.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::String(text) => Some(text),
+            Self::Reference(name) => Some(name.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// A finite float. It stores -0.0 as 0.0, so equal floats have equal bits.
@@ -135,6 +146,36 @@ mod tests {
             (Kind::Call(call), "a call"),
         ] {
             assert_eq!(kind.noun(), noun);
+        }
+    }
+
+    #[test]
+    fn gives_the_text_of_a_string_or_a_reference() {
+        let call = Call {
+            function: "node".into(),
+            function_span: None,
+            arguments: Vec::new(),
+        };
+        for (kind, text) in [
+            (Kind::Bool(true), None),
+            (Kind::Integer(7), None),
+            (Kind::Float(Float::new(1.5).unwrap()), None),
+            (Kind::String("site_a.*".into()), Some("site_a.*")),
+            (
+                Kind::Reference("site_a.pt_1".parse().unwrap()),
+                Some("site_a.pt_1"),
+            ),
+            (
+                Kind::List(vec![Value {
+                    kind: Kind::String("a".into()),
+                    span: None,
+                }]),
+                None,
+            ),
+            (Kind::Map(Map::default()), None),
+            (Kind::Call(call), None),
+        ] {
+            assert_eq!(kind.text(), text, "{kind:?}");
         }
     }
 

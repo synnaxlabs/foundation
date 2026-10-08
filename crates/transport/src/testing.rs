@@ -15,7 +15,7 @@ use env::net::Net;
 use env::tasks::Tasks;
 use sim::Sim;
 use sim::node::Node;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
 use crate::{Address, Config, Port, Session, Transport, port, quic};
@@ -257,9 +257,7 @@ where
         let part = part(&node.net(), address(&node));
         let transport = Transport::new(config, part).expect("a transport");
         let addresses = [Address::Udp(at)];
-        let dialed = transport
-            .dial(crate::tls::public(&SERVER), &addresses)
-            .await;
+        let dialed = transport.dial(SERVER.public(), &addresses).await;
         let session = dialed.expect("a session");
         let clock = node.clock();
         client(Side {

@@ -16,17 +16,8 @@ impl Kind {
     /// The first that applies: [`Error::Long`] when the key would hold more than
     /// [`Name::MAX_BYTES`], [`Error::Name`] when `label` is not a name, and
     /// [`Error::Reserved`] when a segment of `label` starts with `@`.
-    #[expect(
-        clippy::missing_panics_doc,
-        clippy::unwrap_in_result,
-        reason = "a checked label and a kind segment always make a name"
-    )]
     pub fn key(self, label: &str) -> Result<Name, Error> {
-        let segment = match self {
-            Self::Connector | Self::Channel => None,
-            _ => Some(self.as_str()),
-        };
-        let most = segment.map_or(Name::MAX_BYTES, |segment| {
+        let most = self.segment().map_or(Name::MAX_BYTES, |segment| {
             Name::MAX_BYTES - segment.len() - 2
         });
         if label.len() > most {
@@ -36,12 +27,46 @@ impl Kind {
         if label.reserved() {
             return Err(Error::Reserved);
         }
-        Ok(match segment {
+        Ok(self.join(label))
+    }
+
+    /// The tree key of a definition of this kind with the label `label`, reserved or
+    /// not. Panics when the key would hold more than [`Name::MAX_BYTES`].
+    pub(crate) fn join(self, label: Name) -> Name {
+        match self.segment() {
             None => label,
-            Some(segment) => format!("{label}.@{segment}").parse().expect(
-                "a short label that is not reserved and a kind segment make a name",
-            ),
-        })
+            Some(segment) => format!("{label}.@{segment}")
+                .parse()
+                .expect("invariant: a short label and a kind segment make a name"),
+        }
+    }
+
+    /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
+    /// when it does not. Only a subject or an access policy can have a reserved label:
+    /// Foundation makes those ([`crate::founding::create`]), and [`Kind::key`] refuses
+    /// them, so no file holds a definition whose label is reserved.
+    #[must_use]
+    pub fn label(self, key: &Name) -> Option<Name> {
+        let label: Name = match self.segment() {
+            None => key.clone(),
+            Some(segment) => key
+                .as_str()
+                .strip_suffix(segment)?
+                .strip_suffix(".@")?
+                .parse()
+                .ok()?,
+        };
+        let founding = matches!(self, Self::Subject | Self::Access);
+        (founding || !label.reserved()).then_some(label)
+    }
+
+    /// The segment of the kind in its tree key, or `None` for a connector or a channel,
+    /// which is at its own name.
+    const fn segment(self) -> Option<&'static str> {
+        match self {
+            Self::Connector | Self::Channel => None,
+            _ => Some(self.as_str()),
+        }
     }
 
     /// The name of the kind, such as `node_settings`: the keyword a file format names
@@ -59,6 +84,7 @@ impl Kind {
             Self::Placement => "placement",
             Self::Time => "time",
             Self::Retention => "retention",
+            Self::Subject => "subject",
         }
     }
 }
@@ -111,7 +137,7 @@ mod tests {
     use super::*;
 
     /// Each kind with a segment.
-    const KINDS: [(Kind, &str); 7] = [
+    const KINDS: [(Kind, &str); 8] = [
         (Kind::Access, "@access"),
         (Kind::Region, "@region"),
         (Kind::NodeSettings, "@node_settings"),
@@ -119,6 +145,7 @@ mod tests {
         (Kind::Placement, "@placement"),
         (Kind::Time, "@time"),
         (Kind::Retention, "@retention"),
+        (Kind::Subject, "@subject"),
     ];
 
     fn name(text: &str) -> Name {
@@ -245,6 +272,61 @@ mod tests {
             prop_assert!(key.starts_with(&label));
             prop_assert_eq!(key.segments().last(), Some(segment));
             prop_assert_eq!(key.segments().count(), segments.len() + 1);
+        }
+
+        #[test]
+        fn gives_back_the_label_of_each_key(
+            segments in prop::collection::vec("[a-z0-9_-]{1,12}", 1..8),
+            kind in prop::sample::select(ALL.to_vec()),
+        ) {
+            let label = name(&segments.join("."));
+            let key = kind.key(label.as_str()).unwrap();
+            prop_assert_eq!(kind.label(&key), Some(label));
+        }
+    }
+
+    /// Each kind.
+    const ALL: [Kind; 10] = [
+        Kind::Access,
+        Kind::Connector,
+        Kind::Channel,
+        Kind::Region,
+        Kind::NodeSettings,
+        Kind::Compression,
+        Kind::Placement,
+        Kind::Time,
+        Kind::Retention,
+        Kind::Subject,
+    ];
+
+    #[test]
+    fn gives_no_label_for_a_key_of_another_kind() {
+        for key in [
+            "plant.@subject",
+            "plant.@access.x",
+            "@access",
+            "plant.access",
+        ] {
+            assert_eq!(Kind::Access.label(&name(key)), None, "{key}");
+        }
+        assert_eq!(Kind::Channel.label(&name("plant.@access")), None);
+        assert_eq!(Kind::Connector.label(&name("plant.@x.y")), None);
+    }
+
+    #[test]
+    fn gives_a_reserved_label_only_for_a_kind_of_the_founding_definitions() {
+        for (kind, segment) in KINDS {
+            let label =
+                matches!(kind, Kind::Subject | Kind::Access).then(|| name("plant.@x"));
+            let key = name(&format!("plant.@x.{segment}"));
+            assert_eq!(kind.label(&key), label, "{segment}");
+        }
+        assert_eq!(
+            Kind::Subject.label(&name("@admin.@subject")),
+            Some(name("@admin"))
+        );
+        for kind in [Kind::Connector, Kind::Channel] {
+            assert_eq!(kind.label(&name("plant.@x")), None);
         }
     }
 }

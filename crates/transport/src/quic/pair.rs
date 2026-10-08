@@ -15,7 +15,7 @@ use noq_proto::{
     ClientConfig, ConnectionHandle, DatagramEvent, FourTuple, SendDatagramError,
     TransportConfig,
 };
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
 use super::settings::{MTU_MIN, Settings};

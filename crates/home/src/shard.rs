@@ -72,7 +72,7 @@ use crate::{handoff, order, split, stored};
 /// #     while clock.now().mesh.is_none() {
 /// #         node.clock().sleep(Span::from_nanos(1)).await;
 /// #     }
-/// use home::{Config, Outcome, Shard, order, writer};
+/// use home::{Config, Outcome, Shard, order, reader::Next, writer};
 /// use types::authority::Authority;
 /// use types::frame::{Draft, Form, Label, Path, Range};
 /// use types::time::{Span, Stamp};
@@ -111,7 +111,9 @@ use crate::{handoff, order, split, stored};
 /// let mut woken = Vec::new();
 /// shard.woken(&mut woken);
 /// assert_eq!(woken, [reader.into()]);
-/// let taken = shard.take(reader.into()).expect("a frame waits");
+/// let Next::Frame(taken) = shard.take(reader.into()) else {
+///     panic!("a frame waits");
+/// };
 /// assert_eq!(taken.range(0), Some(range));
 /// #     Ok(())
 /// # }
@@ -332,10 +334,9 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// In this order: [`writer::Error::Unsynced`] before the node first has mesh
-    /// time, [`writer::Error::Lease`] for a lease that is not longer than zero, and
-    /// [`writer::Error::Type`] for the first series of the key set with a type the
-    /// home does not write yet. None changes the shard.
+    /// [`writer::Error::Unsynced`] before the node first has mesh time, else
+    /// [`writer::Error::Lease`] for a lease that is not longer than zero. Neither
+    /// changes the shard.
     ///
     /// # Panics
     ///
@@ -352,12 +353,6 @@ impl Shard {
         } = writer;
         let (now, mesh) = self.now().ok_or(writer::Error::Unsynced)?;
         let lease = lease.map(writer::lease).transpose()?;
-        if let Some(&key_set::Entry {
-            slot, data_type, ..
-        }) = split::unwritten(&set)
-        {
-            return Err(writer::Error::Type { slot, data_type });
-        }
         let control = control::Writer { subject, authority };
         let entries = set.entries();
         let mut claims = Vec::with_capacity(set.groups().len());
@@ -499,15 +494,17 @@ impl Shard {
 
     /// Opens an unnamed complete reader on the index at `slot`, with a credit of
     /// `limit_bytes`. From the index's live tail on, it gets each live frame with
-    /// samples after the commit that holds it, while the bytes it has spent are
-    /// below its credit: a frame spends what `charge` says. The first such frame
-    /// that finds the credit spent is a miss: the reader gets neither it nor a later
-    /// frame, no grant changes that, and [`behind`](Self::behind) reports it.
-    /// [`woken`](Self::woken) names the reader once for a miss with no frame waiting,
-    /// and not for a miss while frames wait. The home does not read a missed frame
-    /// back from disk yet. Close the reader and open a new one. The new one starts at
-    /// the live tail of its open, so the frames from the miss to there reach neither
-    /// reader.
+    /// samples after the commit that holds it, while the bytes it has spent are below
+    /// its credit: a frame spends what `charge` says. A frame that finds the credit
+    /// spent waits for a [`grant`](Self::grant), and so does each later frame. A frame
+    /// that still waits when a later commit releases frames of the index is a miss:
+    /// the reader gets neither it nor a later frame, and [`take`](Self::take) gives
+    /// the frames before it, then [`Next::Behind`](reader::Next::Behind).
+    /// [`woken`](Self::woken) names the reader once for a miss with no frame to take,
+    /// and not for a miss while frames wait to be taken. The home does not read a
+    /// missed frame back from disk yet. Close the reader and open a new one. The new
+    /// one starts at the live tail of its open, so the frames from the miss to there
+    /// reach neither reader.
     ///
     /// # Panics
     ///
@@ -539,8 +536,10 @@ impl Shard {
     }
 
     /// Raises the credit of the complete reader `key` to `limit_bytes` since it
-    /// opened. A limit that is not higher changes nothing, and so does a grant to a
-    /// closed reader: a grant can arrive after its reader closes.
+    /// opened. A frame that waits for a grant can be taken while the bytes the reader
+    /// spent are below its credit, and [`woken`](Self::woken) does not name the reader
+    /// for it: take after the grant. A limit that is not higher changes nothing, and so
+    /// does a grant to a closed reader: a grant can arrive after its reader closes.
     ///
     /// # Panics
     ///
@@ -550,28 +549,17 @@ impl Shard {
         self.readers.grant(place, key.session, limit_bytes);
     }
 
-    /// Takes the next frame of the reader `key`, or `None` when none waits or the
-    /// reader is closed. A complete reader that misses a frame
-    /// ([`open_complete`](Self::open_complete)) gets the frames before it, and then
-    /// `None`.
-    ///
-    /// # Panics
-    ///
-    /// If the shard never gave `key`.
-    pub fn take(&mut self, key: reader::Key) -> Option<Frame> {
-        self.readers.take(self.place(key.slot), key.session)
-    }
-
-    /// Whether the complete reader `key` missed a live frame, so it gets no later
-    /// one, as it had no credit for the frame. [`woken`](Self::woken) names it once
-    /// when it misses one with no frame waiting. `false` for a closed reader.
+    /// Takes the next frame of the reader `key`. [`Next::Empty`](reader::Next::Empty)
+    /// when none waits or the reader is closed. A complete reader that misses a frame
+    /// ([`open_complete`](Self::open_complete)) gets the frames before it, then
+    /// [`Next::Behind`](reader::Next::Behind).
     ///
     /// # Panics
     ///
     /// If the shard never gave `key`.
     #[must_use]
-    pub fn behind(&self, key: reader::complete::Key) -> bool {
-        self.readers.behind(self.place(key.slot), key.session)
+    pub fn take(&mut self, key: reader::Key) -> reader::Next {
+        self.readers.take(self.place(key.slot), key.session)
     }
 
     /// Closes the reader `key`. Its waiting frames do not go out, and
@@ -582,21 +570,20 @@ impl Shard {
     ///
     /// If the shard never gave `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
-        self.readers.close(self.place(key.slot), key.session);
+        let now = self.now().map(|(_, now)| now);
+        self.readers.close(self.place(key.slot), key.session, now);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
     /// order and with the latest readers of an index first. Call it after each write,
-    /// since a latest reader gets a frame before its commit, and after each commit.
+    /// because a latest reader gets a frame before its commit, and after each commit.
     /// Complete readers first get the live frames now on disk. A key is a hint: take
-    /// from each until [`take`](Self::take) gives `None`, then check
-    /// [`behind`](Self::behind) of a complete reader before it waits: one named only
-    /// for a miss ([`open_complete`](Self::open_complete)) has no frame to take. When a
-    /// commit ended since the last call, it reads each index with live frames queued
-    /// for complete readers; else it reads none. Called so, with the same `keys` each
-    /// time, a call allocates only when it gives more keys than each call before, or
-    /// when more frames wait for one complete reader than have waited for that reader
-    /// before.
+    /// from each until [`take`](Self::take) gives [`Next::Empty`](reader::Next::Empty)
+    /// or [`Next::Behind`](reader::Next::Behind). When a commit ended since the last
+    /// call, it reads each index with live frames queued for complete readers; else it
+    /// reads none. Called so, with the same `keys` each time, a call allocates only
+    /// when it gives more keys than each call before, or when more frames wait for one
+    /// complete reader than have waited for that reader before.
     pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
@@ -808,7 +795,9 @@ mod tests {
     use std::iter;
     use std::path::{Path as FilePath, PathBuf};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Waker;
+    use std::time::Instant;
 
     use block::{Heap, Pool, Unique};
     use buffer::Layout;
@@ -826,7 +815,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, key};
+    use crate::common::{create_interner, create_pool, data_type, key, values};
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -1315,9 +1304,64 @@ mod tests {
         shard.open_complete(slot, CREDIT, Charge::Whole).into()
     }
 
-    /// The seq of the index group `group` of each frame `reader` takes now.
+    /// Each frame that `reader` takes now, then the [`reader::Next`] after them.
+    fn drain(
+        shard: &mut Shard,
+        reader: impl Into<reader::Key>,
+    ) -> (Vec<Frame>, reader::Next) {
+        let reader = reader.into();
+        let mut frames = Vec::new();
+        loop {
+            match shard.take(reader) {
+                reader::Next::Frame(frame) => frames.push(frame),
+                end @ (reader::Next::Empty | reader::Next::Behind) => {
+                    return (frames, end);
+                }
+            }
+        }
+    }
+
+    /// The seq of the index group `group` of each frame that `reader` takes before
+    /// [`reader::Next::Empty`].
+    ///
+    /// # Panics
+    ///
+    /// If `reader` gets [`reader::Next::Behind`].
+    #[track_caller]
     fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
-        iter::from_fn(|| shard.take(reader))
+        let (frames, end) = drain(shard, reader);
+        let ranges = ranges(&frames, group);
+        assert!(
+            matches!(end, reader::Next::Empty),
+            "behind after {ranges:?}"
+        );
+        ranges
+    }
+
+    /// The seq of the index group `group` of each frame that `reader` takes before
+    /// [`reader::Next::Behind`].
+    ///
+    /// # Panics
+    ///
+    /// If `reader` gets [`reader::Next::Empty`].
+    #[track_caller]
+    fn missed(
+        shard: &mut Shard,
+        reader: impl Into<reader::Key>,
+        group: u32,
+    ) -> Vec<Range> {
+        let (frames, end) = drain(shard, reader);
+        let ranges = ranges(&frames, group);
+        assert!(
+            matches!(end, reader::Next::Behind),
+            "not behind after {ranges:?}"
+        );
+        ranges
+    }
+
+    fn ranges(frames: &[Frame], group: u32) -> Vec<Range> {
+        frames
+            .iter()
             .map(|frame| frame.range(group).expect("the index is present"))
             .collect()
     }
@@ -3024,7 +3068,7 @@ mod tests {
         }
 
         #[test]
-        fn gives_a_complete_reader_out_of_credit_no_later_frame() {
+        fn gives_a_complete_reader_a_frame_that_waits_for_credit_at_a_grant() {
             run(37, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
@@ -3033,16 +3077,62 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
-                assert!(!shard.behind(session));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert!(shard.behind(session));
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 shard.grant(session, CREDIT);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn misses_a_frame_that_waits_for_credit_at_the_next_commit() {
+            run(37, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1, Charge::Whole);
+                let reader = reader::Key::from(session);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(taken(&mut shard, reader, 0), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(missed(&mut shard, reader, 0), []);
+                shard.grant(session, CREDIT);
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(taken(&mut shard, reader, 0), []);
+                assert_eq!(missed(&mut shard, session, 0), []);
+            });
+        }
+
+        #[test]
+        fn gives_a_frame_that_waits_for_credit_on_a_quiet_index_after_a_grant() {
+            run(39, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1, Charge::Whole);
+                let reader = reader::Key::from(session);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                for stamp in [10, 20, 30] {
+                    write(&test, &mut shard, a, &[stamp]);
+                }
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                let other = frame(&test.pool, &set, &[(2, &[40])]);
+                assert_eq!(shard.write(a, LIVE, other), Ok(&[applied(2, 0, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                shard.grant(session, CREDIT);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1), seq(2, 1)]);
             });
         }
 
@@ -3058,10 +3148,12 @@ mod tests {
                 write(&test, &mut shard, a, &stamps(0));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe]);
-                let frame = shard.take(probe).expect("a frame");
-                let (_, index) = frame.ends().next().expect("the index is present");
+                let reader::Next::Frame(probed) = shard.take(probe) else {
+                    panic!("a frame waits");
+                };
+                let (_, index) = probed.ends().next().expect("the index is present");
                 let index = types::frame::charge(1, index);
-                assert!(frame.charge() > index + 1);
+                assert!(probed.charge() > index + 1);
                 let places = Charge::Places([Slot::new(0)].into());
                 let session = shard.open_complete(Slot::new(0), index + 1, places);
                 let reader = reader::Key::from(session);
@@ -3072,10 +3164,18 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe, reader, data.into()]);
-                assert_eq!(iter::from_fn(|| shard.take(reader)).count(), 2);
-                assert!(shard.behind(session));
-                assert_eq!(iter::from_fn(|| shard.take(data.into())).count(), 2);
-                assert!(shard.behind(data));
+                for key in [reader, data.into()] {
+                    assert_eq!(
+                        taken(&mut shard, key, 0),
+                        [seq(100, 100), seq(200, 100)]
+                    );
+                }
+                write(&test, &mut shard, a, &stamps(4));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader, data.into()]);
+                for key in [reader, data.into()] {
+                    assert_eq!(missed(&mut shard, key, 0), []);
+                }
             });
         }
 
@@ -3092,12 +3192,16 @@ mod tests {
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
-                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, reader, 0), []);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(missed(&mut shard, reader, 0), []);
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
-                assert_eq!(taken(&mut shard, reader, 0), []);
+                assert_eq!(missed(&mut shard, reader, 0), []);
             });
         }
 
@@ -3111,10 +3215,12 @@ mod tests {
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                write(&test, &mut shard, a, &[20]);
-                shard.committed().await.expect("the commit ends");
-                assert_eq!(woken(&mut shard), []);
-                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                for stamp in [20, 30] {
+                    write(&test, &mut shard, a, &[stamp]);
+                    shard.committed().await.expect("the commit ends");
+                    assert_eq!(woken(&mut shard), []);
+                }
+                assert_eq!(missed(&mut shard, reader, 0), [seq(0, 1)]);
                 assert_eq!(woken(&mut shard), []);
             });
         }
@@ -3914,49 +4020,132 @@ mod tests {
         );
     }
 
-    /// A key set of the index at slot 2 with a `String` series.
-    fn string_series() -> Arc<KeySet> {
-        create_interner().intern(&[Group {
-            index: key(Slot::new(2)),
-            data: &[(key(Slot::new(3)), Type::String)],
-        }])
+    /// An index type, then each kind of type, with the raw values of 3 samples. A
+    /// variable series is its ends, zeros to the start of its elements, then them.
+    fn every_type() -> [(Type, Vec<u8>); 7] {
+        let le = |values: &[u32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let element = Scalar::U64;
+        let sides = types::sample::Sides {
+            rows: 2,
+            columns: 2,
+        };
+        [
+            (
+                Type::Scalar(Scalar::Stamp),
+                [10_i64, 20, 30].map(i64::to_le_bytes).concat(),
+            ),
+            (Type::String, [le(&[2, 2, 5]), b"abcde".to_vec()].concat()),
+            (Type::Bytes, [le(&[1, 3, 4]), vec![9, 8, 7, 6]].concat()),
+            (
+                Type::List { element, max: 2 },
+                [
+                    le(&[1, 1, 3, 0]),
+                    [4_u64, 5, 6].map(u64::to_le_bytes).concat(),
+                ]
+                .concat(),
+            ),
+            (
+                Type::Array {
+                    element: Scalar::F32,
+                    len: 2,
+                },
+                [0.5_f32, 1.5, 2.5, 3.5, 4.5, 5.5]
+                    .map(f32::to_le_bytes)
+                    .concat(),
+            ),
+            (
+                Type::Matrix {
+                    element: Scalar::I8,
+                    sides,
+                },
+                (1..=12).collect(),
+            ),
+            (Type::Scalar(Scalar::Bool), vec![1, 0, 1]),
+        ]
     }
 
-    #[test]
-    fn refuses_a_key_set_with_a_series_of_a_type_the_home_does_not_write() {
-        run(87, |test| async move {
-            let mut shard = test.shard(AREA).await;
-            let refused = shard.open_writer(writer("a", 2, &string_series()));
-            assert_eq!(
-                refused,
-                Err(writer::Error::Type {
-                    slot: Slot::new(3),
-                    data_type: Type::String,
-                })
-            );
-            let set = two_indexes();
-            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
-            let write = frame(&test.pool, &set, &[(2, &[10])]);
-            assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
-        });
-    }
-
-    #[test]
-    fn refuses_the_type_of_a_series_before_the_panic_of_an_index_not_carried() {
-        run(102, |test| async move {
-            let mut shard = test.shard(AREA).await;
+    /// Writes `count` samples of each series of `series`, an index then its data, in
+    /// the simulation `replay`, and checks that a reader and the stored body give them
+    /// back.
+    fn check_write_and_read(replay: u64, count: u32, series: Vec<(Type, Vec<u8>)>) {
+        run(replay, move |test| async move {
+            let data: Vec<(channel::Key, Type)> = (3..)
+                .zip(&series[1..])
+                .map(|(slot, &(data_type, _))| (key(Slot::new(slot)), data_type))
+                .collect();
             let set = create_interner().intern(&[Group {
-                index: key(Slot::new(3)),
-                data: &[(key(Slot::new(1)), Type::Bytes)],
+                index: key(Slot::new(2)),
+                data: &data,
             }]);
-            assert_eq!(
-                shard.open_writer(writer("a", 1, &set)),
-                Err(writer::Error::Type {
-                    slot: Slot::new(1),
-                    data_type: Type::Bytes,
-                })
-            );
+            let mut shard = test.shard(AREA).await;
+            let latest = shard.open_latest(Slot::new(2));
+            let marked = test.now();
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let lens: Vec<_> =
+                (0..).zip(&series).map(|(e, (_, v))| (e, v.len())).collect();
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Raw, &lens).expect("room");
+            for (entry, bytes) in write.iter_mut() {
+                bytes.copy_from_slice(&series[entry].1);
+            }
+            write.set_count(0, count);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(2, 0, count)][..]));
+            shard.committed().await.expect("the commit ends");
+            let count = usize::try_from(count).expect("a small count");
+            let decoded = |data_type: Type, bytes: &[u8]| -> (Type, Vec<u8>) {
+                let len = codec::validate(data_type, count, bytes).expect("valid");
+                let mut out = vec![0; len];
+                codec::decode(data_type, count, bytes, &mut out).expect("decodes");
+                (data_type, out)
+            };
+            let reader::Next::Frame(frame) = shard.take(latest) else {
+                panic!("a frame");
+            };
+            let read: Vec<_> = frame
+                .iter()
+                .map(|(entry, bytes)| decoded(set.entries()[entry].data_type, bytes))
+                .collect();
+            assert_eq!(read, series);
+            let ring = test.ring().await;
+            let data: Vec<_> = bodies(&ring, marked)
+                .into_iter()
+                .filter(|(tag, _)| *tag == 0)
+                .collect();
+            let stored: Vec<_> = stored::read(&data[0].1)
+                .map(|series| decoded(series.data_type, series.bytes))
+                .collect();
+            assert_eq!(stored, series);
         });
+    }
+
+    #[test]
+    fn writes_and_reads_a_series_of_each_type() {
+        check_write_and_read(87, 3, every_type().to_vec());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+        /// At most 3 data series of 16 samples, so the frame fits one record of
+        /// `BODY_MAX`.
+        #[test]
+        fn writes_and_reads_series_of_any_types_counts_and_ends(
+            types in proptest::collection::vec(data_type(0..=3, 0..=2), 1..4),
+            count in 1_u32..17,
+            state in proptest::prelude::any::<u64>(),
+        ) {
+            let stamps = (1..=i64::from(count)).flat_map(|n| (n * 10).to_le_bytes());
+            let index = (Type::Scalar(Scalar::Stamp), stamps.collect());
+            let data = (1..).zip(types).map(|(n, data_type)| {
+                (data_type, values(state.wrapping_add(n), count, data_type))
+            });
+            check_write_and_read(87, count, iter::once(index).chain(data).collect());
+        }
     }
 
     #[test]
@@ -3964,31 +4153,6 @@ mod tests {
         run(103, |test| async move {
             let shard = test.shard(AREA).await;
             assert!(std::ptr::eq(shard.pool(), &raw const *test.pool));
-        });
-    }
-
-    #[test]
-    fn refuses_a_lease_of_zero_before_the_type_of_a_series() {
-        run(88, |test| async move {
-            let mut shard = test.shard(AREA).await;
-            let zero = Writer {
-                lease: Some(Span::ZERO),
-                ..writer("a", 1, &string_series())
-            };
-            assert_eq!(
-                shard.open_writer(zero),
-                Err(writer::Error::Lease { span: Span::ZERO })
-            );
-        });
-    }
-
-    #[test]
-    fn refuses_the_type_of_a_series_as_unsynced_before_the_node_has_mesh_time() {
-        run(101, |test| async move {
-            let mut shard = test.unsynced().await;
-            shard.carry(Slot::new(2));
-            let a = shard.open_writer(writer("a", 1, &string_series()));
-            assert_eq!(a, Err(writer::Error::Unsynced));
         });
     }
 
@@ -4038,6 +4202,82 @@ mod tests {
             let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    /// A monotonic clock that counts its reads.
+    struct Counting {
+        clock: Clock,
+        reads: Arc<AtomicU64>,
+    }
+
+    impl env::clock::Driver for Counting {
+        fn now(&self) -> Monotonic {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.clock.now()
+        }
+
+        fn epoch(&self) -> Instant {
+            self.clock.epoch()
+        }
+
+        fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
+            Box::pin(Delegated(self.clock.sleep_until(Monotonic(0))))
+        }
+    }
+
+    /// A timer of the clock that [`Counting`] reads.
+    struct Delegated(env::clock::Sleep);
+
+    impl env::clock::Timer for Delegated {
+        fn poll_until(
+            self: Pin<&mut Self>,
+            deadline: Monotonic,
+            cx: &mut Context<'_>,
+        ) -> Poll<()> {
+            let sleep = &mut self.get_mut().0;
+            sleep.reset(deadline);
+            Pin::new(sleep).poll(cx)
+        }
+    }
+
+    #[test]
+    fn reads_the_clock_once_to_open_write_and_close() {
+        run(120, |test| async move {
+            let reads = Arc::new(AtomicU64::new(0));
+            let (clock, mesh) = clock::Clock::new(Clock::new(Counting {
+                clock: test.clock.clone(),
+                reads: Arc::clone(&reads),
+            }));
+            let wall = test.node.wall();
+            test.tasks.spawn(async move { clock.run(wall).await });
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            while mesh.now().mesh.is_none() {
+                test.clock.sleep(Span::from_nanos(1)).await;
+            }
+            let mut shard = Test::with(0, buffer, mesh);
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            let set = two_indexes();
+            // The clock task reads it too, but `sim` polls one task at a time, so no
+            // read of that task falls inside a call.
+            let count = || reads.load(Ordering::Relaxed);
+
+            let from = count();
+            let key = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            assert_eq!(count() - from, 1, "open_writer");
+
+            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
+            let from = count();
+            assert_eq!(
+                shard.write(key, LIVE, write),
+                Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..])
+            );
+            assert_eq!(count() - from, 1, "write");
+
+            let from = count();
+            shard.close_writer(key);
+            assert_eq!(count() - from, 1, "close_writer");
         });
     }
 

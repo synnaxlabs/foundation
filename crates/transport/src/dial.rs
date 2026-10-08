@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use env::clock::{Clock, Sleep};
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 use types::time::{Monotonic, Span};
 
 use crate::{Address, Error, quic};
@@ -173,11 +173,10 @@ mod tests {
 
     use env::net::udp;
     use sim::node::Node;
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use crate::testing::{self, IDLE, address, nodes, spans};
-    use crate::tls::public;
     use crate::{Address, Code, Error, Peer, Session};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
@@ -192,7 +191,7 @@ mod tests {
     fn serve(node: &Node) {
         testing::transport(node, SERVER, |transport, _| async move {
             let session = transport.accept().await.expect("a session");
-            assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
+            assert_eq!(session.peer(), Peer::Node(CLIENT.public()));
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
@@ -212,11 +211,11 @@ mod tests {
     fn dial(node: &Node, addresses: Vec<Address>, from: Span, to: Span) {
         testing::transport(node, CLIENT, move |transport, node| async move {
             let start = node.clock().now();
-            let dialed = transport.dial(public(&SERVER), &addresses).await;
+            let dialed = transport.dial(SERVER.public(), &addresses).await;
             let session = dialed.expect("a session");
             let took = node.clock().now() - start;
             assert!(from <= took && took < to, "{took:?}");
-            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
@@ -230,7 +229,7 @@ mod tests {
         attempts: Vec<(Address, Error)>,
     ) {
         testing::transport(node, CLIENT, move |transport, _| async move {
-            let peer = public(&SERVER);
+            let peer = SERVER.public();
             let dialed = transport.dial(peer, &addresses).await;
             assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));
         });
@@ -262,7 +261,7 @@ mod tests {
         }
         let out = Arc::clone(&dialed);
         testing::transport(&client, CLIENT, move |transport, node| async move {
-            let result = transport.dial(public(&SERVER), &addresses).await;
+            let result = transport.dial(SERVER.public(), &addresses).await;
             let peer = result.as_ref().map(Session::peer).map_err(Clone::clone);
             *out.lock().expect("a lock") = Some(peer);
             node.clock().sleep(spans(IDLE, 3)).await;
@@ -287,7 +286,7 @@ mod tests {
                 let (accepted, dialed) = break_as_it_connects(value, silent);
                 if accepted {
                     connected += 1;
-                    let peer = Ok(Peer::Node(public(&SERVER)));
+                    let peer = Ok(Peer::Node(SERVER.public()));
                     assert_eq!(dialed, peer, "silent {silent}, value {value}");
                 }
             }
@@ -305,11 +304,11 @@ mod tests {
         let at = vec![Address::Udp(address(&server))];
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let start = node.clock().now();
-            let session = transport.dial(public(&SERVER), &at).await;
+            let session = transport.dial(SERVER.public(), &at).await;
             let session = session.expect("a session");
             // The dial ends in the first poll after the pause, not at 1.5 ms.
             assert!(node.clock().now() - start >= spans(Span::MILLISECOND, 21));
-            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
@@ -445,7 +444,7 @@ mod tests {
             ];
             testing::transport(&client, CLIENT, move |transport, node| async move {
                 let clock = node.clock();
-                let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+                let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
                 let after_stagger =
                     super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
                 for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
@@ -505,7 +504,7 @@ mod tests {
             node.fail_udp(address(&node));
             // The carrier sees the break when its task next polls the socket.
             node.clock().sleep(Span::MILLISECOND).await;
-            let dialed = transport.dial(public(&SERVER), &[]).await;
+            let dialed = transport.dial(SERVER.public(), &[]).await;
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
@@ -523,7 +522,7 @@ mod tests {
         let silent = address(&sim.node(sim::node::Config::default()));
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let addresses = [Address::Udp(other), Address::Udp(silent)];
-            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+            let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -548,7 +547,7 @@ mod tests {
         let other = address(&impostor_node);
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let addresses = [Address::Udp(other), Address::Udp(PORT_ZERO)];
-            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+            let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -571,7 +570,7 @@ mod tests {
         let other = address(&impostor_node);
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let addresses = [Address::Udp(PORT_ZERO), Address::Udp(other)];
-            let mut dialed = pin!(transport.dial(public(&SERVER), &addresses));
+            let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -592,7 +591,7 @@ mod tests {
         let silent = address(&sim.node(sim::node::Config::default()));
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let (start, addresses) = (node.clock().now(), [Address::Udp(silent)]);
-            let dialed = transport.dial(public(&SERVER), &addresses).await;
+            let dialed = transport.dial(SERVER.public(), &addresses).await;
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
@@ -617,7 +616,7 @@ mod tests {
             Address::Udp(other),
             Address::Udp(PORT_ZERO),
         ];
-        let expected = public(&SERVER);
+        let expected = SERVER.public();
         let attempts = vec![
             (Address::Udp(silent), Error::TimedOut),
             (Address::Udp(other), Error::Authentication { expected }),
@@ -634,7 +633,7 @@ mod tests {
         let a = address(&client);
         let b = address(&sim.node(sim::node::Config::default()));
         let relay = Address::Relay {
-            node: public(&SERVER),
+            node: SERVER.public(),
             at: a,
         };
         let unspecified = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433);
@@ -660,7 +659,7 @@ mod tests {
     fn a_dial_with_no_address_is_unreachable_at_once() {
         let (mut sim, client, _) = nodes(0);
         testing::transport(&client, CLIENT, move |transport, node| async move {
-            let (start, peer) = (node.clock().now(), public(&SERVER));
+            let (start, peer) = (node.clock().now(), SERVER.public());
             let dialed = transport.dial(peer, &[]).await;
             let attempts = Vec::new();
             assert_eq!(dialed.err(), Some(Error::Unreachable { peer, attempts }));

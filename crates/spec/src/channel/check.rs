@@ -9,25 +9,31 @@ use types::name::Name;
 use super::{Channel, Edge, Kind};
 use crate::data_type::DataType;
 
-/// Checks the edges between `channels`: a data channel's index is an index channel,
-/// its quality is a data channel of type quality, an index's error channel is a data
-/// channel, and its control channel is a data channel on another index.
+/// Checks `channels`: each has its own key, a data channel's index is an index
+/// channel, its quality is a data channel of type quality, an index's error channel is
+/// a data channel, and its control channel is a data channel on another index. An edge
+/// to a key that two channels hold points at the first in name order.
 ///
 /// Gives every problem, in name order.
-///
-/// # Panics
-///
-/// When two channels have one key, which only a defect gives.
 #[must_use]
 pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
-    let mut keys = BTreeMap::new();
+    let mut keys: BTreeMap<channel::Key, (&Name, &Channel)> = BTreeMap::new();
+    let mut duplicates = BTreeMap::new();
     for (name, channel) in channels {
-        if let Some((first, _)) = keys.insert(channel.key, (name, channel)) {
-            panic!("`{first}` and `{name}` have the same key {}", channel.key);
+        if let Some(&(first, _)) = keys.get(&channel.key) {
+            let duplicate = Problem::Duplicate {
+                first: first.clone(),
+                second: name.clone(),
+                key: channel.key,
+            };
+            duplicates.insert(name, duplicate);
+        } else {
+            keys.insert(channel.key, (name, channel));
         }
     }
     let mut problems = Vec::new();
     for (name, channel) in channels {
+        problems.extend(duplicates.remove(name));
         for (edge, &to) in channel.kind.edges() {
             match keys.get(&to) {
                 None => problems.push(Problem::Dangling {
@@ -51,10 +57,22 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
     problems
 }
 
-/// An edge to a missing or wrong channel. `Display` gives the message: a lower-case
-/// clause with no final period. [`Problem::fix`] gives what to do instead.
+/// Two channels with one key, or an edge to a missing or wrong channel. `Display`
+/// gives the message: a lower-case clause with no final period. [`Problem::fix`] gives
+/// what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
+    /// The channel `second` has the key of `first`, which is before it in name order.
+    /// Keys are given once, so only a defect or a node that breaks the protocol gives
+    /// this. The message does not show the key.
+    Duplicate {
+        /// The first channel with the key.
+        first: Name,
+        /// A later channel with the key.
+        second: Name,
+        /// The key.
+        key: channel::Key,
+    },
     /// No channel has the key `to`. The message does not show the key.
     Dangling {
         /// The channel the edge starts at.
@@ -80,8 +98,19 @@ impl Problem {
     #[must_use]
     pub const fn fix(&self) -> &'static str {
         match self {
+            Self::Duplicate { .. } => {
+                "Report a defect: each channel gets its own key when it is first applied"
+            }
             Self::Dangling { .. } => "Point it at a channel that exists",
             Self::Wrong { edge, .. } => edge.need().1,
+        }
+    }
+
+    // The channel that the problem is at.
+    pub(crate) const fn name(&self) -> &Name {
+        match self {
+            Self::Duplicate { second, .. } => second,
+            Self::Dangling { from, .. } | Self::Wrong { from, .. } => from,
         }
     }
 }
@@ -89,6 +118,9 @@ impl Problem {
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Duplicate { first, second, .. } => {
+                write!(f, "`{first}` and `{second}` have the same key")
+            }
             Self::Dangling { from, edge, .. } => {
                 write!(f, "the {edge} of `{from}` points at no channel")
             }

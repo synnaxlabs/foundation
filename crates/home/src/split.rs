@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 
 use types::channel;
-use types::frame::key_set::{self, KeySet};
+use types::frame::key_set::KeySet;
 use types::frame::{self, Draft, Form};
 use types::sample::{Scalar, Type};
 
@@ -79,8 +79,7 @@ impl Scratch {
     ///
     /// # Panics
     ///
-    /// If `draft` is not of `set`, or holds a series whose type the home does not
-    /// write.
+    /// If `draft` is not of `set`.
     pub(crate) fn split<'a>(
         &'a mut self,
         set: &'a KeySet,
@@ -142,21 +141,21 @@ impl Scratch {
         for (entry, bytes) in draft.iter_mut() {
             let group = set.entries()[entry].group;
             let part = &mut self.parts[self.places[to_usize(group)]];
-            // Before the skip, so the panic does not depend on the series before it.
-            let scalar = scalar(set.entries()[entry].data_type);
             if part.check.is_err() {
                 continue;
             }
             let count = to_usize(part.count);
             let start = self.bytes.len();
+            let data_type = set.entries()[entry].data_type;
             let checked = match form {
-                Form::Raw => encode(&mut self.bytes, scalar, count, bytes),
+                Form::Raw => encode(&mut self.bytes, data_type, count, bytes),
                 Form::Encoded if entry == part.index => {
                     part.pending = true;
                     Ok(bytes.len())
                 }
-                Form::Encoded => codec::validate(Type::Scalar(scalar), count, bytes)
-                    .map(|_| bytes.len()),
+                Form::Encoded => {
+                    codec::validate(data_type, count, bytes).map(|_| bytes.len())
+                }
             };
             match checked {
                 Ok(len) => self.series.push(Series {
@@ -417,46 +416,15 @@ fn series(draft: &mut Draft, entry: usize) -> &[u8] {
         .expect("invariant: a checked series is in the frame")
 }
 
-/// The scalar of a series of `data_type`, or `None` for a type the home does not
-/// write.
-const fn written(data_type: Type) -> Option<Scalar> {
-    match data_type {
-        Type::Scalar(scalar) => Some(scalar),
-        Type::Array { .. }
-        | Type::Matrix { .. }
-        | Type::List { .. }
-        | Type::String
-        | Type::Bytes => None,
-    }
-}
-
-/// The first entry of `set` with a type the home does not write, if it has one.
-pub(crate) fn unwritten(set: &KeySet) -> Option<&key_set::Entry> {
-    set.entries()
-        .iter()
-        .find(|entry| written(entry.data_type).is_none())
-}
-
-/// The scalar of a series of `data_type`.
-///
-/// # Panics
-///
-/// If the home does not write a series of `data_type`: [`unwritten`] gives its entry.
-fn scalar(data_type: Type) -> Scalar {
-    written(data_type)
-        .unwrap_or_else(|| panic!("home does not write a series of {data_type:?} yet"))
-}
-
-/// Encodes `values`, `count` samples of `scalar`, onto the end of `bytes`, and returns
-/// the bytes written.
+/// Encodes `values`, `count` samples of `data_type`, onto the end of `bytes`, and
+/// returns the bytes written.
 fn encode(
     bytes: &mut Vec<u8>,
-    scalar: Scalar,
+    data_type: Type,
     count: usize,
     values: &[u8],
 ) -> Result<usize, codec::Error> {
     let start = bytes.len();
-    let data_type = Type::Scalar(scalar);
     bytes.resize(start + codec::max_len(data_type, values.len()), 0);
     let written =
         codec::Encoder::new(data_type).encode(count, values, &mut bytes[start..]);
@@ -464,8 +432,7 @@ fn encode(
     written
 }
 
-/// A series of `channel` that `codec` refuses at its group's count: a raw series of
-/// the wrong length, or an encoded series whose headers are not valid at that count.
+/// A series of `channel` that `codec` refuses at its group's count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Error {
     /// The series' channel.
@@ -496,9 +463,10 @@ mod tests {
     use types::channel::{self, Slot};
     use types::frame::key_set::Group;
     use types::frame::{Form, Frame, Path, Range};
+    use types::sample::Sides;
 
     use super::*;
-    use crate::common::{SCALARS, create_interner, create_pool, key};
+    use crate::common::{create_interner, create_pool, data_type, key, values};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -519,7 +487,12 @@ mod tests {
             for (&entry, values) in &samples.series {
                 let series = match form {
                     Form::Raw => values.clone(),
-                    Form::Encoded => encoded(set, entry, values),
+                    Form::Encoded => encoded(
+                        set,
+                        entry,
+                        held(set, entry, samples.count, values),
+                        values,
+                    ),
                 };
                 bytes.insert(entry, series);
             }
@@ -536,19 +509,23 @@ mod tests {
         draft
     }
 
-    fn scalar_of(set: &KeySet, entry: usize) -> Scalar {
-        match set.entries()[entry].data_type {
-            Type::Scalar(scalar) => scalar,
-            other => panic!("a test channel of type {other:?}"),
+    /// The count that a fixed-width series of the wrong length holds, so its encoded
+    /// form fails as its raw form does. A variable or zero-width series holds `count`.
+    fn held(set: &KeySet, entry: usize, count: u32, values: &[u8]) -> u32 {
+        match set.entries()[entry].data_type.width() {
+            Some(width) if width > 0 => {
+                u32::try_from(values.len() / width).expect("few")
+            }
+            _ => count,
         }
     }
 
-    /// `values` encoded as a series of `entry`, with as many samples as they hold.
-    fn encoded(set: &KeySet, entry: usize, values: &[u8]) -> Vec<u8> {
-        let scalar = scalar_of(set, entry);
-        let mut out = vec![0; codec::max_len(Type::Scalar(scalar), values.len())];
-        let count = values.len() / scalar.width();
-        let len = codec::Encoder::new(Type::Scalar(scalar))
+    /// `values`, `count` samples, encoded as a series of `entry`.
+    fn encoded(set: &KeySet, entry: usize, count: u32, values: &[u8]) -> Vec<u8> {
+        let data_type = set.entries()[entry].data_type;
+        let count = usize::try_from(count).expect("a small count");
+        let mut out = vec![0; codec::max_len(data_type, values.len())];
+        let len = codec::Encoder::new(data_type)
             .encode(count, values, &mut out)
             .expect("values that fit the count");
         out.truncate(len);
@@ -556,11 +533,11 @@ mod tests {
     }
 
     fn decoded(set: &KeySet, entry: usize, count: u32, bytes: &[u8]) -> Vec<u8> {
-        let scalar = scalar_of(set, entry);
+        let data_type = set.entries()[entry].data_type;
         let count = usize::try_from(count).expect("a small count");
-        let mut out = vec![0; count * scalar.width()];
-        codec::decode(Type::Scalar(scalar), count, bytes, &mut out)
-            .expect("an encoded series");
+        let len = codec::validate(data_type, count, bytes).expect("an encoded series");
+        let mut out = vec![0; len];
+        codec::decode(data_type, count, bytes, &mut out).expect("an encoded series");
         out
     }
 
@@ -715,8 +692,8 @@ mod tests {
                     .filter(|&entry| set.entries()[entry].group == group)
                     .map(|entry| {
                         let state = u64::try_from(entry + 1).expect("few");
-                        let width = scalar_of(&set, entry).width();
-                        (entry, values(state, count, width))
+                        let data_type = set.entries()[entry].data_type;
+                        (entry, values(state, count, data_type))
                     })
                     .collect();
                 (group, Samples { count, series })
@@ -921,6 +898,146 @@ mod tests {
                 };
                 assert_eq!(groups, [(1, Err(error))]);
             }
+
+            #[test]
+            fn refuses_a_variable_series_that_codec_refuses_in_either_form() {
+                let element = Scalar::U64;
+                let set = create_interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[
+                        (key(Slot::new(2)), Type::String),
+                        (key(Slot::new(3)), Type::List { element, max: 1 }),
+                    ],
+                }]);
+                let index = [10_u64, 20].map(u64::to_le_bytes).concat();
+                let text =
+                    [&3_u32.to_le_bytes()[..], &1_u32.to_le_bytes(), b"abc"].concat();
+                let wide = Type::List { element, max: 5 };
+                let ends = [0_u32, 2].map(u32::to_le_bytes).concat();
+                let raw =
+                    [&ends[..], &[4_u64, 5].map(u64::to_le_bytes).concat()].concat();
+                let mut list = vec![0; codec::max_len(wide, raw.len())];
+                let len = codec::Encoder::new(wide)
+                    .encode(2, &raw, &mut list)
+                    .expect("valid at max 5");
+                list.truncate(len);
+                let pool = create_pool(1 << 16);
+                let draft = |form: Form, entries: &[(usize, &[u8])]| {
+                    let lens: Vec<_> =
+                        entries.iter().map(|(e, b)| (*e, b.len())).collect();
+                    let mut draft = Draft::new(&pool, &set, form, &lens).expect("room");
+                    for (entry, series) in draft.iter_mut() {
+                        let (_, bytes) = entries
+                            .iter()
+                            .find(|(e, _)| *e == entry)
+                            .expect("an entry");
+                        series.copy_from_slice(bytes);
+                    }
+                    draft.set_count(0, 2);
+                    draft
+                };
+                let encoded_index = encoded(&set, 0, 2, &index);
+                let ends = codec::Error::Ends {
+                    sample: 1,
+                    end: 1,
+                    previous: 3,
+                };
+                let long = codec::Error::Long {
+                    sample: 1,
+                    len: 2,
+                    max: 1,
+                };
+                let cases = [
+                    (draft(Form::Raw, &[(0, &index), (1, &text)]), 2, ends),
+                    (
+                        draft(Form::Encoded, &[(0, &encoded_index), (2, &list)]),
+                        3,
+                        long,
+                    ),
+                ];
+                for (draft, slot, error) in cases {
+                    let mut scratch = Scratch::default();
+
+                    let mut split = scratch.split(&set, draft);
+
+                    let channel = key(Slot::new(slot));
+                    assert_eq!(
+                        groups(&mut split),
+                        [(0, Err(Error { channel, error }))]
+                    );
+                }
+            }
+
+            #[test]
+            fn refuses_an_array_or_matrix_series_that_codec_refuses_in_either_form() {
+                let element = Scalar::U8;
+                let sides = Sides {
+                    rows: 2,
+                    columns: 2,
+                };
+                let set = create_interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[
+                        (key(Slot::new(2)), Type::Array { element, len: 2 }),
+                        (key(Slot::new(3)), Type::Matrix { element, sides }),
+                    ],
+                }]);
+                let index = [10_u64, 20].map(u64::to_le_bytes).concat();
+                let encoded_index = encoded(&set, 0, 2, &index);
+                let tagged = |entry, values: &[u8]| {
+                    let mut series = encoded(&set, entry, 2, values);
+                    series[0] = 9;
+                    series
+                };
+                let length =
+                    |expected, actual| codec::Error::Length { expected, actual };
+                let tag = codec::Error::Tag { vector: 0, tag: 9 };
+                let pool = create_pool(1 << 16);
+                let cases = [
+                    (
+                        Form::Raw,
+                        vec![(0, index.clone()), (1, vec![1; 3])],
+                        2,
+                        length(4, 3),
+                    ),
+                    (
+                        Form::Raw,
+                        vec![(0, index.clone()), (2, vec![7; 7])],
+                        3,
+                        length(8, 7),
+                    ),
+                    (
+                        Form::Encoded,
+                        vec![(0, encoded_index.clone()), (1, tagged(1, &[5; 4]))],
+                        2,
+                        tag.clone(),
+                    ),
+                    (
+                        Form::Encoded,
+                        vec![(0, encoded_index), (2, tagged(2, &[7; 8]))],
+                        3,
+                        tag,
+                    ),
+                ];
+                for (form, entries, slot, error) in cases {
+                    let lens: Vec<_> =
+                        entries.iter().map(|(e, b)| (*e, b.len())).collect();
+                    let mut draft = Draft::new(&pool, &set, form, &lens).expect("room");
+                    for ((_, series), (_, bytes)) in draft.iter_mut().zip(&entries) {
+                        series.copy_from_slice(bytes);
+                    }
+                    draft.set_count(0, 2);
+                    let mut scratch = Scratch::default();
+
+                    let mut split = scratch.split(&set, draft);
+
+                    let channel = key(Slot::new(slot));
+                    assert_eq!(
+                        groups(&mut split),
+                        [(0, Err(Error { channel, error }))]
+                    );
+                }
+            }
         }
     }
 
@@ -931,7 +1048,7 @@ mod tests {
         fn gives_the_error_of_an_encoded_index_from_its_stamps() {
             let set = one_index();
             let pool = create_pool(1 << 16);
-            let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
+            let mut index = encoded(&set, 0, 1, &5_u64.to_le_bytes());
             index[0] = 9;
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, encoded_index(&pool, &set, 1, &index));
@@ -998,7 +1115,7 @@ mod tests {
         #[test]
         fn gives_an_index_of_many_stamps_one_vector_at_a_time() {
             let set = one_index();
-            let vector = encoded(&set, 0, &[7_u64.to_le_bytes(); 1024].concat());
+            let vector = encoded(&set, 0, 1024, &[7_u64.to_le_bytes(); 1024].concat());
             let count = 1 << 22;
             let index = vector.repeat(count / 1024);
             let pool = create_pool(1 << 20);
@@ -1053,7 +1170,7 @@ mod tests {
         fn refuses_an_encoded_index_with_bytes_after_its_last_vector() {
             let set = one_index();
             let pool = create_pool(1 << 16);
-            let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
+            let mut index = encoded(&set, 0, 1, &5_u64.to_le_bytes());
             index.push(0);
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, encoded_index(&pool, &set, 1, &index));
@@ -1076,7 +1193,7 @@ mod tests {
         fn panics_after_the_frame_of_its_group() {
             let set = one_index();
             let pool = create_pool(1 << 16);
-            let index = encoded(&set, 0, &5_u64.to_le_bytes());
+            let index = encoded(&set, 0, 1, &5_u64.to_le_bytes());
             let mut scratch = Scratch::default();
             let mut split = scratch.split(&set, encoded_index(&pool, &set, 1, &index));
             let _frame = split.frame(&pool, 0).expect("room");
@@ -1247,7 +1364,7 @@ mod tests {
             fn on_a_group_whose_encoded_index_is_not_valid() {
                 let set = one_index();
                 let pool = create_pool(1 << 16);
-                let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
+                let mut index = encoded(&set, 0, 1, &5_u64.to_le_bytes());
                 index[0] = 9;
                 let mut scratch = Scratch::default();
                 let mut split =
@@ -1263,7 +1380,7 @@ mod tests {
             fn on_a_group_read_past_the_decode_error_of_its_index() {
                 let set = one_index();
                 let pool = create_pool(1 << 16);
-                let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
+                let mut index = encoded(&set, 0, 1, &5_u64.to_le_bytes());
                 index[0] = 9;
                 let mut scratch = Scratch::default();
                 let mut split =
@@ -1318,90 +1435,6 @@ mod tests {
 
                 drop(split.frame(&pool, 1));
             }
-
-            /// Splits a frame of one stamp at `count` and a `String` series after it.
-            fn split_a_string_series(count: u32) {
-                let set = create_interner().intern(&[Group {
-                    index: key(Slot::new(1)),
-                    data: &[(key(Slot::new(2)), Type::String)],
-                }]);
-                let samples = Samples {
-                    count,
-                    series: BTreeMap::from([
-                        (0, 5_u64.to_le_bytes().to_vec()),
-                        (1, b"text".to_vec()),
-                    ]),
-                };
-                let write = BTreeMap::from([(0, samples)]);
-                let pool = create_pool(1 << 16);
-
-                Scratch::default().split(&set, draft(&pool, &set, Form::Raw, &write));
-            }
-
-            #[test]
-            #[should_panic(expected = "home does not write a series of String yet")]
-            fn on_a_series_of_a_type_the_home_does_not_write() {
-                split_a_string_series(1);
-            }
-
-            #[test]
-            #[should_panic(expected = "home does not write a series of String yet")]
-            fn on_a_series_of_such_a_type_after_an_index_that_does_not_fit() {
-                split_a_string_series(2);
-            }
-        }
-    }
-
-    mod unwritten {
-        use super::*;
-
-        #[test]
-        fn gives_none_for_a_key_set_of_scalars() {
-            assert_eq!(unwritten(&two_groups()), None);
-        }
-
-        #[test]
-        fn gives_none_for_a_series_of_each_scalar() {
-            for scalar in SCALARS {
-                let set = create_interner().intern(&[Group {
-                    index: key(Slot::new(1)),
-                    data: &[(key(Slot::new(2)), Type::Scalar(scalar))],
-                }]);
-
-                assert_eq!(unwritten(&set), None, "{scalar:?}");
-            }
-        }
-
-        #[test]
-        fn gives_the_first_entry_of_each_type_that_is_not_a_scalar() {
-            let element = Scalar::F32;
-            let types = [
-                Type::Array { element, len: 3 },
-                Type::Matrix {
-                    element,
-                    sides: types::sample::Sides {
-                        rows: 2,
-                        columns: 3,
-                    },
-                },
-                Type::List { element, max: 3 },
-                Type::String,
-                Type::Bytes,
-            ];
-            for data_type in types {
-                let set = create_interner().intern(&[Group {
-                    index: key(Slot::new(1)),
-                    data: &[
-                        (key(Slot::new(2)), Type::Scalar(Scalar::U8)),
-                        (key(Slot::new(4)), data_type),
-                        (key(Slot::new(5)), Type::Bytes),
-                    ],
-                }]);
-
-                let entry = unwritten(&set).expect("an entry");
-
-                assert_eq!((entry.slot, entry.data_type), (Slot::new(4), data_type));
-            }
         }
     }
 
@@ -1447,28 +1480,11 @@ mod tests {
         }
     }
 
-    /// The values of one series: `count` samples of `width` bytes from `state`, with
-    /// runs so that more than one codec applies.
-    fn values(mut state: u64, count: u32, width: usize) -> Vec<u8> {
-        let len = usize::try_from(count).expect("a small count") * width;
-        let mut out = Vec::with_capacity(len);
-        while out.len() < len {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let run = usize::try_from(state % 5).expect("small") * width;
-            let byte = u8::try_from(state >> 56).expect("one byte");
-            out.extend(std::iter::repeat_n(byte, run.max(1)));
-        }
-        out.truncate(len);
-        out
-    }
-
-    /// A key set of 1 to 4 groups of scalar channels, with interleaved slots, and a
-    /// write of some of its groups and entries.
+    /// A key set of 1 to 4 groups of channels of any type, with interleaved slots,
+    /// and a write of some of its groups and entries.
     fn writes() -> impl Strategy<Value = (Arc<KeySet>, BTreeMap<u32, Samples>)> {
         let group = (
-            prop::collection::vec(prop::sample::select(&SCALARS[..]), 0..4),
+            prop::collection::vec(data_type(0..=6, 0..=2), 0..4),
             any::<bool>(),
             0_u32..1100,
         );
@@ -1484,11 +1500,11 @@ mod tests {
                 let mut slots = slots.into_iter().map(Slot::new);
                 let data: Vec<(Slot, Vec<(Slot, Type)>)> = groups
                     .iter()
-                    .map(|(scalars, ..)| {
+                    .map(|(types, ..)| {
                         let index = slots.next().expect("a slot per channel");
-                        let data = scalars
+                        let data = types
                             .iter()
-                            .map(|&s| (slots.next().expect("a slot"), Type::Scalar(s)))
+                            .map(|&t| (slots.next().expect("a slot"), t))
                             .collect();
                         (index, data)
                     })
@@ -1524,9 +1540,9 @@ mod tests {
                         if k > 0 && (state >> (k + n)) & 1 == 1 {
                             continue;
                         }
-                        let width = scalar_of(&set, entry).width();
                         let state = state ^ u64::try_from(entry + 1).expect("few");
-                        series.insert(entry, values(state, count, width));
+                        let data_type = set.entries()[entry].data_type;
+                        series.insert(entry, values(state, count, data_type));
                     }
                     write.insert(group, Samples { count, series });
                 }

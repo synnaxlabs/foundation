@@ -4,8 +4,8 @@
 
 use std::future::pending;
 
+use transport::Class;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code};
 
 use super::*;
 
@@ -648,4 +648,103 @@ fn a_task_that_waits_in_a_send_ends_when_the_group_stops() {
         stop(&node, &mesh);
         pending::<()>().await;
     });
+}
+
+// Serves each stream that node 2 opens to `mesh`.
+fn serve_each(mesh: &Mesh, tasks: &Tasks, transport: Rc<Transport>) {
+    let (serving, streams) = (mesh.clone(), tasks.clone());
+    tasks.spawn(async move {
+        let session = transport.accept().await.unwrap();
+        while let Ok(mut incoming) = session.accept().await {
+            let mesh = serving.clone();
+            streams.spawn(async move {
+                let Ok(Some(_)) = incoming.receiver.recv().await else {
+                    return;
+                };
+                drop(mesh.serve(public(2), incoming).await);
+            });
+        }
+    });
+}
+
+impl Peer {
+    /// Keeps node 1 the leader with a heartbeat reply at each tick, reads nothing
+    /// more from it, and stops its stream with `code` at tick `stop`.
+    async fn follow(
+        &self,
+        replies: &mut Sender,
+        receiver: Receiver,
+        stop: u32,
+        code: Code,
+    ) {
+        let mut receiver = Some(receiver);
+        let clock = self.node.clock();
+        for tick in 0..400 {
+            if tick == stop {
+                receiver.take().unwrap().stop(code);
+            }
+            let mut ready = Ready {
+                messages: vec![raft::Message {
+                    term: Term(1),
+                    ..message(2, 1, Body::HeartbeatReply)
+                }],
+                ..Ready::default()
+            };
+            common::signer(2).sign(&mut ready);
+            let reply = Message::Raft(ready.messages.remove(0)).encode();
+            if replies.send(self.block(&reply)).await.is_err() {
+                return;
+            }
+            clock.sleep(TICK).await;
+        }
+    }
+}
+
+// Node 1 leads, and its task for node 2 waits in a send. Its proposal waits for a
+// block of the pool when voter 2 answers `removed`. The group stops while the write
+// of the entry waits, so the proposal gives that stop.
+#[test]
+fn a_proposal_whose_write_waits_gives_a_removed_stop() {
+    let outcome = Arc::new(Mutex::new(None));
+    let written = Arc::clone(&outcome);
+    let mesh = move |node: sim::node::Node, tasks: Tasks| async move {
+        let pool = small_pool();
+        let config = create_config(&node, &tasks, Rc::clone(&pool));
+        let transport = Rc::clone(&config.transport);
+        let mesh = Mesh::open(config).await.unwrap();
+        let clock = node.clock();
+        serve_each(&mesh, &tasks, transport);
+        lead(&mesh, &clock, home(1)).await;
+        clock.sleep(seconds(10)).await;
+        for _ in 0..2 {
+            assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
+        }
+        let _blocks = fill(&pool);
+        let mut call = pin!(mesh.propose_data(vec![1]));
+        assert!(now(call.as_mut()).await.is_pending());
+        clock.sleep(seconds(2)).await;
+        assert!(
+            now(call.as_mut()).await.is_pending(),
+            "the write did not wait"
+        );
+        assert_eq!(mesh.propose_data(vec![2]).await, Err(exhausted(61)));
+        let proposed = within(&clock, seconds(20), call).await;
+        let watched = mesh.watch(INDEX).next().await;
+        *written.lock().unwrap() = Some((proposed, watched));
+        pending::<()>().await;
+    };
+    let mut sim = Sim::new(sim::Config::default());
+    let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
+    start(&nodes[0], "mesh", mesh);
+    drop(start_peer(&nodes[1], 2, 1472, |peer| async move {
+        let session = peer.session().await;
+        let mut receiver = stream(&session).await;
+        let mut replies = peer.elect(&mut receiver).await;
+        peer.follow(&mut replies, receiver, 150, Code(17)).await;
+        pending::<()>().await;
+    }));
+    sim.run_for(seconds(90)).unwrap();
+    let removed = Stopped::Removed { by: key(2) };
+    let expected = (Some(Err(Error::Stopped(removed.clone()))), Err(removed));
+    assert_eq!(outcome.lock().unwrap().take(), Some(expected));
 }

@@ -1,9 +1,11 @@
 use std::fmt;
 
 use raft::Position;
-use types::node::{self, PublicKey};
+use types::ed25519::PublicKey;
+use types::node;
 
 use crate::change::Unknown;
+use crate::pointer::Pointer;
 use crate::region::Unfit;
 use crate::{claim, log};
 
@@ -20,8 +22,17 @@ pub enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a member that is not a voter of this node's configuration.
+    /// A request from a member that is not a voter of this node's configuration, and
+    /// that no committed configuration removed.
     NotVoter {
+        /// The sender.
+        from: node::Key,
+    },
+    /// A request from `from`, which a committed configuration removed: an earlier
+    /// committed configuration held it, and the last one lacks it. The stream stops
+    /// with the `removed` code, and `from` stops its group when this node is a voter
+    /// of its configuration.
+    Removed {
         /// The sender.
         from: node::Key,
     },
@@ -55,6 +66,24 @@ pub enum Error {
     Stream(transport::Error),
     /// The group stopped.
     Stopped(Stopped),
+    /// The spec pointer is not the base of a spec change, so another change applied
+    /// first. Read the spec again and apply on top of it.
+    Stale {
+        /// The base of the change.
+        base: Pointer,
+        /// The pointer when the change applied.
+        pointer: Pointer,
+    },
+    /// The tree of a spec has more chunks than one change lists. Apply a smaller spec.
+    Large {
+        /// The count of chunks of the tree.
+        chunks: usize,
+        /// The most chunks that one change lists.
+        most: usize,
+    },
+    /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
+    /// each problem as [`spec::region::Problem::fix`] says.
+    Problems(Vec<spec::region::Problem>),
 }
 
 impl fmt::Display for Error {
@@ -70,6 +99,10 @@ impl fmt::Display for Error {
             Self::NotVoter { from } => {
                 write!(f, "node {from} sent a request, but it is not a voter")
             }
+            Self::Removed { from } => write!(
+                f,
+                "node {from} sent a request, but a committed configuration removed it"
+            ),
             Self::PeerNotVoter { peer } => write!(
                 f,
                 "the peer with the public key {peer} forwarded a change, but no voter \
@@ -92,6 +125,24 @@ impl fmt::Display for Error {
             Self::Malformed => f.write_str("a message on a mesh stream is not valid"),
             Self::Stream(cause) => write!(f, "a mesh stream failed: {cause}"),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
+            Self::Stale { base, pointer } => write!(
+                f,
+                "the spec changed: the pointer is {pointer}, not the base {base}"
+            ),
+            Self::Large { chunks, most } => write!(
+                f,
+                "the spec has {chunks} chunks, more than the {most} that one change \
+                 lists"
+            ),
+            Self::Problems(problems) => {
+                f.write_str("the spec has problems")?;
+                let mut separator = ": ";
+                for problem in problems {
+                    write!(f, "{separator}{problem}")?;
+                    separator = "; ";
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -135,6 +186,12 @@ pub enum Stopped {
         /// Why its bytes are not a change.
         cause: Unknown,
     },
+    /// Voter `by` answered `removed`: a committed configuration lacks this node. Open
+    /// the mesh again only after a join that gives a new configuration.
+    Removed {
+        /// The voter that answered.
+        by: node::Key,
+    },
     /// Each `Mesh` of the group dropped. Only `Watch::next` gives it: get a new watch
     /// from the mesh that opens next.
     Dropped,
@@ -148,6 +205,10 @@ impl fmt::Display for Stopped {
                 f,
                 "the committed entry at index {} of term {} is not a change: {cause}",
                 at.index, at.term.0
+            ),
+            Self::Removed { by } => write!(
+                f,
+                "voter {by} answered removed: a committed configuration lacks this node"
             ),
             Self::Dropped => f.write_str("each mesh of the group dropped"),
         }
