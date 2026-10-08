@@ -107,7 +107,9 @@ impl Spawned {
             drop(slot);
             let running = self.running.upgrade().expect("invariant: a live scope");
             let done = running.borrow_mut().remove(&self.key);
-            // A future's drop may do anything, so it runs with no borrow held.
+            // A future's drop may do anything, so it runs with no borrow held, and with
+            // no reference to the map, so that a task it polls sees its scope drop.
+            drop(running);
             drop(done);
         }
         polled
@@ -363,5 +365,30 @@ mod tests {
         drop_at_completion(scope, &queued);
         assert_eq!(*polled.borrow(), vec![Poll::Ready(()); 16]);
         assert_eq!(runs.get(), 1, "a future runs no more once its scope drops");
+    }
+
+    #[test]
+    fn a_task_that_drops_its_scope_in_a_drop_at_completion_ends() {
+        let (scope, queued) = scope();
+        let owner = Rc::new(RefCell::new(Some(scope)));
+        let other: Rc<RefCell<Option<Task>>> = Rc::default();
+        let spawn = |future| owner.borrow_mut().as_mut().unwrap().spawn(future);
+        spawn(drop_scope(&owner, Poll::Pending));
+        *other.borrow_mut() = Some(take(&queued));
+        let polled: Polled = Rc::default();
+        let guard = PollsOnDrop {
+            task: Rc::clone(&other),
+            polled: Rc::clone(&polled),
+        };
+        spawn(Box::pin(poll_fn(move |_| {
+            let _ = &guard;
+            Poll::Ready(())
+        })));
+        let mut task = take(&queued);
+        let (waker, _) = waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(task.as_mut().poll(&mut cx), Poll::Ready(()));
+        assert!(owner.borrow().is_none());
+        assert_eq!(*polled.borrow(), vec![Poll::Ready(())]);
     }
 }
