@@ -1876,12 +1876,12 @@ How to read this record:
   caller and must own its ranges (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
   `send_parts` gives the carrier one slice of the block for each run of adjacent parts
-  over 1452 bytes. It copies each stretch of shorter runs and zeros between them into
-  one buffer, which goes to noq in one `write`. The write reads the caller's parts, and
-  the stream keeps only the parts that the carrier did not take, the first one cut at
-  the first byte not taken, in a list that keeps its capacity. Lost: a list of slices
-  and stretches built for each message, because it costs each part on each send. Decided
-  by `laptop.architect-2` (#68, 2026-10-07 19:01 UTC:
+  over 1452 bytes. It copies each stretch of shorter runs and zeros between them. The
+  write reads the caller's parts, and the stream keeps only the parts that the carrier
+  did not take, the first one cut at the first byte not taken, in a list that keeps its
+  capacity. Lost: a list of slices and stretches built for each message, because it
+  costs each part on each send. Decided by `laptop.architect-2` (#68, 2026-10-07 19:01
+  UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
   2026-10-07 20:44 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911). The
@@ -1897,7 +1897,8 @@ How to read this record:
   copied twice, a cut copies up to 16 KiB again, and no source gives the 16 KiB. Decided
   by `laptop.architect-2` (#68, 2026-10-08 07:46 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055243052). The
-  buffer is the connection's, and the stretch goes into it in one walk of its parts.
+  buffer is the connection's and keeps the capacity of the longest stretch, at most
+  `message_bytes_max`. The stretch goes into it in one walk of its parts.
   Lost: a walk that sizes the stretch, then a walk that copies it into a new buffer of
   its length, because the second walk costs more than the second copy (2.31x
   copy-then-send for 1000 ranges of 8 B); a copy into a new `Vec` as the walk goes,
