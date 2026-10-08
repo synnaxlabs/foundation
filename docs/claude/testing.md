@@ -6,10 +6,11 @@ names rule N in `docs/research/r16-rust-guides.md`.
 ## Injection
 
 Every component gets clock, network, disk, and randomness as inputs (`env`). Production
-passes the real ones. Tests pass the simulated ones from `sim`, except the tests of `os`
-itself and a process test (Process tests). Nothing reads the OS clock, the network, the
-disk, or a random source directly. Clippy's `disallowed-methods` list in `clippy.toml`
-enforces this. Only `os` implements the `env` seams and calls the OS, sockets included.
+passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
+clock, the network, the disk, or a random source directly. Clippy's `disallowed-methods`
+list in `clippy.toml` enforces this. Only `os` implements the `env` seams and calls the
+OS, sockets included. Three kinds of test are exceptions: the tests of `os` itself, a
+process test (Process tests), and a test that lists the inputs in `oracles/fuzz/`.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
@@ -67,10 +68,9 @@ logic that a simulated test can reach.
 
 - It lives in `crates/node/tests/it/`: Cargo sets `CARGO_BIN_EXE_foundation` only for
   the integration tests and benchmarks of `node`.
-- It takes each seam it needs (a clock for a deadline, files) from `os`, so the
-  `disallowed-methods` list holds for it too.
-- A test that starts a node makes its own temporary data directory and removes it at the
-  end.
+- It takes its clock from `os`, so the `disallowed-methods` list holds for it too.
+- A test that starts a node makes its own temporary data directory with `std::fs`, as
+  the tests of `os` do, and removes it at the end.
 - Each listener of the node binds port 0 on loopback, and the test reads the port it
   got. No fixed port, and nothing outside loopback.
 - Each wait (for output, for an exit, for a condition) ends at a deadline, and a missed
