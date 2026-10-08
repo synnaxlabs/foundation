@@ -434,8 +434,9 @@ fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
 
 /// Clang defines no `__FLOAT_WORD_ORDER__`, so `config.h` must find the float order of
 /// each target from its other macros, or the copy encodes floats on its slow path with
-/// `long double` helpers. A big-endian target must take the slow path. Each system
-/// header is empty, so only the predefined macros of the target decide.
+/// `long double` helpers. A big-endian target must not copy floats as they lie in
+/// memory. Each system header is empty, so only the predefined macros of the target
+/// decide the float order.
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs Clang")]
 fn the_copy_copies_floats_as_they_lie_in_memory_on_little_endian_targets() {
