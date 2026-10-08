@@ -77,7 +77,7 @@ fn main() {
             );
             assert_eq!(
                 out.ended, end,
-                "{reading:?}, {len} bytes, end read {end}: the stream ends after the message"
+                "{reading:?}, {len} bytes, end read {end}: the end of the stream"
             );
             assert!(
                 out.kept <= KEPT_MAX,
