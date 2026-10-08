@@ -5327,10 +5327,10 @@ How to read this record:
   rule. A program that breaks it gets `Unadmitted`, `Message` with `Kind`, or a served
   request, by the order in which the node reads its headers (`laptop.architect`,
   2026-10-08T19:18:29Z,
-  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067297121). Lost: a node that holds each request stream
-  until it admits a hello, which adds a queue, its bound, and its timeout to `hub` to
-  save one round trip for each session. Decided by `laptop.architect`
-  (2026-10-08T18:16:38Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067297121).
+  Lost: a node that holds each request stream until it admits a hello, which adds a
+  queue, its bound, and its timeout to `hub` to save one round trip for each session.
+  Decided by `laptop.architect` (2026-10-08T18:16:38Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520). The
   sentence on the hello stream is by `laptop.architect` (2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418),
