@@ -3361,11 +3361,14 @@ How to read this record:
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
-  `Watch::next`, and `Mesh::member` (#562). `mesh` gives no `Mesh::key`: a crate that
-  holds a `Mesh` reads this node's key from its own config, as the hub reads
-  `hub::Config::node` (`laptop.architect`, 2026-10-08T18:42:42Z:
+  `Watch::next`, and `Mesh::member` (#562). Approved by `laptop.architect`,
+  2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `mesh`
+  gives no `Mesh::key`: a crate that holds a `Mesh` reads this node's key from its own
+  config, as the hub reads `hub::Config::node` (`laptop.architect`,
+  2026-10-08T18:42:42Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
-  Approved by `laptop.architect`, 2026-10-07T23:31:29Z:
+  Supersedes the approval of `Mesh::key` in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `next`
   gives `Stopped`, which holds the cause types `log::Error` and `change::Unknown`, each
   public in its own module, so a caller can match the exact cause. `next` gives
@@ -3404,7 +3407,14 @@ How to read this record:
   open. `State::new` takes the homes, so the first state holds them. An index with no
   entry has no home until a spec change gives one (#1931; `laptop.architect`,
   2026-10-08T18:35:16Z:
-  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). At
+  each open, the state starts at the founding, so until the replay a watch can give a
+  founding home that the log moved, as at a follower behind the leader. A home that
+  the mesh names is never the authority to write. Trigger: before a production path
+  moves a home, the home takes a write only while it holds its node lease, so a node
+  whose state is old takes no write as a home that it lost (`laptop.architect`,
+  2026-10-08T19:28:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6067470813). A
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
   stays its one check, of the members and voters. It checks no definition or home: the
