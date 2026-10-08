@@ -84,9 +84,10 @@ pub fn entropy() -> env::entropy::Entropy {
 /// A panic ends the shard only where panics unwind, as in tests. A release build
 /// aborts the process at a panic. Tokio catches a panic in the poll or the drop of a
 /// task that code spawns with `tokio::spawn` or `tokio::task::spawn_local`, not
-/// through [`env::tasks::Tasks`], and the shard runs on. A panic in a drop that such a
-/// panic starts, of the task or of the panic's payload, can end the shard or abort the
-/// process.
+/// through [`env::tasks::Tasks`], and the shard runs on. Tokio drops such a task
+/// during the unwind of a panic in its poll, so a panic in that drop aborts the
+/// process. A panic in the drop of the payload of a panic can escape Tokio's catches
+/// and end the shard.
 ///
 /// # Errors
 ///
@@ -103,10 +104,12 @@ pub fn shards() -> Result<env::shards::Shards, Error> {
 /// The body runs in the context of the runtime but outside its `block_on`, so it may
 /// start and block on a Tokio runtime of its own. A panic of a body, in its call, its
 /// poll, or its drop, makes its join give [`env::thread::Panicked`], where panics
-/// unwind. Tokio catches a panic in the poll or the drop of a task that the body
-/// spawns with `tokio::spawn` or `tokio::task::spawn_local`, and the thread runs on. A
-/// panic in a drop that such a panic starts, of the task or of the panic's payload,
-/// can end the thread or abort the process.
+/// unwind, but a panic in a drop during the unwind of a panic aborts the process.
+/// Tokio catches a panic in the poll or the drop of a task that the body spawns with
+/// `tokio::spawn` or `tokio::task::spawn_local`, and the thread runs on. Tokio drops
+/// such a task during the unwind of a panic in its poll, so a panic in that drop
+/// aborts the process. A panic in the drop of the payload of a panic can escape
+/// Tokio's catches and end the thread.
 ///
 /// # Errors
 ///

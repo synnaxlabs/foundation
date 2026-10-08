@@ -38,9 +38,9 @@ impl Handle {
     ///
     /// # Errors
     ///
-    /// [`Panicked`] when the thread panicked. A panic in the main future of a shard,
-    /// in a task of its [`Tasks`](crate::tasks::Tasks), or in the body of a dedicated
-    /// thread does so.
+    /// [`Panicked`] when the thread panicked, as
+    /// [`Shards::start`](crate::shards::Shards::start) and
+    /// [`Threads::start`](crate::threads::Threads::start) state.
     ///
     /// ```
     /// fn wait(handle: env::thread::Handle) -> Result<(), env::thread::Panicked> {
@@ -100,9 +100,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Why a thread failed after it started: it panicked, as at a panic in the main
-/// future of a shard, in a task of its [`Tasks`](crate::tasks::Tasks), or in the body
-/// of a dedicated thread.
+/// Why a thread failed after it started: it panicked.
 ///
 /// ```
 /// let e = env::thread::Panicked { name: "shard-0".into() };
