@@ -5551,10 +5551,11 @@ How to read this record:
   the window scale of the SYN-ACK comes from its receive buffer. On macOS, a socket
   option on a socket that a reset ended gives `EINVAL`. On `EINVAL`, `os` reads the
   pending error: a pending error ends the stream, and with none the call gives `Io`
-  with `EINVAL`. Also on macOS, a create of a path with a trailing slash gives
-  `ENOTDIR` for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a
-  directory gives `EPERM`. Decided by `laptop.architect-2` (2026-10-08T17:19:48Z:
+  with `EINVAL`. Decided by `laptop.architect-2` (2026-10-08T17:19:48Z:
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065277473).
+  Measured on macOS (#1921): a create of a path with a trailing slash gives `ENOTDIR`
+  for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a directory
+  gives `EPERM`, not `EISDIR`. No code reads these codes.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
