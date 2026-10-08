@@ -468,3 +468,16 @@ fn refusal(ended: &Ended) -> Option<Refusal> {
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).expect("invariant: a usize holds a u32")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::future;
+
+    use super::*;
+
+    #[test]
+    fn a_credit_on_its_way_shows_as_sending() {
+        let out = Out::Sending(Box::pin(future::pending()));
+        assert_eq!(format!("{out:?}"), "Sending");
+    }
+}
