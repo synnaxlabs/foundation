@@ -2042,14 +2042,16 @@ How to read this record:
   2026-10-08T05:41:28Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6053189498).
   `types::ed25519::Pair::new` is the one place that derives the public key from the
-  private key. `PrivateKey::public` derives through it for a holder that does not
-  sign, and a signer keeps its public key in its `Pair` (ruling of `Pair` below).
-  `mesh`, `transport`, and `node` keep no copy of the derive. So `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
-  crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
-  Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
-  and the copies, which grow with each crate that needs the key. Decided by
-  `laptop.architect` (2026-10-07T14:16:15Z):
-  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
+  private key (`Pair` ruling below). `PrivateKey::public` derives through it, for a
+  caller that needs only the key (`config`, `node`, tests), and a signer reads
+  `Pair::public`. No crate keeps a copy. So `types` depends on `aws-lc-rs`, as it owns
+  the Ed25519 rule of the key. Cost: each crate that depends on `types` builds
+  `aws-lc-rs` one time for each target directory. Lost: a `pub fn` in `transport`, a
+  pass-through for a thing that is not transport; and the copies, which grow with each
+  crate that needs the key. Decided by `laptop.architect` (2026-10-07T14:16:15Z):
+  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050. The
+  first sentence was changed by `laptop.architect` at 2026-10-08T08:55:53Z
+  (https://github.com/synnaxlabs/foundation/pull/1843#issuecomment-6056356806).
   `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
   `BadSignature` for a signature that is not of the message by the key. A verify on
   `PublicKey` uses a key that is not of small order by construction. `mesh` calls it,
