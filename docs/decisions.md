@@ -3818,7 +3818,11 @@ How to read this record:
   flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
   compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
-  2026-10-08 13:31 UTC).
+  2026-10-08 13:31 UTC). A `-W` flag with no `,` is a warning, which changes no code,
+  so `collect` leaves it out by that pattern, not by name. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
+  2026-10-08 13:57 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
