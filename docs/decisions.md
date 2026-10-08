@@ -1614,7 +1614,13 @@ How to read this record:
   feature emulates it. Reliability is per delivery mode: commands reliable and highest;
   latest drops stale frames by cancel or datagram and keeps `TCP_NOTSENT_LOWAT` small
   over TCP; complete is reliable and ordered with credits; catch-up is lowest. The
-  default carrier per traffic class comes from measurement.
+  default carrier per traffic class comes from measurement. A program with no node
+  key dials nodes through `transport::Client` on the same QUIC carrier: its TLS client
+  sends no certificate and pins the node key, so the node sees `Peer::Client`. It
+  accepts no session, and its limits are fixed: messages up to `pool.largest()`, a
+  window of that or 1 MiB, `streams_max` 1, and idle 30 s. Decided by
+  `laptop.architect-2` (#1754, 2026-10-08T09:52:31Z):
+  https://github.com/synnaxlabs/foundation/issues/1754#issuecomment-6057273348.
 - **T1 seam** Foundation's own `Transport` trait sits in front of every carrier.
   Amended by SIM NETWORK: the trait is private to `transport`, and `sim` replaces the
   network below the carriers (`env::net`), not the transport.
@@ -1882,6 +1888,13 @@ How to read this record:
   19:55 UTC):
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196,
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045706124.
+  `Transport::new` takes the smaller of `Config::message_bytes_max` and
+  `pool.largest()` as the message limit, so no caller clips it. The hello, the QUIC
+  datagram limit, and each check on the send side use that limit. When it is below 1472
+  because of the pool, `Error::Config` names `pool`. Lost: an `Option` field whose
+  `None` means `pool.largest()`, which keeps the error and adds a case to each caller.
+  Decided by `laptop.architect-2` (#1659, 2026-10-08T06:05:25Z):
+  https://github.com/synnaxlabs/foundation/issues/1659#issuecomment-6053512557.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
