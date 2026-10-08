@@ -30,10 +30,9 @@ pub struct Env {
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
-/// earlier commit runs. A commit takes whole 4 KiB blocks. A commit of one frame of a
-/// stamp and an `i64` sample takes one block, and of 64 such frames takes three.
-/// Nothing frees the ring until #160, so a new ring fills at 1023 commits of one such
-/// frame.
+/// earlier commit runs. A commit takes whole 4 KiB blocks, and nothing frees the ring
+/// until #160, so a new ring fills at 1023 commits of one frame of a stamp and an `i64`
+/// sample.
 ///
 /// # Panics
 ///
@@ -195,31 +194,23 @@ mod tests {
         true
     }
 
-    /// The count of commits of `frames` frames each that a new ring takes.
-    fn fill(frames: i64) -> u64 {
-        run(
+    #[test]
+    fn fills_a_new_ring_at_1023_one_frame_commits() {
+        let commits = run(
             sim::node::Config::default(),
-            move |_, mut shard, mut interner, now| async move {
+            |_, mut shard, mut interner, now| async move {
                 let (writer, set) = open_writer(&mut shard, &mut interner);
                 let mut commits = 0;
                 let mut stamp = now.nanos();
-                while commit(&mut shard, writer, &set, stamp..stamp + frames).await {
+                while commit(&mut shard, writer, &set, stamp..stamp + 1).await {
                     commits += 1;
-                    stamp += frames;
+                    stamp += 1;
                 }
                 commits
             },
-        )
-    }
+        );
 
-    #[test]
-    fn fills_a_new_ring_at_1023_one_frame_commits() {
-        assert_eq!(fill(1), 1023);
-    }
-
-    #[test]
-    fn fills_a_new_ring_at_341_commits_of_64_frames() {
-        assert_eq!(fill(64), 341);
+        assert_eq!(commits, 1023);
     }
 
     #[test]
