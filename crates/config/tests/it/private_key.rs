@@ -7,9 +7,10 @@ use document::{Document, Source};
 const PEM: &str = r#""-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n""#;
 
 /// The base64 body of a private key with no header lines: OpenSSH, then Ed25519
-/// PKCS #8 v1 (`openssl genpkey`), v2 with the public key (`ring`), and v2 with
-/// attributes (the sample of RFC 8410).
-const BODIES: [&str; 4] = [
+/// PKCS #8 v1 (`openssl genpkey`), v2 with the public key (`ring`), v2 with
+/// attributes (the sample of RFC 8410), and v2 bodies of 134 and 265 bytes, whose
+/// outer lengths take 2 and 3 bytes.
+const BODIES: [&str; 6] = [
     r#""b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMw""#,
     r#""MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH""#,
     concat!(
@@ -20,6 +21,19 @@ const BODIES: [&str; 4] = [
         r#""MHICAQEwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVh"#,
         r#"CoB8wHQYKKoZIhvcNAQkJFDEPDA1DdXJkbGUgQ2hhaXJzgSEAGb9ECWmEzf6FQbr"#,
         r#"BZ9w7lshQhqowtrbLDFw4rXAxZuE=""#,
+    ),
+    concat!(
+        r#""MIGDAgEBMAUGAytlcAQiBCAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHB6Aw"#,
+        r#"MC4GCiqGSIb3DQEJCRQxIAweQ3VyZGxlIENoYWlycyBvZiB0aGUgTG9uZyBOYW1lgSEA"#,
+        r#"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=""#,
+    ),
+    concat!(
+        r#""MIIBBQIBATAFBgMrZXAEIgQgBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH"#,
+        r#"BweggbEwga4GCiqGSIb3DQEJCRQxgZ8MgZx4eHh4eHh4eHh4eHh4eHh4eHh4eHh4"#,
+        r#"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4"#,
+        r#"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4"#,
+        r#"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHiBIQAJCQkJCQkJ"#,
+        r#"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQ==""#,
     ),
 ];
 

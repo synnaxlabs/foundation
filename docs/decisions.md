@@ -4682,8 +4682,10 @@ How to read this record:
   `config.private-key`, whose message quotes none of the value. A `.pub` line whose
   comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
   more. A base64 body with no header lines gets it too: `b3BlbnNzaC1rZXktdjEA` starts
-  each OpenSSH body, and `BQYDK2VwBCIE` is bytes 6 to 14 of each Ed25519 PKCS #8 body,
-  v1 and v2 (#1886 round 1,
+  each OpenSSH body, and `BQYDK2VwBCIE`, `MAUGAytlcAQi`, and `BgMrZXAEIgQg` are the
+  algorithm and key header (`30 05 06 03 2B 65 70 04 22 04 20`) of each Ed25519 PKCS #8
+  body, v1 and v2, at each of its offsets modulo 3, which the length of the body moves
+  (#1886 rounds 1 and 2,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061047969). Each is
   whole 3-byte groups at an offset of whole groups, so the bytes around it do not
   change it. An Ed25519 public key (`MCowBQYDK2VwAyEA`) does not hold it. Lost: a mark
