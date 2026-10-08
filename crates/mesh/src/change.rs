@@ -1,5 +1,6 @@
 //! The change records that move the region state, each with one byte form.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use types::channel;
@@ -42,9 +43,9 @@ pub(crate) enum Change {
         base: Pointer,
         /// The root digest of the new tree.
         root: Digest,
-        /// The digests of the new tree's chunks that a voter must hold, in strictly
-        /// rising order, at most [`CHUNKS_MAX`].
-        chunks: Vec<Digest>,
+        /// The digests of the new tree's chunks that a voter must hold, at most
+        /// [`CHUNKS_MAX`].
+        chunks: BTreeSet<Digest>,
     },
 }
 
@@ -85,7 +86,12 @@ impl Change {
     ///   or 1), the expiry in nanoseconds (8 bytes), and the ephemeral span behind a
     ///   presence byte.
     /// - Spec: the base version (8 bytes), the base root, the new root, the count of
-    ///   chunks (2 bytes), and each chunk digest. A digest is its 32 bytes.
+    ///   chunks (2 bytes), and each chunk digest in rising order. A digest is its 32
+    ///   bytes.
+    ///
+    /// # Panics
+    ///
+    /// When a `Spec` change lists more than [`CHUNKS_MAX`] chunks.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Home { index, home } => {
@@ -115,7 +121,9 @@ impl Change {
                 out.extend(base.root.0);
                 out.extend(root.0);
                 let count = u16::try_from(chunks.len())
-                    .expect("invariant: a spec change lists at most 1024 chunks");
+                    .ok()
+                    .filter(|_| chunks.len() <= CHUNKS_MAX)
+                    .expect("invariant: a spec change lists at most CHUNKS_MAX chunks");
                 out.extend(count.to_le_bytes());
                 for chunk in chunks {
                     out.extend(chunk.0);
@@ -181,13 +189,13 @@ fn take_spec(bytes: &mut &[u8]) -> Option<Change> {
     if count > CHUNKS_MAX {
         return None;
     }
-    let mut chunks: Vec<Digest> = Vec::with_capacity(count);
+    let mut chunks = BTreeSet::new();
     for _ in 0..count {
         let chunk = Digest(take(bytes)?);
         if chunks.last().is_some_and(|&last| last >= chunk) {
             return None;
         }
-        chunks.push(chunk);
+        chunks.insert(chunk);
     }
     Some(Change::Spec { base, root, chunks })
 }
@@ -339,21 +347,7 @@ mod tests {
 
     #[test]
     fn a_spec_change_with_more_than_1024_chunks_does_not_decode() {
-        let most: Vec<Digest> = (0..CHUNKS_MAX)
-            .map(|at| {
-                let mut chunk = [0; 32];
-                chunk[..2].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
-                Digest(chunk)
-            })
-            .collect();
-        let change = Change::Spec {
-            base: Pointer {
-                version: 7,
-                root: digest(1),
-            },
-            root: digest(2),
-            chunks: most,
-        };
+        let change = many(CHUNKS_MAX);
         let mut bytes = encoded(&change);
         assert_eq!(Change::decode(&bytes), Ok(change));
         bytes[73..75].copy_from_slice(&1025_u16.to_le_bytes());
@@ -363,6 +357,33 @@ mod tests {
             Change::decode(&bytes),
             Err(Malformed::Body { kind: 4, length })
         );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a spec change lists at most CHUNKS_MAX chunks"
+    )]
+    fn encode_of_a_spec_change_with_more_than_1024_chunks_panics() {
+        encoded(&many(CHUNKS_MAX.checked_add(1).unwrap()));
+    }
+
+    /// A spec change that lists `count` distinct chunks.
+    fn many(count: usize) -> Change {
+        let chunks = (0..count)
+            .map(|at| {
+                let mut chunk = [0; 32];
+                chunk[..2].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
+                Digest(chunk)
+            })
+            .collect();
+        Change::Spec {
+            base: Pointer {
+                version: 7,
+                root: digest(1),
+            },
+            root: digest(2),
+            chunks,
+        }
     }
 
     #[test]

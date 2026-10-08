@@ -1729,7 +1729,7 @@ mod tests {
         let change = |byte| Change::Spec {
             base,
             root: common::digest(byte),
-            chunks: vec![common::digest(byte)],
+            chunks: [common::digest(byte)].into(),
         };
         let changes = [change(1), change(2), home(1)];
         cluster.script_each(&changes.map(|change| encoded(&change)));
