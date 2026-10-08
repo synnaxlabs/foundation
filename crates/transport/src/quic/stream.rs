@@ -228,8 +228,8 @@ enum State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Order([Class; 4]);
 
-/// How the send budget admits a new message: room in `order`, and to a claim of
-/// `rationed` only while no claim of its class holds room.
+/// How the send budget gives room to a new message or a waiting one: in `order`, and
+/// to a claim of `rationed` only while no claim of its class holds room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Admission {
     order: Order,
@@ -850,16 +850,32 @@ impl Budget {
         rationed != Some(class) || !self.holds(class)
     }
 
+    /// The classes, in order, that get the room a claim of `class` frees under
+    /// `admission`. While the other class of the share is rationed and a claim of it
+    /// holds room, only `class` and the classes ahead of it get the room.
+    fn room(
+        &self,
+        class: Class,
+        admission: Admission,
+    ) -> impl Iterator<Item = Class> + use<> {
+        let kept = admission.rationed.is_some_and(|rationed| {
+            other(class) == Some(rationed) && self.holds(rationed)
+        });
+        let last = if kept { class } else { Class::CatchUp };
+        admission.order.through(last)
+    }
+
     /// Ends `claim`: gives back its bytes, or ends its wait. Then gives room to the
-    /// waiting claims of `classes`, in that order, until the next does not fit or its
-    /// class is not open with `rationed`, and calls `woken` with the stream of each.
+    /// waiting claims of [`Budget::room`] under `admission`, in that order, until the
+    /// next does not fit or its class is not open, and calls `woken` with the stream
+    /// of each.
     fn release(
         &mut self,
         claim: &mut Claim,
-        classes: impl IntoIterator<Item = Class>,
-        rationed: Option<Class>,
+        admission: Admission,
         mut woken: impl FnMut(Key),
     ) {
+        let classes = self.room(claim.class, admission);
         let rank = claim.class.rank();
         match mem::replace(&mut claim.state, State::Idle) {
             State::Idle => {}
@@ -880,7 +896,9 @@ impl Budget {
         for class in classes {
             let rank = class.rank();
             while let Some(next) = self.waiting[rank].front() {
-                if next.bytes > self.max - self.used || !self.open(class, rationed) {
+                if next.bytes > self.max - self.used
+                    || !self.open(class, admission.rationed)
+                {
                     return;
                 }
                 self.used += next.bytes;
@@ -1010,22 +1028,6 @@ impl Share {
         } else {
             None
         }
-    }
-
-    /// The classes, in order, that get the room a message of `class` frees. Room that
-    /// a class owed bytes frees waits for its next message while a claim of the
-    /// [`Share::rationed`] class holds room, which frees room for all when it ends.
-    fn room(
-        &self,
-        class: Class,
-        sending: &Budget,
-    ) -> impl Iterator<Item = Class> + use<> {
-        let rationed = self.rationed(sending);
-        let kept = rationed.is_some_and(|rationed| {
-            other(class) == Some(rationed) && sending.holds(rationed)
-        });
-        let last = if kept { class } else { Class::CatchUp };
-        self.order().through(last)
     }
 
     /// Counts `bytes` of a message of `class` that noq-proto took while the other
@@ -1187,11 +1189,10 @@ impl Sending {
         (half.unsent, half.block, half.body) = (0..0, Bytes::new(), 0);
         half.chunk = Bytes::new();
         half.parts.clear();
-        let room = self.share.room(half.claim.class, &self.budget);
-        let rationed = self.share.rationed(&self.budget);
+        let admission = self.share.admission(&self.budget);
         let woken = &mut self.woken;
         let wake = |stream: Key| woken.push_back(stream.id);
-        self.budget.release(&mut half.claim, room, rationed, wake);
+        self.budget.release(&mut half.claim, admission, wake);
         self.turns.leave(half);
         self.wake(first);
     }
@@ -1635,7 +1636,7 @@ impl Streams {
         }
         let woken = |stream| events.push_back(Event::Readable { stream });
         self.receiving
-            .release(&mut receiver.claim, Order::RANK, None, woken);
+            .release(&mut receiver.claim, Order::RANK.into(), woken);
     }
 
     /// Ends the wait of `receiver`'s next message for room in the receive budget, and
@@ -1649,7 +1650,7 @@ impl Streams {
         if let State::Queued { .. } = receiver.claim.state {
             let woken = |stream| events.push_back(Event::Readable { stream });
             self.receiving
-                .release(&mut receiver.claim, Order::RANK, None, woken);
+                .release(&mut receiver.claim, Order::RANK.into(), woken);
         }
     }
 
@@ -1724,7 +1725,7 @@ impl Streams {
             (result, kept) = (Err(reset_error(error)), false);
         }
         if !kept && !matches!(result, Ok(Poll::Pending)) {
-            receiving.release(claim, Order::RANK, None, |stream| {
+            receiving.release(claim, Order::RANK.into(), |stream| {
                 events.push_back(Event::Readable { stream });
             });
         }
@@ -2932,7 +2933,7 @@ mod tests {
     /// Releases `claim` with room in `order`, and returns the streams that got room.
     fn release(budget: &mut Budget, claim: &mut Claim, order: Order) -> Vec<Key> {
         let mut woken = Vec::new();
-        budget.release(claim, order, None, |stream| woken.push(stream));
+        budget.release(claim, order.into(), |stream| woken.push(stream));
         woken
     }
 
@@ -2956,8 +2957,7 @@ mod tests {
         }
         assert!(!budget.charge(stream(3), 2, &mut after, rationed));
         let mut woken = Vec::new();
-        let room = Order::RANK;
-        budget.release(&mut held, room, rationed.rationed, |key| woken.push(key));
+        budget.release(&mut held, rationed, |key| woken.push(key));
         assert_eq!(woken, [stream(1)]);
     }
 
@@ -3505,12 +3505,11 @@ mod tests {
         fn room_an_owed_class_frees_waits_while_the_other_holds_room() {
             /// The classes that get room a message of `class` frees.
             fn room(owed: isize, class: Class, sending: &Budget) -> Vec<Class> {
-                Share {
+                let share = Share {
                     owed,
                     ..Share::default()
-                }
-                .room(class, sending)
-                .collect()
+                };
+                sending.room(class, share.admission(sending)).collect()
             }
             let mut budget = Budget::new(10);
             let [mut latest] = claims(Class::Latest);
