@@ -595,10 +595,10 @@ impl<'a> Left<'a> {
             let range = self.head.range.clone();
             let mut after = self.clone();
             after.head.range.start = range.end;
-            if range.len() > COPIED_MAX {
-                return (Piece::Chunk(block.slice(range)), after);
+            if range.len() <= COPIED_MAX {
+                return (Piece::Copied(&block[range]), after);
             }
-            return (Piece::Copied(&block[range]), after);
+            return (Piece::Chunk(block.slice(range)), after);
         }
         buffer.clear();
         let after = self.stretch(block, buffer);
