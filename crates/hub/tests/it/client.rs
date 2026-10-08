@@ -118,13 +118,7 @@ where
     let closed = Arc::new(Mutex::new(None));
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
-        let test = home(&node, &tasks, pool, synced).await;
-        if let Some(rules) = rules {
-            test.hub.set_rules(rules);
-        }
-        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let session = transport.accept().await.expect("a session");
-        let link = test.hub.link(session.clone());
+        let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
         while let Ok(mut incoming) = session.accept().await {
             let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
             tasks.spawn(async move {
@@ -146,6 +140,25 @@ where
 }
 
 /// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
+/// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
+/// session of the first program that dials it, with its link.
+pub(super) async fn accept(
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    pool: usize,
+    synced: bool,
+    rules: Option<access::Rules>,
+) -> (Test, Session, hub::Link) {
+    let test = home(node, tasks, pool, synced).await;
+    if let Some(rules) = rules {
+        test.hub.set_rules(rules);
+    }
+    let transport = transport(node, tasks, &own_pool(), HOME, 1 << 16);
+    let session = transport.accept().await.expect("a session");
+    let link = test.hub.link(session.clone());
+    (test, session, link)
+}
+
 pub(super) async fn home(
     node: &sim::node::Node,
     tasks: &env::tasks::Tasks,

@@ -15,12 +15,13 @@ use hub::serve;
 use transport::stream::Incoming;
 use transport::{Address, Code, Port};
 use types::ed25519::PrivateKey;
-use types::time::Span;
+use types::time::{Interval, Span, Stamp};
+use wire::header::MALFORMED;
 use wire::hub::BUSY;
-use wire::hub::client::{BODY_BYTES_MAX, REFUSED, Refusal, Response};
+use wire::hub::client::{BODY_BYTES_MAX, Challenge, REFUSED, Refusal, Response};
 
 use super::client::{
-    AGENT, Got, OTHER, QUIET, SUBJECT, header, home, name, rules, run_program,
+    AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
     serve_session,
 };
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
@@ -33,7 +34,18 @@ async fn connect(
     at: Address,
     key: PrivateKey,
 ) -> Result<Client, Error> {
-    let pool = own_pool();
+    connect_with(node, tasks, at, key, own_pool()).await
+}
+
+/// As [`connect`], where the client sends from `pool`, and the transport from a pool
+/// of its own.
+async fn connect_with(
+    node: &sim::node::Node,
+    tasks: env::tasks::Tasks,
+    at: Address,
+    key: PrivateKey,
+    pool: Rc<block::Pool>,
+) -> Result<Client, Error> {
     let own = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), own)
         .expect("binds")
@@ -42,7 +54,7 @@ async fn connect(
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),
-        pool: Rc::clone(&pool),
+        pool: own_pool(),
     };
     let transport = transport::Client::new(config, parts.pop().expect("one part"))
         .expect("a client");
@@ -259,11 +271,8 @@ fn by_hand<R>(
     R: Future<Output = ()> + 'static,
 {
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
-        let test = home(&node, &tasks, POOL, true).await;
-        test.hub.set_rules(rules());
-        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let session = transport.accept().await.expect("a session");
-        let link = test.hub.link(session.clone());
+        let (test, session, link) =
+            accept(&node, &tasks, POOL, true, Some(rules())).await;
         let mut hello = session.accept().await.expect("a stream");
         header(&mut hello).await;
         let hello = link.serve(hello);
@@ -412,6 +421,177 @@ fn gives_the_reply_once_its_body_ends() {
     );
 }
 
+/// A program that gives up on a slow request, then sends its next request, gets the
+/// reply of the next request: the node holds the first open until it replies.
+#[test]
+fn sends_the_next_request_after_a_dropped_one() {
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let (test, session, link) =
+            accept(&node, &tasks, POOL, true, Some(rules())).await;
+        while let Ok(mut incoming) = session.accept().await {
+            let (link, clock) = (link.clone(), node.clock());
+            tasks.spawn(async move {
+                header(&mut incoming).await;
+                if let Ok(hub::Served::Request(request)) = link.serve(incoming).await {
+                    clock.sleep(Span::SECOND).await;
+                    drop(request.reply.send(&reversed(&request.body)).await);
+                }
+            });
+        }
+        drop((link, test));
+    };
+    run_program(133, home, |node, tasks, at| async move {
+        let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+        {
+            let mut slow = pin!(client.request(b"slow"));
+            let mut quiet = pin!(node.clock().sleep(QUIET));
+            let first = poll_fn(|cx| match slow.as_mut().poll(cx) {
+                Poll::Ready(got) => Poll::Ready(Some(got)),
+                Poll::Pending => quiet.as_mut().poll(cx).map(|()| None),
+            })
+            .await;
+            assert_eq!(first, None, "the first request is dropped while it waits");
+        }
+        assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+    });
+}
+
+/// Runs a program whose client connects to a home that serves the hello stream by
+/// hand with `hello`, with no hub.
+fn raw<H, P>(
+    seed: u64,
+    hello: impl FnOnce(transport::Session, Incoming, sim::node::Node) -> H + Send + 'static,
+    program: impl FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
+    P: Future<Output = ()> + 'static,
+{
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let mut incoming = session.accept().await.expect("a stream");
+        header(&mut incoming).await;
+        hello(session, incoming, node).await;
+    };
+    run_program(seed, home, program);
+}
+
+#[test]
+fn refuses_a_hello_stream_finished_with_no_challenge() {
+    raw(
+        134,
+        |session, mut hello, node| async move {
+            hello
+                .sender
+                .as_mut()
+                .expect("two-way")
+                .finish()
+                .expect("finishes");
+            node.clock().sleep(QUIET).await;
+            drop(session);
+        },
+        |node, tasks, at| async move {
+            let got = connect(&node, tasks, at, AGENT).await.map(drop);
+            assert_eq!(got, Err(Error::Unanswered));
+        },
+    );
+}
+
+/// A challenge that `wire` refuses ends the renewal, closes the session with
+/// `MALFORMED`, and each later request gives the error.
+#[test]
+fn closes_the_session_on_a_challenge_that_is_not_valid() {
+    raw(
+        135,
+        |session, mut hello, _| async move {
+            let sender = hello.sender.as_mut().expect("two-way");
+            let pool = own_pool();
+            let mut challenge = [0; Challenge::LEN];
+            Challenge {
+                nonce: [7; 16],
+                now: Interval {
+                    earliest: Stamp::from_nanos(0),
+                    latest: Stamp::from_nanos(0),
+                },
+            }
+            .encode(&mut challenge);
+            for _ in 0..2 {
+                sender
+                    .send(pool.copy(&challenge).expect("room"))
+                    .await
+                    .expect("sends");
+                hello
+                    .receiver
+                    .recv()
+                    .await
+                    .expect("a hello")
+                    .expect("not finished");
+            }
+            let refused = pool.copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            assert_eq!(
+                session.closed().await,
+                transport::Error::PeerClosed {
+                    code: Code(MALFORMED)
+                }
+            );
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock().sleep(LIFE).await;
+            assert_eq!(
+                client.request(b"ab").await,
+                Err(Error::Message(wire::hub::Error::Kind { kind: 0xff }))
+            );
+        },
+    );
+}
+
+/// Takes each block of `pool` that it has room for.
+fn fill(pool: &block::Pool) -> Vec<block::Unique> {
+    let mut held = Vec::new();
+    let mut len = pool.largest();
+    while len > 0 {
+        match pool.alloc(len) {
+            Ok(block) => held.push(block),
+            Err(_) => len /= 2,
+        }
+    }
+    held
+}
+
+/// A renewal that finds the pool full tries again, so the hello stays admitted.
+#[test]
+fn renews_the_hello_once_the_pool_has_room() {
+    let home = serve_session(
+        136,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let pool = own_pool();
+            let client = connect_with(&node, tasks, at, AGENT, Rc::clone(&pool))
+                .await
+                .expect("connects");
+            let half = Span::from_nanos(LIFE.nanos() / 2 - Span::SECOND.nanos());
+            node.clock().sleep(half).await;
+            let held = fill(&pool);
+            node.clock()
+                .sleep(Span::from_nanos(10 * Span::SECOND.nanos()))
+                .await;
+            drop(held);
+            node.clock().sleep(LIFE).await;
+            node.clock().sleep(LIFE).await;
+            assert_eq!(client.request(b"late").await, Ok(b"etal".to_vec()));
+            node.clock().sleep(QUIET).await;
+        },
+    );
+    assert_eq!(
+        home.served[0],
+        Ok(Got::Request(name(SUBJECT), b"late".to_vec()))
+    );
+}
+
 #[test]
 fn names_each_error() {
     let cases = [
@@ -453,6 +633,10 @@ fn gives_a_reset_and_a_close_as_one_refusal() {
     ] {
         assert_eq!(Error::from(error), Error::Refused(Refusal::Refused));
     }
+    assert_eq!(
+        Error::from(transport::Error::Stopped { code }),
+        Error::Refused(Refusal::Refused)
+    );
     let reset = transport::Error::Reset { code: Code(0) };
     assert_eq!(Error::from(reset.clone()), Error::Transport(reset));
 }

@@ -16,6 +16,7 @@ use types::hello::Hello;
 use types::name::Name;
 use types::time::{Monotonic, Span};
 use wire::Protocol;
+use wire::header::MALFORMED;
 use wire::hub::client::{
     BODY_BYTES_MAX, Challenge, Refusal, Request, Response, Signed,
 };
@@ -24,6 +25,9 @@ use wire::hub::client::{
 pub const LIFE: Span = Span::from_nanos(10 * Span::MINUTE.nanos());
 
 const HALF: Span = Span::from_nanos(LIFE.nanos() / 2);
+
+/// How long a renewal waits for a block before it tries again.
+const RETRY: Span = Span::SECOND;
 
 /// What a [`Client`] is given.
 #[derive(Debug)]
@@ -76,6 +80,7 @@ struct Shared {
     via: types::node::Key,
     connection: connection::Key,
     clock: env::clock::Clock,
+    tasks: env::tasks::Tasks,
     pool: Rc<block::Pool>,
     turn: Turn,
     /// The error that ended the renewal.
@@ -90,8 +95,9 @@ impl Client {
     /// # Errors
     ///
     /// [`Error::Refused`] for a refused hello, [`Error::Transport`] when the dial or
-    /// the session failed, [`Error::Message`] for a challenge that `wire`
-    /// refuses, and [`Error::Pool`] when the pool has no block for the hello.
+    /// the session failed, [`Error::Message`] for a challenge that `wire` refuses,
+    /// [`Error::Unanswered`] when the node finished the hello stream with no
+    /// challenge, and [`Error::Pool`] when the pool has no block for the hello.
     pub async fn connect(
         transport: &transport::Client,
         config: Config,
@@ -118,6 +124,7 @@ impl Client {
             via,
             connection: connection::Key(connection),
             clock,
+            tasks: tasks.clone(),
             pool,
             turn: Turn::default(),
             ended: RefCell::new(None),
@@ -132,7 +139,9 @@ impl Client {
     }
 
     /// Sends `body` as a request signed with the subject's key, and gives the body of
-    /// the response. Requests of one client go one at a time, in no set order.
+    /// the response. Requests of one client go one at a time, in no set order. A
+    /// request dropped before its response began keeps the turn until the response
+    /// begins or the stream ends, since the node holds it open until then.
     ///
     /// # Errors
     ///
@@ -149,11 +158,12 @@ impl Client {
             .ok()
             .filter(|&length| length <= BODY_BYTES_MAX)
             .ok_or(Error::Body { length: body.len() })?;
-        let _turn = shared.turn.take().await;
+        let mut held = Held::take(shared).await;
         if let Some(error) = shared.ended.borrow().clone() {
             return Err(error);
         }
-        let (mut sender, mut receiver) = shared.session.open(Class::Complete).await?;
+        let (mut sender, receiver) = shared.session.open(Class::Complete).await?;
+        let receiver = held.open.insert(receiver);
         shared
             .send(&mut sender, &wire::header::encode(Protocol::Hub))
             .await?;
@@ -180,6 +190,7 @@ impl Client {
             reply.extend_from_slice(rest.take(&message)?);
         }
         rest.end()?;
+        held.open = None;
         Ok(reply)
     }
 }
@@ -227,17 +238,20 @@ impl Shared {
 }
 
 /// Renews the hello at half of [`LIFE`] after each admission, until the session
-/// closes or a renewal fails. Keeps the error that ended it, and closes the session.
+/// closes or a renewal fails. A renewal with no block tries again after [`RETRY`],
+/// and the node closes the session if the hello expires first. Keeps the error that
+/// ended it, and closes the session.
 async fn renew(
     shared: Rc<Shared>,
     mut sender: Sender,
     mut receiver: Receiver,
     mut last: (Challenge, Monotonic),
 ) {
+    let mut at = last.1 + HALF;
     let error = loop {
         let closed = {
             let mut closed = pin!(shared.session.closed());
-            let mut half = pin!(shared.clock.sleep_until(last.1 + HALF));
+            let mut half = pin!(shared.clock.sleep_until(at));
             poll_fn(|cx| match closed.as_mut().poll(cx) {
                 Poll::Ready(error) => Poll::Ready(Some(error)),
                 Poll::Pending => half.as_mut().poll(cx).map(|()| None),
@@ -248,12 +262,20 @@ async fn renew(
             break Error::from(error);
         }
         match shared.hello(&mut sender, &mut receiver, last).await {
-            Ok(next) => last = next,
+            Ok(next) => {
+                last = next;
+                at = last.1 + HALF;
+            }
+            Err(Error::Pool(_)) => at = shared.clock.now() + RETRY,
             Err(error) => break error,
         }
     };
+    let code = match error {
+        Error::Message(_) => MALFORMED,
+        _ => 0,
+    };
     shared.ended.replace(Some(error));
-    shared.session.close(Code(0));
+    shared.session.close(Code(code));
 }
 
 /// The turn of one request at a time.
@@ -265,7 +287,7 @@ struct Turn {
 }
 
 impl Turn {
-    async fn take(&self) -> Taken<'_> {
+    async fn take(&self) {
         poll_fn(|cx| {
             if !self.taken.replace(true) {
                 return Poll::Ready(());
@@ -277,20 +299,48 @@ impl Turn {
             Poll::Pending
         })
         .await;
-        Taken(self)
+    }
+
+    /// Wakes each waiter, and the first to poll takes the turn, so a waiter that
+    /// dropped holds nothing.
+    fn give(&self) {
+        self.taken.set(false);
+        for waker in self.waiters.take() {
+            waker.wake();
+        }
     }
 }
 
-/// Holds the turn. Its drop wakes each waiter, and the first to poll takes the turn,
-/// so a waiter that dropped holds nothing.
-struct Taken<'t>(&'t Turn);
+/// Holds the turn for one request.
+struct Held {
+    shared: Rc<Shared>,
+    /// The receiver of a request whose response has not ended. The node holds the
+    /// request open until its response begins, so a drop gives the turn only once
+    /// the next message or the end of the stream comes.
+    open: Option<Receiver>,
+}
 
-impl Drop for Taken<'_> {
-    fn drop(&mut self) {
-        self.0.taken.set(false);
-        for waker in self.0.waiters.take() {
-            waker.wake();
+impl Held {
+    async fn take(shared: &Rc<Shared>) -> Self {
+        shared.turn.take().await;
+        Self {
+            shared: Rc::clone(shared),
+            open: None,
         }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let shared = Rc::clone(&self.shared);
+        let Some(mut receiver) = self.open.take() else {
+            shared.turn.give();
+            return;
+        };
+        self.shared.tasks.spawn(async move {
+            drop(receiver.recv().await);
+            shared.turn.give();
+        });
     }
 }
 
@@ -345,6 +395,7 @@ impl From<transport::Error> for Error {
     fn from(error: transport::Error) -> Self {
         match error {
             transport::Error::Reset { code }
+            | transport::Error::Stopped { code }
             | transport::Error::PeerClosed { code } => {
                 Refusal::from_code(code.0).map_or(Self::Transport(error), Self::Refused)
             }
