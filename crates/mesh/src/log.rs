@@ -654,7 +654,7 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         }
         _ => return None,
     }
-    let entries = entry::decode(body)?;
+    let entries = entry::decode(std::mem::take(body))?;
     if !follows(wide(stored.entries.len()), &entries) {
         return None;
     }
