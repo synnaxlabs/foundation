@@ -38,11 +38,12 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
-use crate::{Class, Code, Config, Error, Peer};
+use crate::{Class, Code, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Session};
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
+pub(crate) use self::settings::{Role, Setup};
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
@@ -115,34 +116,26 @@ pub(crate) enum Event {
 }
 
 impl Endpoint {
-    /// An endpoint for this node's key whose connection IDs all start with
-    /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams, the
-    /// socket's batch max, and at most
-    /// [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
-    ///
-    /// # Panics
-    ///
-    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
-        if let Err(error) = config.check() {
-            panic!("{error}");
-        }
-        let (settings, endpoint) = Settings::new(config, shard);
+    /// An endpoint for `setup` whose connection IDs all start with `shard`. Each
+    /// [`Transmit`] holds at most `datagrams_max` datagrams, the socket's batch max,
+    /// and at most [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
+    pub(crate) fn new(setup: &Setup, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        let (settings, endpoint) = Settings::new(setup, shard);
         Self {
-            epoch: config.clock.epoch(),
+            epoch: setup.clock.epoch(),
             settings,
             inner: endpoint,
             datagrams_max: datagrams_max.min(settings::BATCH_MAX),
-            pool: Rc::clone(&config.pool),
-            message_bytes_max: config.message_limit(),
-            window_bytes: config.window_bytes,
+            pool: Rc::clone(&setup.pool),
+            message_bytes_max: setup.message_bytes_max,
+            window_bytes: setup.window_bytes,
             connections: Vec::new(),
             serial: 0,
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
             refusing: false,
-            resets: stateless::Limit::new(&config.entropy),
+            resets: stateless::Limit::new(&setup.entropy),
             received: BytesMut::new(),
         }
     }
@@ -907,8 +900,11 @@ mod tests {
         fn to_port_zero_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
                 endpoint.connect(Monotonic(0), server(), remote);
             });
@@ -1031,8 +1027,11 @@ mod tests {
         fn stays_at_the_earliest_timer_when_a_later_dial_starts() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let mut buffer = Vec::new();
                 endpoint.connect(Monotonic(0), server(), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
@@ -1057,8 +1056,11 @@ mod tests {
         fn writes_a_response_into_the_callers_buffer() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = pair::meta(pair::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
@@ -1074,8 +1076,11 @@ mod tests {
         fn keeps_at_most_responses_max_responses() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = pair::meta(pair::CLIENT, &initial);
                 for _ in 0..=RESPONSES_MAX {
@@ -1148,7 +1153,7 @@ mod tests {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(64).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                    Endpoint::new(&testing::setup(&config), pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(1 << 16).collect();
@@ -1210,10 +1215,14 @@ mod tests {
         fn answers_a_refused_first_initial_with_a_close() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut server =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut server = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let (_, mut client) = Settings::new(&config, pair::CLIENT_SHARD);
+                let (_, mut client) =
+                    Settings::new(&testing::setup(&config), pair::CLIENT_SHARD);
                 let now = server.instant(Monotonic(0));
                 let dial =
                     client.connect(now, other_protocol(), pair::SERVER, SERVER_NAME);
@@ -1271,8 +1280,11 @@ mod tests {
         fn with_no_stride_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = Meta {
                     len: 10,
@@ -1290,7 +1302,7 @@ mod tests {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(10).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                    Endpoint::new(&testing::setup(&config), pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(20_000).collect();

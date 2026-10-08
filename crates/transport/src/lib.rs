@@ -31,6 +31,7 @@
 
 mod address;
 mod class;
+pub mod client;
 mod code;
 pub mod datagram;
 mod dial;
@@ -71,6 +72,7 @@ use types::time::Span;
 
 pub use address::Address;
 pub use class::Class;
+pub use client::Client;
 pub use code::Code;
 pub use error::Error;
 pub use port::Port;
@@ -83,6 +85,9 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// The smallest `message_bytes_max` of either side: a datagram fits in one message,
 /// and so does a hub head or key.
 const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
+
+/// The rule that a pool breaks when its largest block is below [`MESSAGE_BYTES_MIN`].
+const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 
 /// The sessions of one shard. It dials peers and accepts the sessions the node
 /// routes to this shard. It stays on the thread that made it. `node` binds one
@@ -117,13 +122,11 @@ impl Transport {
     /// }
     /// ```
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
-        config.check()?;
-        let clock = config.clock.clone();
-        let public_key = config.private_key.public();
+        let setup = config.setup()?;
         Ok(Self {
-            carrier: quic::Carrier::new(config, part),
-            clock,
-            public_key,
+            carrier: quic::Carrier::new(setup, part),
+            clock: config.clock,
+            public_key: config.private_key.public(),
         })
     }
 
@@ -285,27 +288,31 @@ pub struct Config {
 }
 
 impl Config {
-    /// The largest message this node takes: `message_bytes_max`, clipped to the
-    /// largest block of the pool.
-    pub(crate) fn message_limit(&self) -> usize {
-        self.message_bytes_max.get().min(self.pool.largest())
-    }
-
-    /// The first rule of [`Transport::new`] that this config breaks. A field's own
-    /// range comes before its relation to another field, so the error names the field
-    /// to change.
-    fn check(&self) -> Result<(), Error> {
-        let limit = self.message_limit();
+    /// The node's setup, or the first rule of [`Transport::new`] that this config
+    /// breaks. A field's own range comes before its relation to another field, so the
+    /// error names the field to change.
+    pub(crate) fn setup(&self) -> Result<quic::Setup, Error> {
+        let limit = self.message_bytes_max.get().min(self.pool.largest());
         let (field, rule) = if self.idle <= Span::ZERO {
             ("idle", "must be positive")
         } else if limit < MESSAGE_BYTES_MIN && limit < self.message_bytes_max.get() {
-            ("pool", "must hold a message of at least 1472 bytes")
+            ("pool", POOL_RULE)
         } else if limit < MESSAGE_BYTES_MIN {
             ("message_bytes_max", "must be at least 1472")
         } else if self.window_bytes < limit {
             ("window_bytes", "must be at least message_bytes_max")
         } else {
-            return Ok(());
+            return Ok(quic::Setup {
+                role: quic::Role::Node(self.private_key.clone()),
+                message_bytes_max: limit,
+                window_bytes: self.window_bytes,
+                streams_max: self.streams_max,
+                idle: self.idle,
+                clock: self.clock.clone(),
+                entropy: self.entropy.clone(),
+                tasks: self.tasks.clone(),
+                pool: Rc::clone(&self.pool),
+            });
         };
         Err(Error::Config { field, rule })
     }

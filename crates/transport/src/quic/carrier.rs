@@ -23,8 +23,8 @@ use types::time::Monotonic;
 
 use super::stream::{Incoming, Receiver, Sender};
 use super::wait::{self, RETRY};
-use super::{Endpoint, Event, connection};
-use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer, Status, port};
+use super::{Endpoint, Event, Setup, connection};
+use crate::{Class, Code, Error, PAYLOAD_IPV4, Peer, Status, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
 /// shard's other tasks.
@@ -36,20 +36,16 @@ const BATCHES: usize = 8;
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
-    /// Starts an endpoint for `config` on `port`, and spawns its task on
-    /// `config.tasks`.
-    ///
-    /// # Panics
-    ///
-    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(config: Config, part: port::Part) -> Self {
+    /// Starts an endpoint for `setup` on `part`, and spawns its task on
+    /// `setup.tasks`.
+    pub(crate) fn new(setup: Setup, part: port::Part) -> Self {
         let port::Part {
             index,
             sender,
             receiver,
         } = part;
-        let endpoint = Endpoint::new(&config, index, sender.batch_max());
-        let Config { clock, tasks, .. } = config;
+        let endpoint = Endpoint::new(&setup, index, sender.batch_max());
+        let Setup { clock, tasks, .. } = setup;
         let state = Rc::new(RefCell::new(State {
             endpoint,
             clock: clock.clone(),
@@ -1326,7 +1322,8 @@ mod tests {
         });
         shard(&client, CLIENT, |config, node| async move {
             let (sender, receiver) = socket(&node).expect("a socket");
-            let mut endpoint = Endpoint::new(&config, 0, sender.batch_max());
+            let mut endpoint =
+                Endpoint::new(&testing::setup(&config), 0, sender.batch_max());
             let mut socket = Socket::new(sender, receiver);
             node.clock().sleep(Span::MILLISECOND).await;
             let now = node.clock().now();
@@ -1355,7 +1352,7 @@ mod tests {
         shard(&client, CLIENT, move |config, node| async move {
             let part = testing::part(&node.net(), address(&node));
             node.clock().sleep(Span::MILLISECOND).await;
-            let carrier = Carrier::new(config, part);
+            let carrier = Carrier::new(testing::setup(&config), part);
             let before = node.clock().now();
             let dialed = carrier.connect(SERVER.public(), at).await;
             // A lost first datagram goes again only after hundreds of milliseconds.
@@ -1419,7 +1416,7 @@ mod tests {
         shard(&client, CLIENT, move |config, node| async move {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), address(&node));
-            let carrier = Carrier::new(config, part);
+            let carrier = Carrier::new(testing::setup(&config), part);
             let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let open = poll_fn(|cx| session.poll_open(cx, Class::Complete)).await;
@@ -1574,7 +1571,7 @@ mod tests {
                 sender,
                 receiver,
             };
-            let carrier = Carrier::new(config, part);
+            let carrier = Carrier::new(testing::setup(&config), part);
             let first = carrier.connect(SERVER.public(), at).await;
             let second = carrier.connect(SERVER.public(), at).await;
             node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
