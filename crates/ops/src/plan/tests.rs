@@ -603,24 +603,31 @@ fn places_a_path_that_is_not_utf8_as_display_writes_it() {
 
 /// Lines that `ssh-keygen -t ed25519` wrote, and the fingerprint that
 /// `ssh-keygen -lf` gives for each.
-const ALICE: &str = "ssh-ed25519 \
-                     AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg \
-                     alice@laptop";
+const ALICE: &str = concat!(
+    "ssh-ed25519 ",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg",
+    " alice@laptop",
+);
 const ALICE_FINGERPRINT: &str = "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc";
-const BOB: &str = "ssh-ed25519 \
-                   AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6 \
-                   bob@site";
+const BOB: &str = concat!(
+    "ssh-ed25519 ",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6",
+    " bob@site",
+);
 const BOB_FINGERPRINT: &str = "SHA256:yrQ4K597Aogzr4Zp1m1So77Lh8tM3HApOLoy0kzzo3k";
+/// The 32 bytes of the key of `BOB`.
+const BOB_KEY: [u8; 32] = [
+    253, 16, 48, 49, 70, 56, 119, 210, 245, 116, 123, 213, 165, 114, 10, 251, 62, 66,
+    115, 80, 224, 21, 235, 30, 207, 93, 24, 48, 243, 236, 166, 58,
+];
 
 /// A subject labeled `carol` with Bob's key, then Alice's.
 fn carol() -> String {
     format!("subject \"carol\" {{\n  keys = [\"{BOB}\", \"{ALICE}\"]\n}}\n")
 }
 
-/// The applied subject labeled `alice`, with the key of `line`.
-fn applied_subject(line: &str) -> BTreeMap<Name, Definition> {
-    let key = ssh_key::PublicKey::from_openssh(line).expect("a key");
-    let bytes = key.key_data().ed25519().expect("an Ed25519 key").0;
+/// The applied subject labeled `alice`, with the key `bytes`.
+fn applied_subject(bytes: [u8; 32]) -> BTreeMap<Name, Definition> {
     let key = types::ed25519::PublicKey::new(bytes).expect("a key");
     let subject = Subject::new(vec![key]).expect("a subject");
     BTreeMap::from([(name("alice.@subject"), Definition::Subject(subject))])
@@ -629,7 +636,7 @@ fn applied_subject(line: &str) -> BTreeMap<Name, Definition> {
 #[test]
 fn shows_the_fingerprint_of_each_key_of_a_subject_by_its_bytes() {
     let planned =
-        run(&[("people.hcl", &carol())], &applied_subject(BOB)).expect("a plan");
+        run(&[("people.hcl", &carol())], &applied_subject(BOB_KEY)).expect("a plan");
     assert_eq!(
         planned.text(),
         format!(
@@ -648,7 +655,7 @@ fn shows_the_fingerprint_of_each_key_of_a_subject_by_its_bytes() {
 #[test]
 fn gives_the_fingerprints_of_a_subject_after_the_apply_or_before_a_removal() {
     let planned =
-        run(&[("people.hcl", &carol())], &applied_subject(BOB)).expect("a plan");
+        run(&[("people.hcl", &carol())], &applied_subject(BOB_KEY)).expect("a plan");
     assert_eq!(
         json(&planned)["changes"],
         serde_json::json!([

@@ -8,8 +8,6 @@ use document::{Source, Span};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use spec::definition::{Definition, Kind};
-use ssh_key::HashAlg;
-use ssh_key::public::Ed25519PublicKey;
 use types::name::Name;
 
 use crate::error::{Error, Note, Place, Problem};
@@ -103,12 +101,12 @@ impl Output {
             .iter()
             .map(|change| {
                 let (symbol, kind) = (change.action.symbol(), &change.kind);
-                let keys: Vec<String> = change
+                let lines: String = change
                     .fingerprints
                     .iter()
-                    .map(|fingerprint| format!("    key {fingerprint}\n"))
+                    .flat_map(|fingerprint| ["    key ", fingerprint, "\n"])
                     .collect();
-                format!("{symbol} {kind} {}\n{}", change.name, keys.concat())
+                format!("{symbol} {kind} {}\n{lines}", change.name)
             })
             .collect();
         format!(
@@ -178,9 +176,11 @@ impl Change {
             (Action::Remove, stored.kind(), None, Some(stored))
         };
         let fingerprints = match definition {
-            Some(Definition::Subject(subject)) => {
-                subject.keys().iter().map(|&key| fingerprint(key)).collect()
-            }
+            Some(Definition::Subject(subject)) => subject
+                .keys()
+                .iter()
+                .map(|&key| config::openssh::fingerprint(key))
+                .collect(),
             _ => Vec::new(),
         };
         let label = kind
@@ -215,14 +215,6 @@ impl Action {
             Self::Remove => '-',
         }
     }
-}
-
-/// The `SHA256:` fingerprint of `key`, as `ssh-keygen -l` writes it.
-fn fingerprint(key: types::ed25519::PublicKey) -> String {
-    let key = Ed25519PublicKey(key.to_bytes());
-    ssh_key::PublicKey::from(key)
-        .fingerprint(HashAlg::Sha256)
-        .to_string()
 }
 
 /// The start of `span`, in the file of its source.

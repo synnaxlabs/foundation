@@ -4889,6 +4889,10 @@ How to read this record:
   kind adds a field of its own, those fields become one tagged `detail` enum. Decided
   by `laptop.architect-2` (2026-10-08T17:21:06Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343).
+  `config` owns the OpenSSH form, so `config::openssh::fingerprint(PublicKey) ->
+  String` makes it, and `ops` has no `ssh-key`. Lost: `ssh-key` in `ops`, a second
+  owner of the form. Decided by `laptop.architect-2` (2026-10-08T17:56:21Z,
+  https://github.com/synnaxlabs/foundation/pull/1943#issuecomment-6065898724).
 
 ### 1.12 Access, identity, and secrets
 

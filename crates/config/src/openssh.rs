@@ -1,5 +1,8 @@
+//! The OpenSSH form of an Ed25519 public key.
+
 use std::fmt;
 
+use ssh_key::HashAlg;
 use ssh_key::public::Ed25519PublicKey;
 use types::ed25519::PublicKey;
 
@@ -83,14 +86,22 @@ pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
     // and tabs. `from_openssh` accepts a key length field over 32 when 32 bytes
     // follow, so the key must write back to the same line.
     let line = format!("{ALGORITHM} {encoded}");
-    let bytes = ssh_key::PublicKey::from_openssh(&line)
-        .ok()
-        .filter(|key| key.to_openssh().is_ok_and(|written| written == line))
-        .and_then(|key| {
-            key.key_data()
-                .ed25519()
-                .map(|&Ed25519PublicKey(bytes)| bytes)
-        })
-        .ok_or(Error::NotEd25519)?;
+    let key = ssh_key::PublicKey::from_openssh(&line).or(Err(Error::NotEd25519))?;
+    if key.to_openssh().ok().as_deref() != Some(line.as_str()) {
+        return Err(Error::NotEd25519);
+    }
+    let Some(&Ed25519PublicKey(bytes)) = key.key_data().ed25519() else {
+        unreachable!(
+            "invariant: `ssh-key` refuses a key of another algorithm than the text"
+        );
+    };
     PublicKey::new(bytes).map_err(Error::SmallOrder)
+}
+
+/// The `SHA256:` fingerprint of `key`, as `ssh-keygen -l` writes it.
+#[must_use]
+pub fn fingerprint(key: PublicKey) -> String {
+    ssh_key::PublicKey::from(Ed25519PublicKey(key.to_bytes()))
+        .fingerprint(HashAlg::Sha256)
+        .to_string()
 }

@@ -1196,7 +1196,6 @@ dependencies = [
  "serde",
  "serde_json",
  "spec",
- "ssh-key",
  "types",
 ]
 

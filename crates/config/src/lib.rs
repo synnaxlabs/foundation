@@ -5,7 +5,7 @@ mod access;
 mod channel;
 mod connector;
 mod node_settings;
-mod openssh;
+pub mod openssh;
 mod placement;
 mod plan;
 mod private_key;
@@ -2940,6 +2940,15 @@ mod tests {
                 assert_eq!(check(&documents), Ok(keyed(&[ALICE_KEY])), "{keys:?}");
             }
             assert_eq!(ed25519(ALICE_KEY).split(' ').nth(1), bare.split(' ').nth(1));
+        }
+
+        #[test]
+        fn gives_the_fingerprint_that_ssh_keygen_gives() {
+            let key = PublicKey::new(ALICE_KEY).expect("a key");
+            assert_eq!(
+                crate::openssh::fingerprint(key),
+                "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc"
+            );
         }
 
         #[test]
