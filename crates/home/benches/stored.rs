@@ -1,6 +1,6 @@
 //! The time to make the stored entry of an index frame and drop it, and to read each
 //! series of its body, for frames of 16, 1000, and 100,000 series of one sample: each
-//! an `f32`, or a mix of scalars, an array, a list, a string, and bytes.
+//! an `f32`, or a mix of scalars, an array, a matrix, a list, a string, and bytes.
 
 use std::fmt;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ const MIXED: [Type; 10] = [
     Type::Scalar(Scalar::Stamp),
     Type::Array {
         element: Scalar::F32,
-        len: 6,
+        len: 3,
     },
     Type::Matrix {
         element: Scalar::F32,
@@ -36,8 +36,8 @@ const MIXED: [Type; 10] = [
         },
     },
     Type::List {
-        element: Scalar::U16,
-        max: 8,
+        element: Scalar::U8,
+        max: 16,
     },
     Type::String,
     Type::Bytes,

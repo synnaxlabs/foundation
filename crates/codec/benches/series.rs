@@ -43,9 +43,9 @@ struct Shape {
 /// Creates `LEN` samples.
 #[derive(Clone, Copy)]
 enum Create {
-    /// Each element, cut to its width. A sample of a fixed shape takes the next
-    /// elements of its width.
-    Scalar(fn() -> Vec<i64>),
+    /// Elements, each cut to its scalar's width. A sample takes the next elements of
+    /// its type.
+    Elements(fn() -> Vec<i64>),
     Strings(fn() -> Vec<&'static str>),
 }
 
@@ -74,8 +74,8 @@ const SHAPES: [Shape; 26] = [
     Shape::new("u64.ffor32", Scalar::U64, create_uniform::<32>, 1.982, FULL),
     Shape::new("u64.ffor55", Scalar::U64, create_uniform::<55>, 1.155, FULL),
     Shape::strings("str.state", create_state_names, 2.842, EVERY),
-    Shape::fixed("f32x6.imu", ARRAY, 0.999, EVERY),
-    Shape::fixed("f32x2x3.imu", MATRIX, 0.999, EVERY),
+    Shape::imu("f32x6.imu", ARRAY),
+    Shape::imu("f32x2x3.imu", MATRIX),
 ];
 
 /// Six `f32` elements as an array. It encodes as [`MATRIX`] does.
@@ -104,25 +104,21 @@ impl Shape {
         Self {
             name,
             data_type: Type::Scalar(scalar),
-            create: Create::Scalar(create),
+            create: Create::Elements(create),
             ratio,
             lens,
         }
     }
 
-    /// A shape of [`create_imu`] samples of the fixed type `data_type`.
-    const fn fixed(
-        name: &'static str,
-        data_type: Type,
-        ratio: f64,
-        lens: &'static [usize],
-    ) -> Self {
+    /// A shape of [`create_imu`] samples of `data_type`, which holds six `f32`
+    /// elements.
+    const fn imu(name: &'static str, data_type: Type) -> Self {
         Self {
             name,
             data_type,
-            create: Create::Scalar(create_imu),
-            ratio,
-            lens,
+            create: Create::Elements(create_imu),
+            ratio: 0.999,
+            lens: EVERY,
         }
     }
 
@@ -159,20 +155,25 @@ impl Shape {
     /// The raw bytes of the first `len` samples.
     fn values(&self, len: usize) -> Vec<u8> {
         match self.create {
-            Create::Scalar(create) => {
-                let width = self.data_type.width().expect("a fixed shape");
-                let element = match self.data_type {
-                    Type::Scalar(element)
-                    | Type::Array { element, .. }
-                    | Type::Matrix { element, .. } => element.width(),
+            Create::Elements(create) => {
+                let (element, each) = match self.data_type {
+                    Type::Scalar(element) => (element, 1),
+                    Type::Array { element, len } => {
+                        (element, usize::try_from(len).expect("a short array"))
+                    }
+                    Type::Matrix { element, sides } => (
+                        element,
+                        usize::from(sides.rows) * usize::from(sides.columns),
+                    ),
                     Type::List { .. } | Type::String | Type::Bytes => {
-                        panic!("invariant: a `Scalar` shape has a fixed type")
+                        panic!("invariant: an `Elements` shape has a fixed type")
                     }
                 };
+                let width = element.width();
                 create()
                     .into_iter()
-                    .take(len * width / element)
-                    .flat_map(|value| value.to_le_bytes().into_iter().take(element))
+                    .take(len * each)
+                    .flat_map(|value| value.to_le_bytes().into_iter().take(width))
                     .collect()
             }
             Create::Strings(create) => {
