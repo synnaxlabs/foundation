@@ -323,6 +323,34 @@ impl Shard {
         self.readers.carry(place, slot, live.seq);
     }
 
+    /// Stops carrying the index at `slot`: its control gate goes, and with it a handoff
+    /// that waits for room. Each named reader of the index stops holding its position.
+    /// Its frames stay in the buffer, so a later [`carry`](Self::carry) of `slot`
+    /// continues each path from its tail.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`, or a writer or a reader is open on it.
+    pub fn shed(&mut self, slot: Slot) {
+        let place = self.place(slot);
+        let mut claims = self.writers.values().flat_map(|session| &session.claims);
+        assert!(
+            claims.all(|claim| claim.place != place),
+            "a writer is open on the index at {slot:?}"
+        );
+        let last = self.indexes.len() - 1;
+        let moved = self.readers.shed(place);
+        self.places.remove(&slot);
+        self.indexes.swap_remove(place);
+        if let Some(moved) = moved {
+            self.places.insert(moved, place);
+            let claims = self.writers.values_mut().flat_map(|s| &mut s.claims);
+            for claim in claims.filter(|claim| claim.place == last) {
+                claim.place = place;
+            }
+        }
+    }
+
     /// The pool of the shard's buffer. Frames that a writer fills come from it.
     #[must_use]
     pub fn pool(&self) -> &block::Pool {
@@ -620,7 +648,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the shard never gave `key`.
+    /// If the shard never gave `key`, or does not carry the index of `key`.
     pub fn ack(
         &mut self,
         key: reader::complete::Key,
@@ -638,7 +666,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the shard never gave `key`.
+    /// If the shard never gave `key`, or does not carry the index of `key`.
     pub fn grant(&mut self, key: reader::complete::Key, limit_bytes: u64) {
         let place = self.place(key.slot);
         self.readers.grant(place, key.session, limit_bytes);
@@ -651,7 +679,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the shard never gave `key`.
+    /// If the shard never gave `key`, or does not carry the index of `key`.
     #[must_use]
     pub fn take(&mut self, key: reader::Key) -> reader::Next {
         self.readers.take(self.place(key.slot), key.session)
@@ -664,7 +692,7 @@ impl Shard {
     ///
     /// # Panics
     ///
-    /// If the shard never gave `key`.
+    /// If the shard never gave `key`, or does not carry the index of `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
         let now = self.now().map(|(_, now)| now);
         self.readers.close(self.place(key.slot), key.session, now);
@@ -3723,6 +3751,113 @@ mod tests {
                     ..reader
                 };
                 shard.grant(other, CREDIT + 1);
+            });
+        }
+
+        /// The key set of the index at slot 2 alone.
+        fn only_two() -> Arc<KeySet> {
+            create_interner().intern(&[Group {
+                index: key(Slot::new(2)),
+                data: &[],
+            }])
+        }
+
+        /// Shed at place 0 moves the index at slot 2 there, with a frame that waits
+        /// for its reader.
+        #[test]
+        fn keeps_the_writer_and_the_reader_of_an_index_that_a_shed_moves() {
+            run(131, |test| async move {
+                let set = only_two();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(2));
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let first = frame(&test.pool, &set, &[(0, &[10])]);
+                assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(2, 0, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                shard.shed(Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                let next = frame(&test.pool, &set, &[(0, &[20])]);
+                assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(2, 1, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn continues_the_seq_and_the_reader_keys_of_an_index_it_carries_again() {
+            run(132, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let old = shard.open_complete(Slot::new(0), 1, Charge::Whole);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10, 20]);
+                shard.close_writer(a);
+                shard.close_reader(old.into());
+                shard.shed(Slot::new(0));
+                shard.carry(Slot::new(0));
+                let new = shard.open_complete(Slot::new(0), 1, Charge::Whole);
+                assert_ne!(reader::Key::from(new), reader::Key::from(old));
+                shard.grant(old, CREDIT);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
+                assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 2, 1)][..]));
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [new.into()]);
+                assert_eq!(taken(&mut shard, new.into(), 0), [seq(2, 1)]);
+            });
+        }
+
+        /// Asserts that `call` panics with `message` on a shard that carries slots 0
+        /// and 2.
+        fn check_panics(seed: u64, message: &str, call: fn(&mut Shard)) {
+            let (mut sim, _handle) = start(seed, move |test| async move {
+                call(&mut test.shard(AREA).await);
+            });
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: DIR.into(),
+                    message: message.into(),
+                    seed,
+                })
+            );
+        }
+
+        #[test]
+        fn panics_at_the_shed_of_an_index_with_a_writer_open() {
+            let message = "a writer is open on the index at Slot(0)";
+            check_panics(133, message, |shard| {
+                let set = two_indexes();
+                shard.open_writer(writer("a", 1, &set)).expect("synced");
+                shard.shed(Slot::new(0));
+            });
+        }
+
+        #[test]
+        fn panics_at_the_shed_of_an_index_with_a_reader_open() {
+            let message = "a reader of the index is open";
+            check_panics(134, message, |shard| {
+                let _reader = latest(shard, Slot::new(0));
+                shard.shed(Slot::new(0));
+            });
+        }
+
+        #[test]
+        fn panics_at_the_shed_of_an_index_it_does_not_carry() {
+            check_not_carried(135, |shard| shard.shed(Slot::new(3)));
+        }
+
+        #[test]
+        fn panics_at_the_take_of_a_reader_of_an_index_it_shed() {
+            let message = "the shard does not carry the index at Slot(2)";
+            check_panics(136, message, |shard| {
+                let reader = latest(shard, Slot::new(2));
+                shard.close_reader(reader);
+                shard.shed(Slot::new(2));
+                drop(shard.take(reader));
             });
         }
 
