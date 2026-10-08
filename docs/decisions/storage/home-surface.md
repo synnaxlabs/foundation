@@ -1,8 +1,8 @@
 - **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
   `codec`, and `home` items, apart from three. `Config`, which only `node` builds, names
   `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
-  shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool,
-  so `hub` takes no pool of its own and the two cannot differ (architect,
+  shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool, so
+  `hub` takes no pool of its own and the two cannot differ (architect,
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051).
   `home::reader` re-exports the `delivery` values that the surface names: `Next`,
   `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
@@ -34,4 +34,25 @@
   and `Lease`, which it never gives. The plan has the full text
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
-  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
+  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116). Amended
+  (2026-10-08T22:24:43Z, #2020): `Shard::shed` stops carrying an index, the pair of
+  `carry`. Its control gate goes, and with it a handoff that waits for room. Each named
+  reader of the index stops holding its position. Its frames stay in the buffer, so a
+  later `carry` of the slot continues each path from its tail in the buffer, as after a
+  restart: a lost seq whose gap is not durable is given again (`Outcome::Lost`). Lost: a
+  map of the live tail of each shed index, which grows with each index that leaves for
+  good, and still gives the seq again after a restart (`laptop.architect`,
+  2026-10-08T22:50:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6070616191). It panics
+  on an open writer or reader of the index: the hub ends each session on the index
+  first. A shed frees the place of the index in the shard, and the index at the last
+  place moves there. The hub sheds an index only when its key leaves the definitions; a
+  rename or a changed definition at the same key ends its sessions and keeps the index.
+  No reader key is given twice, also after a shed and a carry: `delivery::Readers::end`
+  gives the number after each key of a shed index, and panics while a record waits to be
+  taken, and the shard carries each index with `Readers::after` at the highest of these.
+  So a hub finds a session by its home key alone. Decided by `laptop.architect`
+  (2026-10-08T22:24:43Z:
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814, and the
+  `delivery` items, 2026-10-08T22:31:27Z:
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046).
