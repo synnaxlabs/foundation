@@ -7,6 +7,10 @@
 //! from 0 through all files. A record that does not fit in the rest of a file starts
 //! the next file, or makes the file again, larger, when it holds no record.
 //!
+//! The directory also holds the file `lock`, which has no bytes. A log holds it open
+//! for writing while it lives, so a second open of the directory gives
+//! [`files::Error::Busy`] on it.
+//!
 //! A header never crosses a 512-byte sector: a record whose header would cross one
 //! starts at the next sector. A power cut keeps all or none of a sector, so a header
 //! is whole or absent, and only the body of the last record can be torn. Where a
@@ -85,7 +89,8 @@ pub enum Error {
         /// The version of the record.
         found: u16,
     },
-    /// A file in the directory of the log that is not the next log file.
+    /// A file in the directory of the log that is not the lock and not the next log
+    /// file.
     Stray {
         /// The file.
         path: PathBuf,
@@ -184,7 +189,8 @@ impl Log {
     ///   512 bytes, or `pool` has no block for a read or a write.
     /// - [`Error::Corrupt`] when a record is not valid and is not a torn end.
     /// - [`Error::Version`] when a record has another format version.
-    /// - [`Error::Stray`] when `dir` holds a file that is not the next log file.
+    /// - [`Error::Stray`] when `dir` holds a file that is not the lock and not the
+    ///   next log file.
     pub(crate) async fn open(
         files: Files,
         dir: PathBuf,

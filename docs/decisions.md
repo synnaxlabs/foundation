@@ -2119,8 +2119,15 @@ How to read this record:
   configuration in force at its index, so the configuration before the last entry
   stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
-  files `log-0`, `log-1`, and so on of one directory; any other file there is
-  `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
+  files `log-0`, `log-1`, and so on of one directory. A log also holds the file `lock`
+  of that directory open for writing, from its open until it drops and its calls end.
+  The file has no bytes, and one with bytes fails the open (`Files(Length)`). So a
+  second open of the directory gives `Error::Log` with `Busy` on the lock, at each
+  time, whatever log file the first log holds (#1360, decided by `laptop.architect`,
+  2026-10-07T12:07:03Z:
+  https://github.com/synnaxlabs/foundation/issues/1360#issuecomment-6037555764). Any
+  other file there is `Error::Stray`. One write of `raft` is one record: a header, then
+  the body. The header
   is an 8-byte check of the rest of the header (the first bytes of
   `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
   body length, and an 8-byte check of the body. The body holds the hard state, when it
