@@ -368,7 +368,9 @@ proptest! {
     }
 
     #[test]
-    fn decodes_any_bytes_with_no_panic(found in proptest::collection::vec(any::<u8>(), 0..256)) {
+    fn decodes_any_bytes_with_no_panic(
+        found in proptest::collection::vec(any::<u8>(), 0..256),
+    ) {
         if let Ok(plan) = Plan::decode(&found) {
             prop_assert_eq!(plan.encode(), found);
         }

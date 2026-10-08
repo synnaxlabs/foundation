@@ -5003,6 +5003,18 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087),
   approved by `laptop.architect` (2026-10-08T14:50:25Z,
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561).
+- **PLAN FILE (#337, 2026-10-08)** `config::Plan::encode` gives the canonical bytes of
+  a plan, and `config::Plan::decode` reads only those bytes and never panics. The
+  first byte is the format version, 1. Then the base pointer, the changes in name
+  order, and the homes in name order. A `Spec` definition is its `spec` encoding; a
+  channel kind holds its edges as names, so the plan still holds no channel key (A4).
+  The bytes hold no span. Another version is `plan::Error::Version`, which says to
+  plan again; other bytes are `plan::Error::Malformed` at the first wrong byte.
+  `decode` checks only the form: `spec::region::check` of the definitions after the
+  plan refuses the rest. `config::Plan::definitions(applied, key)` gives those
+  definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
+  from `key`, which the check refuses as dangling. Plan:
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221.
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no

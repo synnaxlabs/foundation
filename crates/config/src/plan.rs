@@ -64,14 +64,8 @@ pub fn plan(
     kinds: &Table,
 ) -> Result<Plan, Vec<Diagnostic>> {
     let found = checked(documents, kinds)?;
-    let kinds =
-        found
-            .entries
-            .iter()
-            .filter_map(|(name, entry)| match &entry.definition {
-                Definition::Channel(kind) => Some((name, kind)),
-                Definition::Spec(_) => None,
-            });
+    let entries = found.entries.iter();
+    let kinds = entries.filter_map(|(name, entry)| Some((name, kind(entry)?)));
     let channels = channels(kinds, BTreeMap::new(), applied, unheld(applied));
     let mut diagnostics = wrong(&found, &channels);
     let placements = placements(&found);
@@ -145,12 +139,10 @@ impl Plan {
                 _ => None,
             })
             .collect();
-        let kinds = self.changes.iter().filter_map(|change| {
-            match &change.new.as_ref()?.definition {
-                Definition::Channel(kind) => Some((&change.name, kind)),
-                Definition::Spec(_) => None,
-            }
-        });
+        let kinds = self
+            .changes
+            .iter()
+            .filter_map(|change| Some((&change.name, kind(change.new.as_ref()?)?)));
         let channels = channels(kinds, kept, applied, key);
         for change in &self.changes {
             if let Some(Entry {
@@ -182,6 +174,13 @@ pub struct Change {
     /// The definition in the files, with the span of its label, or `None` when the
     /// plan removes it.
     pub new: Option<Entry>,
+}
+
+fn kind(entry: &Entry) -> Option<&spec::channel::Kind<Name>> {
+    match &entry.definition {
+        Definition::Channel(kind) => Some(kind),
+        Definition::Spec(_) => None,
+    }
 }
 
 /// Gives `Key::from_u128(n)` for each `n` from 1 up that no channel of `applied`
