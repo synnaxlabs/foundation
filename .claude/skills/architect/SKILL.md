@@ -51,12 +51,13 @@ A PR that changes a public surface or a crate's dependencies gets your review be
 person's:
 
 1. Launch a fresh `architecture` agent with the PR number and the decisions section.
+   Remove its worktree when it returns (`git worktree remove --force <path>`).
 2. Check yourself that the surface matches its interface issue and the decisions, and
    that each new public item has a caller on the milestone path.
-3. Post one PR comment. Start it with your rating and summary of the PR (`/review`,
-   "Rating"), then approved at `<sha>`, or the findings. A later push needs a new
-   approval only when it changes the public surface or the meaning of a ruling. A fix
-   of wording, links, or code behind the surface needs none.
+3. Post one PR comment. Start it with your name line, then your rating and summary of
+   the PR (`/review`, "Rating"), then approved at `<sha>`, or the findings. A later push
+   needs a new approval only when it changes the public surface or the meaning of a
+   ruling. A fix of wording, links, or code behind the surface needs none.
 
 ## Contract disagreements
 
@@ -81,7 +82,8 @@ the commit you checked:
 - Post each ruling as a comment on its issue at once. The builder acts on it and adds
   it to the crate's section of `docs/decisions.md` in the code PR, with who decided and
   the comment link. Open a record PR of your own only for a ruling with no code PR, such
-  as a new milestone. Only the person's own words lock a decision.
+  as a new milestone, and run `/review` on it before `gh pr merge --auto`: the required
+  check `review` needs a round on each PR. Only the person's own words lock a decision.
 - Answer "why did we decide this" from `docs/decisions.md`, `docs/research/`, and
   `docs/history/interview-log.md`, with the citation.
 

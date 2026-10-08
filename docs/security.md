@@ -85,11 +85,22 @@ state on `main`.
   and a size takes the budget of a size with no block in use (#270). A stream on
   another connection reads while one connection holds its budget (RECV WAITS). Still
   open: many connections before admission (#563), which also bounds the sum of
-  those heap buffers.
-- Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
-  reset to each address it spoofs, with no limit), #620 (a stop after the peer's
-  reset gives the peer the stream's window twice, so a peer grows the connection's
-  receive memory with no bound).
+  those heap buffers. Open: #1482 (an out-of-order frame that noq-proto's assembler
+  holds pins its whole receive allocation, up to 64 KiB, so a peer that sends such
+  frames holds more memory than the budget counts).
+- Each shard's endpoint sends at most one stateless reset to each address in each
+  20 ms window (#607). An address is an IPv4 address or the first 64 bits of an IPv6
+  address. Addresses hash into 65,536 buckets with a key from `Entropy`. Residual risk
+  (#655): a stranger with an ID from a failed dial still gets 50 resets a second for
+  each shard (N x 50 for a node of N shards) sent to each victim address, each smaller
+  than the datagram that caused it. A sender that can use the peer's address (it
+  spoofs it, shares the peer's NAT, or is in the peer's IPv6 /64) takes that peer's
+  resets, and the peer then ends at its idle timeout; peers that share an address
+  share 50 resets a second on each shard. One ID is enough, and a peer whose dial
+  completes gets new IDs with no limit: noq-proto issues a new ID each time the peer
+  retires one.
+- Open: #620 (a stop after the peer's reset gives the peer the stream's window twice,
+  so a peer grows the connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
   session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
   not valid, from one address, stopped every stateless reset; a small datagram of an
@@ -161,10 +172,12 @@ state on `main`.
   configuration the node holds, or of one that a chain of signed configuration
   entries proves (#750, #881). A link carries only its leader's signature and the
   votes of its term, so a voter that led a term at or above the node's committed one
-  can sign a configuration entry it never wrote, to a configuration of itself alone,
-  put it in a chain, prove any term with its own grant, and so stop the group for
-  good. `raft` trusts its voters until #882, which gives a link the signed acks of
-  a quorum; `crates/raft/tests/it/hostile.rs` pins the gap (architect,
+  (after a restart, the term at its applied index, since `Hard` holds no commit index;
+  architect, https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758)
+  can sign a configuration entry it never wrote, to a configuration of itself alone, put
+  it in a chain, prove any term with its own grant, and so stop the group for good.
+  `raft` trusts its voters until #882, which gives a link the signed acks of a quorum;
+  `crates/raft/tests/it/hostile.rs` pins the gap (architect,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
@@ -188,13 +201,16 @@ state on `main`.
   (`raft::Change`). The voter reads the chain up to the entry whose configuration
   the leader's votes are a quorum of, checks each signature it reads, and follows
   the leader; it keeps nothing from the chain. A forged link, or one whose votes are
-  no quorum of the configuration before it, is refused, and the voter does not
-  change (architect, #881,
+  no quorum of the configuration that elected its leader (the last link read of a
+  lower term, else the voter's last committed configuration of a lower term), is
+  refused, and the voter does not change (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579).
-  `raft/tests/it/behind.rs` and `mesh::claim` pin it. The chain does not cover a
-  leader that the missed change made a voter (#1096), and it cannot prove a term that
-  no configuration entry stands behind: a node that a leave removed can reach such a
-  term, and a change that adds it back then stalls the group (#1485).
+  `raft/tests/it/behind.rs` pins that the voter follows the leader, `mesh::claim` pins a
+  forged link, and the `chain` tests in `crates/raft/src/machine.rs` pin the quorum
+  rule. The chain does not cover a leader that the missed change made a voter (#1096),
+  and it cannot prove a term that no configuration entry stands behind: a node that a
+  leave removed can reach such a term, and a change that adds it back then stalls the
+  group (#1485).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -335,6 +351,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
+| `spec_data_type` | `spec::channel::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |

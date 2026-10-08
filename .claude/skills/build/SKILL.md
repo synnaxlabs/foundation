@@ -95,11 +95,8 @@ cargo mutants --in-diff "$p" --jobs 4
 
 - Each missed mutant is a missing test. Exit 3 with an empty `mutants.out/missed.txt` is
   a pass: a timeout means a test caught the mutant.
-- On a box, run `cargo mutants` in a capped cgroup, so a mutant that allocates in a
-  loop cannot take the box down, as CI caps each runner (#803): prefix it with
-  `systemd-run --user --scope -p MemoryMax=<share> -p OOMPolicy=continue`. The share
-  of each box is in
-  [#803](https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6043431001).
+- On a box, run `cargo mutants` in the memory cgroup that `docs/claude/testing.md` gives
+  (mutation testing).
 - A changed `Cargo.toml` or `Cargo.lock`: also
   `cargo deny check advisories bans licenses sources`.
 - A change under a `models` path in `.github/workflows/ci.yaml`: also `cargo xtask

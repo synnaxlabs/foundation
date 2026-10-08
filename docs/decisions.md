@@ -164,6 +164,12 @@ How to read this record:
   as the default: `config` gives each edge as a name, and `plan` gives each name its
   key. `Channel`, `check`, and the encoding stay on keys (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
+  `Kind::edges` gives each edge and the channel it points at, in this order: the error
+  then the control channel of an index, or the index then the quality channel of a
+  data channel. `check` reads the edges through it, and `config` will too. Each user
+  error has a fix: `unit::Error::fix`, and `document::value::Kind::noun` names a value
+  that has the wrong kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
   `types` owns the text of `sample::Type` both ways (`Display` and `FromStr`): exact
   case, no leading zero in a count, and one space after the comma of a list; `Stamp` and
   `Span` read and show as `timestamp` and `duration` (A9), so a text that reads shows as
@@ -200,6 +206,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6044826781.
   Supersedes the field shape of
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
+  `channel::DataType` reads and writes `quality`, and otherwise the text of
+  `sample::Type`. A text that is neither is `channel::Error::DataType`, which holds the
+  `sample::Error`; its message names `quality` when the text has no form, and its fix is
+  the cause's. Decided by `laptop.architect-2`: the mapping (2026-10-07T11:21:13Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520), and
+  the payload, message, and fix (2026-10-08T00:47:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6049836256).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -468,8 +481,31 @@ How to read this record:
   frame. A remote complete reader gets only the series of its view (M2): the home sends
   a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
   that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
-  frames"), #267. The charge is part of the wire contract: a change to `block`'s header
-  or size classes needs a new wire version (C9d). The classes changed to four per
+  frames"), #267. Each complete session has a `delivery::complete::Charge`: `Whole` (a
+  local reader) spends the home's frame, and `Places` (a remote reader) spends the
+  frame of one series for each slot it lists that the frame holds, in listing order,
+  the first listing of a slot only. Catch-up uses the same `Charge`. So a remote
+  session pins home blocks up to its window times the ratio of the home's frame to its
+  view. laptop.architect decided this on 2026-10-07T22:47:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
+  `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
+  it, so `hub` does not depend on `delivery`. The `Charge` adds about 7 ns per frame to
+  `release` with one `Whole` session; that is accepted, with the `Places` state boxed,
+  so that a `Whole` session grows by one pointer and not by the size of `Places`.
+  laptop.architect decided both on 2026-10-07T23:13:16Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048741570. The box2
+  rerun gave 8.0 ns per frame at one session and +4.0% at 16; laptop.architect ruled
+  on 2026-10-07T23:38:44Z that the acceptance covers it:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6049045510. The
+  `hash::Map` of those states adds about 0.3 ns per place to `release` at 100k places
+  (+10%); laptop.architect accepted it on 2026-10-07T23:32:22Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185. One layout
+  type for this charge and the frame that `serve` sends, and the two `Places` costs at
+  100k places, are #1648; laptop.architect gave the OK to defer them on
+  2026-10-07T23:22:03Z:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
   window counts charges, not wire bytes. Per-connection framing in `wire` (X35) pins no
   pool memory and does not count. Credits apply only to complete delivery, which is
@@ -798,6 +834,31 @@ How to read this record:
   since the bench host runs no features. Decided by `laptop.architect`
   (2026-10-07T19:05:26Z):
   https://github.com/synnaxlabs/foundation/issues/1547#issuecomment-6044862850.
+- **NODE BENCH (#1637, 2026-10-07)** The cargo feature `sim` of `node`, off by default
+  (`node`'s dev-dependency on itself turns it on for the bench), adds `#[doc(hidden)]
+  pub mod bench` with `Scope { new, spawn }` and its `Default` over `scope::Scope`. Only
+  the bench `benches/scope.rs` (`test = true`) uses it. Its `env::tasks::Driver` keeps
+  each task, `spawn` gives it, and the bench polls it by hand, so a time holds only
+  `Spawned::poll` and the future's poll. A `bare` line polls the boxed future directly
+  in the same binary, as the control. Lost: a time through `Node::spawn` on `sim` or
+  Tokio, which hides a 0.3 ns change in the executor's cost, and a copy of the poll
+  before `clone_from`, which #1627 decided and the `bare` control replaces. The
+  `same_waker` time is the check on `clone_from` until #715 gates it with a baseline
+  from the form with `clone_from`: an `Arc` waker clone allocates nothing, so no
+  allocation count can. Decided by `laptop.architect-2` (2026-10-07 23:56 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976; the
+  surface of `spawn`, in round 1 of #1666 (2026-10-08 00:11 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049426380. The
+  bench's `Driver`, beside those of `os` and `sim`, is the #1632 clause, by
+  `laptop.architect-2` (2026-10-08 00:18 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1632#issuecomment-6049501422. #1632
+  applies its text to the doc of `env::tasks::Driver` and to ENV SEAMS. The feature is
+  `sim`, since a hook that only a bench or a fuzz target uses is test-only (#1570), by
+  `laptop.architect-2` (2026-10-08 00:56 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1666#issuecomment-6049939448. It
+  supersedes
+  https://github.com/synnaxlabs/foundation/issues/1637#issuecomment-6049244976 in its
+  clause that the feature is `bench`.
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
   `len` 0, and `first` at the live tail. It records a handoff after the gate input that
@@ -1455,7 +1516,25 @@ How to read this record:
   then the body as it arrives, with no copy of a series after the receive. An end below
   the start of its series is not valid; `types` refuses it, as `frame::check` does. The
   padding may hold any bytes (FRAME LAYOUT). Each direction has its own messages: the
-  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened` or `Head`. Stop
+  reader sends `Open`, then `Credit`; the home sends a `Reply`, `Opened`, `Head`, or
+  `Behind`. The home sends `Behind` after the last frame before a miss of the session,
+  then finishes its stream. The reader's `next` gives each frame before it, then
+  `Ended::Behind`. `hub` builds both in #340 PR 4. A message after `Behind` is not
+  valid (lost: a stop code, which can cut off the frames sent before it; the architect,
+  2026-10-07T21:07:50Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6046877541).
+  `Behind` and `Credit` in a latest session are not valid (lost: accept them in either
+  mode, which lets a remote latest reader give `Ended::Behind`; the architect,
+  2026-10-07T21:34:58Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047310321). The
+  check of the mode costs the decode of a `Credit` +0.28 ns. The `Ended` state and the
+  mode flag of `Reader`, for `Behind`, cost a body message up to +0.37 ns and a frame up
+  to +1 ns. Both are accepted with no code change; a `Credit` decode past +1 ns over
+  `main` comes back to the architect (lost: `#[inline]` on `wire::hub::Home::decode`,
+  which is not measured and grows each caller; the architect, 2026-10-07T22:18:40Z,
+  https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6048002213, and
+  2026-10-08T00:16:49Z,
+  https://github.com/synnaxlabs/foundation/pull/1631#issuecomment-6049484466). Stop
   codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node is not
   the home of the index), and 2 `wire::header::MALFORMED` (a message that does not
   decode, comes from the wrong side, or breaks a rule above), which every protocol may
@@ -1872,7 +1951,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z, and
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
-  2026-10-07T17:08:02Z).
+  2026-10-07T17:08:02Z). Amended (approved by `laptop.architect`,
+  2026-10-07T20:35:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046363822,
+  2026-10-07T20:47:58Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046560645, and
+  2026-10-07T20:51:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046617974,
+  #1589): the rule is that a message `step` refuses or drops by its header gives no
+  claim. So it also gives no claim of a message for another node, from this node, or
+  from a second leader of this term (`Misrouted`, `Loopback`, `SecondLeader`). One
+  predicate, `Raft::reads`, holds each refusal and drop by the header, and decides
+  both. A grant or a proof that `step` reads past the header and then ignores is
+  still a claim (#1613 holds the design that removes the class).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -2488,12 +2579,16 @@ How to read this record:
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
-  `Watch::next`, and `Mesh::member` (#562). `next` gives `Stopped`, which holds the
-  cause types `log::Error` and `change::Unknown`, each public in its own module, so a
-  caller can match the exact cause. `next` gives `Stopped` and not `Error`, because a
-  stop is the only error that it has: the type says what the call gives. For a read of a
-  home, `hub` gets the variant `Error::Mesh(mesh::Stopped)` in #340, which supersedes
-  the `Error::Mesh(mesh::Error)` of its plan
+  `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
+  the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
+  differ (#1664). Approved by `laptop.architect`, 2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `next`
+  gives `Stopped`, which holds the cause types `log::Error` and `change::Unknown`, each
+  public in its own module, so a caller can match the exact cause. `next` gives
+  `Stopped` and not `Error`, because a stop is the only error that it has: the type says
+  what the call gives. For a read of a home, `hub` gets the variant
+  `Error::Mesh(mesh::Stopped)` in #340, which supersedes the `Error::Mesh(mesh::Error)`
+  of its plan
   (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6002776268). The
   cause types at the root (`mesh::LogError`) lost, because each name repeats its module.
   A `Stopped` that holds a text for each cause lost, because a caller cannot match a
@@ -2582,38 +2677,47 @@ How to read this record:
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
 - **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
-  node's disk through `env::files`. A put returns only after the chunk is durable. A put
-  of a digest that a put stored since the open makes no file call. A get gives bytes
-  only when they hash to the digest; a chunk that fails the check (a write torn by a
-  crash, a bad sector) reads as absent, so the caller fetches it again as for any absent
-  chunk, and the store counts each one in a crate-private count: an `interface` issue
-  makes it public, with a noun for a name, when the first caller (the node's status of
-  its disk) needs it. `env::files` has no rename, so a torn chunk must read as absent,
-  never as a short chunk. A get or a put holds at most one chunk in memory. `put`
-  borrows its chunk (`&Block`). A put whose future is dropped stores nothing that a get
-  gives unchecked: the next get of the digest reads and checks the file, and the next
-  put writes it again. Layout: one flat directory, one file per chunk named by the 64
-  hex digits of its digest, with the chunk's bytes and nothing else, so the bytes are
-  their own check and the layout needs no header, no check field, and no rename. A pack
-  file with an index lost: it needs record headers, a scan of every byte at open, and
-  compaction for removal. Removal of chunks that no kept root reaches is a follow-up.
-  Decided by `laptop.architect` (2026-10-07T17:23:56Z):
-  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The open
+  node's disk through `env::files`. A put returns only after the chunk is durable. A get
+  gives bytes only when they hash to the digest; a chunk that fails the check (a write
+  torn by a crash, a bad sector) reads as absent, so the caller fetches it again as for
+  any absent chunk, and the store counts each one in a crate-private count: an
+  `interface` issue makes it public, with a noun for a name, when the first caller (the
+  node's status of its disk) needs it. A get or a put holds at most one chunk in memory.
+  `put` borrows its chunk (`&Block`). Layout: one flat directory, one file per chunk
+  named by the 64 hex digits of its digest, with the chunk's bytes and nothing else, so
+  the bytes are their own check and the layout needs no header, no check field, and no
+  rename. A pack file with an index lost: it needs record headers, a scan of every byte
+  at open, and compaction for removal. Removal of chunks that no kept root reaches is a
+  follow-up. Decided by `laptop.architect` (2026-10-07T17:23:56Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. A torn
+  chunk reads as absent, never as a short chunk, because the bytes are their own check.
+  A write to a second name and a rename (`File::rename`, #1503) lost: each chunk then
+  has a second name, a crash leaves strays at that name, and the open needs a rule for
+  them. Decided by `laptop.architect` (2026-10-07T20:47:57Z), item 1:
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6046560177.
+  Supersedes the reason "`env::files` has no rename" of the rules in
+  https://github.com/synnaxlabs/foundation/issues/1226 (2026-10-07T06:59:56Z). The open
   lists the directory and trusts no name: a get of a listed digest reads and checks its
   bytes, and a put of one writes it again, because a process crash leaves whole bytes in
   the cache that no sync covers, and a put that trusted a read of them would return
   before they are durable. A put refuses a chunk longer than the largest block of the
-  pool before any file call. Decided by the builder (#1515,
+  pool before any file call. A put of a digest that a put stored since the open makes no
+  file call. A put whose future is dropped stores nothing that a get gives unchecked:
+  the next get of the digest reads and checks the file, and the next put writes it
+  again. Decided by the builder (#1515,
   https://github.com/synnaxlabs/foundation/pull/1515) and `laptop.architect`
   (2026-10-07T17:47:50Z):
   https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043557708. Supersedes
   the read on the first put of a listed digest in the plan
   (https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6042962010) and the
-  sentence of item 1 of the ruling, "the next put or get of the digest reads the file
-  first". Every open makes the directory and syncs its parent, because an earlier open
-  can have stopped between the two. A put removes a file of another length at its name
-  and writes the chunk. Decided in review round 1 of #1515 (2026-10-07T17:56:25Z):
-  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043700902.
+  sentence of item 1 of the 17:23:56Z ruling, "the next put or get of the digest reads
+  the file first". Every open makes the directory and syncs its parent, because an
+  earlier open can have stopped between the two. A put removes a file of another length
+  at its name and writes the chunk. A create that gives `Full` syncs the directory one
+  time and opens again, because `Files::remove` counts the room of a removed file as
+  used until `sync_dir` on its directory ends. A second `Full` is the error of the put.
+  Decided by `laptop.architect` (2026-10-07T20:47:57Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6046560177.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -4374,6 +4478,7 @@ How to read this record:
 | B3 one cumulative position per index | READER RULES |
 | Retention trims a held sample: the trim clauses of #895 (6032219156), of the READER RULES floor (#89), and of HANDOFF RECORD (#402) | RETENTION, READER RULES, HANDOFF RECORD, STORE TRIM |
 | `set_floor` takes `keep`, and the floor is past each sample stored more than `keep` ago: #1377 (6037946637, parts 1 and 2, and part 3 before the first estimate or while a store time of the path is at or after the cutoff; the floor sentence of 6038431739) and #1080 (6037950577) | READER RULES (the cutoff) |
+| BENCH SPEND; the coordinator as the session that rents and ends the ARM RUNNER hosts | Test budget (5.5) |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -5284,11 +5389,19 @@ engine, and performance work past the P1 targets.
 
 **Test budget (2026-10-05).** The person approved 1000 USD for AWS testing, and it
 replaces BENCH SPEND: a nightly chaos lab (about 2 USD a day), a spot simulation swarm
-of four c7i.8xlarge for four hours (ledger cap 22.85 USD at the on-demand price, about
-9 USD at spot), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
-benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
-should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
-and an automatic shutdown first.
+of four c7i.8xlarge for four hours (about 9 USD at spot, with its ledger cap by "Cloud
+machines" step 2 in `docs/coordination.md`), a nightly P1 benchmark on a c7i.metal-24xl
+(about 4 USD), and benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day
+("test budget should be capped at $100 a day"). Every launch goes in the ledger (#15)
+with its cap and an automatic shutdown first. Only `laptop.monitor` rents and ends
+machines, by "Cloud machines" in `docs/coordination.md`, and no other session holds AWS
+credentials (the person,
+https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
+2026-10-07T16:48:27Z). Supersedes: BENCH SPEND, and the coordinator as the session that
+rents and ends the ARM RUNNER hosts. Those hosts stay under AWS CEILING, outside the
+test budget, its limits, and "Cloud machines" step 3. Each launch and end of one still
+gets its line on #15, with its 72-hour renewal stop as its end time. Step 4 checks each
+instance by itself, because those hosts have no `issue` tag.
 
 ### 5.6 First phase
 
