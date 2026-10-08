@@ -2217,7 +2217,7 @@ How to read this record:
   change of another call, returns that pointer; a later pointer gives `Stale`. Decided
   by `laptop.architect`, 2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
-  equal change of another call, 2026-10-08T11:46:13Z
+  equal change of another call, 2026-10-08T11:46:44Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
@@ -3092,7 +3092,9 @@ How to read this record:
   Amended (2026-10-08, PR 1 of #1741): with a region, `node` opens the chunk store in
   `blob` in the data directory before the mesh, and gives it as
   `mesh::Config::store`. Approved by `laptop.architect-2`, 2026-10-08T11:50:17Z:
-  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059221889. A store
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059221889. The name
+  `store`: `laptop.architect`, 2026-10-08T11:53:51Z, item 5 of
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643. A store
   that does not open stops the node with `Error::Blob`. Decided by
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
