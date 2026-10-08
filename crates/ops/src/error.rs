@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::path::PathBuf;
 
-use document::diagnostic::Code;
+use document::Span;
+use document::diagnostic::{Code, Diagnostic};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -140,6 +142,25 @@ pub(crate) struct Problem {
 }
 
 impl Problem {
+    /// The problem of `diagnostic`, whose spans are in the files at `paths`, by
+    /// source.
+    pub(crate) fn of(diagnostic: Diagnostic, paths: &[PathBuf]) -> Self {
+        Self {
+            code: diagnostic.code.as_str().to_owned(),
+            message: diagnostic.message,
+            fix: diagnostic.fix,
+            place: diagnostic.span.map(|span| Place::of(span, paths)),
+            notes: diagnostic
+                .notes
+                .into_iter()
+                .map(|note| Note {
+                    text: note.text,
+                    place: Place::of(note.span, paths),
+                })
+                .collect(),
+        }
+    }
+
     /// `error[<code>]: <message>`, its place, `fix: <fix>`, then each note and its
     /// place, with `escape` on each text.
     fn text(&self, escape: fn(&str) -> String) -> String {
@@ -180,6 +201,25 @@ pub(crate) struct Place {
     pub(crate) line: u32,
     /// The column, from 1, in Unicode scalar values.
     pub(crate) column: u32,
+}
+
+impl Place {
+    /// The start of `span`, in the file at `paths` of its source.
+    pub(crate) fn of(span: Span, paths: &[PathBuf]) -> Self {
+        let path = usize::try_from(span.source().0)
+            .ok()
+            .and_then(|source| paths.get(source))
+            .expect("invariant: a span is in a file of the plan");
+        let start = span.start();
+        Self {
+            file: path
+                .to_str()
+                .expect("invariant: `read` refuses a path that is not UTF-8")
+                .to_owned(),
+            line: start.line + 1,
+            column: start.column + 1,
+        }
+    }
 }
 
 /// `  --> <file>:<line>:<column>`, as rustc writes a place, and a new line.

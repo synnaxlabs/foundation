@@ -3,14 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use document::Source;
 use document::diagnostic::Diagnostic;
-use document::{Source, Span};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use spec::definition::{Definition, Kind};
 use types::name::Name;
 
-use crate::error::{Error, Note, Place, Problem};
+use crate::error::{Error, Place, Problem};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
@@ -39,7 +39,7 @@ pub(crate) fn plan(
     let failed = |diagnostics: Vec<Diagnostic>| {
         let problems = diagnostics
             .into_iter()
-            .map(|diagnostic| problem(diagnostic, &paths))
+            .map(|diagnostic| Problem::of(diagnostic, &paths))
             .collect();
         Error::Config(problems)
     };
@@ -215,7 +215,7 @@ impl Change {
             action,
             kind: kind.as_str().to_owned(),
             name: label.to_string(),
-            place: span.map(|span| place(span, paths)),
+            place: span.map(|span| Place::of(span, paths)),
             fingerprints,
         };
         (order, change)
@@ -247,40 +247,5 @@ impl Action {
             Self::Change => '~',
             Self::Remove => '-',
         }
-    }
-}
-
-/// The start of `span`, in the file of its source.
-fn place(span: Span, paths: &[PathBuf]) -> Place {
-    let path = usize::try_from(span.source().0)
-        .ok()
-        .and_then(|source| paths.get(source))
-        .expect("invariant: a span is in a file of the plan");
-    let start = span.start();
-    Place {
-        file: path
-            .to_str()
-            .expect("invariant: `read` refuses a path that is not UTF-8")
-            .to_owned(),
-        line: start.line + 1,
-        column: start.column + 1,
-    }
-}
-
-/// The problem of `diagnostic`, whose spans are in `paths`.
-pub(crate) fn problem(diagnostic: Diagnostic, paths: &[PathBuf]) -> Problem {
-    Problem {
-        code: diagnostic.code.as_str().to_owned(),
-        message: diagnostic.message,
-        fix: diagnostic.fix,
-        place: diagnostic.span.map(|span| place(span, paths)),
-        notes: diagnostic
-            .notes
-            .into_iter()
-            .map(|note| Note {
-                text: note.text,
-                place: place(note.span, paths),
-            })
-            .collect(),
     }
 }

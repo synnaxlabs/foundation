@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use types::channel;
 
-use crate::error::{self, Error};
+use crate::error::{self, Error, Problem};
 use crate::front_end;
 use crate::plan::{self, Action, Counts};
 
@@ -36,7 +36,7 @@ pub(crate) async fn apply(
     key: impl FnMut() -> channel::Key,
 ) -> Result<Applied, Error> {
     let file = path.to_str().ok_or_else(|| {
-        Error::Config(vec![plan::problem(front_end::not_utf8(path), &[])])
+        Error::Config(vec![Problem::of(front_end::not_utf8(path), &[])])
     })?;
     let planned = config::plan::Plan::decode(bytes).map_err(Error::Plan)?;
     let spec = mesh
