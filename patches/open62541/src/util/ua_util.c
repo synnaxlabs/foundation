@@ -24,6 +24,9 @@
 #include "base64.h"
 #include "itoa.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #if defined(UA_ARCHITECTURE_WIN32)
 #include <wtypes.h>
 #include <winbase.h>
@@ -653,24 +656,39 @@ UA_KeyValueMap_merge(UA_KeyValueMap *lhs, const UA_KeyValueMap *rhs) {
 
 /* TODO is this safe for multithreading? */
 static UA_THREAD_LOCAL pcg32_random_t UA_rng = PCG32_INITIALIZER;
+static UA_THREAD_LOCAL UA_Boolean UA_rng_started = false;
+
+/* Aborts when this thread set no start value, which would give each such thread the
+ * same values. */
+static void
+UA_rng_require(const char *name) {
+    if(!UA_rng_started) {
+        fprintf(stderr, "%s: no start value on this thread\n", name);
+        abort();
+    }
+}
 
 void
 UA_random_seed(u64 seed) {
     pcg32_srandom_r(&UA_rng, seed, (u64)UA_DateTime_now());
+    UA_rng_started = true;
 }
 
 void
 UA_random_seed_deterministic(UA_UInt64 seed) {
     pcg32_srandom_r(&UA_rng, seed, 0);
+    UA_rng_started = true;
 }
 
 u32
 UA_UInt32_random(void) {
+    UA_rng_require("UA_UInt32_random");
     return (u32)pcg32_random_r(&UA_rng);
 }
 
 UA_Guid
 UA_Guid_random(void) {
+    UA_rng_require("UA_Guid_random");
     UA_Guid result;
     result.data1 = (u32)pcg32_random_r(&UA_rng);
     u32 r = (u32)pcg32_random_r(&UA_rng);
