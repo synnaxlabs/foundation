@@ -1034,9 +1034,10 @@ How to read this record:
   `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
-  Supersedes the clause "apart from two" of #963. `Config` takes no pool: the shard
-  uses `Buffer::pool()`. It takes one `clock: clock::Reader` for monotonic and mesh
-  time. The shard is the only writer of the buffer in `Config`:
+  Supersedes the clause "apart from two" of
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031955051. `Config`
+  takes no pool: the shard uses `Buffer::pool()`. It takes one `clock: clock::Reader`
+  for monotonic and mesh time. The shard is the only writer of the buffer in `Config`:
   the caller gives it with no entry that waits for a commit. The condition is stated,
   not checked: `node` appends nothing before `Shard::new`, and `Config` takes the
   buffer by value, so no later append can come from outside (architect,
@@ -5016,8 +5017,7 @@ How to read this record:
   each through `home::reader`, not at its home (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
-  Supersedes the clauses "Only `hub` re-exports" and "Layer 2 and `node` name the item
-  at its home" of #340 for those values.
+  Supersedes the clause "Only `hub` re-exports" of #340 for those values.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
   trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
