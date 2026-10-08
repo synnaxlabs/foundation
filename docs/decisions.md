@@ -1065,8 +1065,8 @@ How to read this record:
   adds 0.3% to the write of one frame. Accepted by laptop.architect:
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
   A doc states what is true at its commit: `Reader` states no credit window, as a
-  latest reader has none, and `Session` names only `Reader` as its driver. #1636 adds
-  each stream of a remote reader when it adds that driver (laptop.architect,
+  latest reader has none, and `Session` names `Reader` and each stream of a remote
+  reader as its drivers, since #1636 adds the second (laptop.architect,
   2026-10-08T01:01:26Z,
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049988923).
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
@@ -1548,9 +1548,9 @@ How to read this record:
   `Head` (path, seq, count, and the number of series). Every frame is encoded (X35), so
   `Head` has no form. The body holds only the series of the reader's view, the index
   series too, written from the frame's block as slices, and both ends charge the frame
-  that the reader builds (CREDIT RULES, M2). The home's `delivery` spends that charge
-  through a `Charge` of the session's slots, built in #1642 before `node` calls `serve`
-  (the architect, 2026-10-07T22:25:18Z,
+  that the reader builds (CREDIT RULES, M2). `serve` opens each complete session with
+  `delivery::complete::Charge::Places` of the slots of its open (#1642, #1636; the
+  architect, 2026-10-07T22:25:18Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
   has the place of its first listing in the open, from 0. The reader's `hub` lists the
   keys in the entry order of its own frame (its slot order), the index too, so a place
@@ -1582,10 +1582,10 @@ How to read this record:
   `View::bounds` is crate-private, as no crate outside `types` calls it (the architect,
   2026-10-08T00:49:22Z,
   https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049855032; lost: a
-  public `bounds`, a second way to lay a reader's frame beside `Places`). At
-  the open it makes the list of each place and its home entry, sorted by place, and
-  writes each ends message from it with `wire::hub::ends::encode`, which sizes the
-  message by its buffer, so no scratch buffer holds the ends (the architect, #1146,
+  public `bounds`, a second way to lay a reader's frame beside `Places`). `serve`
+  writes each ends message from the series that `Places::lay` gives, in place order,
+  with `wire::hub::ends::encode`, which sizes the message by its buffer, so no scratch
+  buffer holds the ends (the architect, #1146,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). It
   takes exactly the ends the buffer holds and no more, so one iterator passed with
   `by_ref()` splits a run into messages; the caller owns the count of the run (the
@@ -1629,12 +1629,13 @@ How to read this record:
   one message. An ends message holds at most the frame's series, at 8 bytes each, the
   size of their descriptors in the frame's block, so the pool can always hold it (the
   architect, 2026-10-07T22:17:44Z,
-  https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988; it
-  supersedes the block size rule of 6047519084). The home
-  ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait needs
-  a clock in `hub` and a wait queue for each session, and the end frees the frames the
-  session pins (`mesh` ends its stream in the same case). The class rule and code 18
-  were decided by the architect (2026-10-07T21:34:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988).
+  Supersedes "A reply block holds at most `min(bytes_max, Pool::largest)` bytes"
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The
+  home ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait
+  needs a clock in `hub` and a wait queue for each session, and the end frees the
+  frames the session pins (`mesh` ends its stream in the same case). The class rule and
+  code 18 were decided by the architect (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
   by the architect (2026-10-07T21:47:56Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084).

@@ -265,8 +265,9 @@ async fn open(
     let slots: Box<[Slot]> = slots.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
+            let charge = ::home::reader::complete::Charge::Places(slots.clone());
             let (session, credit) =
-                Session::complete(state, slots.clone(), index, limit_bytes);
+                Session::complete(state, slots.clone(), index, limit_bytes, charge);
             (session, Some(credit))
         }
         Mode::Latest => (Session::latest(state, slots.clone(), index), None),
@@ -285,8 +286,8 @@ fn reply(state: &RefCell<State>, reply: Reply) -> Result<Block, Error> {
     Ok(block.freeze())
 }
 
-/// A block of `len` bytes from the home's pool, at most the size of the frame's
-/// descriptors.
+/// A block of `len` bytes from the home's pool: a reply, or an ends run, which is
+/// smaller than the frame's descriptors.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
     state
         .borrow()
@@ -417,6 +418,8 @@ impl Cut {
     }
 }
 
+// These tests call the private `head`, `runs`, and `Cut::next`, so each case of the
+// pure parts has a test; the tests through `Hub::serve` check them on the wire.
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -453,36 +456,16 @@ mod tests {
         (draft.freeze(Path::Live), set)
     }
 
-    /// Each series of `placed`, as `(place, bounds, end)`.
-    fn laid(placed: &[Placed]) -> Vec<(usize, Range<usize>, usize)> {
-        placed
-            .iter()
-            .map(|p| (p.place, p.bounds.clone(), p.end))
-            .collect()
-    }
-
-    /// The frame's entries are in slot order (3, 1, 2, 5), and the places are 1, 2, 3,
-    /// and 4, which the frame does not hold.
     #[test]
-    fn lays_out_the_series_of_each_place_in_place_order() {
+    fn gives_the_path_range_and_series_count_of_the_frame_in_the_head() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let [b, index, a, _, absent] =
-            [3, 1, 2, 5, 4].map(|k| interner.slots().assign(key(k)));
-        let mut layout = Layout::new([index, a, b, absent].into(), index);
-        let (wide, set) = frame(&mut interner, &pool, &[2, 3, 5], &[3, 8, 5, 8]);
-        let placed = layout.places.lay(&wide, &set);
-        assert_eq!(
-            laid(placed),
-            [(0, 8..16, 8), (1, 16..21, 13), (2, 0..3, 19)]
-        );
-        let head = head(&wide, &set, index, placed.len());
+        let index = interner.slots().assign(key(1));
+        let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
+        let head = head(&frame, &set, index, 2);
         assert_eq!(head.path, Path::Live);
-        assert_eq!(Some(head.range), wide.range(0));
-        assert_eq!(head.series, 3);
-        let (narrow, set) = frame(&mut interner, &pool, &[2], &[8, 5]);
-        let placed = layout.places.lay(&narrow, &set);
-        assert_eq!(laid(placed), [(0, 0..8, 8), (1, 8..13, 13)]);
+        assert_eq!(Some(head.range), frame.range(0));
+        assert_eq!(head.series, 2);
     }
 
     /// The head carries the range of the session's index group, not the first group.
@@ -509,22 +492,6 @@ mod tests {
         let head = head(&frame, &set, index, 2);
         assert_eq!(Some(head.range), frame.range(1));
         assert_ne!(frame.range(0), frame.range(1));
-    }
-
-    /// A key listed twice has the place of its first listing, and the second listing
-    /// holds a place with no series.
-    #[test]
-    fn gives_a_series_the_place_of_its_first_listing() {
-        let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
-        let mut interner = Interner::new();
-        let [index, a, b] = [1, 2, 3].map(|k| interner.slots().assign(key(k)));
-        let mut layout = Layout::new([index, a, index, b].into(), index);
-        let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
-        let placed = layout.places.lay(&frame, &set);
-        assert_eq!(
-            laid(placed),
-            [(0, 0..8, 8), (1, 8..16, 16), (3, 16..24, 24)]
-        );
     }
 
     #[test]

@@ -370,14 +370,18 @@ fn write_wide(writer: &mut Writer, now: i64, n: i64) {
 /// compress.
 fn write_samples(writer: &mut Writer, start: i64, samples: i64) {
     let stamps: Vec<_> = (start..start + samples).collect();
-    let values: Vec<_> = stamps
+    write(writer, &stamps, &scrambled(&stamps));
+}
+
+/// A value for each of `stamps` that does not compress.
+fn scrambled(stamps: &[i64]) -> Vec<i64> {
+    stamps
         .iter()
         .map(|&s| {
             let x = s.wrapping_mul(6_364_136_223_846_793_005);
             x ^ (x >> 29)
         })
-        .collect();
-    write(writer, &stamps, &values);
+        .collect()
 }
 
 /// The samples of the channel `key` in `received`.

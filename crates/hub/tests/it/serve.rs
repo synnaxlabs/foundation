@@ -25,7 +25,8 @@ use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, RING, SETTLE, Test, fill, write, write_series, write_wide,
+    AREA, BODY_MAX, I64, RING, SETTLE, Test, fill, scrambled, write, write_series,
+    write_wide,
 };
 
 /// The UDP port of each transport.
@@ -707,6 +708,41 @@ fn sends_each_frame_before_a_miss_then_behind() {
             },
         );
     }
+}
+
+/// A session of `value` and `time` spends the charge of the frame the peer builds,
+/// not of the home's frame, which also holds `value-c`: it gets each frame until those
+/// charges reach its window, then `Behind`.
+#[test]
+#[ignore = "waits on #68"]
+fn charges_a_complete_session_by_the_frame_the_peer_builds() {
+    const LIMIT: u64 = 1 << 16;
+    let home = |test: Test, incoming| async move {
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            for n in 0..16 {
+                let stamps: Vec<_> = (now + n * 1000..now + (n + 1) * 1000).collect();
+                let values = scrambled(&stamps);
+                write_series(&mut writer, &[(1, &stamps), (2, &values), (5, &values)]);
+            }
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+    };
+    session(62, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[2, 1], LIMIT).await;
+        let mut charges = Vec::new();
+        while let Some(got) = got(&mut peer, &mut reader).await {
+            let series = usize::try_from(got.head.series).expect("fits");
+            charges.push(types::frame::charge(series, got.body.len()));
+        }
+        let (last, before) = charges.split_last().expect("a frame");
+        assert!(charges.len() < 16, "{charges:?}");
+        assert!(before.iter().sum::<u64>() < LIMIT, "{charges:?}");
+        assert!(before.iter().sum::<u64>() + last >= LIMIT, "{charges:?}");
+    });
 }
 
 #[test]

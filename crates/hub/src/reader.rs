@@ -131,7 +131,13 @@ impl Reader {
         let slots = slots.into();
         let (session, credit) = match mode {
             Mode::Complete => {
-                let (session, credit) = Session::complete(state, slots, slot, WINDOW);
+                let (session, credit) = Session::complete(
+                    state,
+                    slots,
+                    slot,
+                    WINDOW,
+                    ::home::reader::complete::Charge::Whole,
+                );
                 (session, Some((credit, 0)))
             }
             Mode::Latest => (Session::latest(state, slots, slot), None),
@@ -193,18 +199,19 @@ pub(crate) struct Session {
 
 impl Session {
     /// Opens a complete session through `slots` on the index of `index`, with a grant
-    /// of `limit_bytes`. Returns the session and the credit that raises its grant.
+    /// of `limit_bytes` that each frame spends as `charge` says. Returns the session
+    /// and the credit that raises its grant.
     pub(crate) fn complete(
         state: &Rc<RefCell<State>>,
         slots: Box<[channel::Slot]>,
         index: channel::Slot,
         limit_bytes: u64,
+        charge: ::home::reader::complete::Charge,
     ) -> (Self, Credit) {
-        let key = state.borrow_mut().home.open_complete(
-            index,
-            limit_bytes,
-            home::reader::complete::Charge::Whole,
-        );
+        let key = state
+            .borrow_mut()
+            .home
+            .open_complete(index, limit_bytes, charge);
         let credit = Credit {
             state: Rc::clone(state),
             key,
