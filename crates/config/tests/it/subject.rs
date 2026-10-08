@@ -11,6 +11,8 @@ const SUBJECT: &str = "subject \"plc\" {\n  keys = \"ssh-ed25519 \
                        AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg \
                        alice@laptop\"\n}\n";
 
+const PLC: &str = "the subject \"plc\" has the name of a connector";
+
 fn read(source: u32, text: &str) -> Document {
     config_hcl::read(Source(source), text).expect("the text is HCL")
 }
@@ -19,9 +21,9 @@ fn kinds() -> Table {
     Table::new().with("influx", connector_influx::Kind::default())
 }
 
-/// `config.subject-is-connector` at the label of the subject, with a note at the label
-/// of the connector.
-fn refused(subject: &Document, connector: &Document) -> Vec<Diagnostic> {
+/// `config.subject-is-connector` at the label of the subject, with `message` and a note
+/// at the label of the connector.
+fn refused(subject: &Document, connector: &Document, message: &str) -> Vec<Diagnostic> {
     let label = |document: &Document, keyword: &str| {
         let block = document.blocks.iter().find(|b| &*b.keyword == keyword);
         block.expect("the block").labels[0].span
@@ -29,7 +31,7 @@ fn refused(subject: &Document, connector: &Document) -> Vec<Diagnostic> {
     let mut diagnostic = Diagnostic::new(
         Code::new("config.subject-is-connector"),
         label(subject, "subject"),
-        "the subject \"plc\" has the name of a connector".into(),
+        message.into(),
         "Rename the subject or the connector".into(),
     );
     diagnostic.notes.push(Note {
@@ -54,7 +56,7 @@ fn refuses_a_subject_at_the_name_of_a_connector_in_one_file() {
         let file = read(0, &text);
         assert_eq!(
             config::check(slice(&file), &kinds()),
-            Err(refused(&file, &file)),
+            Err(refused(&file, &file, PLC)),
             "{text}"
         );
     }
@@ -63,13 +65,22 @@ fn refuses_a_subject_at_the_name_of_a_connector_in_one_file() {
 #[test]
 fn refuses_a_subject_at_the_name_of_a_connector_in_another_file() {
     let (connector, subject) = (read(0, CONNECTOR), read(1, SUBJECT));
-    let expected = Err(refused(&subject, &connector));
+    let expected = Err(refused(&subject, &connector, PLC));
     let files = [connector.clone(), subject.clone()];
     assert_eq!(config::check(&files, &kinds()), expected);
     let (subject, connector) = (read(0, SUBJECT), read(1, CONNECTOR));
-    let expected = Err(refused(&subject, &connector));
+    let expected = Err(refused(&subject, &connector, PLC));
     let files = [subject, connector];
     assert_eq!(config::check(&files, &kinds()), expected);
+}
+
+#[test]
+fn refuses_a_subject_at_the_name_of_a_connector_in_another_case() {
+    let (connector, subject) =
+        (read(0, CONNECTOR), read(1, &SUBJECT.replace("plc", "PLC")));
+    let message = "the subject \"PLC\" has the name of a connector";
+    let expected = Err(refused(&subject, &connector, message));
+    assert_eq!(config::check(&[connector, subject], &kinds()), expected);
 }
 
 fn slice(file: &Document) -> &[Document] {

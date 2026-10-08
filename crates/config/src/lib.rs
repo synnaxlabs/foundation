@@ -88,7 +88,9 @@ pub fn check(
         channels: names(documents, Kind::Channel)
             .map(|(name, _)| name)
             .collect(),
-        connectors: names(documents, Kind::Connector).collect(),
+        connectors: names(documents, Kind::Connector)
+            .map(|(name, label)| (name.as_str().to_ascii_lowercase().into(), label))
+            .collect(),
         kinds,
     };
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
@@ -158,8 +160,8 @@ struct Found<'a> {
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The label of each connector that a `connector` block in any Document defines,
-    /// by its name.
-    connectors: BTreeMap<Name, &'a Label>,
+    /// by its name in lowercase.
+    connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
 }

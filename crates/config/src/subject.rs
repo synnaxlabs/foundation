@@ -3,7 +3,7 @@ use std::slice;
 use base64ct::{Base64, Encoding};
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::{Kind, Value};
-use document::{Block, Span, read};
+use document::{Block, Span};
 use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
@@ -65,15 +65,13 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     Some(Definition::Spec(definition::Definition::Subject(subject)))
 }
 
-/// Refuses a subject at the name of a connector, since a connector is a subject that
-/// its node vouches for.
+/// Refuses a subject at the name of a connector in any ASCII case, since a connector
+/// is a subject that its node vouches for.
 fn not_connector(found: &mut Found<'_>, block: &Block) -> Result<(), Reported> {
     let [label] = block.labels.as_slice() else {
         return Ok(());
     };
-    let Some(connector) = read::label(label)
-        .ok()
-        .and_then(|name| found.connectors.get(&name))
+    let Some(connector) = found.connectors.get(&*label.text.to_ascii_lowercase())
     else {
         return Ok(());
     };
