@@ -1706,7 +1706,7 @@ mod tests {
 
     /// Sends `part` of a block of 4 bytes on a stream that finished, with
     /// `try_send_parts` when `tried`, and gives the run.
-    fn after_finish(part: Part, tried: bool) -> Result<(), sim::Error> {
+    fn after_finish(parts: Vec<Part>, tried: bool) -> Result<(), sim::Error> {
         let (mut sim, ..) = testing::sessions(
             0,
             same,
@@ -1714,7 +1714,7 @@ mod tests {
                 let opened = side.session.open_sender(Class::Complete).await;
                 let mut sender = opened.expect("a stream");
                 sender.finish().expect("finished");
-                let (block, parts) = (side.block(b"abcd"), [part]);
+                let block = side.block(b"abcd");
                 if tried {
                     drop(sender.try_send_parts(block, &parts));
                 } else {
@@ -1730,19 +1730,26 @@ mod tests {
 
     #[test]
     fn a_range_outside_the_block_panics_ahead_of_the_panic_after_finish() {
+        // The part at 0 first catches a sum that divides by its start.
         let past = after_finish(
-            Part {
-                range: 1..5,
-                zeros: 0,
-            },
+            vec![
+                Part {
+                    range: 0..1,
+                    zeros: 0,
+                },
+                Part {
+                    range: 1..5,
+                    zeros: 0,
+                },
+            ],
             false,
         );
         let (start, end) = (3, 2);
         let reversed = after_finish(
-            Part {
+            vec![Part {
                 range: start..end,
                 zeros: 0,
-            },
+            }],
             true,
         );
         let panicked = |message: &str| {
