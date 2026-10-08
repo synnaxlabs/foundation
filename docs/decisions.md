@@ -2207,8 +2207,11 @@ How to read this record:
   `fuzzing` feature, give the fuzz target `transport_certificate` the server's
   reading of a dialer's chain and a node's certificate. The protocol is fixed at
   `foundation/1`: rustls agrees only a protocol from the server's own list, so the
-  compare sees that protocol or none, which the handshake tests cover. Approved by `laptop.architect-2` at 2026-10-08T15:11:07Z
-  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892).
+  compare sees that protocol or none, which the handshake tests cover. Approved by
+  `laptop.architect-2` at 2026-10-08T15:11:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892); the
+  reason was corrected in review round 2
+  (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063039608).
 
 ### 1.8 Consensus, regions, and the spec
 
