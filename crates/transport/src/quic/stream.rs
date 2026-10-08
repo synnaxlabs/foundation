@@ -1014,6 +1014,9 @@ impl Share {
     /// both `Latest` and `Complete` compete. Else the bytes move `owed` toward 0 and
     /// never past it, so a class alone makes no debt or credit.
     fn took(&mut self, class: Class, bytes: usize, paired: bool) {
+        if bytes == 0 {
+            return;
+        }
         let (change, other) = match class {
             Class::Latest => (LATEST_COST, Class::Complete),
             Class::Complete => (-1, Class::Latest),
@@ -3366,17 +3369,32 @@ mod tests {
 
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
-            let mut share = Share::new(100);
-            share.took(Class::Latest, 1000, true);
-            assert_eq!(share.owed, LATEST_COST * 100);
-            share.took(Class::Complete, 1000, true);
-            assert_eq!(share.owed, -LATEST_COST * 100);
+            for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
+                let mut share = Share::new(100);
+                share.took(Class::Latest, latest, true);
+                share.took(Class::Complete, owed - 1, true);
+                assert_eq!(share.order(), Order::COMPLETE_FIRST, "{latest}");
+                share.took(Class::Complete, 1, true);
+                assert_eq!(share.order(), Order::RANK, "{latest}");
+            }
+            let budget = Budget::new(10);
+            for complete in [299, 300, 301] {
+                let mut share = Share::new(100);
+                share.took(Class::Complete, complete, true);
+                share.took(Class::Latest, 99, true);
+                let rationed = share.admission(&budget).rationed;
+                assert_eq!(rationed, Some(Class::Complete), "{complete}");
+                share.took(Class::Latest, 1, true);
+                let rationed = share.admission(&budget).rationed;
+                assert_ne!(rationed, Some(Class::Complete), "{complete}");
+            }
         }
 
         #[test]
         fn a_class_competes_until_the_other_sends_one_peer_window() {
             let mut share = Share::new(100);
             let budget = Budget::new(10);
+            share.took(Class::Latest, 0, false);
             assert!(!share.competes(Class::Latest, &budget));
             share.offered(Class::Latest);
             share.took(Class::Complete, 99, false);
@@ -6384,15 +6402,15 @@ mod tests {
             taken
         }
 
-        /// The bytes of the message in hand that the client's stream `key` holds,
-        /// its header included.
+        /// The body bytes of the message in hand that the client's stream `key` has
+        /// not given to noq-proto. A header goes before its body.
         fn held(pair: &mut Pair, key: Key) -> usize {
             let connection = crate::quic::find(
                 &mut pair.client.endpoint.connections,
                 key.connection,
             );
             let half = &connection.expect("a connection").streams.halves[&key.id];
-            half.unsent.len() + half.body
+            half.body
         }
 
         /// Runs the pair for two [`RUN`]s and then `span`, in steps of [`STEP`]. After
@@ -6668,6 +6686,27 @@ mod tests {
                     );
                 });
             }
+        }
+
+        #[test]
+        fn one_latest_stream_on_try_send_gets_its_share_while_complete_fills_the_budget()
+         {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let classes = iter::once(Class::Latest).chain([Class::Complete; 8]);
+                let mut senders: Vec<_> =
+                    classes.map(|class| open_sender(&mut pair, class)).collect();
+                let capacity = capacity(NARROW);
+                let bytes = MESSAGE_MAX / 4;
+                assert_offered_share(
+                    &mut pair,
+                    shard,
+                    &mut senders,
+                    bytes,
+                    capacity,
+                    20 * RUN,
+                );
+            });
         }
 
         #[test]
@@ -7217,6 +7256,7 @@ mod tests {
                 }
             }
         }
+
         #[test]
         fn a_light_latest_load_waits_at_most_a_round_trip_behind_a_complete_backlog() {
             testing::run(1, |shard| {

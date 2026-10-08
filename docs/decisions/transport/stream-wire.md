@@ -41,9 +41,9 @@
   share changes the share bound of `transport/benches/send.rs` in the same PR. Decided
   by architect-2 (#977, 2026-10-07 17:15 UTC):
   https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. The
-  competition memory and the cap: architect-2 (#1311, 2026-10-07):
-  https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6036747607 and
-  https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6037588359. Who
+  competition memory and the cap: architect-2 (#1311, 2026-10-07 11:14 UTC and 12:09
+  UTC): https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6036747607
+  and https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6037588359. Who
   writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
   admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC):
