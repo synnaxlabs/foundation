@@ -158,7 +158,16 @@ impl Lab {
 
     /// Adds a node named `name` on a new simulated host, and writes its key there. It
     /// starts at the next [`Lab::run`].
+    ///
+    /// # Panics
+    ///
+    /// After the first [`Lab::run`], as the write of the key runs the simulation to
+    /// its end, and a node that runs never ends.
     pub(crate) fn start(&mut self, name: &str) -> Node {
+        assert!(
+            self.members.iter().all(|member| member.node.is_none()),
+            "lab failure: `start` after the first run"
+        );
         let byte = u8::try_from(self.members.len() + 1)
             .expect("lab failure: at most 255 nodes");
         let host = self.sim.node(sim::node::Config::default());
@@ -522,7 +531,7 @@ impl Lab {
 }
 
 /// The names that `dir` of `node`'s data directory holds at 1 s, or the error of the
-/// list. Call it before the first [`Lab::run`].
+/// list. Call it after each [`Lab::start`] and before the first [`Lab::run`].
 fn listed(lab: &Lab, node: Node, dir: &'static str) -> Arc<Mutex<Option<Listed>>> {
     let host = lab.members[node.0].host.clone();
     let out = Arc::new(Mutex::new(None));
@@ -594,6 +603,15 @@ fn a_mesh_after_the_first_run_panics() {
     let (a, b) = (lab.start("a"), lab.start("b"));
     lab.run(Duration::from_millis(1));
     lab.mesh(&[a, b]);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run")]
+fn a_start_after_the_first_run_panics() {
+    let mut lab = Lab::new(1);
+    lab.start("a");
+    lab.run(Duration::from_millis(1));
+    lab.start("b");
 }
 
 #[test]
