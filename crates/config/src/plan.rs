@@ -234,6 +234,16 @@ fn homes(
         .collect()
 }
 
+/// A connector's key, entry, and node, and where [`place`] puts it.
+type Connector<'f> = (&'f Name, &'f Entry, &'f Name, Result<Placed<'f>, Unplaced>);
+
+/// An index, where [`place`] puts it, and its nearest connector.
+type Nearest<'f, 'c> = (
+    &'f Name,
+    &'f Result<Placed<'f>, Unplaced>,
+    &'c Connector<'f>,
+);
+
 /// Places each connector, with its `node` as the writer. Reports
 /// `config.connector-home` at the `home` of a winner that names another node,
 /// `config.unplaced` at each connector that [`place`] cannot place, and
@@ -267,13 +277,7 @@ fn connectors<'f>(
             Some((*index, own, connector))
         })
         .collect();
-    let mut owners = BTreeMap::<_, BTreeSet<_>>::new();
-    for (_, own, (connector, ..)) in &nearest {
-        if let Ok(Some(own)) = winner(own) {
-            owners.entry(*connector).or_default().insert(own);
-        }
-    }
-    let moves = moves(&connectors, owners, placements);
+    let moves = moves(&connectors, &nearest, placements);
     for (name, entry, node, placed) in &connectors {
         match placed {
             Ok(Placed {
@@ -298,17 +302,24 @@ fn connectors<'f>(
 }
 
 /// The one fix of each diagnostic of each connector that no placement can win for
-/// with each of its indexes at the connector's node, by connector. `owners` holds the
-/// winners of the indexes of each connector. The fix names each winner.
+/// with each of its indexes at the connector's node, by connector. `nearest` holds the
+/// nearest connector of each index. The fix names each winner, the connector's first.
 fn moves<'c>(
-    connectors: &'c [(&Name, &Entry, &Name, Result<Placed<'_>, Unplaced>)],
-    mut owners: BTreeMap<&Name, BTreeSet<&'c Name>>,
+    connectors: &'c [Connector<'_>],
+    nearest: &[Nearest<'_, 'c>],
     placements: &[(&Name, &Policy)],
 ) -> BTreeMap<&'c Name, String> {
     let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
     for (_, _, node, placed) in connectors {
         if let Ok(Some(placement)) = winner(placed) {
             nodes.entry(placement).or_default().insert(*node);
+        }
+    }
+    let mut owners = BTreeMap::<_, BTreeSet<_>>::new();
+    for (_, own, (connector, _, node, _)) in nearest {
+        if let Ok(Some(own)) = winner(own) {
+            owners.entry(*connector).or_default().insert(own);
+            nodes.entry(own).or_default().insert(*node);
         }
     }
     let elsewhere = |placement: &Name, node: &Name| {
@@ -318,7 +329,7 @@ fn moves<'c>(
     };
     let mut moves = BTreeMap::new();
     for (name, _, node, placed) in connectors {
-        let mut owners = owners.remove(*name).unwrap_or_default();
+        let owners = owners.remove(*name).unwrap_or_default();
         let fix = match placed {
             Ok(Placed {
                 placement: Some(placement),
@@ -327,12 +338,12 @@ fn moves<'c>(
             }) if home != node
                 && nodes[placement].iter().any(|other| other != node) =>
             {
-                owners.insert(placement);
+                let others = owners.into_iter().filter(|owner| owner != placement);
                 format!(
                     "Exclude the connector `{name}` and its indexes from the \
                      `select` of {}, and select them with another placement whose \
                      `home` is `{node}`",
-                    each(&owners)
+                    each(&[*placement].into_iter().chain(others).collect::<Vec<_>>())
                 )
             }
             Ok(Placed {
@@ -342,7 +353,7 @@ fn moves<'c>(
                     "Exclude the indexes of the connector `{name}` from the \
                      `select` of {}, and select the connector and its indexes with \
                      another placement whose `home` is `{node}`",
-                    each(&owners)
+                    each(&owners.into_iter().collect::<Vec<_>>())
                 )
             }
             _ => continue,
@@ -352,9 +363,9 @@ fn moves<'c>(
     moves
 }
 
-/// Names each placement in `keys` by its label: "`p`", "`p` and `q`", or "`p`, `q`,
-/// and `r`".
-fn each(keys: &BTreeSet<&Name>) -> String {
+/// Names each placement in `keys`, in order, by its label: "`p`", "`p` and `q`", or
+/// "`p`, `q`, and `r`".
+fn each(keys: &[&Name]) -> String {
     let labels: Vec<_> = keys.iter().map(|key| format!("`{}`", label(key))).collect();
     match labels.as_slice() {
         [one] => one.clone(),
@@ -440,8 +451,8 @@ fn split(
     let fix = moved.map_or_else(
         || {
             format!(
-                "Make the placement `{}` win for the connector `{connector}` and the \
-                 index `{index}`",
+                "Make the placement `{}` win for the connector `{connector}` and its \
+                 indexes",
                 label(theirs.unwrap_or(at))
             )
         },
