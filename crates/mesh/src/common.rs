@@ -11,9 +11,9 @@ use raft::{
 use transport::Address;
 use types::channel;
 use types::digest::Digest;
-use types::ed25519::PublicKey;
+use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
-use types::node::{self, PrivateKey, SealKey};
+use types::node::{self, SealKey};
 use types::time::{Span, Stamp};
 
 use crate::bytes::{put_channel, put_count, put_name};

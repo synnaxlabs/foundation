@@ -21,9 +21,9 @@ use spec::tree::{self, Chunks};
 use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
-use types::ed25519::PublicKey;
+use types::ed25519::{PrivateKey, PublicKey};
 use types::name::{Name, Prefix};
-use types::node::{self, PrivateKey};
+use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
 

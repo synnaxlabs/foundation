@@ -7,8 +7,8 @@ use std::fmt;
 
 use aws_lc_rs::signature::Ed25519KeyPair;
 use raft::{Body, Claim, Message, Raft, Ready, Signature};
-use types::ed25519::PublicKey;
-use types::node::{self, PrivateKey};
+use types::ed25519::{PrivateKey, PublicKey};
+use types::node;
 
 use crate::bytes::{put_grant, put_key, put_keys, put_position};
 use crate::ed25519;

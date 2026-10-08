@@ -809,7 +809,7 @@ mod tests {
 
     use bytes::Bytes;
     use noq_proto::{Dir, VarInt};
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use super::*;
