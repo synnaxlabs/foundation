@@ -33,6 +33,9 @@ unsafe extern "C" {
     fn UA_findDataType(id: *const NodeId) -> *const c_void;
     fn UA_ByteString_allocBuffer(bytes: *mut Bytes, length: usize) -> u32;
     fn UA_clear(value: *mut c_void, kind: *const c_void);
+    fn connector_opcua_malloc(size: usize) -> *mut c_void;
+    fn connector_opcua_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+    fn connector_opcua_free(ptr: *mut c_void);
 }
 
 /// The size of the header before each block of the allocator.
@@ -41,6 +44,7 @@ const HEADER: usize = 16;
 fn main() {
     c_allocates_through_the_global_allocator();
     the_drop_frees_the_client_its_loop_and_its_timers();
+    each_function_writes_the_size_into_the_header();
 }
 
 fn c_allocates_through_the_global_allocator() {
@@ -88,4 +92,25 @@ fn the_drop_frees_the_client_its_loop_and_its_timers() {
     );
     drop(client);
     assert_eq!(ALLOCATOR.held(), before, "the drop freed each block");
+}
+
+/// `calloc` is the path above; this pins the header that `malloc` and `realloc` write,
+/// which `free` reads to give the block back.
+fn each_function_writes_the_size_into_the_header() {
+    let before = ALLOCATOR.held();
+    let held = || ALLOCATOR.held().strict_sub(before);
+    // SAFETY: any size is valid.
+    let block = unsafe { connector_opcua_malloc(10) };
+    assert!(!block.is_null(), "malloc gave a block");
+    assert_eq!(held(), 10 + HEADER, "malloc");
+    // SAFETY: `block` is live and from the allocator.
+    let block = unsafe { connector_opcua_realloc(block, 50) };
+    assert!(!block.is_null(), "realloc gave a block");
+    assert_eq!(held(), 50 + HEADER, "realloc");
+    // SAFETY: `block` is live and from the allocator.
+    let block = unsafe { connector_opcua_realloc(block, 20) };
+    assert_eq!(held(), 20 + HEADER, "realloc down");
+    // SAFETY: `block` is live and from the allocator, and freed once.
+    unsafe { connector_opcua_free(block) };
+    assert_eq!(ALLOCATOR.held(), before, "free gave back what realloc held");
 }
