@@ -3583,7 +3583,14 @@ How to read this record:
   with the copy, and #1860 makes CI run it on a PR that changes only `patches/`.
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
-  2026-10-08 10:08 UTC).
+  2026-10-08 10:08 UTC). The check stands against a clock reference that the compiler
+  makes from C in the copy, from a new tag or from our patch. It does not stand against
+  an edit made to hide from it, such as assembly that stores a function's address:
+  review of each copy PR covers that. A `#line` directive or a line marker in a copy
+  file fails the check, because it moves the file that the include check reads.
+  Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058103514,
+  2026-10-08 10:42 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
