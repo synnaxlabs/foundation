@@ -49,7 +49,7 @@ enum Create {
     Strings(fn() -> Vec<&'static str>),
 }
 
-const SHAPES: [Shape; 28] = [
+const SHAPES: [Shape; 30] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -73,12 +73,20 @@ const SHAPES: [Shape; 28] = [
     Shape::new("u64.ffor1", Scalar::U64, create_uniform::<1>, 56.6, FULL),
     Shape::new("u64.ffor32", Scalar::U64, create_uniform::<32>, 1.982, FULL),
     Shape::new("u64.ffor55", Scalar::U64, create_uniform::<55>, 1.155, FULL),
-    Shape::strings("str.state", create_state_names, 2.842, EVERY),
-    Shape::strings("str.utf8", create_utf8_names, 1.521, EVERY),
-    Shape::strings("str.last", create_last_utf8, 2.841, FULL),
+    Shape::variable("str.state", Type::String, create_state_names, 2.842, EVERY),
+    Shape::variable("str.utf8", Type::String, create_utf8_names, 1.521, EVERY),
+    Shape::variable("str.last", Type::String, create_last_utf8, 2.841, FULL),
+    Shape::variable("bytes.state", Type::Bytes, create_state_names, 2.842, EVERY),
+    Shape::variable("list.state", LIST, create_state_names, 2.842, EVERY),
     Shape::imu("f32x6.imu", ARRAY),
     Shape::imu("f32x2x3.imu", MATRIX),
 ];
+
+/// A list of at most 16 `u8` elements.
+const LIST: Type = Type::List {
+    element: Scalar::U8,
+    max: 16,
+};
 
 /// Six `f32` elements as an array. It encodes as [`MATRIX`] does.
 const ARRAY: Type = Type::Array {
@@ -124,15 +132,16 @@ impl Shape {
         }
     }
 
-    const fn strings(
+    const fn variable(
         name: &'static str,
+        data_type: Type,
         create: fn() -> Vec<&'static str>,
         ratio: f64,
         lens: &'static [usize],
     ) -> Self {
         Self {
             name,
-            data_type: Type::String,
+            data_type,
             create: Create::Strings(create),
             ratio,
             lens,
