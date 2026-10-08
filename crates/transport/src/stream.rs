@@ -2443,7 +2443,7 @@ mod tests {
             |side| async move {
                 assert_eq!(side.transport.status().budget_waits, 0);
                 let mut senders = Vec::new();
-                // The two that wait are of two classes, so each class counts.
+                // The two that wait are `CatchUp` and `Complete`.
                 let classes = [Class::Complete; 3]
                     .into_iter()
                     .chain([Class::CatchUp, Class::Complete]);

@@ -2833,6 +2833,7 @@ mod tests {
         assert!(budget.charge(stream(1), 2, &mut b, Order::RANK));
         assert!(budget.charge(stream(2), 7, &mut c, Order::RANK));
         assert!(!budget.charge(stream(3), 5, &mut d, Order::RANK));
+        assert_eq!(budget.queued(), 2);
         assert_eq!(release(&mut budget, &mut b, Order::RANK), []);
         let woken = release(&mut budget, &mut c, Order::RANK);
         assert_eq!(woken, [stream(3)]);
@@ -2854,6 +2855,7 @@ mod tests {
         for (index, claim) in (1..).zip(rest) {
             assert!(!budget.charge(stream(index), 3, claim, Order::RANK));
         }
+        assert_eq!(budget.queued(), 4);
         let woken = release(&mut budget, a, Order::RANK);
         assert_eq!(woken, [stream(2), stream(4), stream(3)]);
     }
@@ -2868,6 +2870,7 @@ mod tests {
         assert!(!budget.charge(stream(2), 5, &mut large, Order::RANK));
         assert!(!budget.charge(stream(3), 1, &mut small, Order::RANK));
         assert!(!budget.charge(stream(4), 1, &mut catch_up, Order::RANK));
+        assert_eq!(budget.queued(), 3);
         assert_eq!(release(&mut budget, &mut second, Order::RANK), []);
         let woken = release(&mut budget, &mut first, Order::RANK);
         assert_eq!(woken, [stream(2), stream(3), stream(4)]);
