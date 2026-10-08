@@ -240,6 +240,82 @@ fn a_drop_with_unread_bytes_after_close_resets_the_peer() {
     });
 }
 
+/// Reads `server` until the reset of its peer shows, past any bytes before it.
+async fn read_reset(server: &mut Tcp, remote: SocketAddr) {
+    let reset = Err(Error::Reset { remote });
+    let outcome = timeout(BOUND, async {
+        loop {
+            match read(server, &mut [0; 8]).await {
+                Ok(n) if n > 0 => {}
+                outcome => break outcome,
+            }
+        }
+    });
+    assert_eq!(
+        outcome.await.expect("the reset arrives in the bound"),
+        reset
+    );
+}
+
+#[test]
+fn each_poll_after_a_read_found_the_reset_is_reset() {
+    on_thread("net-reset-read", || async {
+        let net = net();
+        let (_listener, client, mut server) = create_pair(&net).await;
+        let remote = client.local();
+        drop(client);
+        read_reset(&mut server, remote).await;
+        let reset = Err(Error::Reset { remote });
+        assert_eq!(read(&mut server, &mut [0; 8]).await, reset);
+        assert_eq!(write(&mut server, &[b"x"]).await, reset);
+        assert_eq!(close(&mut server).await, reset.map(|_: usize| ()));
+    });
+}
+
+/// Drops `client`, and waits until its reset reached `server`, with no poll that
+/// reports it. Gives the address of the dropped end.
+async fn reset_unseen(client: Tcp, server: &mut Tcp) -> SocketAddr {
+    let counted = Arc::new(Counted {
+        wakes: AtomicUsize::new(0),
+        woken: Notify::new(),
+    });
+    let waker = Waker::from(Arc::clone(&counted));
+    let mut cx = Context::from_waker(&waker);
+    assert_eq!(server.poll_read(&mut cx, &mut [0; 8]), Poll::Pending);
+    let remote = client.local();
+    drop(client);
+    timeout(BOUND, counted.woken.notified())
+        .await
+        .expect("the reset wakes the reader");
+    remote
+}
+
+#[test]
+fn a_close_after_an_unseen_reset_is_reset() {
+    on_thread("net-reset-close", || async {
+        let net = net();
+        let (_listener, client, mut server) = create_pair(&net).await;
+        let remote = reset_unseen(client, &mut server).await;
+        assert_eq!(close(&mut server).await, Err(Error::Reset { remote }));
+        assert_eq!(
+            read(&mut server, &mut [0; 8]).await,
+            Err(Error::Reset { remote })
+        );
+    });
+}
+
+#[test]
+fn each_poll_after_a_write_found_the_reset_is_reset() {
+    on_thread("net-reset-write", || async {
+        let net = net();
+        let (_listener, client, mut server) = create_pair(&net).await;
+        let remote = reset_unseen(client, &mut server).await;
+        let reset = Err(Error::Reset { remote });
+        assert_eq!(write(&mut server, &[b"x"]).await, reset);
+        assert_eq!(read(&mut server, &mut [0; 8]).await, reset);
+    });
+}
+
 #[test]
 fn a_connect_to_a_port_with_no_listener_is_refused() {
     on_thread("net-refused", || async {
