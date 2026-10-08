@@ -59,7 +59,7 @@ const MEMBERS: [&str; 3] = ["cloud", "edge", "n"];
 fn spanless(mut plan: Plan) -> Plan {
     for entry in plan
         .changes
-        .iter_mut()
+        .values_mut()
         .filter_map(|change| change.new.as_mut())
     {
         entry.label_span = None;
@@ -115,7 +115,7 @@ fn gives_the_definitions_that_an_apply_of_the_plan_stores() {
 fn gives_a_dangling_edge_a_key_that_the_region_check_refuses() {
     let spec = Spec::create_empty();
     let mut plan = spec.plan(&[PLANT], &["n"]).expect("no problems");
-    plan.changes.retain(|change| change.name != name("a.time"));
+    plan.changes.remove(&name("a.time"));
     let definitions = plan
         .definitions(&spec.definitions(), keys(0))
         .expect("a plan of the applied spec");
@@ -135,12 +135,9 @@ fn gives_an_edge_to_a_channel_that_the_plan_removes_a_new_key() {
     let plant = PLANT.replace("\"f64\"", "\"f32\"");
     let mut plan = spec.plan(&[&plant], &["n"]).expect("no problems");
     let removed = spec.plan(&[], &["n"]).expect("no problems");
-    let removal = removed
-        .changes
-        .into_iter()
-        .find(|change| change.name == name("a.time"));
-    plan.changes
-        .insert(0, removal.expect("the removal of a.time"));
+    let time = name("a.time");
+    let removal = removed.changes[&time].clone();
+    plan.changes.insert(time, removal);
     let definitions = plan
         .definitions(&spec.definitions(), keys(spec.made))
         .expect("a plan of the applied spec");
@@ -160,21 +157,20 @@ fn refuses_a_change_that_states_another_stored_definition() {
     let plant = PLANT.replace("\"f64\"", "\"f32\"");
     let plan = spec.plan(&[&plant], &["n"]).expect("no problems");
     let value = name("a.value");
-    let at = plan.changes.iter().position(|change| change.name == value);
-    let at = at.expect("the change of a.value");
     let mismatch = Err(Error::Mismatch {
         name: value.clone(),
     });
     for old in [None, Some(Digest::of(b"another definition"))] {
         let mut stated = plan.clone();
-        stated.changes[at].old = old;
+        let change = stated.changes.get_mut(&value);
+        change.expect("the change of a.value").old = old;
         let found = stated.definitions(&spec.definitions(), keys(spec.made));
         assert_eq!(found, mismatch);
     }
     let empty = Spec::create_empty();
     let mut added = empty.plan(&[PLANT], &["n"]).expect("no problems");
-    let at = added.changes.iter().position(|change| change.name == value);
-    added.changes[at.expect("the addition of a.value")].old = Some(Digest::of(b""));
+    let change = added.changes.get_mut(&value);
+    change.expect("the addition of a.value").old = Some(Digest::of(b""));
     let error = added
         .definitions(&empty.definitions(), keys(0))
         .expect_err("an old digest of nothing");
@@ -192,8 +188,7 @@ fn one(at: &str, old: Option<&Stored>, new: Option<Definition>) -> Plan {
     let mut plan = Spec::create_empty()
         .plan(&[PLANT], &["n"])
         .expect("no problems");
-    let mut change = plan.changes.remove(0);
-    change.name = name(at);
+    let (_, mut change) = plan.changes.pop_first().expect("a change");
     change.old = old.map(|old| Digest::of(&old.encode()));
     let entry = change.new.take().expect("the new placement");
     change.new = new.map(|definition| {
@@ -201,7 +196,7 @@ fn one(at: &str, old: Option<&Stored>, new: Option<Definition>) -> Plan {
         entry.definition = definition;
         entry
     });
-    plan.changes = vec![change];
+    plan.changes = BTreeMap::from([(name(at), change)]);
     plan.homes.clear();
     plan
 }
@@ -216,7 +211,7 @@ fn refuses_a_change_that_plan_cannot_make() {
     let placement = Spec::create_empty()
         .plan(&[PLANT], &["n"])
         .expect("no problems");
-    let placement = placement.changes[0]
+    let placement = placement.changes[&name("a.@placement")]
         .new
         .clone()
         .expect("a placement")
@@ -235,7 +230,7 @@ fn refuses_a_change_that_plan_cannot_make() {
         (reserved.expect("a plan"), &empty),
     ];
     for (plan, applied) in cases {
-        let at = plan.changes[0].name.clone();
+        let at = plan.changes.keys().next().expect("a change").clone();
         let found = plan.definitions(applied, keys(0));
         assert_eq!(found, Err(Error::Mismatch { name: at }));
     }
@@ -325,7 +320,7 @@ fn offsets(name: &str, data_type: &str) -> [usize; 4] {
 fn decodes_a_plan_with_no_change() {
     let plan = Plan::decode(&bytes(&[])).expect("a plan");
     assert_eq!(plan.encode(), bytes(&[]));
-    assert_eq!(plan.changes, []);
+    assert_eq!(plan.changes, BTreeMap::new());
 }
 
 #[test]
@@ -498,7 +493,7 @@ fn refuses_a_wrong_byte_inside_a_spec_definition_at_its_count() {
     let [added, _] = plans();
     let inner = added
         .changes
-        .iter()
+        .values()
         .find_map(|change| match &change.new.as_ref()?.definition {
             Definition::Spec(definition) => Some(definition.encode()),
             _ => None,
@@ -521,8 +516,8 @@ fn changed() -> impl Strategy<Value = Plan> {
     let plans = plans();
     let plan = (0..plans.len()).prop_flat_map(move |at| {
         let plan = plans[at].clone();
-        let changes =
-            proptest::sample::subsequence(plan.changes.clone(), 0..=plan.changes.len());
+        let changes: Vec<_> = plan.changes.clone().into_iter().collect();
+        let changes = proptest::sample::subsequence(changes.clone(), 0..=changes.len());
         let homes: Vec<_> = plan.homes.clone().into_iter().collect();
         let homes = proptest::sample::subsequence(homes.clone(), 0..=homes.len());
         let olds =
@@ -537,12 +532,12 @@ fn changed() -> impl Strategy<Value = Plan> {
         )
     });
     plan.prop_map(|(mut plan, mut changes, homes, olds, version, root)| {
-        for (change, old) in changes.iter_mut().zip(olds) {
+        for ((_, change), old) in changes.iter_mut().zip(olds) {
             if change.new.is_some() {
                 change.old = old.map(Digest);
             }
         }
-        plan.changes = changes;
+        plan.changes = changes.into_iter().collect();
         plan.homes = homes.into_iter().collect();
         plan.base = spec::Pointer {
             version,

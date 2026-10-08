@@ -77,8 +77,8 @@ impl Plan {
         out.extend_from_slice(&self.base.version.to_le_bytes());
         out.extend_from_slice(&self.base.root.0);
         count(&mut out, self.changes.len());
-        for change in &self.changes {
-            text(&mut out, change.name.as_str());
+        for (name, change) in &self.changes {
+            text(&mut out, name.as_str());
             match change.old {
                 None => out.push(0),
                 Some(old) => {
@@ -120,11 +120,14 @@ impl Plan {
             version: u64::from_le_bytes(reader.array()?),
             root: Digest(reader.array()?),
         };
-        let mut changes: Vec<Change> = Vec::new();
+        let mut changes = BTreeMap::new();
         for _ in 0..reader.count()? {
             let at = reader.at;
             let name = reader.name()?;
-            if changes.last().is_some_and(|last| last.name >= name) {
+            if changes
+                .last_key_value()
+                .is_some_and(|(last, _)| *last >= name)
+            {
                 return Err(Error::Malformed { at });
             }
             let old = reader
@@ -136,7 +139,7 @@ impl Plan {
             if old.is_none() && new.is_none() {
                 return Err(Error::Malformed { at });
             }
-            changes.push(Change { name, old, new });
+            changes.insert(name, Change { old, new });
         }
         let mut homes = BTreeMap::new();
         for _ in 0..reader.count()? {

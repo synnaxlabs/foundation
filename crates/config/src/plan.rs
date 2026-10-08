@@ -91,8 +91,8 @@ pub struct Plan {
     /// The pointer of the applied spec. An apply refuses the plan when the region's
     /// pointer is another one.
     pub base: spec::Pointer,
-    /// Each change, in tree key order. Empty when the files match the spec.
-    pub changes: Vec<Change>,
+    /// Each change, by tree key. Empty when the files match the spec.
+    pub changes: BTreeMap<Name, Change>,
     /// The home node of each index that has none before the apply, by index name: a
     /// new index, or a data channel that becomes one.
     pub homes: BTreeMap<Name, Name>,
@@ -125,8 +125,8 @@ impl Plan {
         key: impl FnMut() -> Key,
     ) -> Result<BTreeMap<Name, definition::Definition>, Error> {
         let mut definitions = applied.clone();
-        for change in &self.changes {
-            let stored = definitions.remove(&change.name);
+        for (name, change) in &self.changes {
+            let stored = definitions.remove(name);
             let new = change.new.as_ref().map(|entry| match &entry.definition {
                 Definition::Spec(definition) => definition.kind(),
                 Definition::Channel(_) => definition::Kind::Channel,
@@ -136,11 +136,9 @@ impl Plan {
                 .map(definition::Definition::kind)
                 .into_iter();
             if change.old != stored.map(|stored| Digest::of(&stored.encode()))
-                || !kinds.chain(new).all(|kind| planned(&change.name, kind))
+                || !kinds.chain(new).all(|kind| planned(name, kind))
             {
-                return Err(Error::Mismatch {
-                    name: change.name.clone(),
-                });
+                return Err(Error::Mismatch { name: name.clone() });
             }
         }
         let kept = definitions
@@ -153,15 +151,15 @@ impl Plan {
         let kinds = self
             .changes
             .iter()
-            .filter_map(|change| Some((&change.name, kind(change.new.as_ref()?)?)));
+            .filter_map(|(name, change)| Some((name, kind(change.new.as_ref()?)?)));
         let channels = channels(kinds, kept, applied, key);
-        for change in &self.changes {
+        for (name, change) in &self.changes {
             if let Some(Entry {
                 definition: Definition::Spec(definition),
                 ..
             }) = &change.new
             {
-                definitions.insert(change.name.clone(), definition.clone());
+                definitions.insert(name.clone(), definition.clone());
             }
         }
         let channels = channels.into_iter();
@@ -178,8 +176,6 @@ impl Plan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Change {
-    /// The tree key.
-    pub name: Name,
     /// The digest of the stored definition, or `None` when the plan adds it.
     pub old: Option<Digest>,
     /// The definition in the files, with the span of its label, or `None` when the
@@ -676,18 +672,18 @@ fn planned(name: &Name, kind: definition::Kind) -> bool {
         && kind.label(name).is_some_and(|label| !label.reserved())
 }
 
-/// The change of each definition whose bytes differ from the stored bytes, in tree key
-/// order. A stored definition that is not [`planned`] is never removed.
+/// The change of each definition whose bytes differ from the stored bytes, by tree
+/// key. A stored definition that is not [`planned`] is never removed.
 fn changes(
     entries: BTreeMap<Name, Entry>,
     mut channels: BTreeMap<Name, Channel>,
     applied: &BTreeMap<Name, definition::Definition>,
-) -> Vec<Change> {
+) -> BTreeMap<Name, Change> {
     let mut stored: BTreeMap<&Name, &definition::Definition> = applied
         .iter()
         .filter(|(name, definition)| planned(name, definition.kind()))
         .collect();
-    let mut changes = Vec::new();
+    let mut changes = BTreeMap::new();
     for (name, entry) in entries {
         let bytes = match &entry.definition {
             Definition::Spec(definition) => definition.encode(),
@@ -700,18 +696,19 @@ fn changes(
         };
         let old = stored.remove(&name).map(definition::Definition::encode);
         if old.as_ref() != Some(&bytes) {
-            changes.push(Change {
+            let old = old.as_deref().map(Digest::of);
+            changes.insert(
                 name,
-                old: old.as_deref().map(Digest::of),
-                new: Some(entry),
-            });
+                Change {
+                    old,
+                    new: Some(entry),
+                },
+            );
         }
     }
-    changes.extend(stored.into_iter().map(|(name, old)| Change {
-        name: name.clone(),
-        old: Some(Digest::of(&old.encode())),
-        new: None,
+    changes.extend(stored.into_iter().map(|(name, old)| {
+        let old = Some(Digest::of(&old.encode()));
+        (name.clone(), Change { old, new: None })
     }));
-    changes.sort_by(|a, b| a.name.cmp(&b.name));
     changes
 }
