@@ -481,8 +481,10 @@ impl<'a> Shown<'a> {
             if raw && shown.html.is_none() {
                 shown.html = Some(source.trim());
             }
+            // An `Html` event ends at `\n` only, so it can hold more than one line.
             if matches!(event, Event::Html(_)) && open.len() == 1 {
-                shown.html_number = shown.html_number.or(heading(source));
+                let number = || lines(&body[start..range.end]).find_map(heading);
+                shown.html_number = shown.html_number.or_else(number);
             }
             match event {
                 Event::Start(tag) if !inline(tag.to_end()) => {
