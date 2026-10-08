@@ -109,7 +109,7 @@ fn wide() -> (Frame, Arc<KeySet>) {
 
 /// One live frame of [`CHANNELS`] channels to one recording reader that keeps up and
 /// pays for a remote frame of its `places`: the last channel, or every channel, in
-/// entry order.
+/// entry order, which is the home's frame.
 #[divan::bench(args = [1, CHANNELS])]
 fn release_places(bencher: Bencher<'_, '_>, places: usize) {
     release_through(bencher, |set| {
@@ -118,8 +118,8 @@ fn release_places(bencher: Bencher<'_, '_>, places: usize) {
     });
 }
 
-/// As [`release_places`] for places of every channel, last first, so the remote
-/// frame is not the home's frame.
+/// As [`release_places`] for places of every channel, last first, as a remote node
+/// whose slots are in another order lists them.
 #[divan::bench]
 fn release_places_reversed(bencher: Bencher<'_, '_>) {
     release_through(bencher, |set| {

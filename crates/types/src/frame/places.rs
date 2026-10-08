@@ -45,9 +45,9 @@ struct Held {
     entries: Box<[(u32, u32)]>,
     /// The position in `entries` of each, in place order.
     order: Box<[u32]>,
-    /// The places name each entry of the key set in entry order, so the reader's frame
-    /// is the home's frame.
-    identical: bool,
+    /// The places name each entry of the key set, so the reader's frame holds each
+    /// series of a frame.
+    every: bool,
 }
 
 impl Places {
@@ -75,20 +75,20 @@ impl Places {
     }
 
     /// The [`Frame::charge`] of the frame that the reader builds from `frame`, of key
-    /// set `set`. O(1) when the places name each entry of `set` in entry order, as
-    /// the reader's frame is then `frame`; else as for [`Places::lay`].
+    /// set `set`. O(1) when the places name each entry of `set`, in any order, as that
+    /// frame then holds each series of `frame`; else as for [`Places::lay`].
     ///
     /// # Panics
     ///
     /// If `set` is not the key set of `frame`.
     pub fn charge(&mut self, frame: &Frame, set: &KeySet) -> u64 {
         let held = held(&mut self.held, &self.slots, frame, set);
-        if held.identical {
+        // Each block payload is a multiple of 8 bytes, so the padding of the last
+        // series, which differs with place order, does not change the footprint.
+        if held.every {
             let (_, descriptors, body) = parts(&frame.0);
             return charge(descriptors.len(), body.len());
         }
-        // Block payloads are multiples of 64 bytes, so padding the last series too,
-        // which a frame does not, leaves the charge as it is.
         let (mut series, mut body) = (0, 0);
         each(held, frame, |_, bounds| {
             series += 1;
@@ -172,8 +172,7 @@ impl Held {
         entries.dedup_by_key(|&mut (entry, _)| entry);
         let mut order: Vec<u32> = (0..to_u32(entries.len())).collect();
         order.sort_unstable_by_key(|&at| entries[to_usize(at)].1);
-        let identical = entries.len() == set.entries().len()
-            && order.iter().enumerate().all(|(n, &at)| to_usize(at) == n);
+        let every = entries.len() == set.entries().len();
         Self {
             mask: Mask::of_entries(
                 set,
@@ -181,7 +180,7 @@ impl Held {
             ),
             entries: entries.into(),
             order: order.into(),
-            identical,
+            every,
         }
     }
 }
@@ -276,14 +275,25 @@ mod tests {
         }
 
         #[test]
-        fn charges_places_of_each_entry_in_entry_order_as_the_frame(case in cases()) {
+        fn charges_places_of_each_entry_in_any_order_as_the_frame_it_lays(
+            case in cases(),
+            turn: usize,
+            reversed: bool,
+        ) {
             let (set, frame) = frame_of(&case);
-            let slots: Box<[Slot]> = set.entries().iter().map(|entry| entry.slot).collect();
-            let mut places = Places::new(slots);
-            let charge = charge(frame.ends().count(), frame.body().len());
-            prop_assert_eq!(places.charge(&frame, &set), charge);
+            let mut slots: Vec<Slot> = set.entries().iter().map(|entry| entry.slot).collect();
+            let turn = turn % slots.len();
+            slots.rotate_left(turn);
+            if reversed {
+                slots.reverse();
+            }
+            let mut places = Places::new(slots.into());
+            let placed = places.lay(&frame, &set);
+            let laid = charge(placed.len(), placed.last().map_or(0, |placed| placed.end));
+            prop_assert_eq!(places.charge(&frame, &set), laid);
+            prop_assert_eq!(laid, charge(frame.ends().count(), frame.body().len()));
             if set.groups().len() == 1 {
-                prop_assert_eq!(charge, frame.charge());
+                prop_assert_eq!(laid, frame.charge());
             }
         }
     }
@@ -400,7 +410,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "the frame is of key set 0 and the places of key set 1")]
-    fn panics_on_a_frame_of_another_key_set_in_a_whole_charge() {
+    fn panics_on_a_frame_of_another_key_set_in_a_charge_of_every_entry() {
         let (one, two) = two_sets();
         let slots = two.entries().iter().map(|entry| entry.slot).collect();
         Places::new(slots).charge(&filled(&one, &[(0, 3)]), &two);
