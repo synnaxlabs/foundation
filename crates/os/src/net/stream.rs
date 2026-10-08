@@ -154,6 +154,16 @@ impl tcp::Driver for Stream {
                 None => io_error(Errno::PIPE),
             }));
         }
+        // The kernel takes at most 1024 parts, and a write of only empty parts gives 0
+        // with the stream still ready, so a caller's loop would spin.
+        let skip = buffers
+            .iter()
+            .take_while(|buffer| buffer.is_empty())
+            .count();
+        let buffers = &buffers[skip..];
+        if buffers.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         #[cfg(not(target_os = "macos"))]
         let sent =
             ready!(stream.poll_write_vectored(cx, buffers)).map_err(|e| errno(&e));

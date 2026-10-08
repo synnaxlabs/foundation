@@ -182,6 +182,30 @@ fn a_vectored_write_with_an_empty_first_part_takes_bytes() {
     });
 }
 
+/// The kernel takes at most 1024 parts, so the empty parts in front of the bytes go
+/// first.
+#[test]
+fn a_write_after_many_empty_parts_takes_bytes() {
+    on_thread("net-empty", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        let mut parts: Vec<&[u8]> = vec![&[]; 1100];
+        parts.push(b"hello");
+        assert_eq!(write(&mut client, &parts).await, Ok(5));
+    });
+}
+
+/// macOS refuses a `writev` of no parts with `EINVAL`, which would end the stream.
+#[test]
+fn a_write_of_no_parts_gives_0() {
+    on_thread("net-none", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[]).await, Ok(0));
+        assert_eq!(write(&mut client, &[&[7]]).await, Ok(1));
+    });
+}
+
 #[test]
 fn a_round_trip_runs_on_a_shard() {
     on_shard(|| async {

@@ -47,8 +47,8 @@ impl Bound {
         }
         let head;
         let buffers = match buffers.get(whole) {
-            // The whole parts hold no bytes, so the write takes the head of the next.
-            Some(next) if len == 0 => {
+            // The first part crosses the bound, so the write takes its head.
+            Some(next) if whole == 0 => {
                 head = [IoSlice::new(&next[..room])];
                 &head[..]
             }
