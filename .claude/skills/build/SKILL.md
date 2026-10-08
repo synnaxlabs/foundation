@@ -16,9 +16,9 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
 ## Take an issue
 
 1. `git fetch origin`. Work only in your own worktree.
-2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
-   state comment. Else take the oldest `ready` issue whose crates no other open issue
-   with an `owner:` label holds: `gh issue list --label ready --search
+2. An open issue labeled `owner:$FACTORY_NAME` and not `blocked` comes first: resume it
+   from its last state comment. Else take the oldest `ready` issue whose crates no other
+   open issue with an `owner:` label holds: `gh issue list --label ready --search
    "sort:created-asc"`. On the night lane, take only issues that also have `night`.
 3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
    (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
@@ -128,7 +128,8 @@ take the next `night` issue. A PR that needs the person (`oracles/`, `.github/`,
   `docs/dependencies.md`.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
-  reaches no one.
+  reaches no one. When no part of the issue is left to build, add `blocked` and take
+  other work (Take an issue). Remove `blocked` when the answer comes.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
   to the crate's architect (`docs/factory.md`).
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling

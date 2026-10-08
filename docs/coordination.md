@@ -74,7 +74,8 @@ Labels:
 - `model:fable` -> runs on Fable. Only the person or the architect adds it.
 - `interface` -> a request to change a public surface or a crate dependency.
 - `oracle` -> it changes `oracles/`.
-- `blocked` -> waiting on another issue, linked in the body.
+- `blocked` -> waiting on another issue, linked in the body, or on a question for the
+  person.
 - `security` -> a security finding.
 
 Builders file the next issues on the milestone path from `docs/decisions.md`, and the
