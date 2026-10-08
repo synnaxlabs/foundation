@@ -37,11 +37,13 @@ const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
 /// The applies after which the heap is read the first time.
 const FEW: usize = 8;
 /// The applies after which the heap is read the last time.
-const MANY: usize = 264;
+const MANY: usize = 520;
 /// The bytes for each apply by which the slopes of two runs can differ with no
 /// refusal kept. The periodic writes of the node fall at other applies in each run,
-/// and the slopes differ by 1.4 bytes. A `u32` kept for each refusal adds 6.5.
-const SLACK: i128 = 3;
+/// so the gap swings with the window: up to 3.9 bytes over 64 reads, and within 0.34
+/// over each window of 300 to 1025 reads. With a `u32` kept for each refusal, they
+/// differ by about 5.
+const SLACK: i128 = 2;
 
 fn main() {
     many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect();
