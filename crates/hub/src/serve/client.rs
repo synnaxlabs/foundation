@@ -10,8 +10,7 @@ use access::proof::Error as Refusal;
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
 use wire::hub::client::{
-    CAPPED, CHANGED, Challenge, EXPIRED, FromProgram, Gateway, REFUSED, Response,
-    Signed, UNSYNCED, VIA,
+    CAPPED, CHANGED, Challenge, EXPIRED, REFUSED, Response, Signed, UNSYNCED, VIA,
 };
 
 use super::{Error, alloc, halves, stop};
@@ -121,12 +120,11 @@ async fn renew(
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<Served, Error> {
-    let mut gateway = Gateway::default();
-    if !take(shared, &mut gateway, receiver, sender).await? {
+    if !take(shared, receiver, sender).await? {
         return Ok(Served::Ended);
     }
     let mut renewals = pin!(async {
-        while take(shared, &mut gateway, receiver, sender).await? {}
+        while take(shared, receiver, sender).await? {}
         Ok(Served::Ended)
     });
     let mut expiry = pin!(expiry(shared));
@@ -141,7 +139,6 @@ async fn renew(
 /// `false` when the program finished the stream first.
 async fn take(
     shared: &Shared,
-    gateway: &mut Gateway,
     receiver: &mut Receiver,
     sender: &mut Sender,
 ) -> Result<bool, Error> {
@@ -149,10 +146,7 @@ async fn take(
     let Some(message) = receiver.recv().await? else {
         return Ok(false);
     };
-    let FromProgram::Signed(Signed { hello, signature }) = gateway.decode(&message)?
-    else {
-        return Err(Error::Unadmitted);
-    };
+    let Signed { hello, signature } = Signed::decode(&message)?;
     if hello.nonce != nonce {
         return Err(Error::Stale);
     }
@@ -251,31 +245,23 @@ async fn read(
     if shared.admitted.borrow().is_none() {
         return Err(Error::Unadmitted);
     }
-    let mut gateway = Gateway::default();
     let Some(message) = receiver.recv().await? else {
         return Ok(None);
     };
-    // A first message is a hello or a request.
-    let FromProgram::Request(request) = gateway.decode(&message)? else {
-        return Err(Error::Hello);
-    };
+    let request = wire::hub::client::Request::decode(&message)?;
     if shared.open.replace(true) {
         return Err(Error::Pending);
     }
     let open = Open(Rc::clone(shared));
-    let mut remain = usize::try_from(request.length)
-        .expect("invariant: `Gateway` refuses a body over 16 MiB");
-    let mut body = Vec::with_capacity(remain);
-    while remain > 0 {
+    let mut rest = request.body();
+    let mut body = Vec::with_capacity(rest.remain());
+    while rest.remain() > 0 {
         let Some(message) = receiver.recv().await? else {
-            return Err(Error::Unfinished { remain });
+            break;
         };
-        let FromProgram::Body { bytes, .. } = gateway.decode(&message)? else {
-            unreachable!("invariant: `Gateway` gives only body messages in a body");
-        };
-        body.extend_from_slice(bytes);
-        remain -= bytes.len();
+        body.extend_from_slice(rest.take(&message)?);
     }
+    rest.end()?;
     let (admitted, hello) = shared
         .admitted
         .borrow()

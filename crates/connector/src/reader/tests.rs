@@ -2,6 +2,7 @@ use document::diagnostic::Note;
 use document::value::Kind;
 use document::{Attribute, Label, Map, Position, Source};
 use proptest::prelude::*;
+use types::name::Name;
 
 use super::*;
 
@@ -83,14 +84,10 @@ fn second_reader() -> Diagnostic {
 }
 
 #[test]
-fn reads_a_named_complete_reader_with_a_hold() {
-    let config = config(&[
-        (60, "name", string("influx")),
-        (70, "mode", string("complete")),
-        (80, "hold", string("2h")),
-    ]);
+fn reads_a_complete_reader_with_a_hold() {
+    let config =
+        config(&[(70, "mode", string("complete")), (80, "hold", string("2h"))]);
     let expected = Settings {
-        name: Some(name("influx")),
         select: selector("edge.*"),
         mode: Mode::Complete,
         hold: "2h".parse().expect("a span"),
@@ -99,10 +96,9 @@ fn reads_a_named_complete_reader_with_a_hold() {
 }
 
 #[test]
-fn reads_a_complete_reader_with_no_name_and_no_reader_block() {
+fn reads_a_complete_reader_with_no_reader_block() {
     let config = document(&[(0, "select", string("edge.*"))], Vec::new());
     let expected = Settings {
-        name: None,
         select: selector("edge.*"),
         mode: Mode::Complete,
         hold: Span::ZERO,
@@ -211,20 +207,8 @@ fn refuses_a_select_that_does_not_read() {
 }
 
 #[test]
-fn reads_a_hold_with_no_name() {
-    let config = config(&[(80, "hold", string("2h"))]);
-    let expected = Settings {
-        name: None,
-        select: selector("edge.*"),
-        mode: Mode::Complete,
-        hold: "2h".parse().expect("a span"),
-    };
-    assert_eq!(read(&config, &[], &[]), Ok(expected));
-}
-
-#[test]
 fn refuses_a_negative_hold_at_its_value() {
-    let config = config(&[(60, "name", string("influx")), (80, "hold", string("-1s"))]);
+    let config = config(&[(80, "hold", string("-1s"))]);
     let expected = refused(
         "document.negative-span",
         81,
@@ -236,7 +220,7 @@ fn refuses_a_negative_hold_at_its_value() {
 
 #[test]
 fn reads_a_zero_hold() {
-    let config = config(&[(60, "name", string("influx")), (80, "hold", string("0s"))]);
+    let config = config(&[(80, "hold", string("0s"))]);
     assert_eq!(
         read(&config, &[], &[]).map(|settings| settings.hold),
         Ok(Span::ZERO)
@@ -245,11 +229,7 @@ fn reads_a_zero_hold() {
 
 #[test]
 fn refuses_a_hold_in_latest_mode() {
-    let config = config(&[
-        (60, "name", string("influx")),
-        (70, "mode", string("latest")),
-        (80, "hold", string("0s")),
-    ]);
+    let config = config(&[(70, "mode", string("latest")), (80, "hold", string("0s"))]);
     let expected = refused(
         "connector.latest-hold",
         80,
@@ -283,24 +263,32 @@ fn refuses_an_unknown_mode_and_a_mode_that_is_not_text() {
     );
 }
 
-/// The diagnostic of the name "a..b" at offset 61.
-fn bad_name() -> Diagnostic {
-    refused(
-        "document.bad-name",
-        61,
-        "a segment is not valid: \"\" in \"a..b\"",
-        "Use one or more ASCII letters, digits, `_`, and `-` in that segment, after an \
-         optional leading `@`",
-    )
+#[test]
+fn refuses_a_name_at_its_key() {
+    let config = config(&[(60, "name", string("a")), (70, "mode", string("latest"))]);
+    assert_eq!(
+        read(&config, &[], &[]),
+        Err(vec![refused(
+            "document.unknown-attribute",
+            60,
+            "`name` is not an attribute of the `reader` block",
+            "Use `mode` or `hold`, or remove it",
+        )])
+    );
 }
 
 #[test]
-fn refuses_a_name_and_a_hold_that_do_not_read() {
-    let config = config(&[(60, "name", string("a..b")), (80, "hold", string("x"))]);
+fn refuses_a_mode_and_a_hold_that_do_not_read() {
+    let config = config(&[(70, "mode", string("all")), (80, "hold", string("x"))]);
     assert_eq!(
         read(&config, &[], &[]),
         Err(vec![
-            bad_name(),
+            refused(
+                "connector.bad-mode",
+                71,
+                "the reader has no mode \"all\"",
+                "Write \"complete\" or \"latest\"",
+            ),
             refused(
                 "document.bad-span",
                 81,
@@ -312,18 +300,8 @@ fn refuses_a_name_and_a_hold_that_do_not_read() {
 }
 
 #[test]
-fn refuses_only_a_bad_name_with_a_hold() {
-    let config = config(&[(60, "name", string("a..b")), (80, "hold", string("2h"))]);
-    assert_eq!(read(&config, &[], &[]), Err(vec![bad_name()]));
-}
-
-#[test]
 fn refuses_only_a_bad_mode_with_a_hold() {
-    let config = config(&[
-        (60, "name", string("influx")),
-        (70, "mode", string("all")),
-        (80, "hold", string("2h")),
-    ]);
+    let config = config(&[(70, "mode", string("all")), (80, "hold", string("2h"))]);
     assert_eq!(
         read(&config, &[], &[]),
         Err(vec![refused(
@@ -337,7 +315,7 @@ fn refuses_only_a_bad_mode_with_a_hold() {
 
 #[test]
 fn refuses_a_second_reader_block_after_a_good_one() {
-    let mut config = config(&[(60, "name", string("influx"))]);
+    let mut config = config(&[]);
     let mut second =
         block(95, "reader", document(&[(97, "from", string("a"))], vec![]));
     second.labels.push(Label {
@@ -350,8 +328,7 @@ fn refuses_a_second_reader_block_after_a_good_one() {
 
 #[test]
 fn refuses_what_the_reader_block_does_not_take() {
-    let mut config =
-        config(&[(60, "name", string("influx")), (65, "from", string("x"))]);
+    let mut config = config(&[(65, "from", string("x"))]);
     let reader = &mut config.blocks[0];
     reader.labels.push(Label {
         text: "r".into(),
@@ -370,13 +347,13 @@ fn refuses_what_the_reader_block_does_not_take() {
                 "document.label-count",
                 55,
                 "the `reader` block has 1 label, and it takes no labels",
-                "Remove each label, and name the reader with a `name` attribute",
+                "Remove each label: the reader has its connector's name",
             ),
             refused(
                 "document.unknown-attribute",
                 65,
                 "`from` is not an attribute of the `reader` block",
-                "Use `name`, `mode`, or `hold`, or remove it",
+                "Use `mode` or `hold`, or remove it",
             ),
             refused(
                 "document.unknown-block",
@@ -394,27 +371,20 @@ fn names() -> impl Strategy<Value = Name> {
 
 /// Settings, with the pattern of their selector.
 fn settings() -> impl Strategy<Value = (Settings, String)> {
-    let named = (names(), 0..=1_000_000i64).prop_map(|(name, millis)| {
-        (
-            Some(name),
-            Mode::Complete,
-            Span::from_nanos(millis * 1_000_000),
-        )
+    let held = (0..=1_000_000i64)
+        .prop_map(|millis| (Mode::Complete, Span::from_nanos(millis * 1_000_000)));
+    let unheld = any::<bool>().prop_map(|latest| {
+        let mode = if latest { Mode::Latest } else { Mode::Complete };
+        (mode, Span::ZERO)
     });
-    let unheld =
-        (proptest::option::of(names()), any::<bool>()).prop_map(|(name, latest)| {
-            let mode = if latest { Mode::Latest } else { Mode::Complete };
-            (name, mode, Span::ZERO)
-        });
-    (prop_oneof![named, unheld], names(), any::<bool>()).prop_map(
-        |((name, mode, hold), select, wild)| {
+    (prop_oneof![held, unheld], names(), any::<bool>()).prop_map(
+        |((mode, hold), select, wild)| {
             let pattern = if wild {
                 format!("{select}.*")
             } else {
                 select.as_str().to_owned()
             };
             let settings = Settings {
-                name,
                 select: selector(&pattern),
                 mode,
                 hold,
@@ -428,9 +398,6 @@ fn settings() -> impl Strategy<Value = (Settings, String)> {
 /// differ from the defaults.
 fn written(settings: &Settings, pattern: &str) -> Document {
     let mut reader = Vec::new();
-    if let Some(name) = &settings.name {
-        reader.push((60, "name", string(name.as_str())));
-    }
     if settings.mode == Mode::Latest {
         reader.push((70, "mode", string("latest")));
     }

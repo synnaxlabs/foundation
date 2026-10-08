@@ -1,8 +1,9 @@
 //! `config::check` never panics on the documents of HCL files, gives the same entries
 //! for the files in either order or problems in both, and orders its problems as its
-//! doc says. Files that pass alone, with keys that differ in more than case, pass
-//! together and give the union of their entries. Each `\x1e` in the input starts the
-//! next file, up to three. The kind table has the influx kind.
+//! doc says. Files that pass alone, with keys that differ in more than case and no
+//! subject named as a connector in any ASCII case, pass together and give the union
+//! of their entries. Each `\x1e` in the input starts the next file, up to three. The
+//! kind table has the influx kind.
 
 #![no_main]
 
@@ -46,17 +47,31 @@ fuzz_target!(|text: &str| {
     }
 });
 
-/// Files that each pass alone, with keys that differ in more than case, pass together.
+/// Files that each pass alone, with keys that differ in more than case and no subject
+/// named as a connector in any ASCII case, pass together.
 fn passing_files_pass_together(documents: &[Document], kinds: &Table) {
     let mut passing = Vec::new();
     let mut union = BTreeMap::new();
     let mut keys = BTreeSet::new();
+    let mut connectors = BTreeSet::new();
+    let mut subjects = BTreeSet::new();
     for document in documents {
         let Ok(entries) = config::check(std::slice::from_ref(document), kinds) else {
             continue;
         };
         for (key, entry) in entries {
-            if !keys.insert(key.as_str().to_ascii_lowercase()) {
+            let lower = key.as_str().to_ascii_lowercase();
+            match &entry.definition {
+                config::Definition::Spec(Definition::Connector(_)) => {
+                    connectors.insert(lower.clone());
+                }
+                config::Definition::Spec(Definition::Subject(_)) => {
+                    let label = lower.strip_suffix(".@subject").expect("a subject key");
+                    subjects.insert(label.to_owned());
+                }
+                _ => {}
+            }
+            if !keys.insert(lower) || !connectors.is_disjoint(&subjects) {
                 return;
             }
             union.insert(key, entry);
@@ -71,9 +86,9 @@ fn passing_files_pass_together(documents: &[Document], kinds: &Table) {
 }
 
 /// Each block gives one entry, keyed by its label for a channel or a connector, or
-/// `<label>.@<keyword>` for a policy, and unique in any case. A policy or a connector
-/// has a definition that the spec tree reads back, and each edge of a channel names a
-/// channel entry.
+/// `<label>.@<keyword>` for each other block, and unique in any case. A policy or a
+/// connector has a definition that the spec tree reads back, and each edge of a channel
+/// names a channel entry.
 fn entries_match(documents: &[Document], entries: &BTreeMap<Name, config::Entry>) {
     let by_key: BTreeMap<String, &config::Entry> = entries
         .iter()

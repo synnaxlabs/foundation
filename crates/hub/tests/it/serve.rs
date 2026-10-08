@@ -19,14 +19,15 @@ use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code, Port, Transport};
 use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
+use types::frame::Form;
 use types::frame::Path as FramePath;
-use types::sample::Type;
+use types::sample::{Scalar, Type};
 use types::time::Span;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, RING, SETTLE, STAMP, Test, fill, scrambled, write,
+    AREA, BODY_MAX, I64, LIVE, RING, SETTLE, STAMP, Test, fill, scrambled, write,
     write_series, write_wide,
 };
 
@@ -34,6 +35,9 @@ use super::{
 pub(super) const PORT: u16 = 7000;
 pub(super) const HOME: PrivateKey = PrivateKey([1; 32]);
 const PEER: PrivateKey = PrivateKey([2; 32]);
+/// The peer's message limit: the least that `transport` takes, so the home cuts a
+/// body and its ends into several messages.
+const PEER_MESSAGE: usize = 1472;
 /// How long the peer waits for a reply that must not come.
 const QUIET: Span = Span::from_nanos(100_000_000);
 
@@ -43,12 +47,14 @@ pub(super) fn public_key(key: &PrivateKey) -> PublicKey {
         .expect("a public key")
 }
 
-/// A transport of `node` at `PORT` that proves `key`.
+/// A transport of `node` at `PORT` that proves `key` and takes messages of at most
+/// `message` bytes.
 pub(super) fn transport(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,
     key: PrivateKey,
+    message: usize,
 ) -> Transport {
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), at)
@@ -56,7 +62,7 @@ pub(super) fn transport(
         .split(NonZeroUsize::MIN);
     let config = transport::Config {
         private_key: key,
-        message_bytes_max: NonZeroUsize::new(1 << 16).expect("not 0"),
+        message_bytes_max: NonZeroUsize::new(message).expect("not 0"),
         window_bytes: 1 << 20,
         streams_max: NonZeroU32::new(16).expect("not 0"),
         idle: Span::from_nanos(60 * Span::SECOND.nanos()),
@@ -152,7 +158,7 @@ fn session<H, P>(
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let mut test = Test::new(node.clone(), tasks.clone(), layout).await;
         test.sync().await;
-        let transport = transport(&node, &tasks, &own_pool(), HOME);
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");
         let mut incoming = session.accept().await.expect("a stream");
         let header = incoming.receiver.recv().await.expect("a header");
@@ -172,7 +178,7 @@ fn session<H, P>(
     let node = nodes[1].clone();
     let main = move |tasks: Tasks| async move {
         let pool = own_pool();
-        let transport = transport(&node, &tasks, &pool, PEER);
+        let transport = transport(&node, &tasks, &pool, PEER, PEER_MESSAGE);
         let session = transport
             .dial(public_key(&HOME), &[at])
             .await
@@ -645,7 +651,6 @@ fn decoded(got: &Got, types: &[Type]) -> Vec<Vec<i64>> {
 /// The open lists `value` twice: its series has the place of its first listing, and
 /// `time` has place 2.
 #[test]
-#[ignore = "waits on #68"]
 fn sends_each_frame_through_the_places_of_the_open() {
     let home = |test: Test, link: Link, incoming| async move {
         let mut writer = test.writer("a", &["value"]).await;
@@ -678,9 +683,186 @@ fn sends_each_frame_through_the_places_of_the_open() {
     });
 }
 
+/// A frame of 191 series: its ends and its body each pass `PEER_MESSAGE`, so each
+/// goes in two or more messages.
+#[test]
+fn sends_a_frame_wider_than_a_message_of_the_peer() {
+    const KEYS: std::ops::Range<u128> = 10..200;
+    let home = |test: Test, link: Link, incoming| async move {
+        let names: Vec<_> = KEYS.map(|key| format!("v{key}")).collect();
+        for (key, name) in KEYS.zip(&names) {
+            test.hub.define(Channel {
+                key: channel::Key::from_u128(key),
+                name: super::name(name),
+                data_type: I64,
+                index: channel::Key::from_u128(1),
+            });
+        }
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        let mut writer = test.writer("a", &names).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            let values: Vec<_> = KEYS
+                .map(|key| [i64::try_from(key).expect("fits")])
+                .collect();
+            let stamps = [now];
+            let series: Vec<_> = KEYS
+                .zip(&values)
+                .map(|(key, value)| (key, &value[..]))
+                .chain([(1, &stamps[..])])
+                .collect();
+            write_series(&mut writer, &series);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(64, Class::Complete, false, home, |mut peer| async move {
+        let keys: Vec<_> = KEYS.chain([1]).collect();
+        let mut reader = open_complete(&mut peer, &keys, 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        let series = u32::try_from(keys.len()).expect("fits");
+        assert_eq!(places(&got), (0..series).collect::<Vec<_>>());
+        let types: Vec<_> = KEYS.map(|_| I64).collect();
+        let values: Vec<_> = KEYS
+            .map(|key| vec![i64::try_from(key).expect("fits")])
+            .collect();
+        assert_eq!(decoded(&got, &types), values);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A text series that encodes to more than `PEER_MESSAGE` bytes, not a multiple of 8:
+/// the cut falls inside it, and its zeros go in the second message.
+#[test]
+fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
+    let text: Vec<_> = (0..2001_u32)
+        .map(|i| b' ' + u8::try_from((i * 37 + i * i) % 95).expect("fits"))
+        .collect();
+    let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
+    let written = raw.clone();
+    let home = |test: Test, link: Link, incoming| async move {
+        test.hub.define(Channel {
+            key: channel::Key::from_u128(6),
+            name: super::name("text"),
+            data_type: Type::String,
+            index: channel::Key::from_u128(1),
+        });
+        let mut writer = test.writer("a", &["text", "value"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            let set = Arc::clone(writer.set());
+            let [index, text, value] = [1, 6, 2].map(|key| super::entry(&set, key));
+            let series = [(index, 8), (text, written.len()), (value, 8)];
+            let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+            for (entry, bytes) in [
+                (index, &now.to_le_bytes()[..]),
+                (text, &written),
+                (value, &30_i64.to_le_bytes()),
+            ] {
+                let series = draft.series_mut(entry).expect("the series is present");
+                series.copy_from_slice(bytes);
+            }
+            draft.set_count(0, 1);
+            writer.write(LIVE, draft).expect("the home takes it");
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(66, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[6, 2, 1], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(places(&got), [0, 1, 2]);
+        let end = usize::try_from(got.ends[0].1).expect("fits");
+        assert!(end > PEER_MESSAGE);
+        assert_ne!(end % 8, 0);
+        assert!(
+            got.body[end..end.next_multiple_of(8)]
+                .iter()
+                .all(|&b| b == 0)
+        );
+        let mut text = vec![0; raw.len()];
+        codec::decode(Type::String, 1, &got.body[..end], &mut text).expect("decodes");
+        assert_eq!(text, raw);
+        let value =
+            end.next_multiple_of(8)..usize::try_from(got.ends[1].1).expect("fits");
+        let mut out = [0; 8];
+        codec::decode(I64, 1, &got.body[value], &mut out).expect("decodes");
+        assert_eq!(i64::from_le_bytes(out), 30);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A frame of 184 series of 16 bytes and then a series of `f64[0]`, whose sample has 0
+/// bytes: the body fills two messages of the peer, and no third message follows.
+#[test]
+fn sends_no_message_for_a_last_series_of_no_bytes() {
+    const KEYS: std::ops::Range<u128> = 10..193;
+    const EMPTY: u128 = 300;
+    let home = |test: Test, link: Link, incoming| async move {
+        let names: Vec<_> = KEYS
+            .map(|key| format!("v{key}"))
+            .chain(["empty".to_owned()])
+            .collect();
+        let empty = Type::Array {
+            element: Scalar::F64,
+            len: 0,
+        };
+        let types = KEYS.map(|_| I64).chain([empty]);
+        for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
+            test.hub.define(Channel {
+                key: channel::Key::from_u128(key),
+                name: super::name(name),
+                data_type,
+                index: channel::Key::from_u128(1),
+            });
+        }
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        let mut writer = test.writer("a", &names).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            let set = Arc::clone(writer.set());
+            let mut series: Vec<_> = KEYS
+                .chain([1])
+                .map(|key| (super::entry(&set, key), 8))
+                .chain([(super::entry(&set, EMPTY), 0)])
+                .collect();
+            series.sort_unstable();
+            let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+            for key in KEYS {
+                let entry = super::entry(&set, key);
+                let value = i64::try_from(key).expect("fits");
+                let series = draft.series_mut(entry).expect("the series is present");
+                series.copy_from_slice(&value.to_le_bytes());
+            }
+            let index = super::entry(&set, 1);
+            let series = draft.series_mut(index).expect("the series is present");
+            series.copy_from_slice(&now.to_le_bytes());
+            draft.set_count(0, 1);
+            writer.write(LIVE, draft).expect("the home takes it");
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(67, Class::Complete, false, home, |mut peer| async move {
+        let keys: Vec<_> = KEYS.chain([1, EMPTY]).collect();
+        let mut reader = open_complete(&mut peer, &keys, 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        let series = u32::try_from(keys.len()).expect("fits");
+        assert_eq!(places(&got), (0..series).collect::<Vec<_>>());
+        let two = u32::try_from(2 * PEER_MESSAGE).expect("fits");
+        assert_eq!(&got.ends[183..], [(183, two), (184, two)]);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
 /// A credit raises a grant of 0, so the session gets the frame written after it.
 #[test]
-#[ignore = "waits on #68"]
 fn sends_a_frame_once_a_credit_raises_the_grant() {
     let home = |test: Test, link: Link, incoming| async move {
         let mut writer = test.writer("a", &["value"]).await;
@@ -706,7 +888,6 @@ fn sends_a_frame_once_a_credit_raises_the_grant() {
 /// A session of one commit of about three windows gets each frame. The peer sends a
 /// credit only when the session has spent the last one, so a frame waits for each.
 #[test]
-#[ignore = "waits on #68"]
 fn sends_each_frame_of_a_commit_past_the_window_as_credits_come() {
     const LIMIT: u64 = 1 << 14;
     const FRAMES: i64 = 6;
@@ -748,7 +929,6 @@ fn sends_each_frame_of_a_commit_past_the_window_as_credits_come() {
 /// frame before the one it missed at the next commit, in order, then `Behind` and the
 /// finish.
 #[test]
-#[ignore = "waits on #68"]
 fn sends_each_frame_before_a_miss_then_behind() {
     for seed in 0..32 {
         let home = |test: Test, link: Link, incoming| async move {
@@ -792,7 +972,6 @@ fn sends_each_frame_before_a_miss_then_behind() {
 /// not of the home's frame, which also holds `value-c`: it gets each frame until those
 /// charges reach its window, then `Behind` at the next commit.
 #[test]
-#[ignore = "waits on #68"]
 fn charges_a_complete_session_by_the_frame_the_peer_builds() {
     const LIMIT: u64 = 1 << 16;
     let home = |test: Test, link: Link, incoming| async move {

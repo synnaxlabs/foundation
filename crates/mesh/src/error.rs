@@ -1,11 +1,11 @@
 use std::fmt;
 
 use raft::Position;
+use spec::Pointer;
 use types::ed25519::PublicKey;
 use types::node;
 
 use crate::change::Unknown;
-use crate::pointer::Pointer;
 use crate::region::Unfit;
 use crate::{claim, log};
 
@@ -74,9 +74,10 @@ pub enum Error {
         /// The pointer when the change applied.
         pointer: Pointer,
     },
-    /// The tree of a spec has more chunks than one change lists. Apply a smaller spec.
+    /// A spec change lists more chunks than one change can list. Apply the change in
+    /// smaller steps.
     Large {
-        /// The count of chunks of the tree.
+        /// The count of chunks that the change lists.
         chunks: usize,
         /// The most chunks that one change lists.
         most: usize,
@@ -84,6 +85,17 @@ pub enum Error {
     /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
     /// each problem as [`spec::region::Problem::fix`] says.
     Problems(Vec<spec::region::Problem>),
+    /// The voters that hold the chunks of a spec change are not a majority of one
+    /// half of the voters, so the pointer did not move. This half comes first of the
+    /// halves that lack a majority, incoming before outgoing.
+    Quorum {
+        /// The voters of the half that hold the chunks.
+        held: usize,
+        /// The voters of the half.
+        voters: usize,
+    },
+    /// A call of this node's chunk store failed.
+    Blob(blob::Error),
 }
 
 impl fmt::Display for Error {
@@ -131,8 +143,8 @@ impl fmt::Display for Error {
             ),
             Self::Large { chunks, most } => write!(
                 f,
-                "the spec has {chunks} chunks, more than the {most} that one change \
-                 lists"
+                "the change lists {chunks} chunks, more than the {most} that one \
+                 change can list"
             ),
             Self::Problems(problems) => {
                 f.write_str("the spec has problems")?;
@@ -143,6 +155,12 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Self::Quorum { held, voters } => write!(
+                f,
+                "{held} of {voters} voters hold the chunks of the spec change, not a \
+                 majority"
+            ),
+            Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
         }
     }
 }

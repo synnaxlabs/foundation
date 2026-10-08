@@ -50,6 +50,7 @@ fn build(
 ) -> Result<LocalRuntime, Error> {
     cores.place(name, core)?;
     Builder::new_current_thread()
+        .enable_io()
         .enable_time()
         .build_local(LocalOptions::default())
         .map_err(|e| Error::Start {

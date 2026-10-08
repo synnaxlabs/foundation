@@ -145,6 +145,8 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Stopped(_)
         | Error::Stale { .. }
         | Error::Large { .. }
-        | Error::Problems(_) => Some(REFUSED),
+        | Error::Problems(_)
+        | Error::Quorum { .. }
+        | Error::Blob(_) => Some(REFUSED),
     }
 }

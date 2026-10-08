@@ -79,13 +79,13 @@ fn latest(frame: &impl Fn() -> Frame) {
     );
 
     let closed = keys[0];
-    readers.close(closed.into());
+    readers.close(closed.into(), None);
     let ((), allocations) = ALLOCATOR.count(|| {
         assert!(
             matches!(readers.take(closed.into()), Next::Empty),
             "a closed key takes"
         );
-        readers.close(closed.into());
+        readers.close(closed.into(), None);
     });
     assert_eq!(allocations, 0, "a call on a closed latest key allocated");
 }
@@ -131,7 +131,7 @@ fn complete(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
         backfill: None,
     };
     let closed = keys.pop().expect("a session is open");
-    readers.close(closed.into());
+    readers.close(closed.into(), None);
     let ((), allocations) = ALLOCATOR.count(|| {
         for &key in &keys {
             assert_eq!(readers.ack(key, position), Ok(()), "the ack moves forward");
@@ -142,8 +142,8 @@ fn complete(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
             matches!(readers.take(closed.into()), Next::Empty),
             "a closed key takes"
         );
-        readers.close(closed.into());
-        readers.close_named(closed, Stamp::from_nanos(0));
+        readers.close(closed.into(), None);
+        readers.close(closed.into(), Some(Stamp::from_nanos(0)));
     });
     assert_eq!(allocations, 0, "an ack or a call on a closed key allocated");
     assert_eq!(

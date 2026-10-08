@@ -28,7 +28,8 @@ pub use client::{Reply, Request};
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// A message that `wire::hub::Home` refuses. Code `MALFORMED`.
+    /// A message that `wire::hub` refuses, or a client body that ended early
+    /// ([`wire::hub::Error::Unfinished`]). Code `MALFORMED`.
     Message(wire::hub::Error),
     /// The peer opened the stream one way. Code `MALFORMED`.
     OneWay,
@@ -54,17 +55,9 @@ pub enum Error {
     Stale,
     /// A request stream before the link admitted a hello. Code `MALFORMED`.
     Unadmitted,
-    /// A hello on a stream after the first of the session. Code `MALFORMED`.
-    Hello,
     /// A request stream while another request of the link waits for its reply. Code
     /// `MALFORMED`.
     Pending,
-    /// The program finished a request stream with `remain` bytes of its body unsent.
-    /// Code `MALFORMED`.
-    Unfinished {
-        /// The bytes of the body that did not come.
-        remain: usize,
-    },
 }
 
 impl Error {
@@ -77,9 +70,7 @@ impl Error {
             | Self::ManyIndexes
             | Self::NoIndex
             | Self::Unadmitted
-            | Self::Hello
-            | Self::Pending
-            | Self::Unfinished { .. } => Some(Code(MALFORMED)),
+            | Self::Pending => Some(Code(MALFORMED)),
             Self::Access(error) => Some(Code(client::code(error))),
             Self::Stale => Some(Code(STALE)),
             Self::Unknown(_) => Some(Code(UNKNOWN)),
@@ -126,15 +117,8 @@ impl fmt::Display for Error {
             Self::Unadmitted => f.write_str(
                 "the program sent a request before the node admitted a hello",
             ),
-            Self::Hello => {
-                f.write_str("the program sent a hello on a stream after the first")
-            }
             Self::Pending => f.write_str(
                 "the program sent a request while another request waits for its reply",
-            ),
-            Self::Unfinished { remain } => write!(
-                f,
-                "the program finished a request with {remain} bytes of its body unsent"
             ),
         }
     }

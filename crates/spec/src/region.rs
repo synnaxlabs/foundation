@@ -11,7 +11,7 @@ mod common;
 mod tree;
 
 pub use check::{Problem, check};
-pub use tree::tree;
+pub use tree::{Error, definitions, tree};
 
 /// The epoch and the first voters of a child region. Its tree key holds the prefix, so
 /// the prefix is not part of the record. The current voters live in the region's own

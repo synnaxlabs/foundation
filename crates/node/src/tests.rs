@@ -2620,17 +2620,21 @@ mod port {
 
         use ::mesh::card::addresses::Addresses;
         use ::mesh::card::{self, Card};
+        use ::mesh::region::Founding;
         use ::mesh::status::Status;
         use std::future::poll_fn;
         use std::pin::pin;
         use std::task::Poll;
 
         use ::mesh::Member;
+        use spec::definition::{Definition, Kind};
+        use spec::subject::Subject;
+        use spec::tree::Chunks;
         use types::channel;
         use types::node::SealKey;
 
         use super::*;
-        use crate::{Endpoint, Region, route};
+        use crate::{Endpoint, route};
 
         /// The key and private key of a second node.
         const OTHER: (types::node::Key, PrivateKey) =
@@ -2669,11 +2673,12 @@ mod port {
         }
 
         /// The region `plant`, where each of `members` is a voter.
-        fn region(members: &[Member]) -> Region {
-            Region {
+        fn region(members: &[Member]) -> Founding {
+            Founding {
                 prefix: "plant".parse().unwrap(),
                 members: members.to_vec(),
                 voters: members.iter().map(|member| member.card.key()).collect(),
+                definitions: BTreeMap::new(),
             }
         }
 
@@ -2681,7 +2686,7 @@ mod port {
         fn start(
             host: &sim::node::Node,
             (key, private_key): (types::node::Key, PrivateKey),
-            region: Region,
+            region: Founding,
         ) -> Node {
             Node::start(Config {
                 key,
@@ -2907,6 +2912,26 @@ mod port {
             );
         }
 
+        /// A chunk store that does not open stops the node, and `join` gives why.
+        #[test]
+        fn a_chunk_store_that_does_not_open_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("blob"), env::files::Operation::List);
+            let node = start_alone(&host);
+            assert_eq!(sim.run(), Ok(()));
+            let error = blob::Error::Files(env::files::Error::Io {
+                path: PathBuf::from("blob"),
+                operation: env::files::Operation::List,
+                code: 5,
+            });
+            assert_eq!(node.join(), Err(Error::Blob(error.clone())));
+            assert_eq!(
+                Error::Blob(error.clone()).to_string(),
+                format!("cannot open the node's chunk store: {error}")
+            );
+        }
+
         /// Takes the lock of `host` as soon as it is free, then opens the mesh's log
         /// to write. Gives whether the lock was held, and the open of the log.
         fn probe(
@@ -2983,6 +3008,58 @@ mod port {
                 assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
             }
             assert!(held && logged);
+        }
+
+        /// A node started with a region with founding definitions puts the chunks of
+        /// their tree in its chunk store.
+        #[test]
+        fn the_chunk_store_holds_the_tree_of_the_founding_definitions() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let mut region = region(&[member(OWN, &KEY, &host)]);
+            let subject = Subject::new([KEY.public()].into()).unwrap();
+            let label = Kind::Subject.key("plant.operator").unwrap();
+            region.definitions = [(label, Definition::Subject(subject))].into();
+            let mut chunks = Chunks::default();
+            let tree = spec::region::tree(&mut chunks, &region.definitions);
+            let listed = tree.chunks.clone();
+            let node = start(&host, (OWN, KEY), region);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let shard = env::shards::Config {
+                name: "store".into(),
+                core: None,
+            };
+            let own = host.clone();
+            let held = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&held);
+            let started = host.shards().start(shard, move |_| async move {
+                let pool = block::Config { budget: 1 << 20 };
+                let memory = block::Heap::new(pool.reservation());
+                let pool = Rc::new(block::Pool::new(pool, memory));
+                let store = blob::Store::open(blob::Config {
+                    files: own.files(),
+                    dir: crate::directory::blob(),
+                    pool,
+                })
+                .await
+                .expect("the store opens");
+                for digest in tree.chunks {
+                    let block = store.get(digest).await.expect("a read");
+                    let bytes = block.map(|block| block.to_vec());
+                    out.lock().unwrap().push((digest, bytes));
+                }
+            });
+            drop(started.expect("the store starts"));
+            assert_eq!(sim.run(), Ok(()));
+            assert!(listed.contains(&tree.root));
+            let expected: Vec<_> = listed
+                .into_iter()
+                .map(|digest| (digest, chunks.get(digest).map(<[u8]>::to_vec)))
+                .collect();
+            assert_eq!(*held.lock().unwrap(), expected);
         }
 
         /// A node that starts again with its region, at once after a stop or a power

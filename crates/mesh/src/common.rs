@@ -8,6 +8,7 @@ use raft::{
     Answer, Body, Data, Entry, Grant, Message, Position, Proof, Ready, Signature, Term,
     Voters,
 };
+use spec::Pointer;
 use transport::Address;
 use types::channel;
 use types::digest::Digest;
@@ -21,7 +22,6 @@ use crate::card::{self, Card};
 use crate::change::{Change, Join};
 use crate::claim::Signer;
 use crate::member::Member;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{Options, Ticket, Voter};
 
@@ -293,7 +293,7 @@ pub(crate) fn digest(byte: u8) -> Digest {
 }
 
 /// A spec change on version `version` at root `[base; 32]`, to root `[root; 32]`, with
-/// each chunk `[chunk; 32]` of `chunks`.
+/// each chunk `[chunk; 32]` of `chunks`, held by node 1.
 pub(crate) fn spec(version: u64, base: u8, root: u8, chunks: &[u8]) -> Change {
     Change::Spec {
         base: Pointer {
@@ -302,6 +302,7 @@ pub(crate) fn spec(version: u64, base: u8, root: u8, chunks: &[u8]) -> Change {
         },
         root: digest(root),
         chunks: chunks.iter().copied().map(digest).collect(),
+        holders: [key(1)].into(),
     }
 }
 
