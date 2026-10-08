@@ -4320,26 +4320,30 @@ How to read this record:
   refuses an empty list, keys out of order or equal, and a key of small order. Lost: the
   subject at its plain name, which takes that name from a channel or a connector and
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
-  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
-  In a file, a `subject` block has one attribute, `keys`: the line of an OpenSSH
-  `.pub` file, or a list of them, as `allow` takes one action or a list. `config` keeps
-  the key, not the comment. It reads the base64 with `base64ct`, which refuses text
-  that is not canonical, so one key has one text form. A value that holds
-  `PRIVATE KEY` (the OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a
-  `.ppk` file) gives `config.private-key`, whose message quotes none of the value. A
-  `.pub` line whose comment holds `PRIVATE KEY` gets that alarm too, because a missed
-  private key costs more. A PEM or RFC 4716 public key gives `config.bad-public-key`.
-  A message quotes at most the first word of a value: an algorithm name from a closed
-  table of OpenSSH key types, with `{:?}`. The form of one line or a list, the
-  first-word rule, and the marks of a private key are from `laptop.architect-2` at
-  2026-10-08T06:42:17Z
-  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085). The
-  ruling at 2026-10-08T05:49:53Z
-  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142)
-  decided the PEM rule. `config` refuses a `subject` at the name of a `connector`, in
-  any ASCII case (`config.subject-is-connector`)
-  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217),
-  with a note at the connector. The read moves to `ssh-key` if the person approves it
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217). In a
+  file, a `subject` block has one attribute, `keys`: the line of an OpenSSH `.pub` file,
+  or a list of them, as `allow` takes one action or a list. `config` keeps the key, not
+  the comment. It reads the base64 with `base64ct`, which refuses text that is not
+  canonical, so one key has one text form. A value that holds `PRIVATE KEY` (the
+  OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a `.ppk` file) gives
+  `config.private-key`, whose message quotes none of the value. A `.pub` line whose
+  comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
+  more. A PEM or RFC 4716 public key gives `config.bad-public-key`. A message quotes at
+  most the first word of a value: an algorithm name from a closed table of OpenSSH key
+  types, with `{:?}`. The form of one line or a list, the first-word rule, and the marks
+  of a private key are from `laptop.architect-2` at 2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085), which
+  supersedes item 1 of the ruling at 2026-10-08T05:49:53Z. That ruling, by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142),
+  decided the PEM rule and supersedes change 2 of the ruling at 03:15:41Z. `config`
+  refuses a `subject` at the name of a `connector` (`config.subject-is-connector`)
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217), with a
+  note at the connector (`laptop.architect-2`, 2026-10-08T06:58:26Z,
+  https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054362063), in any
+  ASCII case (`laptop.architect-2`, 2026-10-08T07:02:08Z,
+  https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054428920). The read
+  moves to `ssh-key` if the person approves it
   (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
   PR of #337 that first prints a key's fingerprint. Decided by `laptop.architect-2` at
   2026-10-08T06:42:17Z
