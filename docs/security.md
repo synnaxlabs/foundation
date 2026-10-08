@@ -160,8 +160,11 @@ state on `main`.
   stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
   `raft` checks the index a heartbeat or an append answer names, the order of an
   append's entries, and that no entry is above the append's term. A node that a
-  change removed and that missed its release can win an election once no voter has
-  a lease, and lead until it commits the leave (#483).
+  change removed and that missed its release campaigns; a voter whose log holds the
+  leave refuses the request, with `removed` once the leave commits, and the node stops
+  (#1105). A voter whose log lacks the leave entry admits the request until #1106, so
+  in `raft` alone such a node can win an election once no voter has a lease, and lead
+  until it commits the leave.
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a

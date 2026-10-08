@@ -318,11 +318,11 @@ fn leased_voters_drop_the_campaign_of_a_removed_node() {
     assert_eq!(nodes[&key(3)].role(), Role::PreCandidate);
 }
 
-// A known gap until #483: once no voter has a lease, the voters elect a removed node
-// that missed its release. Node 4 holds the leave without its commit, so it
+// A known gap in `raft` alone: once no voter has a lease, the voters elect a removed
+// node that missed its release. Node 4 holds the leave without its commit, so it
 // campaigns, and its log is as long as theirs. After leader 1 fails, node 4 wins,
 // commits an entry of its term, and steps down. Voters 2 and 3 follow it until their
-// election timeout. #483 drops a message from a node outside the configuration.
+// election timeout. `mesh` refuses such a request before `raft` sees it (#1105).
 #[test]
 fn the_voters_elect_a_removed_node_once_the_leader_fails() {
     let mut nodes = lose_the_release(4);

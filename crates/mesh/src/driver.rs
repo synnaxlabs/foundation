@@ -10,7 +10,7 @@ use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use block::{Block, Pool};
-use env::clock::Clock;
+use env::clock::{Clock, Sleep};
 use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
@@ -55,7 +55,7 @@ const LOG: &str = "log";
 /// The code of a stream with a message that the mesh refused.
 const REFUSED: Code = Code(16);
 /// The code of a stream with a request from a node that a committed configuration
-/// removed, when a configuration in this node's log held it.
+/// removed.
 const REMOVED: Code = Code(17);
 
 /// What a [`Mesh`] is built from.
@@ -192,12 +192,11 @@ impl Mesh {
             election_ticks: ELECTION_TICKS,
             heartbeat_ticks: HEARTBEAT_TICKS,
         };
-        let held = keys(&start.voters).collect();
+        let configurations = Configurations::new(&start.voters);
         let group = Rc::new(RefCell::new(Group {
             raft: Raft::new(fixed, start)?,
             state,
-            held,
-            committed: None,
+            configurations,
             queues: BTreeMap::new(),
             sessions: BTreeMap::new(),
             stopped: Rc::default(),
@@ -292,7 +291,7 @@ impl Mesh {
             return Err(Error::Spoofed { from });
         }
         if request(&message.body) && !group.voter(from) {
-            return Err(if group.removed(from) {
+            return Err(if group.configurations.removed(from) {
                 Error::Removed { from }
             } else {
                 Error::NotVoter { from }
@@ -371,11 +370,10 @@ impl Mesh {
         {
             let group = self.group.borrow();
             group.taking()?;
-            let Voters { incoming, outgoing } = group.raft.voters();
-            let holds = |voter: &node::Key| {
-                group.state.member(*voter).map(Member::public_key) == Some(peer)
+            let holds = |voter: node::Key| {
+                group.state.member(voter).map(Member::public_key) == Some(peer)
             };
-            if !incoming.iter().chain(outgoing).any(holds) {
+            if !keys(group.raft.voters()).any(holds) {
                 return Err(Error::PeerNotVoter { peer });
             }
         }
@@ -544,13 +542,7 @@ impl Drop for Watch {
 struct Group {
     raft: Raft,
     state: region::State,
-    // Each voter of the opening configuration and of each `Voters` entry that
-    // committed since the open. A written entry can be truncated, so it counts only
-    // once it commits.
-    held: BTreeSet<node::Key>,
-    // The voters of the last `Voters` entry that committed since the open. `None`
-    // until one commits: the hard state carries no commit index.
-    committed: Option<Voters>,
+    configurations: Configurations,
     queues: BTreeMap<node::Key, Queue>,
     // The session to each member that its task dialed, until a send finds that the
     // session failed or the group stops.
@@ -597,13 +589,6 @@ impl Group {
     // Whether `key` votes in one half of the configuration, at least.
     fn voter(&self, key: node::Key) -> bool {
         votes(self.raft.voters(), key)
-    }
-
-    // Whether a committed configuration removed `key`: an earlier one held it, and
-    // the last one lacks it.
-    fn removed(&self, key: node::Key) -> bool {
-        let lacks = |voters| !votes(voters, key);
-        self.held.contains(&key) && self.committed.as_ref().is_some_and(lacks)
     }
 
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
@@ -667,16 +652,15 @@ impl Group {
     }
 
     // Applies each change in `committed`, and wakes the watches when a home moves.
-    fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
-        for Entry { at, data } in committed {
+    fn apply(&mut self, entries: Vec<Entry>) -> Result<(), Stopped> {
+        for Entry { at, data } in entries {
             self.applied.push(at);
             self.wake_calls();
             let bytes = match data {
                 Data::Bytes(bytes) => bytes,
                 Data::Empty => continue,
                 Data::Voters(change) => {
-                    self.held.extend(keys(&change.voters));
-                    self.committed = Some(change.voters);
+                    self.configurations.commit(change.voters);
                     continue;
                 }
             };
@@ -729,6 +713,38 @@ impl Drop for Group {
         self.wake();
         self.end_senders();
         self.wake_watches();
+    }
+}
+
+// The configurations that committed since the open, as far as the node knows.
+struct Configurations {
+    // Each voter of the opening configuration and of each committed `Voters` entry. A
+    // written entry can be truncated, so it counts only once it commits.
+    held: BTreeSet<node::Key>,
+    // The voters of the last committed `Voters` entry. `None` until one commits
+    // after the open: the hard state carries no commit index.
+    last: Option<Voters>,
+}
+
+impl Configurations {
+    fn new(voters: &Voters) -> Self {
+        Self {
+            held: keys(voters).collect(),
+            last: None,
+        }
+    }
+
+    // Takes a `Voters` entry that committed.
+    fn commit(&mut self, voters: Voters) {
+        self.held.extend(keys(&voters));
+        self.last = Some(voters);
+    }
+
+    // Whether a committed configuration removed `key`: an earlier one held it, and
+    // the last one lacks it.
+    fn removed(&self, key: node::Key) -> bool {
+        let lacks = |voters| !votes(voters, key);
+        self.held.contains(&key) && self.last.as_ref().is_some_and(lacks)
     }
 }
 
@@ -845,27 +861,13 @@ async fn run(
             return;
         };
         signer.sign(&mut ready);
-        // The pool may give the blocks later, so the write runs again at each tick.
-        let written = loop {
-            let cause = match log.write(ready.hard.clone(), &ready.entries).await {
-                Err(log::Error::Pool(
-                    cause @ (block::Error::Exhausted { .. }
-                    | block::Error::Refused { .. }),
-                )) => cause,
-                written => break written,
-            };
-            if let Some(group) = group.upgrade() {
-                group.borrow_mut().waits = Some(cause);
-            }
-            (&mut tick).await;
-            tick = clock.sleep(TICK);
-            if group.strong_count() == 0 {
-                return;
-            }
+        let Some(written) = write(&group, &mut log, &clock, &mut tick, &ready).await
+        else {
+            wake_each(&proposals);
+            return;
         };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
-        group.waits = None;
         let Ready {
             entries,
             messages,
@@ -879,13 +881,48 @@ async fn run(
             group.send(messages);
             group.apply(committed)
         });
-        for proposal in &proposals {
-            proposal.wake();
-        }
+        wake_each(&proposals);
         if let Err(stopped) = applied {
             group.stop(stopped);
             return;
         }
+    }
+}
+
+// Writes the hard state and the entries of `ready`, and tries again at each tick
+// while the pool gives no block. `None` when the last handle of the group drops, or a
+// sender stops the group, before the write ends: the entries then go nowhere.
+async fn write(
+    group: &Weak<RefCell<Group>>,
+    log: &mut Log,
+    clock: &Clock,
+    tick: &mut Sleep,
+    ready: &Ready,
+) -> Option<Result<(), log::Error>> {
+    loop {
+        let cause = match log.write(ready.hard.clone(), &ready.entries).await {
+            Err(log::Error::Pool(
+                cause @ (block::Error::Exhausted { .. } | block::Error::Refused { .. }),
+            )) => cause,
+            written => {
+                let group = group.upgrade()?;
+                let mut group = group.borrow_mut();
+                group.waits = None;
+                return group.running().is_ok().then_some(written);
+            }
+        };
+        group.upgrade()?.borrow_mut().waits = Some(cause);
+        (&mut *tick).await;
+        *tick = clock.sleep(TICK);
+        if group.upgrade()?.borrow().running().is_err() {
+            return None;
+        }
+    }
+}
+
+fn wake_each(proposals: &[Rc<Proposal>]) {
+    for proposal in proposals {
+        proposal.wake();
     }
 }
 
@@ -2192,7 +2229,7 @@ mod tests {
 
         // Node 3 is a voter at the start, and the committed leave lacks it.
         #[test]
-        fn answers_removed_to_a_request_from_a_node_that_its_log_held() {
+        fn answers_removed_to_a_node_that_a_committed_configuration_removed() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let sets = [(&[1, 2][..], &[1, 2, 3][..]), (&[1, 2], &[])];
@@ -2202,7 +2239,8 @@ mod tests {
                 assert_eq!(
                     removed.to_string(),
                     format!(
-                        "node {} sent a request, but a committed configuration removed it",
+                        "node {} sent a request, but a committed configuration \
+                         removed it",
                         key(3)
                     )
                 );
@@ -2286,12 +2324,12 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &[1, 2]).await.unwrap();
                 let held = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
-                assert_eq!(mesh.group.borrow().held, held(&[1, 2]));
+                assert_eq!(mesh.group.borrow().configurations.held, held(&[1, 2]));
                 let sets = [(&[1, 2, 3][..], &[1, 2][..]), (&[1, 2, 3], &[])];
                 take(&node, &mesh, changes(2, &sets), 0).await;
-                assert_eq!(mesh.group.borrow().held, held(&[1, 2]));
+                assert_eq!(mesh.group.borrow().configurations.held, held(&[1, 2]));
                 commit(&node, &mesh, 2).await;
-                assert_eq!(mesh.group.borrow().held, held(&[1, 2, 3]));
+                assert_eq!(mesh.group.borrow().configurations.held, held(&[1, 2, 3]));
             });
         }
 
