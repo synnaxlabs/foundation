@@ -10,6 +10,7 @@ use document::{Document, Position, Source, Span};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
+use spec::subject::Subject;
 use types::channel::Key;
 use types::name::Name;
 use types::sample;
@@ -598,4 +599,91 @@ fn places_a_path_that_is_not_utf8_as_display_writes_it() {
         .map(|problem| problem.place.as_ref().expect("a place").file.as_str())
         .collect();
     assert_eq!(files, ["a\u{fffd}.hcl", "a\u{fffd}\u{fffd}.hcl"]);
+}
+
+/// Lines that `ssh-keygen -t ed25519` wrote, and the fingerprint that
+/// `ssh-keygen -lf` gives for each.
+const ALICE: &str = "ssh-ed25519 \
+                     AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg \
+                     alice@laptop";
+const ALICE_FINGERPRINT: &str = "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc";
+const BOB: &str = "ssh-ed25519 \
+                   AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6 \
+                   bob@site";
+const BOB_FINGERPRINT: &str = "SHA256:yrQ4K597Aogzr4Zp1m1So77Lh8tM3HApOLoy0kzzo3k";
+
+/// A subject labeled `carol` with Bob's key, then Alice's.
+fn carol() -> String {
+    format!("subject \"carol\" {{\n  keys = [\"{BOB}\", \"{ALICE}\"]\n}}\n")
+}
+
+/// The applied subject labeled `alice`, with the key of `line`.
+fn applied_subject(line: &str) -> BTreeMap<Name, Definition> {
+    let key = ssh_key::PublicKey::from_openssh(line).expect("a key");
+    let bytes = key.key_data().ed25519().expect("an Ed25519 key").0;
+    let key = types::ed25519::PublicKey::new(bytes).expect("a key");
+    let subject = Subject::new(vec![key]).expect("a subject");
+    BTreeMap::from([(name("alice.@subject"), Definition::Subject(subject))])
+}
+
+#[test]
+fn shows_the_fingerprint_of_each_key_of_a_subject_by_its_bytes() {
+    let planned =
+        run(&[("people.hcl", &carol())], &applied_subject(BOB)).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        format!(
+            "\
++ subject carol
+    key {ALICE_FINGERPRINT}
+    key {BOB_FINGERPRINT}
+- subject alice
+    key {BOB_FINGERPRINT}
+1 to add, 0 to change, 1 to remove.
+"
+        )
+    );
+}
+
+#[test]
+fn gives_the_fingerprints_of_a_subject_after_the_apply_or_before_a_removal() {
+    let planned =
+        run(&[("people.hcl", &carol())], &applied_subject(BOB)).expect("a plan");
+    assert_eq!(
+        json(&planned)["changes"],
+        serde_json::json!([
+            {
+                "action": "add",
+                "kind": "subject",
+                "name": "carol",
+                "place": { "file": "people.hcl", "line": 1, "column": 9 },
+                "fingerprints": [ALICE_FINGERPRINT, BOB_FINGERPRINT],
+            },
+            {
+                "action": "remove",
+                "kind": "subject",
+                "name": "alice",
+                "fingerprints": [BOB_FINGERPRINT],
+            },
+        ])
+    );
+}
+
+#[test]
+fn gives_no_fingerprints_for_another_kind() {
+    let planned =
+        run(&[("site.hcl", &placed_site())], &BTreeMap::new()).expect("a plan");
+    let json = json(&planned);
+    let changes = json["changes"].as_array().expect("changes");
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.get("fingerprints").is_none())
+    );
+    assert!(
+        planned
+            .changes
+            .iter()
+            .all(|change| change.fingerprints.is_empty())
+    );
 }

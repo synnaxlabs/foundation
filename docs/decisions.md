@@ -4714,6 +4714,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064364728). The
   place and notes details: `laptop.architect-2` (2026-10-08T16:40:27Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6064603605).
+  A subject change has `fingerprints`: the `SHA256:` fingerprint of each key, as
+  `ssh-keygen -l` writes it, sorted by the bytes of the key, after the apply, or before
+  it for a removal. The key is absent for each other kind. The text gives one line
+  `    key SHA256:...` for each, under its change. Lost: a diff of the keys of a change;
+  a reviewer must trust the end state, and the full list shows each key it grants.
+  Trigger: `fingerprints` is the only field of `Change` for one kind. When a second
+  kind adds a field of its own, those fields become one tagged `detail` enum. Decided
+  by `laptop.architect-2` (2026-10-08T17:21:06Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343).
 
 ### 1.12 Access, identity, and secrets
 
