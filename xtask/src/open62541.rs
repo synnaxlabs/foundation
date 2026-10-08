@@ -1556,6 +1556,13 @@ End of search list.
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn check_passes_on_the_committed_copy() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        assert_eq!(check(root), Ok(()));
+    }
+
+    #[test]
     fn remove_fails_on_an_error_other_than_a_missing_directory() {
         let dir = temp("remove");
         std::fs::write(dir.join("file"), "").unwrap();
