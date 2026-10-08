@@ -1155,7 +1155,10 @@ fn fails_a_round_with_raw_html() {
         ("-\t<source", "-\t<source"),
         ("[^1]: <source", "[^1]: <source"),
         ("> [^a]: <source", "> [^a]: <source"),
-        ("[^a\\]b]: <source", "[^a\\]b]: <source"),
+        ("[^a\\]: <source", "[^a\\]: <source"),
+        ("[^\\]: <source", "[^\\]: <source"),
+        ("[^a\\\\]: <source", "[^a\\\\]: <source"),
+        ("[^a[b]: <source", "[^a[b]: <source"),
         ("- [^a]:<source", "- [^a]:<source"),
     ];
     for (html, line) in cases {
@@ -1220,6 +1223,9 @@ fn passes_a_round_whose_text_github_shows_as_text() {
         "a <b",
         "[^]: <source",
         "[^a]b]: <source",
+        "[^a\\]b]: <source",
+        "[^a b]: <source",
+        "[^a\tb]: <source",
     ];
     for text in shown {
         let comment =

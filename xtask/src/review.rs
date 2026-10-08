@@ -2,7 +2,6 @@
 //! it parses is in `.claude/skills/review/SKILL.md`, "Round comment".
 
 use std::collections::BTreeSet;
-use std::ops::Range;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
@@ -458,12 +457,7 @@ impl<'a> Shown<'a> {
         // holds the text of its paragraph with no paragraph event.
         let mut open: Vec<Option<usize>> = Vec::new();
         let (mut fresh, mut code) = (true, false);
-        // The source of each footnote label so far, `[^label]:`.
-        let mut notes = Vec::new();
         for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
-            if let Event::Start(Tag::FootnoteDefinition(_)) = event {
-                notes.push(note(body, range.start));
-            }
             let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
             let source = &body[start..range.start + line.len()];
@@ -473,7 +467,7 @@ impl<'a> Shown<'a> {
                 Event::Html(_) | Event::InlineHtml(_) => true,
                 Event::Text(_) => {
                     !code
-                        && marks(body, start..range.start, &notes)
+                        && marks(&body[start..range.start])
                         && line.strip_prefix('<').is_some_and(|l| l.starts_with(opens))
                 }
                 _ => false,
@@ -604,26 +598,14 @@ fn heading(line: &str) -> Option<&str> {
         .strip_prefix("## Review round ")
 }
 
-/// The source in `body` of `[^label]:`, the label of the footnote definition at
-/// `start`. The label ends at its first `]` that no backslash escapes.
-fn note(body: &str, start: usize) -> Range<usize> {
-    let mut escaped = false;
-    let close = body[start + 2..].find(|c| {
-        let close = c == ']' && !escaped;
-        escaped = c == '\\' && !escaped;
-        close
-    });
-    start..start + close.expect("a footnote label ends at a `]`") + 4
-}
-
-/// Whether `prefix`, the source in `body` of a line before some text, holds only the
-/// indent and the marks of quotes, list items, and the footnote labels `notes`, so that
-/// the text starts a line of a block. An escaped `<` has its backslash in `prefix`.
-fn marks(body: &str, prefix: Range<usize>, notes: &[Range<usize>]) -> bool {
-    let mut rest = &body[prefix.clone()];
+/// Whether `prefix`, the source of a line before some text, holds only the indent and
+/// the marks of quotes, list items, and footnote labels, so that the text starts a line
+/// of a block. An escaped `<` has its backslash in `prefix`. A footnote label is as
+/// GitHub reads it: no backslash escapes, and no space or tab.
+fn marks(prefix: &str) -> bool {
+    let mut rest = prefix;
     loop {
         rest = rest.trim_start_matches([' ', '\t']);
-        let at = prefix.end - rest.len();
         let number = rest.trim_start_matches(|c: char| c.is_ascii_digit());
         let item = if number.len() < rest.len() {
             number.strip_prefix(['.', ')'])
@@ -632,8 +614,9 @@ fn marks(body: &str, prefix: Range<usize>, notes: &[Range<usize>]) -> bool {
         };
         let item = item.filter(|after| after.starts_with([' ', '\t']));
         let note = || {
-            let note = notes.iter().find(|n| n.start == at)?;
-            Some(&body[note.end..prefix.end])
+            let (label, after) = rest.strip_prefix("[^")?.split_once(']')?;
+            let label = !label.is_empty() && !label.contains([' ', '\t']);
+            after.strip_prefix(':').filter(|_| label)
         };
         match item.or_else(|| rest.strip_prefix('>')).or_else(note) {
             Some(after) => rest = after,
