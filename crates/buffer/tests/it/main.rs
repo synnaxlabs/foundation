@@ -4163,6 +4163,30 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
     });
 }
 
+/// A drop while a commit runs, with nothing queued, ends the task at the end of that
+/// commit: not at once, and not at its next deadline.
+#[test]
+fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
+    run(162, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        drop(buffer);
+        shard.clock.sleep(tenths(1)).await;
+        assert_eq!(shard.memory.open_files(), 1, "the sync still runs");
+        shard.clock.sleep(tenths(2)).await;
+        assert_eq!(shard.memory.open_files(), 0, "the task ended at the sync");
+    });
+}
+
 /// A drop while a commit runs ends the task when that commit fails: it never writes
 /// the entries queued at the drop, nor waits for its next deadline.
 #[test]

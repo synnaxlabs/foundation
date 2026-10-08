@@ -235,10 +235,11 @@ impl From<header::Error> for Error {
 }
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
-/// `tasks`. The task idles while nothing is queued. A drop ends the task at once
-/// when it idles, else at the first file call that fails, or at its next deadline
-/// after it wrote the entries queued at the drop. Await a [`Commit`] held past the
-/// drop before a reopen, and before the shard ends, which cancels the task.
+/// `tasks`. The task idles while nothing is queued and no commit runs. A drop ends
+/// the task at once when it idles, else at the end of its last commit, which writes
+/// each entry queued at the drop, or earlier at the first file call that fails.
+/// Await a [`Commit`] held past the drop before a reopen, and before the shard ends,
+/// which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
