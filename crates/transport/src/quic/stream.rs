@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::mem;
 use std::ops::Range;
 use std::rc::Rc;
+use std::slice;
 use std::task::Poll;
-use std::{iter, slice};
 
 use block::{Block, Unique};
 use bytes::Bytes;
@@ -415,27 +415,36 @@ impl Half {
         }
         loop {
             let mut sources = Sources { parts, at: *at };
-            let written = match sources.next() {
-                None => return Ok(()),
-                Some(first) if first.long() => {
-                    let mut run = self.block.slice_ref(first.bytes(&self.block));
-                    send.write_chunks(&mut slice::from_mut(&mut run))?
-                }
-                Some(first) => {
-                    let mut rest = sources.take_while(|next| !next.long()).peekable();
-                    if rest.peek().is_none() {
-                        send.write(first.bytes(&self.block))?
-                    } else {
-                        buffer.clear();
-                        for source in iter::once(first).chain(rest) {
-                            buffer.extend_from_slice(source.bytes(&self.block));
-                        }
-                        send.write(buffer)?
+            let Some(first) = sources.next() else {
+                return Ok(());
+            };
+            let mut after = sources.at;
+            let (written, len) = if first.long() {
+                let mut run = self.block.slice_ref(first.bytes(&self.block));
+                let len = run.len();
+                (send.write_chunks(&mut slice::from_mut(&mut run))?, len)
+            } else {
+                let mut next = sources.next().filter(|next| !next.long());
+                if next.is_none() {
+                    let bytes = first.bytes(&self.block);
+                    (send.write(bytes)?, bytes.len())
+                } else {
+                    buffer.clear();
+                    buffer.extend_from_slice(first.bytes(&self.block));
+                    while let Some(source) = next {
+                        buffer.extend_from_slice(source.bytes(&self.block));
+                        after = sources.at;
+                        next = sources.next().filter(|next| !next.long());
                     }
+                    (send.write(buffer)?, buffer.len())
                 }
             };
             self.body -= written;
-            at.advance(parts, written);
+            if written == len {
+                *at = after;
+            } else {
+                at.advance(parts, written);
+            }
         }
     }
 }
@@ -526,16 +535,27 @@ impl Iterator for Sources<'_> {
             let part = self.parts.get(self.at.part)?;
             if self.at.taken < part.range.len() {
                 let start = part.range.start + self.at.taken;
-                let mut end = part.range.end;
-                while self.parts[self.at.part].zeros == 0 {
+                let (mut last, mut end) = (part, part.range.end);
+                while last.zeros == 0 {
                     match self.parts.get(self.at.part + 1) {
                         Some(next) if next.range.start == end => end = next.range.end,
                         Some(next) if next.range.is_empty() => {}
                         _ => break,
                     }
                     self.at.part += 1;
+                    last = &self.parts[self.at.part];
                 }
-                self.at.taken = self.parts[self.at.part].range.len();
+                self.at = if last.zeros == 0 {
+                    Cursor {
+                        part: self.at.part + 1,
+                        taken: 0,
+                    }
+                } else {
+                    Cursor {
+                        part: self.at.part,
+                        taken: last.range.len(),
+                    }
+                };
                 return Some(Source::Run(start..end));
             }
             let zeros = part.range.len() + usize::from(part.zeros) - self.at.taken;
