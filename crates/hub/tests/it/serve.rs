@@ -710,7 +710,7 @@ fn sends_a_frame_once_a_credit_raises_the_grant() {
 fn sends_each_frame_of_a_commit_past_the_window_as_credits_come() {
     const LIMIT: u64 = 1 << 14;
     const FRAMES: i64 = 6;
-    let home = |test: Test, incoming| async move {
+    let home = |test: Test, link, incoming| async move {
         let mut writer = test.writer("a", &["value"]).await;
         let (clock, now) = (test.clock.clone(), test.now());
         test.tasks.spawn(async move {
@@ -720,7 +720,7 @@ fn sends_each_frame_of_a_commit_past_the_window_as_credits_come() {
             }
             clock.sleep(SETTLE).await;
         });
-        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+        assert_eq!(serve(&link, incoming).await, Ok(()));
     };
     session(63, Class::Complete, false, home, |mut peer| async move {
         let mut reader = open_complete(&mut peer, &[1, 2], LIMIT).await;
