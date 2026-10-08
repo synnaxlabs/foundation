@@ -49,8 +49,8 @@
   https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
   supersedes the `mesh::Pointer` of
   https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836.
-  `Mesh::open` runs no check of the founding definitions: the founding is agreed region
-  state, and a check at each open stops a node on a later build whose checks find more
+  `Mesh::open` refuses no founding definitions: the founding is agreed region state,
+  and a refusal at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
