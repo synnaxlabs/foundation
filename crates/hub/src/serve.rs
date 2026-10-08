@@ -466,7 +466,7 @@ impl Cut {
 }
 
 // These tests call the private `head`, `runs`, and `Cut::next`, so each case of the
-// pure parts has a test; the tests through `Hub::serve` check them on the wire.
+// pure parts has a test; the tests through `Link::serve` check them on the wire.
 #[cfg(test)]
 mod tests {
     use std::ops::Range;

@@ -89,9 +89,15 @@ struct Test {
 }
 
 impl Test {
-    /// A hub on a new ring of `node` with `layout`, whose mesh clock does not run yet.
-    async fn new(node: sim::node::Node, tasks: Tasks, layout: buffer::Layout) -> Self {
-        let config = block::Config { budget: POOL };
+    /// A hub on a new ring of `node` with `layout` and a pool of `pool` bytes, whose
+    /// mesh clock does not run yet.
+    async fn new(
+        node: sim::node::Node,
+        tasks: Tasks,
+        layout: buffer::Layout,
+        pool: usize,
+    ) -> Self {
+        let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         let (unsynced, mesh) = clock::Clock::new(node.clock());
         let mut interner = Interner::new();
@@ -302,7 +308,7 @@ fn unsynced_on<F>(
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let layout = buffer::Layout::new(area, body_max).expect("a ring");
-        main(Test::new(node, tasks, layout).await).await;
+        main(Test::new(node, tasks, layout, POOL).await).await;
     })
     .expect("the run ends");
 }

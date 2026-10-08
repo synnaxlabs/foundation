@@ -26,7 +26,7 @@ use wire::hub::client::{
 };
 
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
-use super::{AREA, BODY_MAX, NODE, Test};
+use super::{AREA, BODY_MAX, NODE, POOL, Test};
 
 const SUBJECT: &str = "ops.agent";
 /// The key that the spec lists for [`SUBJECT`].
@@ -81,6 +81,19 @@ fn session<P>(
 where
     P: Future<Output = ()> + 'static,
 {
+    session_with(seed, synced, POOL, program)
+}
+
+/// As [`session`], with a home pool of `pool` bytes.
+fn session_with<P>(
+    seed: u64,
+    synced: bool,
+    pool: usize,
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) -> Home
+where
+    P: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -97,7 +110,7 @@ where
     let node = nodes[0].clone();
     let main = move |tasks: env::tasks::Tasks| async move {
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout).await;
+        let mut test = Test::new(node.clone(), tasks.clone(), layout, pool).await;
         if synced {
             test.sync().await;
         }
@@ -434,6 +447,7 @@ fn refuses_a_hello_that_does_not_echo_the_nonce() {
         let mut hello = Agent::hello(challenge);
         hello.nonce[0] ^= 1;
         agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.hello.recv().await, Err(closed_with(STALE)));
         assert_eq!(agent.closed().await, closed_with(STALE));
     });
     assert_eq!(home.served, [Err(serve::Error::Stale)]);
@@ -713,6 +727,19 @@ fn refuses_a_request_whose_signature_does_not_verify() {
     );
 }
 
+/// A hello stream that the program finishes before its first hello gives `Ended`, and
+/// closes the session with code 0.
+#[test]
+fn ends_a_hello_stream_that_finished_before_its_hello() {
+    let home = session(104, true, |mut agent| async move {
+        agent.hello.challenge().await;
+        agent.hello.sender.finish().expect("finishes");
+        agent.sleep(QUIET).await;
+    });
+    assert_eq!(home.served, [Ok(Got::Ended)]);
+    assert_eq!(home.closed, transport::Error::Closed { code: Code(0) });
+}
+
 /// A request stream that the program finishes before its request gives `Ended`.
 #[test]
 fn ends_a_request_stream_that_finished_before_its_request() {
@@ -756,6 +783,74 @@ fn closes_the_session_on_a_request_before_the_first_hello() {
         [Err(serve::Error::Message(wire::hub::Error::Kind {
             kind: 5
         }))]
+    );
+}
+
+/// The link frees a request before the first byte of its response.
+#[test]
+fn takes_a_request_sent_once_the_last_response_header_comes() {
+    let body: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 251) as u8).collect();
+    let home = session(103, true, move |mut agent| async move {
+        agent.admit().await;
+        let length = u64::try_from(body.len()).expect("fits");
+        let mut first = agent.open().await;
+        let request = Request {
+            length,
+            signature: Pair::new(&AGENT)
+                .sign(&access::proof::request(CONNECTION, &body)),
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        first.send(&out).await;
+        for chunk in body.chunks(1 << 16) {
+            first.send(chunk).await;
+            agent.sleep(Span::MILLISECOND).await;
+        }
+        first.sender.finish().expect("finishes");
+        let header = first.recv().await.expect("a message").expect("a header");
+        Response::decode(&header).expect("a response");
+        let mut second = agent.request(2, b"ab").await;
+        while first.recv().await.expect("a message").is_some() {}
+        assert_eq!(second.response().await, b"ba");
+    });
+    assert!(
+        home.served
+            .iter()
+            .all(|got| got != &Err(serve::Error::Pending)),
+        "{:?}",
+        home.served
+    );
+}
+
+/// A response chunk fits the largest block of the home's pool, also when a message of
+/// the transport is larger.
+#[test]
+fn cuts_a_response_to_the_largest_block_of_the_pool() {
+    let body: Vec<u8> = (0..60_000_u32).map(|i| (i % 251) as u8).collect();
+    let reversed: Vec<u8> = body.iter().rev().copied().collect();
+    let length = u64::try_from(body.len()).expect("fits");
+    let home = session_with(105, true, 1 << 16, move |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.open().await;
+        let request = Request {
+            length,
+            signature: Pair::new(&AGENT)
+                .sign(&access::proof::request(CONNECTION, &body)),
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        stream.send(&out).await;
+        for chunk in body.chunks(1 << 16) {
+            stream.send(chunk).await;
+            agent.sleep(Span::MILLISECOND).await;
+        }
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.response().await, reversed);
+    });
+    assert!(
+        matches!(home.served[0], Ok(Got::Request(_, _))),
+        "{:?}",
+        home.served
     );
 }
 

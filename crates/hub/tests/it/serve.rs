@@ -27,7 +27,7 @@ use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, LIVE, RING, SETTLE, STAMP, Test, fill, scrambled, write,
+    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, scrambled, write,
     write_series, write_wide,
 };
 
@@ -156,7 +156,7 @@ fn session<H, P>(
     let node = nodes[0].clone();
     let main = move |tasks: Tasks| async move {
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout).await;
+        let mut test = Test::new(node.clone(), tasks.clone(), layout, POOL).await;
         test.sync().await;
         let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");

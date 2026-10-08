@@ -117,11 +117,7 @@ pub(crate) async fn hello(
 ) -> Result<Served, Error> {
     let served = match halves(incoming) {
         Ok((mut receiver, mut sender)) => {
-            let served = renew(session, &mut receiver, &mut sender).await;
-            if let Err(error) = &served {
-                stop(receiver, sender, error);
-            }
-            served
+            renew(session, &mut receiver, &mut sender).await
         }
         Err(error) => Err(error),
     };
