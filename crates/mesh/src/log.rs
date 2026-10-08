@@ -1936,6 +1936,27 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
+    #[test]
+    fn gives_the_version_error_for_a_torn_record_of_another_version() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            let mut record = encode(0, None, &[bytes(1, 10)]);
+            record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+            let last = record.len() - 1;
+            record[last] ^= 1;
+            let head = check(&record[CHECK..HEADER]);
+            record[..CHECK].copy_from_slice(&head);
+            put(&node, "log-0", 0, &record).await;
+        })
+        .unwrap();
+        let expected = Error::Version {
+            path: file("log-0"),
+            found: 2,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
     const LARGE: usize = 3 << 19;
 
     /// Writes a small record, one larger than a file, and two small ones: three files.
