@@ -223,6 +223,39 @@ mod tests {
     }
 
     #[test]
+    fn opens_the_ring_that_shard_0_holds() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let commits = sim
+            .run_on(&node, |node, tasks| async move {
+                let (mut shard, mut interner, now) =
+                    shard(env(&node, tasks.clone())).await;
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let mut stamp = now.nanos();
+                for _ in 0..10 {
+                    assert!(commit(&mut shard, writer, &set, stamp..stamp + 1).await);
+                    stamp += 1;
+                }
+                let ended = shard.committed();
+                drop(shard);
+                ended.await.expect("the buffer ends");
+                let (mut shard, mut interner, _) =
+                    super::shard(env(&node, tasks)).await;
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let mut commits = 0;
+                while commit(&mut shard, writer, &set, stamp..stamp + 1).await {
+                    commits += 1;
+                    stamp += 1;
+                }
+                commits
+            })
+            .expect("the run ends");
+
+        // The 10 commits before the open keep their blocks.
+        assert!(commits <= 1023 - 10, "{commits}");
+    }
+
+    #[test]
     fn gives_the_midpoint_of_the_clock_while_the_wall_error_is_unknown() {
         let config = sim::node::Config {
             wall_error: None,
