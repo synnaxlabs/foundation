@@ -271,9 +271,10 @@ fn an_any_v6_socket_talks_plain_ipv4() {
     });
 }
 
-/// Linux holds all of 127.0.0.0/8 on the loopback. macOS holds only 127.0.0.1, and
-/// sends from it for a source that is not local.
+/// Linux holds all of 127.0.0.0/8 on the loopback. macOS ignores each IPv4 source
+/// until #1972 patches `noq-udp`.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_source_address_picks_the_local_address() {
     on_thread("udp-source", || async {
         let net = net();
@@ -288,12 +289,7 @@ fn a_source_address_picks_the_local_address() {
         assert_eq!(send(&mut sender, &to).await, Ok(()));
         let datagrams = receive(&mut receiver, 1).await;
         let port = sender.local().port();
-        let picked = if cfg!(target_os = "linux") {
-            other
-        } else {
-            LOCALHOST
-        };
-        assert_eq!(datagrams[0].source, SocketAddr::new(picked.into(), port));
+        assert_eq!(datagrams[0].source, SocketAddr::new(other.into(), port));
     });
 }
 
