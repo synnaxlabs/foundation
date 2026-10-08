@@ -6,7 +6,7 @@ use std::fmt;
 use types::channel;
 use types::name::Name;
 
-use super::{Channel, DataType, Kind};
+use super::{Channel, DataType, Edge, Kind};
 
 /// Checks the edges between `channels`: a data channel's index is an index channel,
 /// its quality is a data channel of type quality, an index's error channel is a data
@@ -27,7 +27,7 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
     }
     let mut problems = Vec::new();
     for (name, channel) in channels {
-        for (edge, to) in edges(&channel.kind).into_iter().flatten() {
+        for (edge, &to) in channel.kind.edges() {
             match keys.get(&to) {
                 None => problems.push(Problem::Dangling {
                     from: name.clone(),
@@ -48,19 +48,6 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
         }
     }
     problems
-}
-
-fn edges(kind: &Kind) -> [Option<(Edge, channel::Key)>; 2] {
-    match kind {
-        Kind::Index { error, control } => [
-            error.map(|to| (Edge::Error, to)),
-            control.map(|to| (Edge::Control, to)),
-        ],
-        Kind::Data(data) => [
-            Some((Edge::Index, *data.index())),
-            data.quality().map(|to| (Edge::Quality, *to)),
-        ],
-    }
 }
 
 /// An edge to a missing or wrong channel. `Display` gives the message: a lower-case
@@ -112,20 +99,6 @@ impl fmt::Display for Problem {
     }
 }
 
-/// An edge from one channel to another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edge {
-    /// From a data channel to the index channel that times it.
-    Index,
-    /// From a data channel to the channel that holds its quality.
-    Quality,
-    /// From an index channel to the channel that holds its clock error bound.
-    Error,
-    /// From an index channel to the channel that holds its control handoffs, which is
-    /// on another index.
-    Control,
-}
-
 impl Edge {
     /// Reports whether the edge from the channel `from` can point at a channel of
     /// `kind`.
@@ -154,17 +127,6 @@ impl Edge {
                 "Point it at a data channel on another index",
             ),
         }
-    }
-}
-
-impl fmt::Display for Edge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Index => "index channel",
-            Self::Quality => "quality channel",
-            Self::Error => "error channel",
-            Self::Control => "control channel",
-        })
     }
 }
 

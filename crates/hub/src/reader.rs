@@ -200,7 +200,11 @@ impl Session {
         index: channel::Slot,
         limit_bytes: u64,
     ) -> (Self, Credit) {
-        let key = state.borrow_mut().home.open_complete(index, limit_bytes);
+        let key = state.borrow_mut().home.open_complete(
+            index,
+            limit_bytes,
+            home::reader::complete::Charge::Whole,
+        );
         let credit = Credit {
             state: Rc::clone(state),
             key,
