@@ -2015,10 +2015,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
   `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
   `BadSignature` for a signature that is not of the message by the key. A verify on
-  `PublicKey` uses a key that is not of small order by construction. `mesh` and
-  `access::admit` call it. Lost: a `bool`, which a caller can invert or drop with no
-  word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the length;
-  and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
+  `PublicKey` uses a key that is not of small order by construction. `mesh` calls it,
+  and `access::admit` will (#1747). Lost: a `bool`, which a caller can invert or drop
+  with no word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the
+  length; and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858).
 
 ### 1.8 Consensus, regions, and the spec
