@@ -84,8 +84,9 @@ The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
 the empty-list sentence of
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy of
-a Rust crate is a path package, so `cargo deny` does not check it against advisories
-(#1867).
+a Rust crate is a path package, which `cargo deny` does not check against advisories,
+so the `Advisories of each patched release` step of the `deny` job in
+`.github/workflows/ci.yaml` checks its release (#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |

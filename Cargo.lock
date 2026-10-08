@@ -833,6 +833,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "hub"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "block",
  "buffer",
  "clock",
@@ -841,7 +842,10 @@ dependencies = [
  "env",
  "home",
  "sim",
+ "spec",
+ "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
@@ -1165,10 +1169,15 @@ name = "ops"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "config",
+ "config-hcl",
+ "connector",
  "document",
  "schemars",
  "serde",
  "serde_json",
+ "spec",
+ "types",
 ]
 
 [[package]]
