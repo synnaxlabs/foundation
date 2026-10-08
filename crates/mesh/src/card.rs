@@ -2,13 +2,13 @@
 
 use std::fmt;
 
+use types::ed25519::{BadSignature, Pair, PrivateKey, PublicKey};
 use types::name::Name;
-use types::node::{self, PrivateKey, PublicKey, SealKey};
+use types::node::{self, SealKey};
 
 use crate::bytes::{
     put_key, put_name, put_public_key, take, take_key, take_name, take_public_key,
 };
-use crate::ed25519;
 
 pub mod addresses;
 
@@ -77,12 +77,12 @@ impl Signed {
     /// When `card.public_key` is not the public half of `private_key`.
     #[must_use]
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
-        let pair = ed25519::pair(private_key);
+        let pair = Pair::new(private_key);
         assert!(
-            ed25519::public(&pair) == card.public_key,
+            pair.public() == card.public_key,
             "the card's public key is not the public half of the private key"
         );
-        let signature = ed25519::sign(&pair, &statement(TAG, key, &card));
+        let signature = pair.sign(&statement(TAG, key, &card));
         Self(Unchecked {
             key,
             card,
@@ -182,9 +182,9 @@ impl Unchecked {
     /// [`Forged`] when it does not hold for `card.public_key`.
     pub(crate) fn check(self) -> Result<Signed, Forged> {
         let statement = statement(TAG, self.key, &self.card);
-        if !ed25519::holds(self.card.public_key, &statement, &self.signature) {
-            return Err(Forged { node: self.key });
-        }
+        let key = self.card.public_key;
+        key.verify(&statement, &self.signature)
+            .map_err(|_bad: BadSignature| Forged { node: self.key })?;
         Ok(Signed(self))
     }
 }

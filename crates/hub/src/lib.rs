@@ -135,9 +135,8 @@ impl Hub {
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
-    /// name that no channel has, then [`writer::Error::Type`] for a channel of a type
-    /// that the home does not write, else [`writer::Error::Home`] when the home
-    /// refuses the writer.
+    /// name that no channel has, else [`writer::Error::Home`] when the home refuses
+    /// the writer.
     #[expect(
         clippy::unused_async,
         clippy::unused_async_trait_impl,

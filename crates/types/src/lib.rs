@@ -8,9 +8,12 @@
 pub mod authority;
 pub mod byte;
 pub mod channel;
+pub mod connection;
 pub mod digest;
+pub mod ed25519;
 pub mod frame;
 pub mod hash;
+pub mod hello;
 pub mod name;
 pub mod node;
 pub mod quality;
@@ -21,6 +24,16 @@ pub mod uuid;
 
 #[cfg(test)]
 mod common {
+    /// The 32 bytes that the 64 hex digits `hex` give.
+    pub(crate) fn bytes(hex: &str) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
+            let pair = std::str::from_utf8(pair).unwrap();
+            *byte = u8::from_str_radix(pair, 16).unwrap();
+        }
+        bytes
+    }
+
     /// Asserts that `message` is a lower-case clause and `fix` a sentence, neither with
     /// a final period, as a diagnostic shows them.
     pub(crate) fn assert_stated(message: &str, fix: &str) {

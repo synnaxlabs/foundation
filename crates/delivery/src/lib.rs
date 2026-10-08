@@ -10,7 +10,7 @@ use std::fmt;
 use types::name::Name;
 use types::time::{Span, Stamp};
 
-pub use readers::{Key, Readers, complete, latest};
+pub use readers::{Key, Next, Readers, complete, latest};
 
 /// A reader's position on one index: on each path, the seq of the first sample it has
 /// not received. It has every sample below it.
@@ -39,10 +39,13 @@ impl fmt::Display for Position {
 pub enum Reader {
     /// A reader without a name. It holds data only while its session is open.
     Unnamed,
-    /// A reader with a name. It has at most one session at a time. After the session
-    /// closes, the reader keeps its position and holds its data for `hold`. A hold of
-    /// zero ends at the close.
+    /// A reader with a name, which belongs to the subject that opens it. It has at most
+    /// one session at a time. After the session closes, the reader keeps its position
+    /// and holds its data for `hold`. A hold of zero ends at the close. Readers of the
+    /// same name and different subjects share nothing.
     Named {
+        /// The subject that opens the reader.
+        subject: Name,
         /// The reader's name.
         name: Name,
         /// How long the reader holds its data after its session closes: zero or more.
@@ -67,10 +70,12 @@ pub enum Start {
     },
 }
 
-/// A named reader's state, for the index log. The last record of a reader replaces the
-/// ones before it.
+/// A named reader's state, for the index log. The last record of a reader, by its
+/// subject and name, replaces the ones before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
+    /// The subject whose reader it is.
+    pub subject: Name,
     /// The reader's name.
     pub reader: Name,
     /// The reader's position.

@@ -911,7 +911,7 @@ fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
 }
 
 #[test]
-fn opens_no_writer_on_a_channel_of_a_type_the_home_does_not_write() {
+fn writes_and_reads_a_channel_of_a_variable_type() {
     run(19, |test| async move {
         test.hub.define(Channel {
             key: channel::Key::from_u128(6),
@@ -919,19 +919,38 @@ fn opens_no_writer_on_a_channel_of_a_type_the_home_does_not_write() {
             data_type: Type::String,
             index: channel::Key::from_u128(1),
         });
-        let writer = test.hub.writer(config("a", &["value", "text"])).await;
-        let error = writer.expect_err("an error");
-        assert_eq!(
-            error,
-            writer::Error::Type {
-                name: name("text"),
-                data_type: Type::String,
-            }
-        );
-        assert_eq!(
-            error.to_string(),
-            "the home does not write channel text of String yet"
-        );
+        let mut reader = test.reader(&["text"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["text"]).await;
+        let now = test.now();
+        let set = Arc::clone(writer.set());
+        let (index, text) = (entry(&set, 1), entry(&set, 6));
+        let raw = [&2_u32.to_le_bytes()[..], b"hi"].concat();
+        let series = [(index, 8), (text, raw.len())];
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        draft
+            .series_mut(index)
+            .expect("the index")
+            .copy_from_slice(&now.to_le_bytes());
+        draft
+            .series_mut(text)
+            .expect("the text")
+            .copy_from_slice(&raw);
+        draft.set_count(0, 1);
+        let written = writer
+            .write(LIVE, draft)
+            .expect("the home takes it")
+            .to_vec();
+        assert_eq!(written, [applied(0)]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(samples(&received, 1), [now]);
+        let (_, bytes) = received
+            .view
+            .iter()
+            .find(|&(present, _)| present == text)
+            .expect("the view holds the text");
+        let mut out = vec![0; raw.len()];
+        codec::decode(Type::String, 1, bytes, &mut out).expect("decodes");
+        assert_eq!(out, raw);
     });
 }
 
@@ -1135,25 +1154,34 @@ fn poll_flagged<F: Future>(next: Pin<&mut F>) -> (Poll<F::Output>, Arc<Flag>) {
 }
 
 #[test]
-fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_its_next_call() {
-    for seed in 0..32 {
-        run_on(seed, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
+fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_the_next_commit() {
+    for (seed, commits) in (0..32).zip([1, 2].into_iter().cycle()) {
+        run_on(seed, (WIDE_AREA, WIDE_BODY_MAX), move |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
             write_samples(&mut writer, now, PAST_WINDOW);
             let charge = charge(&reader.next().await.expect("a frame").view);
             assert!(charge > WINDOW, "{charge} bytes spend the window");
-            // The reader holds the frame, so the window has no room for the next.
-            write_samples(&mut writer, now + PAST_WINDOW, 1);
-            test.clock.sleep(SETTLE).await;
-            assert_behind(&reader.next().await.expect_err("the reader missed a frame"));
+            // The reader holds the frame, so the next waits for credit.
+            for n in 0..commits {
+                write_samples(&mut writer, now + PAST_WINDOW + n, 1);
+                test.clock.sleep(SETTLE).await;
+            }
+            let next = reader.next().await;
+            if commits == 1 {
+                let range = next.expect("the call gives credit").view.range(0);
+                let seq = PAST_WINDOW.cast_unsigned();
+                assert_eq!(range, Some(Range { seq, count: 1 }));
+            } else {
+                assert_behind(&next.expect_err("the reader missed a frame"));
+            }
         });
     }
 }
 
 #[test]
-fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window() {
+fn gives_a_waiting_complete_reader_each_frame_of_a_commit_past_its_window() {
     for seed in 0..32 {
         run(seed, |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
@@ -1172,12 +1200,22 @@ fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window()
                 flag.0.load(Ordering::Relaxed),
                 "the commit wakes the reader"
             );
-            let (charges, ended) = take_all(&mut reader).await;
-            assert_behind(&ended);
-            assert!(charges.len() < 200, "the reader misses a frame");
-            let spent: u64 = charges.iter().sum();
-            assert!(spent >= WINDOW, "{spent} bytes spend the window");
-            assert_behind(&reader.next().await.expect_err("the reader ended"));
+            let mut spent = 0;
+            for n in 0..200 {
+                let received = reader.next().await.expect("a frame");
+                let range = received.view.range(0).expect("the index is present");
+                assert_eq!(
+                    range,
+                    Range {
+                        seq: n * 1000,
+                        count: 1000
+                    }
+                );
+                spent += charge(&received.view);
+            }
+            assert!(spent > WINDOW, "{spent} bytes pass the window");
+            let (polled, _) = poll_flagged(pin!(reader.next()));
+            assert!(polled.is_pending(), "no frame waits");
         });
     }
 }
@@ -1197,6 +1235,9 @@ fn ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame() {
                 write_wide(&mut writer, now, n);
             }
             test.clock.sleep(SETTLE).await;
+            // The frames past the window miss at this commit.
+            write_wide(&mut writer, now, 200);
+            test.clock.sleep(SETTLE).await;
             let (charges, ended) = take_all(&mut reader).await;
             assert_behind(&ended);
             assert!(
@@ -1214,13 +1255,16 @@ fn ends_a_complete_reader_that_missed_a_frame_as_behind_after_a_failed_sync() {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
-        for n in 0..200 {
+        for n in 0..201 {
             write_wide(&mut writer, now, n);
+            // The frames past the window miss at the commit of frame 200.
+            if n >= 199 {
+                test.clock.sleep(SETTLE).await;
+            }
         }
-        test.clock.sleep(SETTLE).await;
         let mut latest = test.reader(&["value"], Mode::Latest).await;
         test.node.fail_file(FilePath::new(RING), Operation::Sync);
-        write_wide(&mut writer, now, 200);
+        write_wide(&mut writer, now, 201);
         test.clock.sleep(SETTLE).await;
         let (_, ended) = take_all(&mut latest).await;
         assert!(matches!(ended, Ended::Buffer(_)), "the sync failed");

@@ -9,6 +9,8 @@
 //! ends run exactly [`Head::series`] ends, so the receiver counts them to find where a
 //! run ends. The body starts a new message.
 //!
+//! The streams of a program's session are in [`client`].
+//!
 //! [`Home`] decodes the messages from the reader's node, and [`Reader`] those from the
 //! home. Each checks the order and the runs of its side of the session.
 //!
@@ -25,6 +27,7 @@
 //! - [`keys`]: each channel key (`u128`).
 //! - [`ends`]: place and end (each `u32`) for each series.
 
+pub mod client;
 mod home;
 mod reader;
 
@@ -423,7 +426,7 @@ pub mod ends {
 pub enum Error {
     /// The message has no bytes.
     Empty,
-    /// The first byte names no message.
+    /// The first byte names no message of this stream.
     Kind {
         /// The first byte.
         kind: u8,
@@ -481,6 +484,24 @@ pub enum Error {
         /// The kind byte of the message.
         kind: u8,
     },
+    /// The subject of a hello is not a name.
+    Subject,
+    /// The key of a hello is a point of small order.
+    SmallOrder,
+    /// A request or a response has a body over
+    /// [`BODY_BYTES_MAX`](client::BODY_BYTES_MAX).
+    Oversize {
+        /// The bytes of the body.
+        length: u64,
+    },
+    /// A message of the other client stream: a request or a response on the hello
+    /// stream.
+    Mixed {
+        /// The kind byte of the message.
+        kind: u8,
+    },
+    /// A message comes after the body of a request or a response.
+    Trailing,
 }
 
 impl fmt::Display for Error {
@@ -489,7 +510,7 @@ impl fmt::Display for Error {
             Self::Empty => f.write_str("the hub message is empty"),
             Self::Kind { kind } => write!(
                 f,
-                "the hub message has kind {kind}, which this node does not know"
+                "the hub message has kind {kind}, which this stream does not carry"
             ),
             Self::Length { len } => write!(
                 f,
@@ -530,6 +551,22 @@ impl fmt::Display for Error {
                 f,
                 "the hub message has kind {kind}, which a latest session does not have"
             ),
+            Self::Subject => f.write_str("the subject of the hello is not a name"),
+            Self::SmallOrder => {
+                f.write_str("the key of the hello is a point of small order")
+            }
+            Self::Oversize { length } => write!(
+                f,
+                "the body has {length} bytes, over the cap of {}",
+                client::BODY_BYTES_MAX
+            ),
+            Self::Mixed { kind } => write!(
+                f,
+                "the hub message has kind {kind}, which the hello stream does not take"
+            ),
+            Self::Trailing => {
+                f.write_str("a hub message came after the body of the stream")
+            }
         }
     }
 }
@@ -1108,7 +1145,7 @@ mod tests {
             (Error::Empty, "the hub message is empty"),
             (
                 Error::Kind { kind: 9 },
-                "the hub message has kind 9, which this node does not know",
+                "the hub message has kind 9, which this stream does not carry",
             ),
             (
                 Error::Length { len: 4 },
@@ -1157,6 +1194,32 @@ mod tests {
             (
                 Error::Latest { kind: 3 },
                 "the hub message has kind 3, which a latest session does not have",
+            ),
+        ];
+        for (error, text) in cases {
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn names_each_error_of_a_client_stream() {
+        let cases = [
+            (Error::Subject, "the subject of the hello is not a name"),
+            (
+                Error::SmallOrder,
+                "the key of the hello is a point of small order",
+            ),
+            (
+                Error::Oversize { length: 16_777_217 },
+                "the body has 16777217 bytes, over the cap of 16777216",
+            ),
+            (
+                Error::Mixed { kind: 5 },
+                "the hub message has kind 5, which the hello stream does not take",
+            ),
+            (
+                Error::Trailing,
+                "a hub message came after the body of the stream",
             ),
         ];
         for (error, text) in cases {

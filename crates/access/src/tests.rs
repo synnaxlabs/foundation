@@ -1,5 +1,21 @@
+use std::collections::BTreeMap;
+
+use document::Document;
+use document::encoding::Checked;
 use proptest::prelude::*;
+use spec::channel::{Channel, Kind as ChannelKind};
+use spec::compression::{self, Mode};
+use spec::connector::Connector;
+use spec::definition::Kind;
+use spec::placement::{self, Nodes};
+use spec::region::Delegation;
+use spec::time::{self, Peers};
+use spec::{node_settings, retention};
+use types::byte::Size;
+use types::channel;
+use types::ed25519::PublicKey;
 use types::name::Selector;
+use types::time::Span;
 
 use super::*;
 
@@ -16,13 +32,34 @@ fn policy(subjects: &str, select: &str, allow: &[Action], authority: u8) -> Poli
     )
 }
 
+fn connector() -> Definition {
+    let config = Checked::new(Document::default()).unwrap();
+    Definition::Connector(Connector::new(name("modbus"), name("gw_1"), config))
+}
+
+type Tree = BTreeMap<Name, Definition>;
+
+/// One tree per region, in the order that each region first comes, with each policy
+/// under its region and each connector in the root tree.
 fn rules(policies: &[(&str, Policy)], connectors: &[&str]) -> Rules {
-    Rules::new(
-        policies
-            .iter()
-            .map(|(r, p)| (r.parse().unwrap(), p.clone())),
-        connectors.iter().copied().map(name),
-    )
+    let placed = policies.iter().enumerate().map(|(i, (region, policy))| {
+        let label = match *region {
+            "" => format!("p{i}"),
+            region => format!("{region}.p{i}"),
+        };
+        let key = Kind::Access.key(&label).unwrap();
+        (*region, key, Definition::Access(policy.clone()))
+    });
+    let rooted = connectors.iter().map(|at| ("", name(at), connector()));
+    let mut trees = Vec::<(&str, Tree)>::new();
+    for (region, key, definition) in placed.chain(rooted) {
+        if !trees.iter().any(|(r, _)| *r == region) {
+            trees.push((region, Tree::new()));
+        }
+        let (_, tree) = trees.iter_mut().find(|(r, _)| *r == region).unwrap();
+        tree.insert(key, definition);
+    }
+    Rules::new(trees.iter().map(|(r, tree)| (r.parse().unwrap(), tree)))
 }
 
 fn grant(rules: &Rules, subject: &str, on: &str) -> Grant {
@@ -155,13 +192,140 @@ fn matches_subjects_in_any_region() {
     assert_eq!(actions, [Action::Read].into_iter().collect());
 }
 
-fn arbitrary_policy() -> impl Strategy<Value = (Prefix, Policy)> {
+#[test]
+fn takes_the_connectors_of_each_region_tree() {
+    let root = Tree::from([(name("gw.daq"), connector())]);
+    let site_a = Tree::from([(name("site_a.daq"), connector())]);
+    let rules = Rules::new([
+        (name("site_a").into(), &site_a),
+        (Prefix::ROOT, &root),
+        (name("site_b").into(), &Tree::new()),
+    ]);
+    let write = [Action::Write].into_iter().collect();
+    for (subject, on) in [("gw.daq", "gw.daq.ai_0"), ("site_a.daq", "site_a.daq.ai_0")]
+    {
+        let under = grant(&rules, subject, on);
+        assert_eq!(under.actions(), write, "{on}");
+        assert_eq!(under.authority(), Some(Authority::ABSOLUTE), "{on}");
+    }
+}
+
+/// One definition of each kind that is not a connector, each under `site_a`.
+fn other_kinds() -> Tree {
+    let all = || Selector::new(["**"]).unwrap();
+    let channel = Channel {
+        key: channel::Key::from_u128(1),
+        kind: ChannelKind::Index {
+            error: None,
+            control: None,
+        },
+    };
+    let home = Nodes {
+        home: Some(name("node_1")),
+        ..Nodes::default()
+    };
+    let compression = compression::Policy {
+        select: all(),
+        mode: Mode::Raw,
+    };
+    Tree::from([
+        (name("site_a.daq"), Definition::Channel(channel)),
+        (
+            Kind::Access.key("site_a.k").unwrap(),
+            Definition::Access(policy("ops.*", "**", &[Action::Read], 0)),
+        ),
+        (
+            Kind::Region.key("site_a").unwrap(),
+            Definition::Region(Delegation::new(1, [name("node_1")]).unwrap()),
+        ),
+        (
+            Kind::NodeSettings.key("site_a.k").unwrap(),
+            Definition::NodeSettings(
+                node_settings::Policy::new(all(), Some(Size::GIBIBYTE), None).unwrap(),
+            ),
+        ),
+        (
+            Kind::Compression.key("site_a.k").unwrap(),
+            Definition::Compression(compression),
+        ),
+        (
+            Kind::Placement.key("site_a.k").unwrap(),
+            Definition::Placement(placement::Policy::new(all(), home).unwrap()),
+        ),
+        (
+            Kind::Time.key("site_a.k").unwrap(),
+            Definition::Time(time::Policy::new(all(), Peers::default())),
+        ),
+        (
+            Kind::Retention.key("site_a.k").unwrap(),
+            Definition::Retention(retention::Policy::new(all(), Span::SECOND).unwrap()),
+        ),
+        (
+            Kind::Subject.key("site_a.k").unwrap(),
+            Definition::Subject(
+                Subject::new(vec![PublicKey::new([2; 32]).unwrap()]).unwrap(),
+            ),
+        ),
+    ])
+}
+
+#[test]
+fn gives_no_grant_from_a_definition_that_is_not_a_connector() {
+    let tree = other_kinds();
+    let rules = Rules::new([(Prefix::ROOT, &tree)]);
+    for subject in tree.keys() {
+        let on = format!("{subject}.pt_1");
+        let under = grant(&rules, subject.as_str(), &on);
+        assert_eq!(under.actions(), Actions::NONE, "{subject}");
+    }
+}
+
+// Each name of `other_kinds` sorts before the connectors, and they before `z`.
+#[test]
+fn keeps_each_definition_after_another_in_one_tree() {
+    let mut tree = other_kinds();
+    tree.extend([
+        (name("x.gw"), connector()),
+        (name("y.gw"), connector()),
+        (
+            Kind::Access.key("z").unwrap(),
+            Definition::Access(policy("ops.*", "**", &[Action::Plan], 0)),
+        ),
+    ]);
+    let rules = Rules::new([(Prefix::ROOT, &tree)]);
+    let write = [Action::Write].into_iter().collect();
+    for gateway in ["x.gw", "y.gw"] {
+        let on = format!("{gateway}.ai_0");
+        assert_eq!(grant(&rules, gateway, &on).actions(), write, "{gateway}");
+    }
+    let both = [Action::Read, Action::Plan].into_iter().collect();
+    assert_eq!(grant(&rules, "ops.ana", "x.pt_1").actions(), both);
+}
+
+#[test]
+fn keeps_each_policy_with_the_region_of_its_tree() {
+    let root = Tree::from([(
+        Kind::Access.key("ops").unwrap(),
+        Definition::Access(policy("ops.*", "**", &[Action::Plan], 0)),
+    )]);
+    let site_a = Tree::from([(
+        Kind::Access.key("site_a.ops").unwrap(),
+        Definition::Access(policy("ops.*", "**", &[Action::Read], 0)),
+    )]);
+    let rules = Rules::new([(Prefix::ROOT, &root), (name("site_a").into(), &site_a)]);
+    let both = [Action::Read, Action::Plan].into_iter().collect();
+    let plan = [Action::Plan].into_iter().collect();
+    assert_eq!(grant(&rules, "ops.ana", "site_a.pt_1").actions(), both);
+    assert_eq!(grant(&rules, "ops.ana", "site_b.pt_1").actions(), plan);
+}
+
+fn arbitrary_policy() -> impl Strategy<Value = (&'static str, Policy)> {
     let regions = prop::sample::select(vec!["", "a", "a.b", "b"]);
     let selects = prop::sample::select(vec!["**", "a.**", "b.*", "a.b.**", "*.x"]);
     let subjects = prop::sample::select(vec!["**", "s.*", "s.x", "t.*"]);
     let allow = prop::sample::subsequence(spec_actions(), 0..=6);
     (regions, subjects, selects, allow, any::<u8>())
-        .prop_map(|(r, s, sel, a, auth)| (r.parse().unwrap(), policy(s, sel, &a, auth)))
+        .prop_map(|(r, s, sel, a, auth)| (r, policy(s, sel, &a, auth)))
 }
 
 fn spec_actions() -> Vec<Action> {
@@ -175,7 +339,7 @@ fn spec_actions() -> Vec<Action> {
     ]
 }
 
-type Placed = Vec<(Prefix, Policy)>;
+type Placed = Vec<(&'static str, Policy)>;
 
 fn policies_and_shuffle() -> impl Strategy<Value = (Placed, Placed)> {
     prop::collection::vec(arbitrary_policy(), 0..8)
@@ -187,10 +351,7 @@ proptest! {
     fn decides_the_same_for_any_order_of_policies(
         (policies, shuffled) in policies_and_shuffle(),
     ) {
-        let build = |p: Placed| {
-            Rules::new(p, [name("s.x")])
-        };
-        let (one, two) = (build(policies), build(shuffled));
+        let (one, two) = (rules(&policies, &["s.x"]), rules(&shuffled, &["s.x"]));
         for subject in ["s.x", "s.y", "t.z"] {
             for on in ["a.x", "a.b.x", "b.x", "s.x.y", "c.x"] {
                 prop_assert_eq!(grant(&one, subject, on), grant(&two, subject, on));

@@ -118,6 +118,8 @@ fn reaches_itself_by_full_sha_and_by_prefix() {
     let (repo, end) = Repo::with_pr("itself");
     assert_eq!(repo.reaches(&end, &end), Ok(true));
     assert_eq!(repo.reaches(&end[..7], &end), Ok(true));
+    let child = repo.commit("a.md", "text\n");
+    assert_eq!(repo.reaches(&format!("{child}^"), &end), Ok(false));
 }
 
 #[test]
@@ -250,6 +252,43 @@ fn a_range_that_names_no_commit_has_that_text() {
     assert_eq!(
         repo.code_change(&end, "HEAD"),
         Ok(Some("has `HEAD`, which names no commit".to_string()))
+    );
+}
+
+#[test]
+fn a_range_may_start_at_the_parent_of_a_commit() {
+    let (repo, end) = Repo::with_pr("parent");
+    let fix = repo.commit("c.rs", "fn c() {}\n");
+    let head = repo.commit("d.md", "text\n");
+    let short = &fix[..8];
+    assert_eq!(
+        repo.code_change(&format!("{short}^"), &head),
+        Ok(Some("changes code at `c.rs:1`".to_string()))
+    );
+    assert_eq!(
+        repo.code_change(&format!("{}^", &head[..8]), &head),
+        Ok(None)
+    );
+    assert_eq!(repo.code_change(&format!("{fix}^"), &end), Ok(None));
+    assert_eq!(
+        repo.code_change(&end, &format!("{fix}^")),
+        Ok(Some(format!("has `{fix}^`, which names no commit")))
+    );
+    assert_eq!(
+        repo.code_change(&format!("{short}^^"), &head),
+        Ok(Some(format!("has `{short}^^`, which names no commit")))
+    );
+    let root = repo.git(&["rev-list", "--max-parents=0", "HEAD"]);
+    assert_eq!(
+        repo.code_change(&format!("{root}^"), &head),
+        Ok(Some(format!("has `{root}^`, which names no commit")))
+    );
+    assert_eq!(
+        repo.code_change(&format!("{}^", &head[..6]), &head),
+        Ok(Some(format!(
+            "has `{}^`, which names no commit",
+            &head[..6]
+        )))
     );
 }
 

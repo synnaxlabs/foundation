@@ -266,7 +266,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::{SCALARS, create_interner, create_pool, key};
+    use crate::common::{create_interner, create_pool, data_type, key};
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.
@@ -627,22 +627,6 @@ mod tests {
     mod round_trip {
         use super::*;
 
-        fn data_type() -> impl Strategy<Value = Type> {
-            let scalar = || proptest::sample::select(SCALARS.to_vec());
-            prop_oneof![
-                scalar().prop_map(Type::Scalar),
-                (scalar(), any::<u32>())
-                    .prop_map(|(element, len)| Type::Array { element, len }),
-                (scalar(), any::<u16>(), any::<u16>()).prop_map(
-                    |(element, rows, columns)| matrix(element, rows, columns)
-                ),
-                (scalar(), any::<u32>())
-                    .prop_map(|(element, max)| Type::List { element, max }),
-                Just(Type::String),
-                Just(Type::Bytes),
-            ]
-        }
-
         /// One entry of a generated write.
         #[derive(Debug, Clone)]
         struct Entry {
@@ -654,18 +638,20 @@ mod tests {
         /// then its data channels, the present group, then each entry of their key
         /// set.
         fn write() -> impl Strategy<Value = Write> {
-            vec(vec(data_type(), 0..4), 1..4).prop_flat_map(|groups| {
-                let entries: usize = groups.iter().map(|data| data.len() + 1).sum();
-                let keys = btree_set(any::<u128>(), entries)
-                    .prop_map(|bits| {
-                        bits.into_iter().map(channel::Key::from_u128).collect()
-                    })
-                    .prop_shuffle();
-                let entry = (any::<bool>(), vec(any::<u8>(), 0..24))
-                    .prop_map(|(present, bytes)| Entry { present, bytes });
-                let group = 0..groups.len();
-                (Just(groups), keys, group, vec(entry, entries))
-            })
+            vec(vec(data_type(0..=u32::MAX, 0..=u16::MAX), 0..4), 1..4).prop_flat_map(
+                |groups| {
+                    let entries: usize = groups.iter().map(|data| data.len() + 1).sum();
+                    let keys = btree_set(any::<u128>(), entries)
+                        .prop_map(|bits| {
+                            bits.into_iter().map(channel::Key::from_u128).collect()
+                        })
+                        .prop_shuffle();
+                    let entry = (any::<bool>(), vec(any::<u8>(), 0..24))
+                        .prop_map(|(present, bytes)| Entry { present, bytes });
+                    let group = 0..groups.len();
+                    (Just(groups), keys, group, vec(entry, entries))
+                },
+            )
         }
 
         type Write = (Vec<Vec<Type>>, Vec<channel::Key>, usize, Vec<Entry>);

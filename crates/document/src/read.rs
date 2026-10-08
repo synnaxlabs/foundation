@@ -6,9 +6,9 @@ use std::slice;
 use types::name::{Error, Name, Selector};
 use types::{byte, time};
 
-use crate::diagnostic::{Code, Diagnostic};
+use crate::diagnostic::{Code, Diagnostic, Note};
 use crate::value::{Kind, Value};
-use crate::{Document, Label, Span};
+use crate::{Block, Document, Label, Span};
 
 const UNKNOWN_ATTRIBUTE: Code = Code::new("document.unknown-attribute");
 const UNKNOWN_BLOCK: Code = Code::new("document.unknown-block");
@@ -17,6 +17,9 @@ const BAD_SIZE: Code = Code::new("document.bad-size");
 const BAD_NAME: Code = Code::new("document.bad-name");
 const BAD_SELECTOR: Code = Code::new("document.bad-selector");
 const BAD_SPAN: Code = Code::new("document.bad-span");
+const NEGATIVE_SPAN: Code = Code::new("document.negative-span");
+const LABEL_COUNT: Code = Code::new("document.label-count");
+const REPEATED_BLOCK: Code = Code::new("document.repeated-block");
 
 /// Reads a byte size from a string that [`byte::Size`] reads, such as `"200GiB"` or
 /// `"1.5GiB"`.
@@ -77,12 +80,14 @@ fn size_fix(text: &str, error: byte::Error) -> String {
     }
 }
 
-/// Reads a span from a string that [`time::Span`] reads, such as `"3d"` or `"1.5s"`.
+/// Reads a span of zero or more from a string that [`time::Span`] reads, such as
+/// `"3d"` or `"1.5s"`.
 ///
 /// # Errors
 ///
 /// A `document.bad-span` diagnostic at the value's span when the value is not a
-/// string, or when `time::Span` refuses its text.
+/// string or `time::Span` refuses its text, and a `document.negative-span`
+/// diagnostic there when the span is below zero.
 pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
     let bad = |message: String, fix: String| {
         Diagnostic::new(BAD_SPAN, value.span, message, fix)
@@ -93,12 +98,21 @@ pub fn span(value: &Value) -> Result<time::Span, Diagnostic> {
             "Write a string such as \"3d\"".into(),
         ));
     };
-    text.parse::<time::Span>().map_err(|error| {
+    let read = text.parse::<time::Span>().map_err(|error| {
         bad(
             format!("cannot read the span {text:?}: {error}"),
             span_fix(error),
         )
-    })
+    })?;
+    if read < time::Span::ZERO {
+        return Err(Diagnostic::new(
+            NEGATIVE_SPAN,
+            value.span,
+            format!("the span {read} is below zero"),
+            "Write a span of zero or more".into(),
+        ));
+    }
+    Ok(read)
 }
 
 /// The fix for `error`, with each span quoted as the file writes it.
@@ -107,7 +121,7 @@ fn span_fix(error: time::Error) -> String {
         time::Error::Span => {
             "Write a span such as \"250us\", \"1.5s\", or \"3d\"".into()
         }
-        time::Error::Long => "Use a span from \"-106751d\" to \"106751d\"".into(),
+        time::Error::Long => "Use a span from \"0s\" to \"106751d\"".into(),
         time::Error::Fraction
         | time::Error::Stamp
         | time::Error::Date
@@ -177,20 +191,16 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
     let patterns = items(value);
     let mut texts = Vec::with_capacity(patterns.len());
     for pattern in patterns {
-        let text: &str = match &pattern.kind {
-            Kind::String(text) => text,
-            Kind::Reference(name) => name.as_str(),
-            kind => {
-                return Err(Diagnostic::new(
-                    BAD_SELECTOR,
-                    pattern.span,
-                    format!(
-                        "a pattern is a string or a reference, not {}",
-                        kind.noun()
-                    ),
-                    "Write a string such as \"site_a.*\"".into(),
-                ));
-            }
+        let Some(text) = pattern.kind.text() else {
+            return Err(Diagnostic::new(
+                BAD_SELECTOR,
+                pattern.span,
+                format!(
+                    "a pattern is a string or a reference, not {}",
+                    pattern.kind.noun()
+                ),
+                "Write a string such as \"site_a.*\"".into(),
+            ));
         };
         // `Selector::new` does not say which pattern it refuses, so each reads alone
         // first. Alone, an exclusion includes no names, which is not its error.
@@ -202,6 +212,76 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
         }
     }
     Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
+}
+
+/// Checks that `block` has `N` labels, and gives them.
+///
+/// # Errors
+///
+/// A `document.label-count` diagnostic with `fix` when it has another number: at its
+/// first label past `N`, or at its keyword when it has fewer. The message is "the
+/// `<keyword>` block has <count>, and it takes <N>", each such as "no labels".
+pub fn labels<const N: usize>(
+    block: &Block,
+    fix: String,
+) -> Result<&[Label; N], Diagnostic> {
+    if let Ok(labels) = block.labels.as_slice().try_into() {
+        return Ok(labels);
+    }
+    let at = block
+        .labels
+        .get(N)
+        .map_or(block.keyword_span, |label| label.span);
+    Err(Diagnostic::new(
+        LABEL_COUNT,
+        at,
+        format!(
+            "the `{}` block has {}, and it takes {}",
+            block.keyword,
+            count(block.labels.len()),
+            count(N),
+        ),
+        fix,
+    ))
+}
+
+/// `labels` in words, such as "no labels" or "1 label".
+fn count(labels: usize) -> String {
+    match labels {
+        0 => "no labels".into(),
+        1 => "1 label".into(),
+        labels => format!("{labels} labels"),
+    }
+}
+
+/// Reports each block of `body` with `keyword` after the first. `of` names `body` in
+/// each message, such as "the connector".
+///
+/// Returns a `document.repeated-block` diagnostic at the keyword of each such block,
+/// "<of> has another `<keyword>` block", with the fix "Join the two into one" and a
+/// note at the first block's keyword.
+#[must_use]
+pub fn repeated(body: &Document, of: &str, keyword: &str) -> Vec<Diagnostic> {
+    let mut blocks = body
+        .blocks
+        .iter()
+        .filter(|block| &*block.keyword == keyword);
+    let first = blocks.next().and_then(|first| first.keyword_span);
+    blocks
+        .map(|block| {
+            let mut diagnostic = Diagnostic::new(
+                REPEATED_BLOCK,
+                block.keyword_span,
+                format!("{of} has another `{keyword}` block"),
+                "Join the two into one".into(),
+            );
+            diagnostic.notes.extend(first.map(|span| Note {
+                span,
+                text: format!("the first `{keyword}` block"),
+            }));
+            diagnostic
+        })
+        .collect()
 }
 
 /// Reports each attribute of `body` whose key is not in `keys`, and each block whose
@@ -258,7 +338,6 @@ pub fn unknown(
 /// When `keys` is empty: the caller's list is internal.
 #[must_use]
 pub fn missing(of: &str, at: Option<Span>, keys: &[&str], fix: String) -> Diagnostic {
-    assert!(!keys.is_empty(), "`missing` needs at least one key");
     Diagnostic::new(
         MISSING_ATTRIBUTE,
         at,
@@ -296,10 +375,15 @@ fn use_or_remove(keys: &[&str]) -> String {
     }
 }
 
-/// `words` in backticks, as a list that ends with "or".
-fn one_of(words: &[&str]) -> String {
+/// `words` in backticks, as a list that ends with "or", such as "`a`, `b`, or `c`".
+///
+/// # Panics
+///
+/// When `words` is empty: the caller's list is internal.
+#[must_use]
+pub fn one_of(words: &[&str]) -> String {
     match words {
-        [] => String::new(),
+        [] => panic!("`one_of` needs at least one word"),
         [word] => format!("`{word}`"),
         [first, second] => format!("`{first}` or `{second}`"),
         [rest @ .., last] => {
@@ -915,12 +999,27 @@ mod tests {
             ("3d", time::Span::DAY.nanos() * 3),
             ("1.5s", 1_500_000_000),
             ("0s", 0),
-            ("-2h", -time::Span::HOUR.nanos() * 2),
+            ("1ns", 1),
         ] {
             assert_eq!(
                 super::span(&string(text)),
                 Ok(time::Span::from_nanos(read)),
                 "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_span_below_zero_at_the_value() {
+        for (text, written) in [("-1ns", "-1ns"), ("-2h", "-2h"), ("-60m", "-1h")] {
+            assert_eq!(
+                super::span(&string(text)),
+                Err(Diagnostic::new(
+                    Code::new("document.negative-span"),
+                    Some(span()),
+                    format!("the span {written} is below zero"),
+                    "Write a span of zero or more".into(),
+                )),
             );
         }
     }
@@ -959,7 +1058,7 @@ mod tests {
             (
                 "106752d",
                 "a span does not fit in 64-bit nanoseconds",
-                "Use a span from \"-106751d\" to \"106751d\"",
+                "Use a span from \"0s\" to \"106751d\"",
             ),
         ] {
             assert_eq!(
@@ -967,6 +1066,16 @@ mod tests {
                 refused_span(&format!("cannot read the span {text:?}: {problem}"), fix),
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reads_each_span_that_the_fix_of_a_long_span_names() {
+        for text in ["106752d", "-106752d"] {
+            let fix = super::span(&string(text)).unwrap_err().fix;
+            for named in fix.split('"').skip(1).step_by(2) {
+                assert!(super::span(&string(named)).is_ok(), "{text:?}: {named:?}");
+            }
         }
     }
 
@@ -1030,7 +1139,7 @@ mod tests {
         }
 
         #[test]
-        fn reads_the_text_of_each_span(nanos in any::<i64>()) {
+        fn reads_the_text_of_each_span(nanos in 0..=i64::MAX) {
             let written = time::Span::from_nanos(nanos);
             prop_assert_eq!(super::span(&string(&written.to_string())), Ok(written));
         }
@@ -1039,6 +1148,10 @@ mod tests {
         fn reads_as_time_span_does(text in near_span()) {
             match (super::span(&string(&text)), text.parse::<time::Span>()) {
                 (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                (Err(diagnostic), Ok(parsed)) if parsed < time::Span::ZERO => {
+                    let negative = Code::new("document.negative-span");
+                    prop_assert_eq!(diagnostic.code, negative);
+                }
                 (Err(diagnostic), Err(error)) => {
                     prop_assert_eq!(diagnostic.code, Code::new("document.bad-span"));
                     prop_assert_eq!(diagnostic.span, Some(span()));
@@ -1046,8 +1159,13 @@ mod tests {
                         diagnostic.message,
                         format!("cannot read the span {text:?}: {error}")
                     );
-                    // The fix is the error's, with each span quoted.
-                    prop_assert_eq!(diagnostic.fix.replace('"', ""), error.fix());
+                    // The fix is the error's, with each span quoted, but a long span
+                    // gets the range of zero or more.
+                    let fix = match error {
+                        time::Error::Long => "Use a span from 0s to 106751d",
+                        error => error.fix(),
+                    };
+                    prop_assert_eq!(diagnostic.fix.replace('"', ""), fix);
                 }
                 (read, parsed) => {
                     prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
@@ -1058,7 +1176,7 @@ mod tests {
 
     mod keys {
         use super::*;
-        use crate::{Attribute, Block, read};
+        use crate::{Attribute, read};
 
         /// A body with an attribute at the offset of each key, and a block at the
         /// offset of each keyword.
@@ -1128,14 +1246,21 @@ mod tests {
         #[test]
         fn tells_attributes_and_blocks_apart() {
             let body = body(&[(1, "reader")], &[(2, "select")]);
-            let found = unknown(&body, "the connector", &["select"], &["reader"]);
-            let codes: Vec<_> =
-                found.iter().map(|d| (d.code.as_str(), d.span)).collect();
             assert_eq!(
-                codes,
+                unknown(&body, "the connector", &["select"], &["reader"]),
                 [
-                    ("document.unknown-attribute", at(1)),
-                    ("document.unknown-block", at(2)),
+                    diagnostic(
+                        "document.unknown-attribute",
+                        1,
+                        "`reader` is not an attribute of the connector",
+                        "Use `select`, or remove it",
+                    ),
+                    diagnostic(
+                        "document.unknown-block",
+                        2,
+                        "the connector cannot hold the `select` block",
+                        "Use `reader`, or remove it",
+                    ),
                 ]
             );
         }
@@ -1208,7 +1333,20 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "`missing` needs at least one key")]
+        fn lists_one_two_or_more_words() {
+            assert_eq!(one_of(&["a"]), "`a`");
+            assert_eq!(one_of(&["a", "b"]), "`a` or `b`");
+            assert_eq!(one_of(&["a", "b", "c"]), "`a`, `b`, or `c`");
+        }
+
+        #[test]
+        #[should_panic(expected = "`one_of` needs at least one word")]
+        fn refuses_to_list_no_word() {
+            drop(one_of(&[]));
+        }
+
+        #[test]
+        #[should_panic(expected = "`one_of` needs at least one word")]
         fn refuses_to_name_no_missing_key() {
             drop(missing(
                 "the `retention` block",
@@ -1255,6 +1393,136 @@ mod tests {
                     fix,
                 ))
             );
+        }
+
+        /// A `reader` block with its keyword at 0 and a label at the offset of each.
+        fn labeled(offsets: &[u32]) -> Block {
+            let labels = offsets.iter().map(|offset| Label {
+                text: format!("l{offset}").into(),
+                span: at(*offset),
+            });
+            Block {
+                keyword: "reader".into(),
+                keyword_span: at(0),
+                labels: labels.collect(),
+                body: Document::default(),
+                span: at(0),
+            }
+        }
+
+        #[test]
+        fn gives_the_labels_a_block_takes() {
+            assert_eq!(labels::<0>(&labeled(&[]), "Fix".into()), Ok(&[]));
+            let block = labeled(&[4]);
+            assert_eq!(
+                labels::<1>(&block, "Fix".into()).map(|[label]| &*label.text),
+                Ok("l4")
+            );
+        }
+
+        #[test]
+        fn refuses_a_label_count_at_the_first_label_past_it() {
+            let fix = "Remove each label";
+            for (offsets, at, message) in [
+                (
+                    &[4][..],
+                    4,
+                    "the `reader` block has 1 label, and it takes no labels",
+                ),
+                (
+                    &[4, 8],
+                    4,
+                    "the `reader` block has 2 labels, and it takes no labels",
+                ),
+            ] {
+                assert_eq!(
+                    labels::<0>(&labeled(offsets), fix.into()),
+                    Err(diagnostic("document.label-count", at, message, fix)),
+                );
+            }
+            assert_eq!(
+                labels::<1>(&labeled(&[4, 8, 12]), fix.into()),
+                Err(diagnostic(
+                    "document.label-count",
+                    8,
+                    "the `reader` block has 3 labels, and it takes 1 label",
+                    fix,
+                )),
+            );
+        }
+
+        #[test]
+        fn refuses_too_few_labels_at_the_keyword() {
+            let fix = "Give the block its name";
+            assert_eq!(
+                labels::<1>(&labeled(&[]), fix.into()),
+                Err(diagnostic(
+                    "document.label-count",
+                    0,
+                    "the `reader` block has no labels, and it takes 1 label",
+                    fix,
+                )),
+            );
+            assert_eq!(
+                labels::<2>(&labeled(&[4]), fix.into()),
+                Err(diagnostic(
+                    "document.label-count",
+                    0,
+                    "the `reader` block has 1 label, and it takes 2 labels",
+                    fix,
+                )),
+            );
+        }
+
+        proptest! {
+            #[test]
+            fn gives_labels_only_for_their_count(count in 0..4_usize) {
+                let offsets: Vec<u32> = (1..).take(count).collect();
+                let block = labeled(&offsets);
+                let at = |n: usize| {
+                    block.labels.get(n).map_or(block.keyword_span, |l| l.span)
+                };
+                prop_assert_eq!(labels::<0>(&block, String::new()).is_ok(), count == 0);
+                prop_assert_eq!(labels::<2>(&block, String::new()).is_ok(), count == 2);
+                if let Err(refused) = labels::<1>(&block, String::new()) {
+                    prop_assert_ne!(count, 1);
+                    prop_assert_eq!(refused.span, at(1));
+                } else {
+                    prop_assert_eq!(count, 1);
+                }
+            }
+        }
+
+        #[test]
+        fn reports_each_repeated_block_with_a_note_at_the_first() {
+            let body = body(
+                &[],
+                &[(3, "select"), (5, "reader"), (9, "reader"), (12, "reader")],
+            );
+            let repeated = |at| {
+                let mut diagnostic = diagnostic(
+                    "document.repeated-block",
+                    at,
+                    "the connector has another `reader` block",
+                    "Join the two into one",
+                );
+                diagnostic.notes.push(Note {
+                    span: self::at(5).unwrap(),
+                    text: "the first `reader` block".into(),
+                });
+                diagnostic
+            };
+            assert_eq!(
+                read::repeated(&body, "the connector", "reader"),
+                [repeated(9), repeated(12)]
+            );
+        }
+
+        #[test]
+        fn reports_no_block_that_is_alone_or_absent() {
+            let body = body(&[], &[(3, "select"), (5, "reader")]);
+            assert_eq!(read::repeated(&body, "the connector", "reader"), []);
+            assert_eq!(read::repeated(&body, "the connector", "hold"), []);
         }
     }
 }

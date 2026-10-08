@@ -10,7 +10,7 @@ use bytes::Bytes;
 use noq_proto::crypto::rustls::HandshakeData;
 use noq_proto::{ConnectionError, ConnectionHandle, VarInt};
 use rustls::pki_types::CertificateDer;
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
 use super::Event;
 use super::datagram::Received;

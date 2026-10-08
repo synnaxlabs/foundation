@@ -32,7 +32,7 @@ use env::net::udp::{Meta, Transmit};
 use noq_proto::{
     ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
 };
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 use types::time::Monotonic;
 
 use self::connection::Connection;
@@ -809,13 +809,12 @@ mod tests {
 
     use bytes::Bytes;
     use noq_proto::{Dir, VarInt};
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use super::*;
     use crate::quic::pair::{self, Pair, Side};
     use crate::testing;
-    use crate::tls;
 
     /// The link delay each way in [`dial`].
     const DELAY: Duration = Duration::from_millis(10);
@@ -829,7 +828,7 @@ mod tests {
     }
 
     fn server() -> PublicKey {
-        tls::public(&pair::SERVER_KEY)
+        pair::SERVER_KEY.public()
     }
 
     fn events(side: &Side) -> Vec<&Event> {
@@ -875,9 +874,9 @@ mod tests {
         fn proves_each_node_key_to_the_other() {
             testing::run(1, |shard| {
                 let pair = dial(shard, server());
-                let connected = |side: &Side, key| Event::Connected {
+                let connected = |side: &Side, key: &PrivateKey| Event::Connected {
                     key: side.key.expect("a connection"),
-                    peer: Peer::Node(tls::public(key)),
+                    peer: Peer::Node(key.public()),
                 };
                 let client = connected(&pair.client, &pair::SERVER_KEY);
                 let available = available(&pair.client);
@@ -891,7 +890,7 @@ mod tests {
         #[test]
         fn to_another_key_fails_authentication_and_tells_the_server_nothing() {
             testing::run(1, |shard| {
-                let expected = tls::public(&PrivateKey([9; 32]));
+                let expected = PrivateKey([9; 32]).public();
                 let mut pair = dial(shard, expected);
                 pair.run(Duration::from_secs(1));
                 let error = Error::Authentication { expected };
