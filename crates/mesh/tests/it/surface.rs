@@ -13,14 +13,17 @@ use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
 use mesh::status::Status;
-use mesh::{Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, region};
+use mesh::{
+    Config, Error, Member, Mesh, Pointer, Stopped, Watch, change, claim, log, region,
+};
 use raft::{Position, Term};
 use sim::Sim;
+use spec::definition::Definition;
 use transport::stream::Incoming;
 use transport::{Address, Class, Code, Peer, Port, Transport};
 use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
-use types::name::Prefix;
+use types::name::{Name, Prefix};
 use types::node::{self, SealKey};
 use types::time::Span;
 use wire::Protocol;
@@ -44,6 +47,11 @@ fn assert_serves<'a, F: Future<Output = Result<(), Error>>>(
 
 fn assert_sets<'a, F: Future<Output = Result<(), Error>>>(
     _: fn(&'a Mesh, channel::Key, node::Key) -> F,
+) {
+}
+
+fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
+    _: fn(&'a Mesh, Pointer, BTreeMap<Name, Definition>) -> F,
 ) {
 }
 
@@ -141,6 +149,7 @@ fn create_config_on(
         region: "plant".parse::<Prefix>().unwrap(),
         voters: members.iter().map(|member| member.card.key()).collect(),
         members,
+        founding: BTreeMap::new(),
         files: node.files(),
         dir: PathBuf::new(),
         clock: node.clock(),
@@ -189,9 +198,14 @@ fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
 }
 
 #[test]
-fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
+fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
     solo(|node, tasks| async move {
         let mesh = Mesh::open(create_config(&node, &tasks)).await.unwrap();
+        let founding = Pointer {
+            version: 0,
+            root: spec::tree::empty(),
+        };
+        assert_eq!(mesh.pointer(), founding);
         assert_eq!(mesh.member(KEY), Some(create_member(1, Vec::new())));
         assert_eq!(mesh.member(OTHER), None);
         let mut watch = mesh.watch(INDEX);
@@ -405,13 +419,15 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 }
 
 #[test]
-fn key_watch_member_next_serve_and_set_home_have_the_signatures_that_a_caller_holds() {
+fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
     let _: fn(&Mesh) -> node::Key = Mesh::key;
+    let _: fn(&Mesh) -> Pointer = Mesh::pointer;
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
     assert_gives_a_home(Watch::next);
     assert_serves(Mesh::serve);
     assert_sets(Mesh::set_home);
+    assert_applies(Mesh::apply);
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -432,7 +448,10 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Pool(_)
         | Error::Malformed
         | Error::Stream(_)
-        | Error::Stopped(_) => {}
+        | Error::Stopped(_)
+        | Error::Stale { .. }
+        | Error::Large { .. }
+        | Error::Problems(_) => {}
     };
     let _: fn(&Error) = cases;
 }

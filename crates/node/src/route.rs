@@ -1,19 +1,29 @@
 //! Shard 0's sessions: each stream goes to the server of the protocol its header
 //! names.
 
+use std::rc::Rc;
+
+use mesh::Mesh;
 use transport::stream::Incoming;
-use transport::{Code, Error, Session, Transport};
+use transport::{Code, Error, Peer, Session, Transport};
 use wire::Protocol;
 
 use crate::scope::Scope;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
-/// transport stops, and gives the error that stopped it. Admits every peer.
-pub(crate) async fn accept(transport: Transport, tasks: env::tasks::Tasks) -> Error {
+/// transport stops, and gives the error that stopped it. Admits every peer; `mesh`,
+/// when the node has one, checks each message against its region.
+pub(crate) async fn accept(
+    transport: Rc<Transport>,
+    mesh: Option<Mesh>,
+    tasks: env::tasks::Tasks,
+) -> Error {
     let mut sessions = Scope::new(tasks.clone());
     loop {
         match transport.accept().await {
-            Ok(session) => sessions.spawn(Box::pin(serve(session, tasks.clone()))),
+            Ok(session) => {
+                sessions.spawn(Box::pin(serve(session, mesh.clone(), tasks.clone())));
+            }
             Err(error) => return error,
         }
     }
@@ -22,16 +32,17 @@ pub(crate) async fn accept(transport: Transport, tasks: env::tasks::Tasks) -> Er
 /// Routes each stream that the peer of `session` opens, each in its own future on
 /// `tasks`, so a stream whose header is late delays no other. Ends when the session
 /// ends.
-async fn serve(session: Session, tasks: env::tasks::Tasks) {
+async fn serve(session: Session, mesh: Option<Mesh>, tasks: env::tasks::Tasks) {
     let mut streams = Scope::new(tasks);
     while let Ok(incoming) = session.accept().await {
-        streams.spawn(Box::pin(route(incoming)));
+        streams.spawn(Box::pin(route(incoming, session.peer(), mesh.clone())));
     }
 }
 
-/// Reads the header of `incoming`, its first message, and routes the stream by its
-/// protocol. No protocol has a server yet, so each stream is rejected.
-async fn route(mut incoming: Incoming) {
+/// Reads the header of `incoming`, its first message, and routes the stream that
+/// `peer` opened by its protocol. A `Mesh` stream of a node goes to `mesh`; each
+/// other stream is rejected.
+async fn route(mut incoming: Incoming, peer: Peer, mesh: Option<Mesh>) {
     let Ok(first) = incoming.receiver.recv().await else {
         return;
     };
@@ -39,11 +50,16 @@ async fn route(mut incoming: Incoming) {
         return reject(incoming);
     };
     match protocol {
-        Protocol::Clock
-        | Protocol::Mesh
-        | Protocol::Replica
-        | Protocol::Blob
-        | Protocol::Hub => reject(incoming),
+        Protocol::Mesh => match (peer, mesh) {
+            (Peer::Node(key), Some(mesh)) => {
+                // `serve` stops the stream with the code of its error.
+                drop(mesh.serve(key, incoming).await);
+            }
+            (Peer::Client, _) | (_, None) => reject(incoming),
+        },
+        Protocol::Clock | Protocol::Replica | Protocol::Blob | Protocol::Hub => {
+            reject(incoming);
+        }
     }
 }
 
@@ -70,8 +86,7 @@ mod tests {
 
     use super::header;
 
-    /// A first message is a header only when it is the whole message. Each arm rejects
-    /// today, so no peer sees the difference yet.
+    /// A first message is a header only when it is the whole message.
     #[test]
     fn a_header_with_a_byte_after_it_names_no_protocol() {
         let mut message = wire::header::encode(Protocol::Mesh).to_vec();

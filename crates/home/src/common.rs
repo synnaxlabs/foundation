@@ -47,12 +47,15 @@ pub(crate) fn data_type(
 }
 
 /// The raw values of one series: `count` samples of `data_type` from `state`. A
-/// variable sample holds at most 5 elements.
+/// variable sample holds at most 5 elements. A `String` sample is ASCII.
 pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
     let count = usize::try_from(count).expect("a small count");
     match data_type {
-        Type::String | Type::Bytes => variable(state, count, Scalar::U8, 5),
-        Type::List { element, max } => variable(state, count, element, max.min(5)),
+        Type::String => variable(state, count, Scalar::U8, 5, 0x7f),
+        Type::Bytes => variable(state, count, Scalar::U8, 5, 0xff),
+        Type::List { element, max } => {
+            variable(state, count, element, max.min(5), 0xff)
+        }
         fixed => {
             let width = fixed.width().expect("a fixed width");
             elements(state, count * width, width)
@@ -61,8 +64,15 @@ pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
 }
 
 /// The raw values of `count` variable samples of `element`, each of at most `max`
-/// elements: their ends, zeros to the start of the elements, then the elements.
-fn variable(mut state: u64, count: usize, element: Scalar, max: u32) -> Vec<u8> {
+/// elements: their ends, zeros to the start of the elements, then the elements, each
+/// byte of which is cut by `mask`.
+fn variable(
+    mut state: u64,
+    count: usize,
+    element: Scalar,
+    max: u32,
+    mask: u8,
+) -> Vec<u8> {
     let mut out = Vec::new();
     let mut end = 0;
     for _ in 0..count {
@@ -73,7 +83,11 @@ fn variable(mut state: u64, count: usize, element: Scalar, max: u32) -> Vec<u8> 
     out.resize(out.len().next_multiple_of(element.width().min(8)), 0);
     let width = element.width();
     let len = usize::try_from(end).expect("a small end") * width;
-    out.extend(elements(state, len, width));
+    out.extend(
+        elements(state, len, width)
+            .into_iter()
+            .map(|byte| byte & mask),
+    );
     out
 }
 

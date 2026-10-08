@@ -570,7 +570,8 @@ impl Shard {
     ///
     /// If the shard never gave `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
-        self.readers.close(self.place(key.slot), key.session);
+        let now = self.now().map(|(_, now)| now);
+        self.readers.close(self.place(key.slot), key.session, now);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
@@ -794,7 +795,9 @@ mod tests {
     use std::iter;
     use std::path::{Path as FilePath, PathBuf};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Waker;
+    use std::time::Instant;
 
     use block::{Heap, Pool, Unique};
     use buffer::Layout;
@@ -4199,6 +4202,82 @@ mod tests {
             let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    /// A monotonic clock that counts its reads.
+    struct Counting {
+        clock: Clock,
+        reads: Arc<AtomicU64>,
+    }
+
+    impl env::clock::Driver for Counting {
+        fn now(&self) -> Monotonic {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.clock.now()
+        }
+
+        fn epoch(&self) -> Instant {
+            self.clock.epoch()
+        }
+
+        fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
+            Box::pin(Delegated(self.clock.sleep_until(Monotonic(0))))
+        }
+    }
+
+    /// A timer of the clock that [`Counting`] reads.
+    struct Delegated(env::clock::Sleep);
+
+    impl env::clock::Timer for Delegated {
+        fn poll_until(
+            self: Pin<&mut Self>,
+            deadline: Monotonic,
+            cx: &mut Context<'_>,
+        ) -> Poll<()> {
+            let sleep = &mut self.get_mut().0;
+            sleep.reset(deadline);
+            Pin::new(sleep).poll(cx)
+        }
+    }
+
+    #[test]
+    fn reads_the_clock_once_to_open_write_and_close() {
+        run(120, |test| async move {
+            let reads = Arc::new(AtomicU64::new(0));
+            let (clock, mesh) = clock::Clock::new(Clock::new(Counting {
+                clock: test.clock.clone(),
+                reads: Arc::clone(&reads),
+            }));
+            let wall = test.node.wall();
+            test.tasks.spawn(async move { clock.run(wall).await });
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            while mesh.now().mesh.is_none() {
+                test.clock.sleep(Span::from_nanos(1)).await;
+            }
+            let mut shard = Test::with(0, buffer, mesh);
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            let set = two_indexes();
+            // The clock task reads it too, but `sim` polls one task at a time, so no
+            // read of that task falls inside a call.
+            let count = || reads.load(Ordering::Relaxed);
+
+            let from = count();
+            let key = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            assert_eq!(count() - from, 1, "open_writer");
+
+            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
+            let from = count();
+            assert_eq!(
+                shard.write(key, LIVE, write),
+                Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..])
+            );
+            assert_eq!(count() - from, 1, "write");
+
+            let from = count();
+            shard.close_writer(key);
+            assert_eq!(count() - from, 1, "close_writer");
         });
     }
 

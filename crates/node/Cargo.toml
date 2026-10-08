@@ -21,6 +21,7 @@ env = { path = "../env" }
 estimate = { path = "../estimate" }
 home = { path = "../home" }
 hub = { path = "../hub" }
+mesh = { path = "../mesh" }
 ops = { path = "../ops" }
 os = { path = "../os" }
 transport = { path = "../transport" }

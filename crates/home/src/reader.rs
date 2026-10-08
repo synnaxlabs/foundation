@@ -10,6 +10,7 @@ use delivery::{Position, Reader, Readers, Start};
 use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::frame::{Frame, Path};
+use types::time::Stamp;
 
 /// An open reader on its shard, in either mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -133,16 +134,22 @@ impl Set {
         self.entries[place].readers.take(session)
     }
 
-    /// Closes the reader `session` on the index at `place`. Its waiting frames do not
-    /// go out, and [`woken`](Self::woken) does not name it. A close of a closed reader
-    /// changes nothing.
+    /// Closes the reader `session` on the index at `place` at mesh time `now`. Its
+    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it. A
+    /// close of a closed reader changes nothing.
     ///
     /// # Panics
     ///
-    /// If the index never gave `session`.
-    pub(crate) fn close(&mut self, place: usize, session: delivery::Key) {
+    /// If the index never gave `session`, or `now` is `None` and `session` is an open
+    /// named complete session.
+    pub(crate) fn close(
+        &mut self,
+        place: usize,
+        session: delivery::Key,
+        now: Option<Stamp>,
+    ) {
         let entry = &mut self.entries[place];
-        entry.readers.close(session);
+        entry.readers.close(session, now);
         let key = Key {
             slot: entry.slot,
             session,
@@ -437,7 +444,7 @@ mod tests {
             assert_eq!(first, second, "each index numbers its own readers");
             set.applied(0, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
             set.applied(1, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
-            set.close(0, first.into());
+            set.close(0, first.into(), None);
             assert_eq!(woken(&mut set), [reader(1, second)]);
         }
     }

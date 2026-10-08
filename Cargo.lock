@@ -117,6 +117,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -327,6 +333,7 @@ checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 name = "config"
 version = "0.0.0"
 dependencies = [
+ "base64ct",
  "config-hcl",
  "connector",
  "connector-influx",
@@ -978,13 +985,13 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mesh"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
  "block",
  "clock",
  "env",
  "proptest",
  "raft",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",
@@ -1022,6 +1029,7 @@ dependencies = [
  "home",
  "hub",
  "loom",
+ "mesh",
  "node",
  "ops",
  "os",
