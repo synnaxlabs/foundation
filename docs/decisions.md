@@ -1875,6 +1875,16 @@ How to read this record:
   `Message` type of the proposal, because it changes `send` and `try_send` for each
   caller and must own its ranges (architect, #1197:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
+  `send_parts` gives the carrier one slice of the block for each run of adjacent parts
+  over 1452 bytes, and one write of each stretch of shorter runs and zeros between
+  them. The block's count changes once per message. A short run changes no count. The
+  write reads the caller's parts, and the stream keeps only the parts that the carrier
+  did not take, the first one cut at the first byte not taken, in a list that keeps its
+  capacity. Lost: a list of slices and stretches built for each message, because it
+  costs each part on each send. Decided by `laptop.architect-2` (#68, 2026-10-07 19:01
+  UTC: https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
+  2026-10-07 20:44 UTC:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
