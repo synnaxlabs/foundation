@@ -118,8 +118,15 @@ queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHA
   comment that states the change, the test that pins it, and its source. Choose the
   issue whose PR has had no review round, by preference one in progress, else the next
   one in that crate. Its builder folds the item into its PR and lists it in the PR body.
+- **Outside a crate:** a small change to a file in no crate, which no PR that you
+  build changes, goes into the records PR of the file's owner (below): the architect
+  of the crate that a decision covers (else `laptop.architect`) for
+  `docs/decisions.md`, the red-team for `docs/security.md` and fuzz inputs,
+  `laptop.monitor` for `docs/factory.md` and `docs/coordination.md`, and the director
+  for the rules in `CLAUDE.md` and `.claude/`.
 - **Alone:** a small change gets its own issue and PR only when no open issue in its
-  crate fits, when it fixes a broken `main`, or when other work waits on it.
+  crate fits and no records PR above takes it, when it fixes a broken `main`, or when
+  other work waits on it.
 - **Records:** each architect, red-team, and `laptop.monitor` keeps one PR open for its
   own small changes (decisions, threat model notes, fuzz inputs, factory docs), and
   sends it to review at most once a day, or at once when other work waits on it. A
@@ -137,8 +144,9 @@ dependency:
    the crate's builder (a small one as "Small changes" says). A change to a locked
    decision, a contract, or an oracle goes to the person first, with the architect's
    recommendation.
-3. After the merge, the architect files the follow-up of each crate that must follow
-   the change, as "Small changes" says.
+3. After the merge, the architect files an issue for each crate that must follow the
+   change, or an item of an open issue in that crate when its change is small ("Small
+   changes").
 
 A builder may change anything private inside the crates of its issue without asking.
 

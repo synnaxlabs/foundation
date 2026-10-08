@@ -3952,7 +3952,8 @@ How to read this record:
   follow the same rule, as their own commit before the fix; a larger one ships alone.
   Each architect, red-team, and `laptop.monitor` keeps one PR open for its own small
   changes, sent to review at most once a day, or at once when other work waits on it
-  (`docs/coordination.md`, "Small changes"). Of the 252 PRs that merged in the 24 h to
+  (`docs/coordination.md`, "Small changes"). A small change to a file in no crate goes
+  into the records PR of the file's owner. Of the 252 PRs that merged in the 24 h to
   2026-10-08T03:05Z, 65 changed 50 lines or fewer, and each paid the full fixed cost of
   CI, review rounds, an audit, and a queue slot (#1705: 8 lines, two review rounds, and
   an audit). The person decided to fold small fixes into open PRs, relayed by
@@ -3964,9 +3965,11 @@ How to read this record:
   hold up progress on the next piece. Instead they should preferrably be folded into
   current or existing larger PRs". The rest was decided by the director at
   2026-10-08T03:23:34Z
-  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051516851).
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051516851) and
+  2026-10-08T03:31:23Z
+  (https://github.com/synnaxlabs/foundation/pull/1706#issuecomment-6051596894).
   Supersedes the mechanical-change and refactor sentences of `CLAUDE.md` Rule 2
-  (https://github.com/synnaxlabs/foundation/blob/4b06ad16/CLAUDE.md#L200-L202).
+  (https://github.com/synnaxlabs/foundation/blob/8f6a0596/CLAUDE.md#L200-L202).
 - **COST TRIALS (2026-10-08)** Until 2026-10-09T04:00Z, `box1.builder-1`,
   `box1.builder-2`, `box1.builder-4`, and `box2.builder-7` run the `reviewer` of a
   second round that does not skip `breaker` on Sonnet. After the end time,

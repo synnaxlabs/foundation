@@ -203,7 +203,7 @@ default, template, and system instruction.
 - Mechanical changes (renames, format runs, regenerated code) ship alone. A small one
   follows the bullet above, as its own commit.
 - A fix and the refactor it needs are two PRs. The refactor lands first. A small
-  refactor follows the bullet above, as its own commit before the fix.
+  refactor goes into the fix's PR, as its own commit before the fix.
 - Prefer branches off `main` over stacks.
 - Unfinished features ship dark behind a cargo feature or a config flag.
 
