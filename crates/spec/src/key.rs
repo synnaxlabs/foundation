@@ -81,6 +81,30 @@ impl Kind {
     }
 }
 
+/// Whether Foundation, not a file, owns the definition at tree key `key`: [`Kind::key`]
+/// gives `key` for no label that a file can use. `plan` leaves out each definition at
+/// such a key.
+#[must_use]
+pub fn reserved(key: &Name) -> bool {
+    ALL.into_iter()
+        .find_map(|kind| kind.label(key))
+        .is_none_or(|label| label.reserved())
+}
+
+/// Each kind.
+const ALL: [Kind; 10] = [
+    Kind::Access,
+    Kind::Connector,
+    Kind::Channel,
+    Kind::Region,
+    Kind::NodeSettings,
+    Kind::Compression,
+    Kind::Placement,
+    Kind::Time,
+    Kind::Retention,
+    Kind::Subject,
+];
+
 /// A label that makes no tree key. `Display` gives the message: a lower-case clause
 /// with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,21 +299,38 @@ mod tests {
             let key = kind.key(label.as_str()).unwrap();
             prop_assert_eq!(kind.label(&key), Some(label));
         }
+
+        #[test]
+        fn leaves_each_key_of_a_label_to_the_files(
+            segments in prop::collection::vec("[a-z0-9_-]{1,12}", 1..8),
+            kind in prop::sample::select(ALL.to_vec()),
+        ) {
+            let key = kind.key(&segments.join(".")).unwrap();
+            prop_assert!(!reserved(&key), "{key}");
+        }
     }
 
-    /// Each kind.
-    const ALL: [Kind; 10] = [
-        Kind::Access,
-        Kind::Connector,
-        Kind::Channel,
-        Kind::Region,
-        Kind::NodeSettings,
-        Kind::Compression,
-        Kind::Placement,
-        Kind::Time,
-        Kind::Retention,
-        Kind::Subject,
-    ];
+    #[test]
+    fn reserves_each_key_that_no_label_gives() {
+        for key in [
+            "@admin.@subject",
+            "@admin.@access",
+            "plant.@x.@access",
+            "plant.@changes",
+            "@x.y",
+            "@access",
+        ] {
+            assert!(reserved(&name(key)), "{key}");
+        }
+        for key in [
+            "plant.@access",
+            "plant.x",
+            "plant.@region",
+            "plant.@subject",
+        ] {
+            assert!(!reserved(&name(key)), "{key}");
+        }
+    }
 
     #[test]
     fn gives_no_label_for_a_key_of_another_kind() {

@@ -44,7 +44,10 @@ fn key(kind: Kind) -> Name {
 
 #[cfg(test)]
 mod tests {
+    use types::name::Prefix;
+
     use super::*;
+    use crate::region;
 
     fn admin() -> PublicKey {
         PublicKey::new([7; 32]).unwrap()
@@ -82,5 +85,17 @@ mod tests {
             let decoded = Definition::decode(&definition.encode());
             assert_eq!(decoded, Ok(definition), "{key}");
         }
+    }
+
+    #[test]
+    fn gives_definitions_that_no_file_can_hold() {
+        for key in create(admin()).keys() {
+            assert!(crate::key::reserved(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn gives_a_root_region_with_no_problem() {
+        assert_eq!(region::check(&Prefix::ROOT, &create(admin())), []);
     }
 }
