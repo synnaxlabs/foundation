@@ -118,7 +118,10 @@ fn checked<'a>(
     };
     for (name, label) in names(documents, Kind::Connector) {
         let lower = name.as_str().to_ascii_lowercase().into();
-        found.connectors.entry(lower).or_insert(label);
+        let first = found.connectors.entry(lower).or_insert(label);
+        if order(label.span) < order(first.span) {
+            *first = label;
+        }
     }
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
@@ -183,13 +186,14 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// The label of each tree key so far and the kind of its block, by the key in
-    /// lowercase, so that keys that differ only in case collide.
+    /// The label of each tree key so far that comes first in [`order`], and the kind of
+    /// its block, by the key in lowercase, so that keys that differ only in case
+    /// collide.
     labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
-    /// The label of the first connector that a `connector` block in any Document
-    /// defines at each name, by the name in lowercase.
+    /// The label of the first connector in [`order`] that a `connector` block in any
+    /// Document defines at each name, by the name in lowercase.
     connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
@@ -257,15 +261,20 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        let (first, earlier) =
+        let ((first, earlier), (label, later)) =
             match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
-                btree_map::Entry::Occupied(first) => *first.get(),
                 btree_map::Entry::Vacant(entry) => {
                     entry.insert((label, kind));
                     return Some((key, label.span));
                 }
+                btree_map::Entry::Occupied(mut held)
+                    if order(label.span) < order(held.get().0.span) =>
+                {
+                    ((label, kind), held.insert((label, kind)))
+                }
+                btree_map::Entry::Occupied(held) => (*held.get(), (label, kind)),
             };
-        let earlier = earlier.as_str();
+        let (earlier, keyword) = (earlier.as_str(), later.as_str());
         let blocks = if earlier == keyword {
             format!("`{keyword}`")
         } else {
@@ -648,7 +657,7 @@ mod tests {
     #[test]
     fn refuses_a_name_that_repeats_in_another_file() {
         let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
-        let documents = [
+        let mut documents = [
             document(vec![settings(0, 0, "site_a.budget", &policy)]),
             document(vec![
                 settings(1, 0, "site_a.other", &policy),
@@ -666,7 +675,10 @@ mod tests {
             span: at(0, 1).unwrap(),
             text: "the earlier name".into(),
         });
-        assert_eq!(check(&documents), Err(vec![repeat]));
+        for _ in 0..2 {
+            assert_eq!(check(&documents), Err(vec![repeat.clone()]));
+            documents.reverse();
+        }
     }
 
     #[test]
