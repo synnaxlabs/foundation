@@ -2949,6 +2949,40 @@ mod port {
             assert_eq!(node.join(), Ok(()));
         }
 
+        /// A task whose drop panics as the mesh's group stops: `join` ranks the
+        /// group's stop above the panic.
+        #[test]
+        fn a_panic_as_the_group_stops_gives_the_group_error() {
+            struct Panics;
+            impl Drop for Panics {
+                fn drop(&mut self) {
+                    panic!("a task's drop panics");
+                }
+            }
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let node = start_alone(&host);
+            node.spawn(|_| {
+                let panics = Panics;
+                async move {
+                    std::future::pending::<()>().await;
+                    drop(panics);
+                }
+            });
+            assert_eq!(sim.run_for(OPEN), Ok(()));
+            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: "a task's drop panics".into(),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Err(Error::Group(write_failed())));
+        }
+
         /// A transport that stops before the mesh's group: `join` gives the
         /// transport's error, and the group's stop after it sets no second error.
         #[test]
