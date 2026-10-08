@@ -22,8 +22,16 @@ const BOT: &str = "synnax-foundation-factory[bot]";
 const FORMAT: &str =
     "in the format of .claude/skills/review/SKILL.md, \"Round comment\".";
 
+/// The line that starts and ends a code block, and stands for each line in one.
+const FENCE: &str = "```";
+
 /// The names of the lines that end each round comment, in order.
 const END: [&str; 3] = ["Deferred", "Public surface", "Hot path"];
+
+/// A round comment posted before this UTC time keeps the check from before the end
+/// lines: it needs no end lines, and an earlier free-form one passes. It still needs
+/// `performance` when a `Hot path:` line names a function.
+const CUTOFF: &str = "2026-10-08T03:00:00Z";
 
 /// The record of a PR that the check reads.
 #[derive(Debug)]
@@ -40,6 +48,8 @@ struct Record {
 struct Comment {
     author: String,
     body: String,
+    /// When the comment was posted, a UTC time (`utc`), so text order is time order.
+    created: String,
 }
 
 /// A parsed `## Review round <n>` comment.
@@ -55,6 +65,14 @@ struct Round {
     findings: u32,
     /// The `Hot path:` line names a function, so the round requires `performance`.
     hot: bool,
+}
+
+/// A round comment that does not parse.
+#[derive(Debug)]
+struct Malformed {
+    /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form.
+    fixed: bool,
+    problem: String,
 }
 
 /// Checks that the review of PR `pr` is done at commit `head`: its last round
@@ -113,7 +131,10 @@ fn problems(
         .comments
         .iter()
         .filter(|c| c.author == BOT)
-        .filter_map(|c| round(&c.body))
+        .filter_map(|c| {
+            let old = c.created.as_str() < CUTOFF;
+            round(&c.body, old).map(|round| (old, round))
+        })
         .collect();
     if rounds.is_empty() {
         problems.push(format!(
@@ -121,11 +142,12 @@ fn problems(
              {FORMAT}"
         ));
     }
-    for (i, round) in rounds.iter().enumerate() {
+    for (i, (old, round)) in rounds.iter().enumerate() {
         let round = match round {
             Ok(round) => round,
-            Err(problem) => {
-                problems.push(problem.clone());
+            Err(e) if *old && i + 1 < rounds.len() && !e.fixed => continue,
+            Err(e) => {
+                problems.push(e.problem.clone());
                 continue;
             }
         };
@@ -153,7 +175,7 @@ fn problems(
             ));
         }
     }
-    if let Some(Ok(round)) = rounds.last() {
+    if let Some((_, Ok(round))) = rounds.last() {
         if round.findings > 0 {
             problems.push(format!(
                 "review round {} has findings ({}). Fix or answer them, then run \
@@ -219,17 +241,13 @@ fn approval(record: &Record, head: &str) -> Option<String> {
 
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
 /// The fields are the first paragraph after that line, so the findings text cannot
-/// set them. The last paragraph is the end lines ([`END`]).
-fn round(body: &str) -> Option<Result<Round, String>> {
+/// set them. The last paragraph is the end lines ([`END`]), unless the comment is
+/// `old`, posted before [`CUTOFF`].
+fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
     // Only the end lines keep their indent: an indented one is a quote, not a line.
     let mut lines = body.lines().map(str::trim_end);
     let number = lines.find_map(|l| l.trim_start().strip_prefix("## Review round "))?;
-    let paragraphs: Vec<Vec<&str>> = lines
-        .collect::<Vec<_>>()
-        .split(|l| l.is_empty())
-        .filter(|p| !p.is_empty())
-        .map(<[&str]>::to_vec)
-        .collect();
+    let paragraphs = paragraphs(lines);
     let (mut reviewers, mut range, mut findings) = (None, None, None);
     let mut breakerless = false;
     for line in paragraphs
@@ -247,10 +265,12 @@ fn round(body: &str) -> Option<Result<Round, String>> {
             findings.get_or_insert(value);
         }
     }
+    let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     let Ok(number) = number.parse::<u32>() else {
-        return Some(Err(format!(
-            "`## Review round {number}` has no round number"
-        )));
+        return Some(Err(Malformed {
+            fixed,
+            problem: format!("`## Review round {number}` has no round number"),
+        }));
     };
     let missing = |name| {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
@@ -271,8 +291,12 @@ fn round(body: &str) -> Option<Result<Round, String>> {
                 )
             })?,
         };
-        let last = paragraphs.get(1..).and_then(<[_]>::last);
-        let hot = hot(last.map_or(&[][..], Vec::as_slice), number)?;
+        let rest = paragraphs.get(1..).unwrap_or_default();
+        let hot = if old {
+            named(rest)
+        } else {
+            hot(rest.last().map_or(&[][..], Vec::as_slice), number)?
+        };
         Ok(Round {
             number,
             reviewers: reviewers
@@ -287,30 +311,35 @@ fn round(body: &str) -> Option<Result<Round, String>> {
             hot,
         })
     };
-    Some(fields())
+    Some(fields().map_err(|problem| Malformed { fixed, problem }))
 }
 
-/// Whether the end lines `paragraph` of round `number` name a hot path: the first
-/// word of its `Hot path:` value is not `none`. The paragraph must be the [`END`]
-/// lines in order, each at the start of its line, and each of which may wrap onto the
-/// lines after it.
+/// The paragraphs of `lines`, split at blank lines. Each line of a code block, blank
+/// ones too, becomes [`FENCE`], which is never a field or an end line.
+fn paragraphs<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<&'a str>> {
+    let mut fenced = false;
+    lines
+        .map(|l| {
+            let fence = l.trim_start().starts_with(FENCE);
+            let quoted = fenced || fence;
+            fenced ^= fence;
+            if quoted { FENCE } else { l }
+        })
+        .collect::<Vec<_>>()
+        .split(|l| l.is_empty())
+        .filter(|p| !p.is_empty())
+        .map(<[&str]>::to_vec)
+        .collect()
+}
+
+/// Whether the end lines `paragraph` of round `number` name a hot path ([`function`]).
+/// The paragraph must be the [`END`] lines in order and nothing else.
 fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
-    let mut values: Vec<(&str, String)> = Vec::new();
-    for line in paragraph {
-        let name = END
-            .iter()
-            .find(|name| line.starts_with(&format!("{name}:")));
-        match (name, values.last_mut()) {
-            (Some(name), _) => values.push((*name, line[name.len() + 1..].to_string())),
-            (None, Some((_, value))) => {
-                *value = format!("{value} {}", line.trim_start());
-            }
-            (None, None) => break,
-        }
-    }
+    let (values, read) = entries(paragraph);
     let [deferred, surface, hot] = END;
     for (i, name) in END.into_iter().enumerate() {
-        if values.get(i).is_none_or(|(found, _)| *found != name) {
+        let found = values.get(i).map(|(found, _)| *found);
+        if read < paragraph.len() || found != Some(name) {
             return Err(format!(
                 "review round {number} does not end with a `{name}:` line. End each \
                  round with its `{deferred}:`, `{surface}:`, and `{hot}:` lines, in \
@@ -323,8 +352,45 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
             "review round {number} has a second `{name}:` line in its end lines."
         ));
     }
-    let first = values[2].1.split_whitespace().next().unwrap_or_default();
-    Ok(first.trim_matches(['`', ',', '.', ';']) != "none")
+    Ok(function(&values[2].1))
+}
+
+/// Whether a round posted before [`CUTOFF`] names a hot path: a `Hot path:` line in
+/// `paragraphs`, the round's text after its fields, names a function ([`function`]).
+fn named(paragraphs: &[Vec<&str>]) -> bool {
+    let start = format!("{}:", END[2]);
+    paragraphs.iter().any(|p| {
+        (0..p.len())
+            .filter(|&i| p[i].starts_with(&start))
+            .any(|i| function(&entries(&p[i..]).0[0].1))
+    })
+}
+
+/// The [`END`] entries at the start of `lines`, each as its name and value, and the
+/// number of lines they take. An entry starts at the start of a line with its name,
+/// and may wrap onto the lines after it, but not onto a fence line.
+fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
+    let mut values: Vec<(&str, String)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let name = END
+            .iter()
+            .find(|name| line.starts_with(&format!("{name}:")));
+        match (name, values.last_mut()) {
+            (Some(name), _) => values.push((*name, line[name.len() + 1..].to_string())),
+            (None, Some((_, value))) if *line != FENCE => {
+                *value = format!("{value} {}", line.trim_start());
+            }
+            _ => return (values, i),
+        }
+    }
+    (values, lines.len())
+}
+
+/// Whether the `Hot path:` value `value` names a function: its first word, with
+/// backticks and a final `,`, `.`, or `;` removed, is not `none`.
+fn function(value: &str) -> bool {
+    let first = value.split_whitespace().next().unwrap_or_default();
+    first.trim_matches(['`', ',', '.', ';']) != "none"
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.
@@ -360,10 +426,31 @@ fn record_of(
                 Ok(Comment {
                     author: field::text(&c["user"], "login")?.to_string(),
                     body: field::text(c, "body")?.to_string(),
+                    created: utc(field::text(c, "created_at")?)?.to_string(),
                 })
             })
             .collect::<Result<_, String>>()?,
     })
+}
+
+/// `text` when it is a UTC time `YYYY-MM-DDTHH:MM:SSZ`, the form GitHub gives, in
+/// which text order is time order.
+fn utc(text: &str) -> Result<&str, String> {
+    let shaped = text.len() == 20
+        && text.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b'T',
+            13 | 16 => b == b':',
+            19 => b == b'Z',
+            _ => b.is_ascii_digit(),
+        });
+    if shaped {
+        Ok(text)
+    } else {
+        Err(format!(
+            "`created_at` is `{text}`, not a UTC time `YYYY-MM-DDTHH:MM:SSZ`"
+        ))
+    }
 }
 
 /// Each object that `gh api --paginate` returns for `path`: the items of each page

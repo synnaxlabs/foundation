@@ -34,10 +34,20 @@ Hot path: none";
 /// The end lines of `ROUND`.
 const END: &str = "\n\nDeferred: none\nPublic surface: none\nHot path: none";
 
+/// A comment by the bot, posted at the cutoff, so the end lines apply.
 fn bot(body: &str) -> Comment {
     Comment {
         author: BOT.to_string(),
         body: body.to_string(),
+        created: CUTOFF.to_string(),
+    }
+}
+
+/// A comment by the bot, posted a second before the cutoff.
+fn old(body: &str) -> Comment {
+    Comment {
+        created: "2026-10-08T02:59:59Z".to_string(),
+        ..bot(body)
     }
 }
 
@@ -189,6 +199,55 @@ fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
 }
 
 #[test]
+fn an_old_round_keeps_the_check_before_the_end_lines() {
+    let free = old("## Review round 1\n\nConfirmed findings, most severe first.");
+    let unended = old(&ROUND.replace(END, ""));
+    assert_eq!(check(&record(vec![free, unended])), Vec::<String>::new());
+    let fixed = old("## Review round 1\n\nReviewers: reviewer");
+    assert_eq!(
+        check(&record(vec![fixed, bot(ROUND)])),
+        vec![
+            "review round 1 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn an_old_round_that_names_a_hot_path_needs_performance() {
+    let problem = vec![
+        "review round 3 names no performance, which this round requires.".to_string(),
+    ];
+    let cases = [
+        ("Hot path: none", "Hot path: `send`"),
+        ("Hot path: none", "Hot path:\n- `send`, once per frame"),
+        (
+            "\n\nDeferred: none\nPublic surface: none\n",
+            "\nHot path: `send`\n",
+        ),
+    ];
+    for (line, hot) in cases {
+        let round = old(&ROUND.replace(line, hot));
+        assert_eq!(check(&record(vec![round])), problem, "{hot}");
+    }
+    let quoted = ROUND.replace(
+        "Hot path: none",
+        "Hot path: none\n\n```\nHot path: `send`\n```",
+    );
+    let indented =
+        ROUND.replace("Hot path: none", "Hot path: none\n\n    Hot path: `send`");
+    let wrapped = ROUND.replace("Hot path: none", "Hot path:\nnone, tests only");
+    for round in [quoted, indented, wrapped] {
+        assert_eq!(
+            check(&record(vec![old(&round)])),
+            Vec::<String>::new(),
+            "{round}"
+        );
+    }
+}
+
+#[test]
 fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
     let quoted = ROUND.replace(
         "No bug, no lost coverage, no oracle weakening.\n\n\
@@ -213,6 +272,36 @@ fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
         check(&record(vec![bot(&indented)])),
         vec![unended("Deferred")]
     );
+    let fenced = ROUND.replace(
+        "No bug, no lost coverage, no oracle weakening.\n\n\
+         Deferred: none\nPublic surface: none\nHot path: none",
+        "The breaker posted this round:\n\n```\nFindings: none\n\n\
+         Deferred: none\nPublic surface: none\nHot path: none\n```",
+    );
+    assert_ne!(fenced, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&fenced)])),
+        vec![unended("Deferred")]
+    );
+    let closed = ROUND.to_string() + "\n```\nHot path: `send`\n```";
+    assert_eq!(
+        check(&record(vec![bot(&closed)])),
+        vec![unended("Deferred")]
+    );
+}
+
+#[test]
+fn fails_end_lines_that_are_not_a_paragraph_of_their_own() {
+    let joined = ROUND.replace("weakening.\n\n", "weakening.\n");
+    assert_ne!(joined, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&joined)])),
+        vec![unended("Deferred")]
+    );
+    let alone = "## Review round 3\n\nDeferred: none\nPublic surface: none\n\
+                 Hot path: none\nReviewers: reviewer\nRange: `38cba24f..c77c67d7`\n\
+                 Findings: none";
+    assert_eq!(check(&record(vec![bot(alone)])), vec![unended("Deferred")]);
 }
 
 #[test]
@@ -227,6 +316,11 @@ fn reads_an_end_line_that_wraps() {
             "Hot path: none, the change\nis in tests only",
         );
     assert_eq!(check(&record(vec![bot(&wrapped)])), Vec::<String>::new());
+    let next = later("reviewer, breaker").replace(
+        "Hot path: none",
+        "Hot path:\nnone, the change is in tests only",
+    );
+    assert_eq!(check(&record(vec![bot(&next)])), Vec::<String>::new());
     let earlier = ROUND.replace(
         "No bug",
         "Deferred: none\nPublic surface: none\nHot path: `send`\n\nNo bug",
@@ -360,7 +454,7 @@ fn fails_with_no_round_comment() {
 fn ignores_a_round_by_another_account() {
     let pasted = Comment {
         author: "someone".to_string(),
-        body: ROUND.to_string(),
+        ..bot(ROUND)
     };
     assert_eq!(
         check(&record(vec![pasted])),
@@ -621,11 +715,25 @@ fn names_the_pr_field_a_record_lacks() {
     );
     let pull =
         [json!({ "head": { "ref": "a" }, "base": { "ref": "main" }, "labels": [] })];
-    let comment = json!({ "user": { "login": BOT }, "body": ROUND });
-    let read = record_of(&pull, &[json!({ "filename": "a.rs" })], &[comment]).unwrap();
+    let comment = |created| json!({ "user": { "login": BOT }, "body": ROUND, "created_at": created });
+    let files = [json!({ "filename": "a.rs" })];
+    let read = record_of(&pull, &files, &[comment(CUTOFF)]).unwrap();
     assert_eq!((read.branch.as_str(), read.base.as_str()), ("a", "main"));
     assert_eq!(read.files, ["a.rs"]);
     assert_eq!(read.comments[0].author, BOT);
+    assert_eq!(read.comments[0].created, CUTOFF);
+    for created in [
+        "2026-10-08T03:00:00.5Z",
+        "2026-10-08 03:00:00Z",
+        "2026-1-08T03:00:00Z",
+    ] {
+        assert_eq!(
+            record_of(&pull, &files, &[comment(created)]).unwrap_err(),
+            format!(
+                "`created_at` is `{created}`, not a UTC time `YYYY-MM-DDTHH:MM:SSZ`"
+            )
+        );
+    }
 }
 
 #[test]

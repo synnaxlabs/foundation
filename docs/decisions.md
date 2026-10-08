@@ -3910,13 +3910,18 @@ How to read this record:
   requires, and `performance` when the first word of its `Hot path:` value is not
   `none`. Stated by the issue that the director's audits filed,
   https://github.com/synnaxlabs/foundation/issues/1467 (2026-10-07T15:20:38Z).
-  Supersedes "`performance` is never required" of
-  https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989. The end
-  lines are the last paragraph of the comment, in that order, as `/review`, "Round
-  comment", writes them, each at the start of its line, so an indented quote of them
-  is not them. Each may wrap onto the lines after it, and a paragraph after them fails.
-  The first word of a value, with backticks and a final comma or period removed, is
-  the word that is checked.
+  It adds `performance` to ruling 2 of
+  https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6040439732
+  (2026-10-07T06:32:32Z). The end lines are the last paragraph of the comment, in that
+  order, as `/review`, "Round comment", writes them, each at the start of its line, so
+  an indented quote of them or a line in a code block is not them. Each may wrap onto
+  the lines after it, and a paragraph after them fails. The first word of a value, with
+  backticks and a final comma, period, or semicolon removed, is the word that is
+  checked. A round comment posted before the cutoff `CUTOFF` in `xtask/src/review.rs`
+  (2026-10-08T03:00:00Z) is checked as before: an earlier free-form round passes, and it
+  needs no end lines. A `Hot path:` line in its text after its fields that names a
+  function still needs `performance`. Decided by the director at 2026-10-08T02:44:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051099968).
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not
