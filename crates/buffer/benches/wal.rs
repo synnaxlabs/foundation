@@ -1,0 +1,29 @@
+//! The time for each record of a commit of the write-ahead ring, with no file:
+//! `append` and `synced` for each record, `trimmed` and `release` for each commit. A
+//! commit of 1 record shows the cost for each commit, one of 8 the cost for each
+//! record. A ring of 64 blocks wraps often, one of 4096 blocks seldom.
+
+use buffer::bench::Ring;
+use divan::Bencher;
+use divan::counter::ItemsCount;
+
+fn main() {
+    divan::main();
+}
+
+#[divan::bench(args = [64, 4096])]
+fn commit_1_record(bencher: Bencher<'_, '_>, blocks: u64) {
+    cycle(bencher, blocks, 1);
+}
+
+#[divan::bench(args = [64, 4096])]
+fn commit_8_records(bencher: Bencher<'_, '_>, blocks: u64) {
+    cycle(bencher, blocks, 8);
+}
+
+fn cycle(bencher: Bencher<'_, '_>, blocks: u64, records: usize) {
+    let mut ring = Ring::new(blocks);
+    bencher
+        .counter(ItemsCount::new(records))
+        .bench_local(|| ring.commit(divan::black_box(records)));
+}

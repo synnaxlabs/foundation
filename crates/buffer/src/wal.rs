@@ -38,7 +38,7 @@ const BODY_MIN: usize = ALIGN - HEADER_LEN;
 const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry");
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
-const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
+pub(crate) const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 
 fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length in memory fits in u64")
@@ -548,7 +548,10 @@ impl Writer {
     /// not yet synced. The space of a trim is free only at its release. From one trim
     /// to the release of the next, the ring takes the records of two commits and the
     /// blocks that one wrap skips.
-    #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
+    #[cfg_attr(
+        not(any(test, feature = "sim")),
+        expect(dead_code, reason = "a commit calls it")
+    )]
     pub(crate) fn trimmed(&self, kept: Option<u64>) -> Option<Position> {
         let window = self.layout.window;
         let synced = self.ends.back().map_or(self.tail, |end| end.offset);
