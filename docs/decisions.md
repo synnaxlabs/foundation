@@ -3822,7 +3822,10 @@ How to read this record:
   so `collect` leaves it out by that pattern, not by name. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
-  2026-10-08 13:57 UTC).
+  2026-10-08 13:57 UTC) and `laptop.director`
+  (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
+  2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260.
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that

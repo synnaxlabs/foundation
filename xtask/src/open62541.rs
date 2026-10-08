@@ -304,11 +304,12 @@ fn kept(flag: &str) -> bool {
         })
 }
 
-/// Whether `flags.txt` leaves out `flag`: one of [`LEFT_OUT`], or a warning, which
-/// changes no code. A `-W` flag with a `,`, such as `-Wl,`, passes flags to another
-/// tool and is not a warning.
+/// Whether `flags.txt` leaves out `flag`: one of [`LEFT_OUT`], or a warning.
 fn left_out(flag: &str) -> bool {
-    LEFT_OUT.contains(&flag) || (flag.starts_with("-W") && !flag.contains(','))
+    LEFT_OUT.contains(&flag)
+        // A warning, which changes no code. A `-W` flag with a `,`, such as `-Wl,`,
+        // passes flags to another tool.
+        || (flag.starts_with("-W") && !flag.contains(','))
 }
 
 /// One compile of the `open62541` library in `compile_commands.json`.
