@@ -185,10 +185,12 @@ the table; a later round: `reviewer`, `breaker` unless the check counts no code 
 in its range, and `performance` with new numbers when its `Hot path:` line names a
 function), the `Deferred:` line of each round comment links the OK of each deferral in a
 risk crate, the `Public surface:` line of the last round comment links the architect's
-approval of each item, each finding of an architect review has its fix commit or a
-linked answer, and each later step that a round, an architect review, an architect's
-ruling, or an issue that the PR closes names is stated on an open issue that does it (a
-new issue, or a comment on an existing one) or as a trigger in the decisions entry, each
+approval of each item, at a SHA after which no commit changes the item's surface or the
+meaning of a ruling (`.claude/skills/architect/SKILL.md`, "Review before the person"
+step 3), each finding of an architect review has its fix commit or a linked answer, and
+each later step that a round, an architect review, an architect's ruling, or an issue
+that the PR closes names is stated on an open issue that does it (a new issue, or a
+comment on an existing one) or as a trigger in the decisions entry, each
 trigger that is the work of another open issue or PR is commented on that issue or PR,
 and each issue in `gh pr view <n> --json closingIssuesReferences`, or after a closing
 word in a commit message of the PR, is one that the PR finishes. GitHub closes each at
