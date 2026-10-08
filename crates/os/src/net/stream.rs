@@ -40,14 +40,11 @@ pub(super) struct Stream {
 
 impl Stream {
     /// A stream over `stream`, connected from `local` to `peer`, before its first poll.
-    /// It sets `options`, then `SO_LINGER` 0, unless `failed`, the error that already
-    /// ended the stream, is given. When a reset ends the socket first, the stream gives
-    /// the reset.
+    /// It sets `options` and `SO_LINGER` 0, unless `failed` already ended the stream.
     ///
     /// # Errors
     ///
-    /// The code of a failed option. macOS refuses an option on a socket that a reset
-    /// ended with `EINVAL`, so `EINVAL` comes only with no error pending.
+    /// The code of a failed option, unless the error that ended the socket caused it.
     pub(super) fn new(
         stream: std::net::TcpStream,
         local: SocketAddr,
@@ -61,11 +58,10 @@ impl Stream {
                 sockopt::set_socket_linger(&stream, Some(Duration::ZERO))
             }) {
                 Ok(()) => None,
-                Err(Errno::INVAL) => match Self::pending(&stream) {
-                    Some(code) => Some(stream_error(code, peer)),
-                    None => return Err(Errno::INVAL),
+                Err(code) => match Self::ended(&stream, code) {
+                    Some(ended) => Some(stream_error(ended, peer)),
+                    None => return Err(code),
                 },
-                Err(code) => return Err(code),
             },
         };
         Ok(Self {
@@ -92,6 +88,16 @@ impl Stream {
             .live("stream", TcpStream::from_std)
             .map_err(io_error)?;
         Ok(Pin::new(stream))
+    }
+
+    /// The error that ended `stream`, when a call on it gave `code` because the
+    /// connection ended with no poll that reported why: `ENOTCONN` from a shutdown,
+    /// and on macOS `EINVAL` from an option after a reset.
+    fn ended(stream: impl AsFd, code: Errno) -> Option<Errno> {
+        match code {
+            Errno::NOTCONN | Errno::INVAL => Self::pending(stream),
+            _ => None,
+        }
     }
 
     /// The error the kernel holds for the stream, after an event no poll reported.
@@ -169,15 +175,8 @@ impl tcp::Driver for Stream {
         }
         // The linger goes first: macOS refuses an option on a socket shut both ways.
         let shut = sockopt::set_socket_linger(&*stream, None)
-            .and_then(|()| rustix::net::shutdown(&*stream, Shutdown::Write));
-        let shut = match shut {
-            // The connection ended with no poll that reported why. After a reset,
-            // macOS refuses the linger with `EINVAL`.
-            Err(code @ (Errno::NOTCONN | Errno::INVAL)) => {
-                Err(Self::pending(&*stream).unwrap_or(code))
-            }
-            outcome => outcome,
-        };
+            .and_then(|()| rustix::net::shutdown(&*stream, Shutdown::Write))
+            .map_err(|code| Self::ended(&*stream, code).unwrap_or(code));
         match shut {
             Ok(()) => {
                 self.closed = true;
