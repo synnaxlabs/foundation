@@ -8,11 +8,24 @@ publish.workspace = true
 [features]
 open62541 = ["dep:cc"]
 
+[dependencies]
+env = { path = "../env" }
+types = { path = "../types" }
+
 [build-dependencies]
 cc = { workspace = true, optional = true }
 
 [dev-dependencies]
 cc = { workspace = true }
+# Turns on `open62541`, since the bench host runs no features.
+connector-opcua = { path = ".", features = ["open62541"] }
+divan = { workspace = true }
+sim = { path = "../sim" }
+
+[[bench]]
+name = "run"
+harness = false
+test = true
 
 [lints]
 workspace = true

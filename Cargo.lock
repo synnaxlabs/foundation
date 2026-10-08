@@ -411,6 +411,11 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "connector-opcua",
+ "divan",
+ "env",
+ "sim",
+ "types",
 ]
 
 [[package]]
