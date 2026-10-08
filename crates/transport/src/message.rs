@@ -507,7 +507,7 @@ mod tests {
                 for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
                     let bytes = [encode(&[vec![1; 200]]).as_slice(), cut].concat();
                     let mut source = Source::new(bytes, split);
-                    let mut reader = Reader::new(200);
+                    let mut reader = Reader::new(usize::MAX);
                     assert_eq!(
                         read_all(&mut reader, &pool, &mut source),
                         Err(Error::Broken {
@@ -515,6 +515,12 @@ mod tests {
                         }),
                         "{cut:x?}, {split} per chunk"
                     );
+                    // Private: only a peer that misframes ends a stream inside a
+                    // message, and no heap count is exact in a binary with a test
+                    // harness.
+                    assert_eq!(reader.held.buffer.capacity(), 0);
+                    let slots = reader.held.chunks.capacity();
+                    assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
                 }
             }
         }
@@ -525,7 +531,7 @@ mod tests {
             for split in 1..=7 {
                 for cut in [&[0x40][..], &[0x80, 0, 0], &[0xC0; 7]] {
                     let mut source = Source::new(cut.to_vec(), split);
-                    let mut reader = Reader::new(16);
+                    let mut reader = Reader::new(usize::MAX);
                     let read = reader.read(
                         |_| false,
                         |len| pool.alloc(len).ok(),
