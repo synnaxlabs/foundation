@@ -24,12 +24,14 @@ pub struct Env {
     pub tasks: env::tasks::Tasks,
 }
 
-/// A shard on a new ring in `env`, its interner, and the mesh time once the clock has
-/// one: the midpoint of the clock's interval, as the shard stamps it.
+/// A shard on the ring in `shard-0` of `env.files`, its interner, and the mesh time
+/// once the clock has one: the midpoint of the clock's interval, as the shard stamps
+/// it.
 ///
-/// The ring is 4 MiB in `shard-0`, with record bodies of at most 64 KiB and a commit
-/// each 10 ms. A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
-/// nothing frees the ring until #160, so a run fills it at 1023 one-frame commits.
+/// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
+/// otherwise. A commit starts 10 ms after the write it holds.
+/// A commit takes whole 4 KiB blocks (one for a frame, three for 64), and nothing frees
+/// the ring until #160, so a run fills it at 1023 one-frame commits.
 ///
 /// # Panics
 ///
@@ -80,18 +82,21 @@ mod tests {
     use env::files::Mode;
     use types::authority::Authority;
     use types::channel;
-    use types::frame::key_set::Group;
+    use types::channel::Slot;
+    use types::frame::key_set::{Group, KeySet};
     use types::frame::{Draft, Form, Label, Path as Route};
     use types::sample::{Scalar, Type};
 
     use super::*;
-    use crate::Outcome;
+    use crate::{Outcome, Refusal, order};
 
     /// Runs `body` on a shard of a sim node made with `config`.
-    fn run<T: Send + 'static, F: Future<Output = T> + 'static>(
-        config: sim::node::Config,
-        body: impl FnOnce(sim::node::Node, Shard, Interner, Stamp) -> F + Send + 'static,
-    ) -> T {
+    fn run<T, F, B>(config: sim::node::Config, body: B) -> T
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + 'static,
+        B: FnOnce(sim::node::Node, Shard, Interner, Stamp) -> F + Send + 'static,
+    {
         let mut sim = sim::Sim::new(sim::Config::default());
         let node = sim.node(config);
         sim.run_on(&node, |node, tasks| async move {
@@ -120,44 +125,98 @@ mod tests {
         assert_eq!(len, (1 << 22) + 2 * 4096);
     }
 
+    /// A writer on one index with one data channel, and its key set.
+    fn open_writer(
+        shard: &mut Shard,
+        interner: &mut Interner,
+    ) -> (crate::writer::Key, Arc<KeySet>) {
+        let index = channel::Key::from_u128(1);
+        let channels = [(channel::Key::from_u128(2), Type::Scalar(Scalar::I64))];
+        let set = interner.intern(&[Group {
+            index,
+            data: &channels,
+        }]);
+        shard.carry(set.entries()[0].slot);
+        let writer = shard
+            .open_writer(crate::writer::Writer {
+                subject: "a".parse().expect("a valid name"),
+                authority: Authority(1),
+                lease: None,
+                set: Arc::clone(&set),
+            })
+            .expect("opens");
+        (writer, set)
+    }
+
+    /// The outcomes of a frame of one sample at `stamp`.
+    fn write(
+        shard: &mut Shard,
+        writer: crate::writer::Key,
+        set: &KeySet,
+        stamp: Stamp,
+    ) -> Vec<Outcome> {
+        let series = [(0, 8), (1, 8)];
+        let mut draft =
+            Draft::new(shard.pool(), set, Form::Raw, &series).expect("a frame");
+        for (entry, _) in series {
+            let bytes = draft.series_mut(entry).expect("the series is present");
+            bytes.copy_from_slice(&stamp.nanos().to_le_bytes());
+        }
+        draft.set_count(0, 1);
+        let outcomes = shard.write(writer, Label::Path(Route::Live), draft);
+        outcomes.expect("the home takes it").to_vec()
+    }
+
     #[test]
-    fn applies_a_frame_at_the_mesh_time_it_gives_while_the_wall_error_is_unknown() {
+    fn gives_the_midpoint_of_the_clock_while_the_wall_error_is_unknown() {
         let config = sim::node::Config {
             wall_error: None,
             ..sim::node::Config::default()
         };
-        let outcomes = run(config, |_, mut shard, mut interner, now| async move {
-            let index = channel::Key::from_u128(1);
-            let data = channel::Key::from_u128(2);
-            let channels = [(data, Type::Scalar(Scalar::I64))];
-            let set = interner.intern(&[Group {
-                index,
-                data: &channels,
-            }]);
-            shard.carry(set.entries()[0].slot);
-            let writer = shard
-                .open_writer(crate::writer::Writer {
-                    subject: "a".parse().expect("a valid name"),
-                    authority: Authority(1),
-                    lease: None,
-                    set: Arc::clone(&set),
-                })
-                .expect("opens");
-            let series = [(0, 8), (1, 8)];
-            let mut draft =
-                Draft::new(shard.pool(), &set, Form::Raw, &series).expect("a frame");
-            for (entry, _) in series {
-                let bytes = draft.series_mut(entry).expect("the series is present");
-                bytes.copy_from_slice(&now.nanos().to_le_bytes());
-            }
-            draft.set_count(0, 1);
-            let outcomes = shard.write(writer, Label::Path(Route::Live), draft);
-            outcomes.expect("the home takes it").to_vec()
-        });
+        let (ahead, applied, now) =
+            run(config, |_, mut shard, mut interner, now| async move {
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let late = Stamp::from_nanos(now.nanos() + 1_000_000_001);
+                let ahead = write(&mut shard, writer, &set, late);
+                (ahead, write(&mut shard, writer, &set, now), now)
+            });
 
+        let refusal = Refusal::Order(order::Error::Ahead {
+            stamp: Stamp::from_nanos(now.nanos() + 1_000_000_001),
+            latest: Stamp::from_nanos(now.nanos() + 1_000_000_000),
+        });
+        assert_eq!(
+            ahead,
+            [Outcome::Refused {
+                slot: Slot::new(0),
+                refusal
+            }]
+        );
         assert!(
-            matches!(outcomes[..], [Outcome::Applied { .. }]),
-            "{outcomes:?}"
+            matches!(applied[..], [Outcome::Applied { .. }]),
+            "{applied:?}"
+        );
+    }
+
+    #[test]
+    fn starts_the_commit_of_a_frame_10_ms_after_its_write() {
+        let elapsed = run(
+            sim::node::Config::default(),
+            |node, mut shard, mut interner, now| async move {
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let start = node.clock().now();
+                write(&mut shard, writer, &set, now);
+                shard.committed().await.expect("commits");
+                node.clock().now() - start
+            },
+        );
+
+        let commit = Span::from_nanos(10_000_000);
+        // The disk takes under 1 ms of it.
+        let disk = Span::from_nanos(1_000_000);
+        assert!(
+            commit <= elapsed && elapsed.nanos() < commit.nanos() + disk.nanos(),
+            "{elapsed:?}"
         );
     }
 }
