@@ -396,8 +396,8 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
 /// Clang with libgcc 9.3.1 or later, or with `-rtlib=compiler-rt`. The host build does
 /// not show it. So this preprocesses each source of the copy as the host build does,
 /// and compiles it for 64-bit Arm with that default. The preprocessing is the host's,
-/// so the test finds the names that the code generation for Arm adds, not the names
-/// of a branch of the source for Arm only.
+/// so the test finds the names that the code generation for Arm adds, not the names of
+/// a branch of the source for Arm only.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
