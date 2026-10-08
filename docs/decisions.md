@@ -2149,9 +2149,12 @@ How to read this record:
   when their majorities sum to at most 64. This binds only after #1231. Decided by
   `laptop.architect`, 2026-10-08T12:38:01Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060034191).
-  Supersedes the voter bound of
-  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161 and of
-  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643. Before
+  Supersedes the voter bound and the sum of 33 873 bytes of
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
+  voter bound of
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161. The sum
+  of 33 869 bytes: `laptop.architect`, 2026-10-08T12:46:52Z
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060184527). Before
   #1231 counts peers as holders, the rule of a majority of each half moves to
   `raft::Voters::quorum` (#1875). Every member refuses, at apply, a change whose
   holders are not a majority of each half of the voters as of the entry
@@ -2213,14 +2216,13 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), and
   the second sentence 2026-10-08T12:23:54Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059781924), which
-  supersedes the second sentence of
+  supersedes the second sentence of the SPEC APPLY text of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551. A put
   gives `Error::Pool` or `Error::Blob` on a failure. `Mesh::open` puts each chunk of the
   founding tree in the store. A change that the state refuses as stale gives
   `Error::Stale { base, pointer }`. A call learns the refusal of its own entry from
   `Applied`, which keeps the refusal of each applied entry above the lowest open floor
-  of a try. Decided by `laptop.architect`,
-  2026-10-08T08:22:08Z
+  of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A call
   whose entry finds the pointer that the call makes, after a lost answer or an equal
   change of another call, returns that pointer; a later pointer gives `Stale`. Decided
