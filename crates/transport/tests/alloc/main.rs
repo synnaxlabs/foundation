@@ -5,27 +5,27 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+#[path = "../common/mod.rs"]
+mod common;
+
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
+use common::{CLIENT, PORT, SERVER, filled, part, public};
 use sim::Sim;
 use sim::node::Node;
 use transport::stream::{Part, Sender};
-use transport::{Address, Class, Code, Config, Error, Port, Transport};
-use types::node::{PrivateKey, PublicKey};
+use transport::{Address, Class, Code, Config, Error, Transport};
+use types::node::PrivateKey;
 use types::time::Span;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
-const CLIENT: PrivateKey = PrivateKey([1; 32]);
-const SERVER: PrivateKey = PrivateKey([2; 32]);
-const PORT: u16 = 4433;
 /// Long enough for the peer to read and acknowledge a message.
 const PAUSE: Span = Span::from_nanos(100_000_000);
 const CLOSED: Error = Error::PeerClosed { code: Code(0) };
@@ -185,36 +185,13 @@ fn serve(node: &Node) {
     drop(started.expect("a shard"));
 }
 
-fn filled(pool: &Pool, bytes: usize) -> Block {
-    let mut block = pool.alloc(bytes).expect("the pool has room");
-    block.fill(0x5a);
-    block.freeze()
-}
-
+/// [`common::config`] with messages up to 128 KiB and a pool of 4 MiB.
 fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
     let pool = block::Config { budget: 1 << 22 };
     let memory = Heap::new(pool.reservation());
     Config {
-        private_key: key,
         message_bytes_max: NonZeroUsize::new(1 << 17).expect("not zero"),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(4).expect("not zero"),
-        idle: Span::from_nanos(10 * Span::SECOND.nanos()),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks,
         pool: Rc::new(Pool::new(pool, memory)),
+        ..common::config(node, tasks, key)
     }
-}
-
-fn part(node: &Node, port: u16) -> transport::port::Part {
-    let at = SocketAddr::new(node.addresses()[0], port);
-    let port = Port::bind(&node.net(), at).expect("a port");
-    port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }
