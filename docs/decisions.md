@@ -1001,8 +1001,9 @@ How to read this record:
   in one call see the same time, and a lease never compares readings of two clocks
   (approved by the coordinator on 2026-10-06, #964). Before the node first has mesh
   time, it opens no writer, with `writer::Error::Unsynced`. A write needs an open
-  writer, so it never meets that case. A reader opens with no mesh time: its open and
-  its close take no stamp (#1024; decided by the architect, #963). This is a patch: #523
+  writer, so it never meets that case. An unnamed reader opens with no mesh time: its
+  open and its close take no stamp (#1024; decided by the architect, #963). A named
+  reader needs mesh time (HOME NAMED READERS). This is a patch: #523
   decides where samples wait before the first estimate (CLOCK PEER ANSWER), and removes
   or keeps `Unsynced`. Lost: time as arguments of each call, because each caller repeats
   the same two reads and can pass an old one. Approved by the coordinator on 2026-10-05
@@ -1054,6 +1055,21 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861). The
   surface was approved by `laptop.architect` (2026-10-08T07:01:09Z:
   https://github.com/synnaxlabs/foundation/pull/1824#issuecomment-6054411394).
+- **HOME NAMED READERS (#1742, #1851)** `Shard::open_named_complete` and
+  `open_named_latest` open a reader by its subject and name, and `Shard::ack` moves the
+  position of a named complete reader. Before the node first has mesh time, a named
+  open gives `reader::Unsynced`, because a hold ends at a mesh time stamp. A named
+  complete reader opens at its last ack within its hold, else at the live tail, and
+  ends `Behind` when a frame after that ack was released. Its close starts its hold.
+  An open of the same subject and name takes the old session over, and
+  `reader::Opened::replaced` names it. `home` drops the position records of
+  `delivery` until #274 appends them to the index log, so a reopen after a restart
+  starts at the live tail. Lost: one open that takes a `delivery::Reader`, because only
+  a named open can fail. Decided by `laptop.architect` (2026-10-08T10:01:19Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). The
+  subject in the key and the order of the PRs: `laptop.architect`
+  (2026-10-08T10:15:04Z:
+  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053).
 - **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
