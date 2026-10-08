@@ -2945,11 +2945,18 @@ mod tests {
                 },
             }])
             .unwrap();
+            let value = Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: at(0, 60),
+                value: private.clone(),
+            }])
+            .unwrap();
             let cases = [
                 list(&[Kind::List(vec![private])]),
                 list(&[string(ALICE), call]),
                 Kind::Map(map.clone()),
                 list(&[Kind::Map(map)]),
+                list(&[Kind::Map(value)]),
             ];
             for keys in cases {
                 assert_eq!(
