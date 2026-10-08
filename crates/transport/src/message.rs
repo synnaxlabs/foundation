@@ -445,7 +445,6 @@ mod tests {
 
             #[test]
             fn when_stream_ends_inside_a_prefix_it_fails(
-                low in 0_u8..64,
                 // `None` repeats the first byte.
                 tail in prop::collection::vec(
                     prop_oneof![
@@ -458,36 +457,42 @@ mod tests {
                 ),
             ) {
                 let pool = pool(1 << 16);
-                for (tag, len) in [(1_u8, 2), (2, 4), (3, 8)] {
-                    let first = (tag << 6) | low;
+                // A message before the cut prefix leaves state in the reader.
+                let starts = [Vec::new(), encode(&[vec![1, 2, 3]])];
+                // Each first byte of a prefix of 2, 4, or 8 bytes.
+                for first in 0x40_u8..=0xFF {
+                    let len = 1_usize << (first >> 6);
                     let tail = tail.iter().map(|byte| byte.unwrap_or(first));
                     let whole: Vec<_> = iter::once(first).chain(tail).collect();
                     for cut in 1..len {
                         for split in 1..len {
-                            let bytes = whole.get(..cut).expect("a cut").to_vec();
-                            let mut source = Source::new(bytes, split);
-                            let mut reader = Reader::new(16);
-                            prop_assert_eq!(
-                                read_all(&mut reader, &pool, &mut source),
-                                Err(Error::Broken {
-                                    reason: "the stream ended inside a message"
-                                        .to_owned()
-                                }),
-                                "{} bytes of {:x?}, {} per chunk",
-                                cut,
-                                whole,
-                                split
-                            );
-                            // Private: only a peer that misframes ends a stream
-                            // inside a message, and no heap count is exact in a
-                            // binary with a test harness.
-                            prop_assert_eq!(reader.held.buffer.capacity(), 0);
-                            let slots = reader.held.chunks.capacity();
-                            prop_assert!(
-                                slots <= CHUNKS_MAX,
-                                "a list of {} slots",
-                                slots
-                            );
+                            for start in &starts {
+                                let cut = whole.get(..cut).expect("a cut");
+                                let bytes = [start.as_slice(), cut].concat();
+                                let mut source = Source::new(bytes, split);
+                                let mut reader = Reader::new(16);
+                                prop_assert_eq!(
+                                    read_all(&mut reader, &pool, &mut source),
+                                    Err(Error::Broken {
+                                        reason: "the stream ended inside a message"
+                                            .to_owned()
+                                    }),
+                                    "{:x?} then {:x?}, {} per chunk",
+                                    start,
+                                    cut,
+                                    split
+                                );
+                                // Private: only a peer that misframes ends a stream
+                                // inside a message, and no heap count is exact in a
+                                // binary with a test harness.
+                                prop_assert_eq!(reader.held.buffer.capacity(), 0);
+                                let slots = reader.held.chunks.capacity();
+                                prop_assert!(
+                                    slots <= CHUNKS_MAX,
+                                    "a list of {} slots",
+                                    slots
+                                );
+                            }
                         }
                     }
                 }
