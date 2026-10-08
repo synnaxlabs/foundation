@@ -18,16 +18,23 @@
   tabs at the end of each line removed: as CommonMark with the GitHub extensions that
   `pulldown-cmark` has (tables, footnotes, strikethrough, task lists, and quote kinds).
   The others change no line of text: an extended autolink keeps its text, and the tag
-  filter acts only on raw HTML, which fails. A line ends at `\n`, `\r\n`, or a lone `\r`
-  (decided by the director at 2026-10-08T04:42:33Z,
+  filter acts only on raw HTML, which fails (corrected by the director at
+  2026-10-08T21:55:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069788449). A
+  line ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at
+  2026-10-08T04:42:33Z,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
-  round heading is the first top-level `## Review round <n>` heading. The fields are
+  round heading is the first top-level `## Review round <n>` heading. In a round
+  posted after the cutoff with no such heading, it is the first line of a top-level
+  HTML block that is `## Review round <n>` after at most three spaces, since GitHub
+  reads some of these blocks as text and shows the line as a heading. The fields are
   the first top-level block after it, and the end lines are the last one, each when it
   is a paragraph. A code block, an HTML block, a list, a quote, or a table is not a
   paragraph, so a list after the `Hot path:` line fails. A round comment posted after
   the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
-  block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source
-  starts with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. The
+  block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source,
+  after the indent and the marks of quotes, list items, and footnote labels, starts
+  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. The
   message names the line. GitHub reads some of these lines in a different way, and an
   open `<!--` or `<details>` hides the text after it. A round comment that fails by
   this rule gets an edit that puts the line in a code span, and the cutoff stays. In
@@ -37,8 +44,8 @@
   https://github.com/synnaxlabs/foundation/issues/1783, with the rulings of the
   director at 2026-10-08T21:47:24Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
-  approved by the director at
-  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069844452.
+  approved by the director at 2026-10-08T21:59:14Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069844452).
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
