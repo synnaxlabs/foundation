@@ -6361,7 +6361,12 @@ How to read this record:
   Amended (2026-10-08, #1830, by `laptop.architect-2`, 07:26 UTC): with a mesh, each
   session and stream future drops, then the mesh, and the transport drops when the
   last task of the mesh ends, before `lock` drops:
-  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
+  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235. Amended
+  again (2026-10-08, #1962, by `laptop.architect-2`, 20:07 UTC): with a mesh, shard 0
+  waits for each task of the mesh to end, and the transport drops with the last of the
+  port's future and the tasks of the mesh. This holds also when the mesh stops before
+  the node, which then keeps serving until #1780 stops it:
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010.
 - **NODE MESH (#585, 2026-10-08)** `Config::key` is the node's key, beside
   `Config::private_key`; both are patches until #1660 moves them to node-local disk.
   `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
