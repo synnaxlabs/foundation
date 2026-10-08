@@ -724,6 +724,144 @@ mod tests {
         const ROUND_TRIP: Duration = Duration::from_millis(125);
     }
 
+    mod probe {
+        use super::*;
+
+        /// The most time between two probes to a peer that does not answer.
+        const GAP_MAX: Duration = Duration::from_secs(2);
+
+        /// A pair with link delay `delay`, whose connections outlive each run here.
+        fn pair(shard: &testing::Shard, delay: Duration) -> Pair {
+            let idle = Span::from_nanos(120 * Span::SECOND.nanos());
+            Pair::new(shard, idle, delay)
+        }
+
+        /// The times between two instants at which `side` sent, from `sent` on.
+        fn gaps(side: &Side, sent: usize) -> Vec<Duration> {
+            let mut at: Vec<_> = side.sent[sent..].iter().map(|&(at, ..)| at).collect();
+            at.dedup();
+            at.windows(2)
+                .map(|pair| pair[1].checked_sub(pair[0]).expect("in order"))
+                .collect()
+        }
+
+        /// Connects over a link with `delay`, stops the server, writes 100 bytes from
+        /// the client, and runs `span`. The client's sends start at the write.
+        fn unanswered(shard: &testing::Shard, delay: Duration, span: Duration) -> Pair {
+            let mut pair = pair(shard, delay);
+            pair.dial(pair::SERVER_KEY.public());
+            pair.run(Duration::from_secs(3));
+            pair.server.silent = true;
+            let connection = pair.client.connection();
+            let stream = connection.streams().open(Dir::Uni).expect("a stream");
+            let mut send = connection.send_stream(stream);
+            assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+            pair.client.sent.clear();
+            pair.run(span);
+            pair
+        }
+
+        #[test]
+        fn to_a_silent_server_in_a_dial_come_at_most_2_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let mut pair = pair(shard, DELAY);
+                pair.server.silent = true;
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(100));
+                gaps(&pair.client, 0)
+            });
+            assert!(gaps.len() >= 30, "{gaps:?}");
+            assert!(gaps.iter().all(|&gap| gap <= GAP_MAX), "{gaps:?}");
+        }
+
+        #[test]
+        fn with_data_in_flight_double_up_to_2_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let pair = unanswered(shard, DELAY, Duration::from_secs(100));
+                gaps(&pair.client, 0)
+            });
+            assert!(gaps.len() >= 30, "{gaps:?}");
+            let doubled = (0..gaps.len()).map(|i| {
+                let exponent = u32::try_from(i).expect("fits").min(16);
+                (gaps[0] * 2_u32.pow(exponent)).min(GAP_MAX)
+            });
+            assert_eq!(gaps, doubled.collect::<Vec<_>>());
+        }
+
+        // A round trip of 1.2 s with no second sample gives a probe timeout over 2 s.
+        #[test]
+        fn never_come_before_the_probe_timeout() {
+            let gaps = testing::run(1, |shard| {
+                let delay = Duration::from_millis(600);
+                let pair = unanswered(shard, delay, Duration::from_secs(60));
+                gaps(&pair.client, 0)
+            });
+            // A probe is two datagrams, the second a few ms after the first.
+            let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY).collect();
+            assert!(probes.len() >= 10, "{gaps:?}");
+            assert!(probes.iter().all(|&&gap| gap > GAP_MAX), "{gaps:?}");
+        }
+
+        #[test]
+        fn after_a_write_between_two_probes_come_one_gap_after_the_write() {
+            let (since, gaps) = testing::run(1, |shard| {
+                let mut pair = unanswered(shard, DELAY, Duration::from_secs(60));
+                let probe = pair.client.sent.last().expect("a probe").0;
+                let now = Duration::from_secs(63);
+                let write = now.max(probe + Duration::from_secs(1));
+                pair.run(write.checked_sub(now).expect("not before now"));
+                let connection = pair.client.connection();
+                let stream = connection.streams().open(Dir::Uni).expect("a stream");
+                let mut send = connection.send_stream(stream);
+                assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+                pair.client.sent.clear();
+                pair.run(Duration::from_secs(3));
+                assert_eq!(pair.client.sent[0].0, write);
+                let since = write.checked_sub(probe).expect("after the probe");
+                (since, gaps(&pair.client, 0))
+            });
+            assert!(since < GAP_MAX, "{since:?}");
+            assert_eq!(gaps[0], GAP_MAX, "{gaps:?}");
+        }
+
+        // The server's probe is in the Initial space. The client's ACK resets the
+        // backoff, and the lost Handshake packet left long before the probe, so its
+        // probe timeout has passed.
+        #[test]
+        fn back_off_no_more_after_an_ack_so_a_lost_handshake_goes_at_once() {
+            let (answer, sent) = testing::run(1, |shard| {
+                let mut pair = pair(shard, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(35));
+                pair.server.drops = 1;
+                let before = pair.server.sent.len();
+                pair.run(Duration::from_secs(1));
+                let server: Vec<_> =
+                    pair.server.sent.iter().map(|&(at, ..)| at).collect();
+                let probe = server[before + 1];
+                let mut client = pair.client.sent.iter().map(|&(at, ..)| at);
+                let answer = client.find(|&at| at >= probe + DELAY);
+                (answer.expect("an answer"), server)
+            });
+            assert!(sent.contains(&(answer + DELAY)), "{answer:?} {sent:?}");
+        }
+
+        #[test]
+        fn a_timer_that_fires_long_after_its_deadline_sends_one_probe() {
+            let sent = testing::run(1, |shard| {
+                let mut pair = unanswered(shard, DELAY, Duration::from_secs(10));
+                pair.client.silent = true;
+                pair.run(Duration::from_secs(20));
+                pair.client.silent = false;
+                pair.client.sent.clear();
+                pair.run(Duration::ZERO);
+                pair.client.sent.len()
+            });
+            // A probe is two datagrams when data is in flight.
+            assert_eq!(sent, 2);
+        }
+    }
+
     mod datagrams {
         use super::*;
 

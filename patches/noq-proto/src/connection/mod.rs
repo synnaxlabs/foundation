@@ -3067,7 +3067,9 @@ impl Connection {
         // exponential backoff from the PTO timer and would result in too many tail-loss
         // probes being sent.
         if self.peer_completed_handshake_address_validation() {
-            self.path_data_mut(path).pto_count = 0;
+            let path_data = self.path_data_mut(path);
+            path_data.pto_count = 0;
+            path_data.pto_fired = None;
         }
 
         // Explicit congestion notification
@@ -3275,6 +3277,7 @@ impl Connection {
         pns.loss_probes = pns.loss_probes.saturating_add(count);
         let path_data = self.path_data_mut(path_id);
         path_data.pto_count = path_data.pto_count.saturating_add(1);
+        path_data.pto_fired = Some(now);
         self.set_loss_detection_timer(now, path_id);
     }
 
@@ -3636,10 +3639,9 @@ impl Connection {
                 continue;
             }
 
-            // Compute the PTO duration for this space, we want to cap the maximum interval
-            // between two tail-loss probes so to not do a simple exponential backoff but
-            // rather iterate through the probes to compute the capped increment for an
-            // exponential backoff at each step.
+            // Compute the PTO duration for this space: an exponential backoff, capped at
+            // the maximum interval between two tail-loss probes, but never below the
+            // time an answer needs.
             let duration = {
                 let max_ack_delay = if space == SpaceId::Data {
                     self.ack_frequency.max_ack_delay_for_pto()
@@ -3647,21 +3649,18 @@ impl Connection {
                     Duration::ZERO
                 };
                 let pto_base = path.rtt.pto_base() + max_ack_delay;
-                let mut duration = pto_base;
-                for i in 1..=pto_count {
-                    let exponential_duration = pto_base * 2u32.pow(i.min(MAX_BACKOFF_EXPONENT));
-                    let max_duration = duration + max_interval;
-                    duration = exponential_duration.min(max_duration);
-                }
-                duration
+                let backoff = 2u32.pow(pto_count.min(MAX_BACKOFF_EXPONENT));
+                (pto_base * backoff).min(max_interval.max(pto_base))
             };
 
             let Some(last_ack_eliciting) = pns.time_of_last_ack_eliciting_packet else {
                 continue;
             };
             // Base the deadline on when the last probe was sent, so the PTO
-            // doesn't fire before the response has had time to arrive.
-            let pto = last_ack_eliciting + duration;
+            // doesn't fire before the response has had time to arrive, or on the
+            // last PTO fire when later, so that one expired timer fires once.
+            let pto = last_ack_eliciting.max(path.pto_fired.unwrap_or(last_ack_eliciting))
+                + duration;
             if result.is_none_or(|(earliest_pto, _)| pto < earliest_pto) {
                 if path.anti_amplification_blocked(1) {
                     // Nothing would be able to be sent.
@@ -5963,6 +5962,7 @@ impl Connection {
             // Self::peer_competed_handshake_address_validation.
             if let Some(path) = self.paths.get_mut(&path_id) {
                 path.data.pto_count = 0;
+                path.data.pto_fired = None;
             }
             self.set_loss_detection_timer(now, path_id);
 

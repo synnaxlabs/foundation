@@ -2025,6 +2025,34 @@ How to read this record:
   session). The limit is fixed for the session, so a size defect shows in every state
   of the stream
   (https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6035220831).
+- **PROBE GAP (#1415, 2026-10-08)** With no answer from the peer, the gap between two
+  probes of a QUIC connection is at most the cap that `noq-proto` picks: 2 s, 1 s when
+  the idle timeout is 25 s or less, and 1.5 RTT on a slow link. So a session that lives
+  through a cut shorter than its idle timeout sends again within about one cap and a
+  few round trips after the heal, whatever the length of the cut. The bound covers each
+  packet number space, so also the handshake of a dial that starts in a cut. The wait
+  that it bounds comes only when the data in flight fills the congestion window, so
+  that only a probe can send. The local patch of `noq-proto` 1.3.0
+  (`docs/dependencies.md`) makes the PTO duration `min(pto_base * 2^pto_count,
+  max(cap, pto_base))`, and starts the gap at the later of the last ack-eliciting send
+  and the last PTO fire, cleared where `pto_count` goes back to 0. The release caps
+  each step to the step before plus the cap, so the gap grew about 2 s for each probe.
+  A cap with no start at the fire keeps an expired deadline in the past, and
+  `handle_timeout` never returns. Cost: during a cut, a session with data in flight
+  sends one probe each 2 s. Rejected: a probe when a datagram of the peer comes in (no
+  bound when the peer sends nothing); a shorter idle timeout (the gap still grows); no
+  change (the wait grows with the cut for each protocol on `transport`); a watchdog
+  that pings each session with data in flight (the full window holds back the ping
+  too); and `mesh` drops a silent session (#1410). Decided by architect-2
+  (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6039795556,
+  2026-10-07T14:11:52Z). The handshake: amended by architect-2
+  (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6044520215,
+  2026-10-07T18:45:16Z). The start of the gap, the full window, and no upstream
+  report: plan
+  (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6058289883),
+  approved by architect-2
+  (https://github.com/synnaxlabs/foundation/issues/1415#issuecomment-6058428352,
+  2026-10-08T11:02:00Z).
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is

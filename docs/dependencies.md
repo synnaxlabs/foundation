@@ -51,7 +51,7 @@ change small, and list it here with its reason. The patched copy lives in
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
-| `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `noq-proto` | 1.3.0 | The gap between two probes is at most the cap (PROBE GAP in `docs/decisions.md`) | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
 
 ## Tests, benchmarks, and tools
 

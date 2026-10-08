@@ -2141,6 +2141,147 @@ mod tests {
         };
         got.iter().map(count).collect()
     }
+
+    mod heal {
+        use super::*;
+
+        /// The idle of both nodes in these runs.
+        const IDLE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
+
+        fn cut(sim: &mut Sim, a: &Node, b: &Node, loss: f64) {
+            let config = sim::link::Config {
+                loss,
+                ..sim::link::Config::default()
+            };
+            sim.link(a, b, config);
+            sim.link(b, a, config);
+        }
+
+        /// Runs `sim` in steps of 10 ms until `count` grows, and gives the time that
+        /// took in ms, or `None` when it does not grow within `limit` ms.
+        fn grows(sim: &mut Sim, count: &AtomicU32, limit: i64) -> Option<i64> {
+            let before = count.load(Ordering::Relaxed);
+            (1..=limit / 10).find_map(|step| {
+                assert_eq!(sim.run_for(spans(Span::MILLISECOND, 10)), Ok(()));
+                (count.load(Ordering::Relaxed) > before).then_some(step * 10)
+            })
+        }
+
+        /// The milliseconds until the server reads a message after a cut of `secs`
+        /// seconds heals, on a stream that carries one message each 250 ms.
+        fn stream_heal_ms(value: u64, secs: i64, len: usize) -> Option<i64> {
+            let (mut sim, client, server) = testing::nodes(value);
+            let at = [Address::Udp(testing::address(&server))];
+            let read = Arc::new(AtomicU32::new(0));
+            let counter = Arc::clone(&read);
+            testing::shard(&server, testing::SERVER, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let session = transport.accept().await.expect("a session");
+                let mut incoming = session.accept().await.expect("a stream");
+                while incoming.receiver.recv().await.expect("a message").is_some() {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            testing::shard(&client, testing::CLIENT, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let pool = Rc::clone(&config.pool);
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let server = testing::SERVER.public();
+                let session = transport.dial(server, &at).await.expect("a session");
+                let opened = session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let clock = node.clock();
+                for n in 0..u32::MAX {
+                    let mut message = vec![0; len];
+                    message[..4].copy_from_slice(&n.to_le_bytes());
+                    let block = testing::block(&pool, &message);
+                    sender.send(block).await.expect("sent");
+                    clock.sleep(spans(Span::MILLISECOND, 250)).await;
+                }
+            });
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            assert!(
+                read.load(Ordering::Relaxed) > 0,
+                "no message before the cut"
+            );
+            cut(&mut sim, &client, &server, 1.0);
+            assert_eq!(sim.run_for(spans(Span::SECOND, secs)), Ok(()));
+            cut(&mut sim, &client, &server, 0.0);
+            grows(&mut sim, &read, 30_000)
+        }
+
+        /// The milliseconds until a dial that starts in a cut of `secs` seconds
+        /// gives its session after the cut heals.
+        fn dial_heal_ms(value: u64, secs: i64) -> Option<i64> {
+            let (mut sim, client, server) = testing::nodes(value);
+            let at = [Address::Udp(testing::address(&server))];
+            let dialed = Arc::new(AtomicU32::new(0));
+            let counter = Arc::clone(&dialed);
+            testing::shard(&server, testing::SERVER, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let session = transport.accept().await.expect("a session");
+                std::future::pending::<()>().await;
+                drop((transport, session));
+            });
+            testing::shard(&client, testing::CLIENT, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let server = testing::SERVER.public();
+                let session = transport.dial(server, &at).await.expect("a session");
+                counter.store(1, Ordering::Relaxed);
+                std::future::pending::<()>().await;
+                drop((transport, session));
+            });
+            cut(&mut sim, &client, &server, 1.0);
+            assert_eq!(sim.run_for(spans(Span::SECOND, secs)), Ok(()));
+            assert_eq!(dialed.load(Ordering::Relaxed), 0, "a dial through the cut");
+            cut(&mut sim, &client, &server, 0.0);
+            grows(&mut sim, &dialed, 30_000)
+        }
+
+        /// The most time after a cut heals until the stream or the dial moves again.
+        const HEAL_MS: i64 = 3_000;
+
+        #[test]
+        fn a_stream_with_a_full_window_moves_within_3_s_after_a_cut_heals() {
+            for secs in [8, 15, 46, 59] {
+                let heal = stream_heal_ms(1, secs, 1_000);
+                assert!(
+                    heal.is_some_and(|ms| ms <= HEAL_MS),
+                    "cut {secs} s: {heal:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_dial_in_a_cut_gives_its_session_within_3_s_after_the_cut_heals() {
+            for secs in [8, 15, 50] {
+                let heal = dial_heal_ms(1, secs);
+                assert!(
+                    heal.is_some_and(|ms| ms <= HEAL_MS),
+                    "cut {secs} s: {heal:?}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
