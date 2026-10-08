@@ -813,9 +813,12 @@ fn writes_the_documented_subject_layout_with_keys_in_order() {
 #[test]
 fn refuses_a_subject_with_no_key() {
     let bytes = subject_bytes(0, &[]);
-    assert_eq!(Definition::decode(&bytes), Err(Error::NoKeys { at: 2 }));
     assert_eq!(
-        Error::NoKeys { at: 2 }.to_string(),
+        Definition::decode(&bytes),
+        Err(Error::NoPublicKeys { at: 2 })
+    );
+    assert_eq!(
+        Error::NoPublicKeys { at: 2 }.to_string(),
         "the subject at byte 2 has no public key"
     );
 }
@@ -824,14 +827,20 @@ fn refuses_a_subject_with_no_key() {
 fn refuses_keys_out_of_order_or_repeated() {
     for keys in [[[5; 32], [2; 32]], [[5; 32], [5; 32]]] {
         let bytes = subject_bytes(2, &keys);
-        assert_eq!(Definition::decode(&bytes), Err(Error::KeyOrder { at: 42 }));
+        assert_eq!(
+            Definition::decode(&bytes),
+            Err(Error::PublicKeyOrder { at: 42 })
+        );
     }
     let mut last_byte = [5; 32];
     last_byte[31] = 4;
     let bytes = subject_bytes(2, &[[5; 32], last_byte]);
-    assert_eq!(Definition::decode(&bytes), Err(Error::KeyOrder { at: 42 }));
     assert_eq!(
-        Error::KeyOrder { at: 42 }.to_string(),
+        Definition::decode(&bytes),
+        Err(Error::PublicKeyOrder { at: 42 })
+    );
+    assert_eq!(
+        Error::PublicKeyOrder { at: 42 }.to_string(),
         "the public key at byte 42 is not after the key before it"
     );
 }
@@ -840,7 +849,7 @@ fn refuses_keys_out_of_order_or_repeated() {
 fn refuses_a_key_of_small_order() {
     let bytes = subject_bytes(2, &[[2; 32], [0; 32]]);
     let error = Definition::decode(&bytes);
-    assert_eq!(error, Err(Error::KeyOrder { at: 42 }));
+    assert_eq!(error, Err(Error::PublicKeyOrder { at: 42 }));
     let bytes = subject_bytes(2, &[[0; 32], [2; 32]]);
     assert_eq!(
         Definition::decode(&bytes),
@@ -1652,10 +1661,16 @@ fn decodes_the_subject_fuzz_inputs_to_the_subject_reader() {
     let empty =
         include_bytes!("../../../../oracles/fuzz/spec_definition/subject_no_keys");
     assert_eq!(Definition::decode(valid), Ok(subject(&[2, 9])));
-    assert_eq!(Definition::decode(order), Err(Error::KeyOrder { at: 42 }));
+    assert_eq!(
+        Definition::decode(order),
+        Err(Error::PublicKeyOrder { at: 42 })
+    );
     assert_eq!(Definition::decode(small), Err(Error::SmallOrder { at: 10 }));
     assert_eq!(Definition::decode(large), Err(Error::Truncated { at: 2 }));
-    assert_eq!(Definition::decode(empty), Err(Error::NoKeys { at: 2 }));
+    assert_eq!(
+        Definition::decode(empty),
+        Err(Error::NoPublicKeys { at: 2 })
+    );
 }
 
 #[test]

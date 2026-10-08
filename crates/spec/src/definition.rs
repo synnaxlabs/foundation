@@ -660,14 +660,14 @@ impl<'a> Reader<'a> {
             let at = self.at();
             let bytes = self.array()?;
             if keys.last().is_some_and(|last| last.to_bytes() >= bytes) {
-                return Err(Error::KeyOrder { at });
+                return Err(Error::PublicKeyOrder { at });
             }
             keys.push(
                 PublicKey::new(bytes).map_err(|SmallOrder| Error::SmallOrder { at })?,
             );
         }
         Subject::new(keys).map_err(|error| match error {
-            subject::Error::Empty => Error::NoKeys { at: start },
+            subject::Error::Empty => Error::NoPublicKeys { at: start },
             subject::Error::Duplicate { .. } => {
                 unreachable!("the keys are in strict order")
             }
@@ -910,12 +910,12 @@ pub enum Error {
         error: retention::Error,
     },
     /// A subject has no public key.
-    NoKeys {
+    NoPublicKeys {
         /// Where the count of keys is.
         at: usize,
     },
     /// A subject's public key is not after the key before it in byte order.
-    KeyOrder {
+    PublicKeyOrder {
         /// Where the key is.
         at: usize,
     },
@@ -1006,10 +1006,10 @@ impl fmt::Display for Error {
             Self::Retention { at, error } => {
                 write!(f, "the retention at byte {at}: {error}")
             }
-            Self::NoKeys { at } => {
+            Self::NoPublicKeys { at } => {
                 write!(f, "the subject at byte {at} has no public key")
             }
-            Self::KeyOrder { at } => write!(
+            Self::PublicKeyOrder { at } => write!(
                 f,
                 "the public key at byte {at} is not after the key before it"
             ),
