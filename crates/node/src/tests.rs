@@ -2758,8 +2758,8 @@ mod port {
             assert_eq!(read, Some((vec![stamp], vec![7])));
         }
 
-        /// A founding that `spec::region::check` refuses, here a data channel whose
-        /// index the spec does not hold, fails the node at its first open.
+        /// A founding with a data channel whose index the spec does not hold fails the
+        /// node at its first open.
         #[test]
         fn a_founding_with_a_dangling_index_fails_the_node() {
             use super::super::hub::{I64, data};
