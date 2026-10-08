@@ -78,7 +78,7 @@
 /* #undef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 /* Multithreading */
-#define UA_MULTITHREADING 100
+#define UA_MULTITHREADING 0
 
 /* Advanced Options */
 #define UA_ENABLE_STATUSCODE_DESCRIPTIONS
@@ -220,18 +220,15 @@
 /**
  * Thread-local variables
  * ---------------------- */
-#if UA_MULTITHREADING >= 100
-# if defined(_MSC_VER)
-#  define UA_THREAD_LOCAL __declspec(thread)
-# elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#  define UA_THREAD_LOCAL _Thread_local /* C11 or newer */
-# elif defined(__GNUC__) || defined(__clang__)
-#  define UA_THREAD_LOCAL __thread
-# else
-#  error "No thread-local storage keyword available on this compiler."
-# endif
+/* At each level of UA_MULTITHREADING: each thread runs its own clients and servers. */
+#if defined(_MSC_VER)
+# define UA_THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+# define UA_THREAD_LOCAL _Thread_local /* C11 or newer */
+#elif defined(__GNUC__) || defined(__clang__)
+# define UA_THREAD_LOCAL __thread
 #else
-# define UA_THREAD_LOCAL
+# error "No thread-local storage keyword available on this compiler."
 #endif
 
 /**

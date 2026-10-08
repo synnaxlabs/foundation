@@ -20,7 +20,7 @@ const DEST: &str = "patches/open62541";
 /// are ours, and no feature the connector does not use.
 const OPTIONS: [&str; 11] = [
     "-DUA_ARCHITECTURE=none",
-    "-DUA_MULTITHREADING=100",
+    "-DUA_MULTITHREADING=0",
     "-DUA_ENABLE_ENCRYPTION=OFF",
     "-DUA_ENABLE_PUBSUB=OFF",
     "-DUA_ENABLE_XML_ENCODING=OFF",
@@ -69,12 +69,11 @@ const EXTRA: [&str; 2] = [
 
 /// The flags of the upstream compile, other than `-D`, `-I`, and `-std`, that change
 /// the code. `flags.txt` keeps them.
-const CODE_FLAGS: [&str; 8] = [
+const CODE_FLAGS: [&str; 7] = [
     "-fno-strict-aliasing",
     "-fexceptions",
     "-ffunction-sections",
     "-fdata-sections",
-    "-pthread",
     "-fno-unwind-tables",
     "-fno-asynchronous-unwind-tables",
     "-fno-math-errno",
@@ -93,16 +92,14 @@ const LEFT_OUT: [&str; 4] = [
 
 /// The system headers that a file of the copy may include: the C standard library and
 /// the POSIX headers of the plugins. A header that one of them includes is not checked.
-const SYSTEM_HEADERS: [&str; 18] = [
+const SYSTEM_HEADERS: [&str; 16] = [
     "ctype.h",
     "errno.h",
     "float.h",
     "inttypes.h",
     "limits.h",
-    "pthread.h",
     "signal.h",
     "stdarg.h",
-    "stdatomic.h",
     "stdbool.h",
     "stddef.h",
     "stdint.h",
@@ -1847,7 +1844,7 @@ End of search list.
         append("src/util/ua_encryptedsecret.c", "#include <time.h>\n");
         append(
             "src/util/ua_util.c",
-            "#include <pthread.h>\n#include <time.h>\n",
+            "#include <stdio.h>\n#include <time.h>\n",
         );
         assert_eq!(
             check(&root),
@@ -1915,6 +1912,7 @@ End of search list.
         let mut cc = Command::new("cc");
         cc.current_dir(&copy)
             .args(flags.lines())
+            .arg("-pthread")
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/open62541/rng.c"))
             .arg(&library)
             .arg("-o")

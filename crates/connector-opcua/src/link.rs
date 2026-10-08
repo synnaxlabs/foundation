@@ -298,7 +298,7 @@ fn the_copy_links_the_timer() {
 /// Each symbol outside the copy and `shim.c` that they may name, in glibc on x86-64
 /// and 64-bit Arm, at each optimization level. None gives or takes a heap block, so no
 /// block crosses between the allocator of libc and `src/alloc.rs`.
-const OUTSIDE: [&str; 41] = [
+const OUTSIDE: [&str; 34] = [
     "_GLOBAL_OFFSET_TABLE_",
     "__ctype_b_loc",
     "__errno_location",
@@ -324,13 +324,6 @@ const OUTSIDE: [&str; 41] = [
     "memmove",
     "memset",
     "printf",
-    "pthread_mutex_destroy",
-    "pthread_mutex_init",
-    "pthread_mutex_lock",
-    "pthread_mutex_unlock",
-    "pthread_mutexattr_destroy",
-    "pthread_mutexattr_init",
-    "pthread_mutexattr_settype",
     "puts",
     "stderr",
     "stdout",
