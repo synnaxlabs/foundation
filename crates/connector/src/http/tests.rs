@@ -509,12 +509,11 @@ fn gives_the_connect_error_when_nothing_listens() {
     );
 }
 
-/// The error of a send to `uri`, which `check` gives too.
-fn refused(uri: &str) -> Error {
-    let error = Network::new(10).send(get(uri)).expect_err("a refused URI");
+/// The error of a send to `uri`, and the error of `check` on it.
+fn refused(uri: &str) -> [Error; 2] {
+    let sent = Network::new(10).send(get(uri)).expect_err("a refused URI");
     let checked = check(&uri.parse().expect("a URI")).expect_err("a refused URI");
-    assert_eq!(format!("{checked:?}"), format!("{error:?}"), "{uri}");
-    error
+    [sent, checked]
 }
 
 #[test]
@@ -532,9 +531,10 @@ fn checks_a_uri_that_send_takes() {
 #[test]
 fn refuses_a_scheme_other_than_http() {
     for uri in ["https://10.0.0.2/", "/write", "https://admin:secret@[]:0/"] {
-        let error = refused(uri);
-        assert!(matches!(error, Error::Scheme), "{uri}: {error:?}");
-        assert_eq!(error.to_string(), "the scheme of the URI is not http");
+        for error in refused(uri) {
+            assert!(matches!(error, Error::Scheme), "{uri}: {error:?}");
+            assert_eq!(error.to_string(), "the scheme of the URI is not http");
+        }
     }
 }
 
@@ -544,18 +544,19 @@ fn refuses_user_info_and_keeps_none_of_it() {
         "http://admin:hunter2@10.0.0.2:8086/",
         "http://admin:hunter2@[influx]:99999/",
     ] {
-        let error = refused(uri);
-        assert!(matches!(error, Error::UserInfo), "{uri}: {error:?}");
-        let message = error.to_string();
-        assert_eq!(
-            message,
-            "the URI holds user info; give a credential through a secret"
-        );
-        let shown = format!("{message} {error:?}");
-        assert!(
-            !shown.contains("admin") && !shown.contains("hunter2"),
-            "{shown}"
-        );
+        for error in refused(uri) {
+            assert!(matches!(error, Error::UserInfo), "{uri}: {error:?}");
+            let message = error.to_string();
+            assert_eq!(
+                message,
+                "the URI holds user info; give a credential through a secret"
+            );
+            let shown = format!("{message} {error:?}");
+            assert!(
+                !shown.contains("admin") && !shown.contains("hunter2"),
+                "{shown}"
+            );
+        }
     }
 }
 
@@ -573,15 +574,16 @@ fn refuses_a_host_that_is_not_valid() {
         ("http://a[::1]:80/", "a[::1]"),
         ("http://a:8[0]/", "a:8[0]"),
     ] {
-        let error = refused(uri);
-        assert!(
-            matches!(&error, Error::Host { host: h } if h == host),
-            "{uri}: {error:?}"
-        );
-        assert_eq!(
-            error.to_string(),
-            format!("the URI has no valid host: \"{host}\"")
-        );
+        for error in refused(uri) {
+            assert!(
+                matches!(&error, Error::Host { host: h } if h == host),
+                "{uri}: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("the URI has no valid host: \"{host}\"")
+            );
+        }
     }
 }
 
@@ -598,15 +600,18 @@ fn refuses_a_port_that_is_not_a_u16() {
         ("[fd00::2]:80x", "80x"),
         ("[::]:80x", "80x"),
     ] {
-        let error = refused(&format!("http://{authority}/"));
-        assert!(
-            matches!(&error, Error::Port { port: p } if p == port),
-            "{authority}: {error:?}"
-        );
-        assert_eq!(
-            error.to_string(),
-            format!("the port \"{port}\" of the URI is not a number from 1 to 65535")
-        );
+        for error in refused(&format!("http://{authority}/")) {
+            assert!(
+                matches!(&error, Error::Port { port: p } if p == port),
+                "{authority}: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "the port \"{port}\" of the URI is not a number from 1 to 65535"
+                )
+            );
+        }
     }
 }
 
