@@ -90,7 +90,7 @@ fn accepted(
     options: &tcp::Options,
 ) -> Result<Stream, Error> {
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    Stream::new(stream, canonical(local), canonical(peer), Some(options))
+    Stream::new(stream, canonical(local), canonical(peer), options, None)
         .map_err(io_error)
 }
 

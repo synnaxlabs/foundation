@@ -1,5 +1,7 @@
 //! A TCP stream: the kernel's socket, polled through Tokio.
 
+#[cfg(target_os = "macos")]
+use std::io;
 use std::io::IoSlice;
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -10,7 +12,11 @@ use std::time::Duration;
 use env::net::{Error, tcp};
 use rustix::io::Errno;
 use rustix::net::{Shutdown, sockopt};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(not(target_os = "macos"))]
+use tokio::io::AsyncWrite;
+#[cfg(target_os = "macos")]
+use tokio::io::Interest;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::TcpStream;
 
 use super::socket::Socket;
@@ -22,6 +28,9 @@ pub(super) struct Stream {
     socket: Socket<std::net::TcpStream, TcpStream>,
     local: SocketAddr,
     peer: SocketAddr,
+    /// The bound that a write keeps on macOS, whose kernel applies it only to the
+    /// write event.
+    unsent_bytes_max: usize,
     /// `poll_close` ran: the FIN is queued.
     closed: bool,
     /// The error that ended the stream. The kernel reports a reset once and then an
@@ -31,8 +40,9 @@ pub(super) struct Stream {
 
 impl Stream {
     /// A stream over `stream`, connected from `local` to `peer`, before its first poll.
-    /// It sets `options` when given, then `SO_LINGER` 0. When a reset ended the
-    /// socket first, the stream gives the reset.
+    /// It sets `options`, then `SO_LINGER` 0, unless `failed`, the error that already
+    /// ended the stream, is given. When a reset ends the socket first, the stream gives
+    /// the reset.
     ///
     /// # Errors
     ///
@@ -42,43 +52,30 @@ impl Stream {
         stream: std::net::TcpStream,
         local: SocketAddr,
         peer: SocketAddr,
-        options: Option<&tcp::Options>,
+        options: &tcp::Options,
+        failed: Option<Error>,
     ) -> Result<Self, Errno> {
-        let set = options
-            .map_or(Ok(()), |options| apply(stream.as_fd(), options))
-            .and_then(|()| sockopt::set_socket_linger(&stream, Some(Duration::ZERO)));
-        let failed = match set {
-            Ok(()) => None,
-            Err(Errno::INVAL) => match Self::pending(&stream) {
-                Some(code) => Some(stream_error(code, peer)),
-                None => return Err(Errno::INVAL),
+        let failed = match failed {
+            Some(failed) => Some(failed),
+            None => match apply(stream.as_fd(), options).and_then(|()| {
+                sockopt::set_socket_linger(&stream, Some(Duration::ZERO))
+            }) {
+                Ok(()) => None,
+                Err(Errno::INVAL) => match Self::pending(&stream) {
+                    Some(code) => Some(stream_error(code, peer)),
+                    None => return Err(Errno::INVAL),
+                },
+                Err(code) => return Err(code),
             },
-            Err(code) => return Err(code),
         };
         Ok(Self {
             socket: Socket::Idle(stream),
             local,
             peer,
+            unsent_bytes_max: options.unsent_bytes_max,
             closed: false,
             failed,
         })
-    }
-
-    /// A stream over `stream` that `error` ended before its first poll. It sets no
-    /// option, so that macOS does not refuse one.
-    pub(super) fn ended(
-        stream: std::net::TcpStream,
-        local: SocketAddr,
-        peer: SocketAddr,
-        error: Error,
-    ) -> Self {
-        Self {
-            socket: Socket::Idle(stream),
-            local,
-            peer,
-            closed: false,
-            failed: Some(error),
-        }
     }
 
     /// Records `error` as the end of the stream, and gives it.
@@ -152,9 +149,9 @@ impl tcp::Driver for Stream {
                 None => io_error(Errno::PIPE),
             }));
         }
-        match ready!(stream.poll_write_vectored(cx, buffers)) {
+        match ready!(send(stream, cx, buffers, self.unsent_bytes_max)) {
             Ok(written) => Poll::Ready(Ok(written)),
-            Err(e) => Poll::Ready(Err(self.fail(stream_error(errno(&e), peer)))),
+            Err(code) => Poll::Ready(Err(self.fail(stream_error(code, peer)))),
         }
     }
 
@@ -191,6 +188,67 @@ impl tcp::Driver for Stream {
     }
 }
 
+/// Writes from `buffers` to `stream`.
+#[cfg(not(target_os = "macos"))]
+fn send(
+    stream: Pin<&mut TcpStream>,
+    cx: &mut Context<'_>,
+    buffers: &[IoSlice<'_>],
+    _: usize,
+) -> Poll<Result<usize, Errno>> {
+    stream
+        .poll_write_vectored(cx, buffers)
+        .map_err(|e| errno(&e))
+}
+
+/// Writes at most `unsent_bytes_max` bytes from `buffers` to `stream`, and then
+/// waits for the write event, which alone honors `TCP_NOTSENT_LOWAT` on macOS. The
+/// unsent bytes so stay below twice the bound.
+#[cfg(target_os = "macos")]
+fn send(
+    stream: Pin<&mut TcpStream>,
+    cx: &mut Context<'_>,
+    buffers: &[IoSlice<'_>],
+    unsent_bytes_max: usize,
+) -> Poll<Result<usize, Errno>> {
+    let stream = stream.into_ref().get_ref();
+    // A bound of 0 would write nothing, and wait for no event.
+    let max = unsent_bytes_max.max(1);
+    let mut len = 0;
+    let whole = buffers
+        .iter()
+        .take_while(|buffer| {
+            len += buffer.len();
+            len <= max
+        })
+        .count();
+    let head;
+    let buffers = match buffers.get(whole) {
+        Some(first) if whole == 0 => {
+            head = [IoSlice::new(&first[..max])];
+            &head[..]
+        }
+        _ => &buffers[..whole],
+    };
+    loop {
+        ready!(stream.poll_write_ready(cx)).map_err(|e| errno(&e))?;
+        let mut written = Err(Errno::AGAIN);
+        // `WouldBlock` from the closure clears the readiness, unless an event came
+        // during the write.
+        let _cleared = stream.try_io(Interest::WRITABLE, || {
+            written = rustix::io::writev(stream, buffers);
+            match written {
+                // No event follows a write of no bytes, so the readiness stays.
+                Ok(0) => Ok(()),
+                _ => Err(io::ErrorKind::WouldBlock.into()),
+            }
+        });
+        if written != Err(Errno::AGAIN) {
+            return Poll::Ready(written);
+        }
+    }
+}
+
 impl Drop for Stream {
     /// After `poll_close`, bytes the peer sent and this side did not read make the
     /// close reset, on each OS. Before it, `SO_LINGER` 0 is still set.
@@ -217,6 +275,15 @@ mod tests {
 
     use super::*;
 
+    fn options() -> tcp::Options {
+        tcp::Options {
+            send_buffer_bytes: 1 << 16,
+            recv_buffer_bytes: 1 << 15,
+            unsent_bytes_max: 1 << 14,
+            delayed: true,
+        }
+    }
+
     /// A connected pair on the loopback, with the blocking calls of std.
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
     fn create_pair() -> (std::net::TcpStream, std::net::TcpStream) {
@@ -236,7 +303,7 @@ mod tests {
     fn stream_to(socket: std::net::TcpStream, peer: SocketAddr) -> Stream {
         socket.set_nonblocking(true).unwrap();
         let local = socket.local_addr().unwrap();
-        Stream::new(socket, local, peer, None).unwrap()
+        Stream::new(socket, local, peer, &options(), None).unwrap()
     }
 
     /// An address to name a peer the kernel no longer holds.
