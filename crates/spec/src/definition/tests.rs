@@ -1407,7 +1407,8 @@ fn definition() -> impl Strategy<Value = Definition> {
     ]
 }
 
-fn kinded() -> impl Strategy<Value = (super::Kind, Definition)> {
+/// A definition of each kind, with its kind.
+pub(crate) fn kinded() -> impl Strategy<Value = (super::Kind, Definition)> {
     prop_oneof![
         access_strategy().prop_map(|d| (super::Kind::Access, d)),
         connector_strategy().prop_map(|d| (super::Kind::Connector, d)),
@@ -1423,11 +1424,6 @@ fn kinded() -> impl Strategy<Value = (super::Kind, Definition)> {
 }
 
 proptest! {
-    #[test]
-    fn gives_the_kind_of_each_definition((kind, definition) in kinded()) {
-        prop_assert_eq!(definition.kind(), kind);
-    }
-
     #[test]
     fn decodes_each_encoding_to_its_definition(definition in definition()) {
         prop_assert_eq!(Definition::decode(&definition.encode()), Ok(definition));

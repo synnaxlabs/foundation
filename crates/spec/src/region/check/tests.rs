@@ -3,6 +3,7 @@ use types::channel::Key;
 
 use super::*;
 use crate::channel::Edge;
+use crate::definition::tests::kinded;
 use crate::region::common::{
     access, create_definitions, data, index, name, prefix, record, subject,
 };
@@ -122,6 +123,37 @@ fn gives_misplaced_before_ungoverned_at_one_key() {
             },
             ungoverned("site.@x.y", "plant"),
         ]
+    );
+}
+
+#[test]
+fn gives_misplaced_before_a_channel_problem_at_one_key() {
+    let definitions = create_definitions(&[("plant.@x.y", data(2, 9))]);
+    assert_eq!(
+        check(&prefix("plant"), &definitions),
+        [
+            Problem::Misplaced {
+                name: name("plant.@x.y"),
+                kind: Kind::Channel,
+            },
+            Problem::Channel(channel::Problem::Dangling {
+                from: name("plant.@x.y"),
+                edge: Edge::Index,
+                to: Key::from_u128(9),
+            }),
+        ]
+    );
+}
+
+#[test]
+fn makes_no_child_of_a_record_above_the_prefix() {
+    let definitions = create_definitions(&[
+        ("plant.@region", record()),
+        ("plant.line.x.@subject", subject()),
+    ]);
+    assert_eq!(
+        check(&prefix("plant.line"), &definitions),
+        [ungoverned("plant.@region", "plant.line")]
     );
 }
 
@@ -262,6 +294,16 @@ fn gives_each_problem_a_message_and_a_fix() {
 }
 
 proptest! {
+    #[test]
+    fn finds_a_definition_of_each_kind_at_another_key_misplaced(
+        (kind, definition) in kinded(),
+    ) {
+        let key = name("plant.x.@other");
+        let definitions = BTreeMap::from([(key.clone(), definition)]);
+        let problems = check(&prefix("plant"), &definitions);
+        prop_assert_eq!(&problems[0], &Problem::Misplaced { name: key, kind });
+    }
+
     #[test]
     fn finds_no_problem_in_definitions_at_their_keys_under_the_prefix(
         labels in prop::collection::btree_set("[a-c]{1,2}(\\.[a-c]{1,2}){0,2}", 1..8),
