@@ -74,15 +74,15 @@ How to read this record:
 - **Root CLAUDE.md principles** apply to every crate: injected dependencies, no mutable
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
-- **DEVX (2026-10-08)** Design each user surface for the person, agent, or program
-  that uses it. A user surface is any surface that a user reaches. These are the CLI,
-  MCP, the config language, the client protocol and each SDK, and each file that a
-  user reads or writes. Each plan for one compares its options by the steps of each
-  common task, the first use after a new install among them. It also compares them by
-  the error and fix that each wrong step gives (C7). A step that Foundation can do
-  itself is not a step for the user (FIRST ADMIN). The person, relayed by
-  `laptop.monitor`: "when we're designing public APIs like this, we really need to
-  think about devx" (2026-10-08T02:43:43Z,
+- **DEVX (2026-10-08)** Design each user surface for the person, agent, or program that
+  uses it. A user surface is any surface that a user reaches. These are the CLI, MCP,
+  the config language, the client protocol and each SDK, and each file that a user reads
+  or writes. Each plan for one compares its options by the steps of each common task,
+  the first use after a new install among them. It also compares them by the error and
+  fix that each wrong step gives (C7). A step that Foundation can do itself is not a
+  step for the user (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when we're
+  designing public APIs like this, we really need to think about devx"
+  (2026-10-08T02:43:43Z,
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981). The
   plan rule is decided by `laptop.architect-2` and `laptop.architect` from those words
   (2026-10-08T02:46:51Z,
@@ -2237,8 +2237,8 @@ How to read this record:
   closes. Also lost: a bound of the highest term in the stable log. It refuses a real
   leader whose link has a lower term than an entry of the node that is not committed.
   Decided by `laptop.architect` (#1682, 2026-10-08T01:03:46Z):
-  https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758. A
-  false `AppendReply` still counts as held (#882). Lost: a lease that drops a
+  https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758.
+  A false `AppendReply` still counts as held (#882). Lost: a lease that drops a
   heartbeat or an `Append` of a higher term from a node that is not the leader. A
   reply of a higher term ends any node's lease, and a leader must step down on one;
   the lease also changed three etcd oracle tests. The
@@ -2873,10 +2873,9 @@ How to read this record:
   `laptop.architect`, 2026-10-08T00:46:02Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6049818540). `open`
   panics when `Config.transport` proves a key that is not the public half of
-  `Config.private_key`. `node` builds both from the one key that it loads, so a
-  mismatch is a defect in `node`, not bad outside input.
-  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
-  the architect, 2026-10-07T19:55:13Z:
+  `Config.private_key`. `node` builds both from the one key that it loads, so a mismatch
+  is a defect in `node`, not bad outside input. `Error::WrongKey` stays for a key that
+  is not the key of the member record (ruled by the architect, 2026-10-07T19:55:13Z:
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
   Supersedes the sentence that `open` does not check the key of the transport:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
@@ -2889,8 +2888,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
   the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  other calls that change the region and the change records stay private. The surface
-  is approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
+  other calls that change the region and the change records stay private. The surface is
+  approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
   above). The architect approved the surface as built at 2026-10-07T19:55:12Z:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. It has the
   types that the caller builds, `Config.time`, and the sentence that `open` does not
@@ -3970,23 +3969,22 @@ How to read this record:
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
 - **FIRST ADMIN (2026-10-08)** A node that starts a new mesh has an empty spec, and
-  under BQ12 only a key that the spec names can sign an apply. So the first
-  `foundation start` of that node, on an empty data directory, creates the spec with
-  one admin subject. It writes the admin's private key into the data directory, and
-  only the user who started the node can read the key. The CLI on the same host signs
-  with that key, so the first `apply` needs no key step. A node that joins by ticket
-  (BQ11a) joins a mesh that has a spec, so it creates none. BQ12 holds as written:
-  each node checks each apply, the first one too, against a key in the spec. Lost: the
-  first apply from any local process, because any local user could then take the node.
-  Also lost: an admin public key given before the first start, a step before the first
-  use. Decided by the person ("Yes, I approve."), relayed by `laptop.monitor` at
-  2026-10-08T02:43:43Z:
+  under BQ12 only a key that the spec names can sign an apply. So the first `foundation
+  start` of that node, on an empty data directory, creates the spec with one admin
+  subject. It writes the admin's private key into the data directory, and only the user
+  who started the node can read the key. The CLI on the same host signs with that key,
+  so the first `apply` needs no key step. A node that joins by ticket (BQ11a) joins a
+  mesh that has a spec, so it creates none. BQ12 holds as written: each node checks each
+  apply, the first one too, against a key in the spec. Lost: the first apply from any
+  local process, because any local user could then take the node. Also lost: an admin
+  public key given before the first start, a step before the first use. Decided by the
+  person ("Yes, I approve."), relayed by `laptop.monitor` at 2026-10-08T02:43:43Z:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
   #1744 plan names the subject, its access policy, and the key file, as
   `laptop.architect-2` and `laptop.architect` decided (2026-10-08T02:46:51Z,
   https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026). The
-  question was about a node whose spec is empty. So `laptop.architect` decided the
-  limit to a node that starts a new mesh, and the sentence on a node that joins
+  question was about a node whose spec is empty. So `laptop.architect` decided the limit
+  to a node that starts a new mesh, and the sentence on a node that joins
   (2026-10-08T02:57:01Z,
   https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051238643). It also
   decided that the #1744 plan names how a first start tells a new mesh from a join
@@ -5932,14 +5930,14 @@ with no OPC UA security, so the open choice of the OPC UA crypto plugin (5.1) do
 block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
 2026-10-08T01:52:14Z:
 https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
-approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order.
-FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
-connectors. Supersedes, for ONE NODE work only, the order of this entry (the person's
-decision of 2026-10-05, which has no link). For ONE NODE work, features, access, and
-config files do not wait until the acceptance scenario of FIRST SLICE passes (#462).
-The person decided ("Yes, that's fine. I really think that first slice should try to
-focus on the 'guts' the internals while ONE NODE work should be focused on developer
-APIs and connectors."), relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order. FIRST
+SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
+Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
+2026-10-05, which has no link). For ONE NODE work, features, access, and config files do
+not wait until the acceptance scenario of FIRST SLICE passes (#462). The person decided
+("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
+the internals while ONE NODE work should be focused on developer APIs and connectors."),
+relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
 https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
