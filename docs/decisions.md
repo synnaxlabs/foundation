@@ -3617,7 +3617,11 @@ How to read this record:
   2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
   rest at `finish`, which drops the diagnostics when a caller returns early;
   `unknown_attributes` and `unknown_blocks` as two functions; a public
-  `UNKNOWN_ATTRIBUTE` code for a caller to match on.
+  `UNKNOWN_ATTRIBUTE` code for a caller to match on. `read::one_of` lists words in
+  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list, as
+  `missing` does. It is public for the `config.bad-action` fix, so no copy goes into
+  `config`. Decided by `laptop.architect-2` at 2026-10-08T03:54:12Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for

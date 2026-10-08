@@ -128,20 +128,6 @@ fn written(value: &Value) -> Option<&str> {
     }
 }
 
-/// `words` in backticks, as a list that ends with "or".
-fn one_of(words: &[&str]) -> String {
-    match words {
-        [] => String::new(),
-        [word] => format!("`{word}`"),
-        [first, second] => format!("`{first}` or `{second}`"),
-        [rest @ .., last] => {
-            let rest: Vec<String> =
-                rest.iter().map(|word| format!("`{word}`")).collect();
-            format!("{}, or `{last}`", rest.join(", "))
-        }
-    }
-}
-
 /// The channel names of the Documents, and what `check` has found so far.
 #[derive(Debug, Default)]
 struct Found<'a> {

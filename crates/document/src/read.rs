@@ -296,10 +296,15 @@ fn use_or_remove(keys: &[&str]) -> String {
     }
 }
 
-/// `words` in backticks, as a list that ends with "or".
-fn one_of(words: &[&str]) -> String {
+/// `words` in backticks, as a list that ends with "or", such as "`a`, `b`, or `c`".
+///
+/// # Panics
+///
+/// When `words` is empty: the caller's list is internal.
+#[must_use]
+pub fn one_of(words: &[&str]) -> String {
     match words {
-        [] => String::new(),
+        [] => panic!("`one_of` needs at least one word"),
         [word] => format!("`{word}`"),
         [first, second] => format!("`{first}` or `{second}`"),
         [rest @ .., last] => {
@@ -1205,6 +1210,19 @@ mod tests {
                     diagnostic("document.missing-attribute", 7, message, "Add it"),
                 );
             }
+        }
+
+        #[test]
+        fn lists_one_two_or_more_words() {
+            assert_eq!(one_of(&["a"]), "`a`");
+            assert_eq!(one_of(&["a", "b"]), "`a` or `b`");
+            assert_eq!(one_of(&["a", "b", "c"]), "`a`, `b`, or `c`");
+        }
+
+        #[test]
+        #[should_panic(expected = "`one_of` needs at least one word")]
+        fn refuses_to_list_no_word() {
+            drop(one_of(&[]));
         }
 
         #[test]

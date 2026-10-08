@@ -7,7 +7,7 @@ use spec::access::{Action, Actions, Policy};
 use spec::definition;
 use types::authority::Authority;
 
-use crate::{Definition, Found, one_of, written};
+use crate::{Definition, Found, written};
 
 const BAD_ACTION: Code = Code::new("config.bad-action");
 const EMPTY_ALLOW: Code = Code::new("config.empty-allow");
@@ -79,7 +79,7 @@ fn actions(value: &Value) -> Result<Actions, Diagnostic> {
 fn action(value: &Value) -> Result<Action, Diagnostic> {
     let refuse = |message| {
         let words = ACTIONS.map(|(word, _)| word);
-        let fix = format!("Use {}", one_of(&words));
+        let fix = format!("Use {}", read::one_of(&words));
         Diagnostic::new(BAD_ACTION, value.span, message, fix)
     };
     let word = written(value).ok_or_else(|| {
