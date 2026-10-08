@@ -22,10 +22,12 @@ use wire::header::MALFORMED;
 use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::{OTHER, TIME};
-use super::serve::{HOME, PEER, PORT, own_pool, transport};
+use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
 
 /// The fewest bytes that a transport takes in one message.
 const MESSAGE_MIN: usize = 1472;
+/// The window of a transport of a test, in bytes.
+const WINDOW: usize = 1 << 20;
 use super::{
     AREA, BODY_MAX, I64, POOL, Test, fill, name, samples, spec_channel, write,
     write_series, write_wide,
@@ -70,15 +72,16 @@ fn remote<H, R>(
     H: Future<Output = ()> + 'static,
     R: Future<Output = ()> + 'static,
 {
-    remote_sized(seed, link, [1 << 16; 2], home, reader);
+    remote_sized(seed, link, [(1 << 16, WINDOW); 2], home, reader);
 }
 
 /// As [`remote`], where the transport of the reader's node takes messages of at most
-/// `messages[0]` bytes, and that of the home's node at most `messages[1]`.
+/// `sizes[0].0` bytes and has a window of `sizes[0].1` bytes, and that of the home's
+/// node `sizes[1]`.
 fn remote_sized<H, R>(
     seed: u64,
     link: sim::link::Config,
-    messages: [usize; 2],
+    sizes: [(usize, usize); 2],
     home: impl FnOnce(sim::node::Node, Tasks, Transport, Arc<Steps>) -> H + Send + 'static,
     reader: impl FnOnce(Test, Arc<Steps>) -> R + Send + 'static,
 ) where
@@ -100,7 +103,7 @@ fn remote_sized<H, R>(
     };
     let (node, kept) = (nodes[0].clone(), Arc::clone(&steps));
     let main = move |tasks: Tasks| async move {
-        let transport = transport(&node, &tasks, &own_pool(), HOME, messages[0]);
+        let transport = transport_sized(&node, &tasks, &own_pool(), HOME, sizes[0]);
         let region =
             super::region::open(&node, &tasks, Rc::new(transport), vec![at]).await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
@@ -119,7 +122,7 @@ fn remote_sized<H, R>(
     );
     let node = nodes[1].clone();
     let main = move |tasks: Tasks| async move {
-        let transport = transport(&node, &tasks, &own_pool(), PEER, messages[1]);
+        let transport = transport_sized(&node, &tasks, &own_pool(), PEER, sizes[1]);
         home(node, tasks, transport, steps).await;
     };
     drop(
@@ -570,9 +573,9 @@ fn a_reader_stops_the_stream_as_malformed_when_a_body_message_is_longer_than_the
     );
 }
 
-/// Defines 100 data channels on `time` at `test`'s hub, and gives their names.
-fn define_many(test: &Test) -> Vec<types::name::Name> {
-    let channels: Vec<_> = (100..200)
+/// Defines `count` data channels on `time` at `test`'s hub, and gives their names.
+fn define_many(test: &Test, count: u128) -> Vec<types::name::Name> {
+    let channels: Vec<_> = (100..100 + count)
         .map(|key| {
             let channel = spec_channel(key, DataType::Sample(I64), 1);
             (name(&format!("extra-{key}")), channel)
@@ -589,11 +592,11 @@ fn a_reader_whose_keys_and_frames_each_take_many_messages_gets_each_frame() {
     remote_sized(
         9,
         sim::link::Config::default(),
-        [MESSAGE_MIN; 2],
+        [(MESSAGE_MIN, WINDOW); 2],
         |node, tasks, transport, steps| async move {
             let kept = Arc::clone(&steps);
             hub_home(node, tasks, transport, steps, |test| async move {
-                define_many(&test);
+                define_many(&test, 100);
                 let mut writer = test.writer("w", &["time", "value"]).await;
                 until(&test.clock, &kept.opened).await;
                 let now = test.now();
@@ -604,7 +607,7 @@ fn a_reader_whose_keys_and_frames_each_take_many_messages_gets_each_frame() {
             .await;
         },
         |test, steps| async move {
-            let mut names = define_many(&test);
+            let mut names = define_many(&test, 100);
             names.push(name("value"));
             assert!(
                 (names.len() + 1) * 16 > MESSAGE_MIN,
@@ -806,6 +809,83 @@ fn a_reader_after_the_home_closed_the_held_session_dials_again() {
             let closed = transport::Error::PeerClosed { code: Code(0) };
             assert_eq!(error, reader::Error::Transport(closed));
             read_three(test, steps).await;
+        },
+    );
+}
+
+/// `Ok` with the output of `a` when it is done first, else `Err` with that of `b`.
+async fn race<A: Future, B: Future>(a: A, b: B) -> Result<A::Output, B::Output> {
+    let (mut a, mut b) = (pin!(a), pin!(b));
+    poll_fn(|cx| {
+        if let Poll::Ready(output) = a.as_mut().poll(cx) {
+            return Poll::Ready(Ok(output));
+        }
+        b.as_mut().poll(cx).map(Err)
+    })
+    .await
+}
+
+#[test]
+fn a_complete_reader_whose_credit_finds_no_room_gets_each_frame() {
+    const FRAMES: usize = 63;
+    const BODY: usize = 16_320;
+    let charge = frame::charge(2, BODY);
+    let sent = charge * u64::try_from(FRAMES).expect("a few frames");
+    assert!(
+        sent <= 1 << 20 && sent + charge > 1 << 20,
+        "the grant ends here"
+    );
+    let half = u32::try_from(BODY / 2).expect("a short body");
+    remote_sized(
+        12,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let session = transport.accept().await.expect("a session");
+            let mut incoming = session.accept().await.expect("a stream");
+            let mut sender = incoming.sender.take().expect("a two-way stream");
+            for _ in 0..3 {
+                incoming
+                    .receiver
+                    .recv()
+                    .await
+                    .expect("a message")
+                    .expect("open");
+            }
+            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            // The second reader's keys fill the window of the session until the home
+            // takes them.
+            let mut second = session.accept().await.expect("a second stream");
+            for _ in 0..FRAMES {
+                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
+                send(&mut sender, BODY, |out| out.fill(1)).await;
+            }
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            let credit = loop {
+                match race(incoming.receiver.recv(), second.receiver.recv()).await {
+                    Ok(credit) => break credit,
+                    Err(keys) => drop(keys.expect("a message").expect("open")),
+                }
+            };
+            let credit = credit.expect("a credit").expect("open");
+            assert_eq!(credit.len(), Credit::LEN);
+            send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
+            send(&mut sender, BODY, |out| out.fill(1)).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            test.tasks.spawn(async move {
+                drop(hub.reader(&names, Mode::Complete).await);
+            });
+            for _ in 0..FRAMES {
+                reader.next().await.expect("a frame");
+            }
+            let deadline = test.clock.sleep(Span::from_nanos(3_000_000_000));
+            let next = race(reader.next(), deadline).await;
+            assert!(matches!(next, Ok(Ok(_))), "the frame after the credit came");
         },
     );
 }

@@ -57,6 +57,18 @@ pub(super) fn transport(
     key: PrivateKey,
     message: usize,
 ) -> Transport {
+    transport_sized(node, tasks, pool, key, (message, 1 << 20))
+}
+
+/// As [`transport`], with messages of at most `sizes.0` bytes and a window of
+/// `sizes.1` bytes.
+pub(super) fn transport_sized(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    pool: &Rc<Pool>,
+    key: PrivateKey,
+    (message, window): (usize, usize),
+) -> Transport {
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), at)
         .expect("binds")
@@ -64,7 +76,7 @@ pub(super) fn transport(
     let config = transport::Config {
         private_key: key,
         message_bytes_max: NonZeroUsize::new(message).expect("not 0"),
-        window_bytes: 1 << 20,
+        window_bytes: window,
         streams_max: NonZeroU32::new(16).expect("not 0"),
         idle: Span::from_nanos(60 * Span::SECOND.nanos()),
         clock: node.clock(),

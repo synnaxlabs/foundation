@@ -1,8 +1,9 @@
 //! A reader session at another node's home: one hub stream to that home (HUB WIRE).
 
 use std::cell::RefCell;
+use std::fmt;
 use std::future::poll_fn;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
@@ -25,7 +26,7 @@ use crate::region::Homes;
 pub(super) struct Remote {
     state: Rc<RefCell<State>>,
     /// `None` once the session ended.
-    stream: Option<(Sender, Receiver)>,
+    stream: Option<(Out, Receiver)>,
     decoder: wire::hub::Reader,
     /// The reader's key set. Place `n` of the open is entry `n`.
     set: Arc<KeySet>,
@@ -94,7 +95,7 @@ impl Remote {
         let mask = Mask::new(&set, set.entries().iter().map(|entry| entry.slot));
         Ok(Self {
             state: Rc::clone(state),
-            stream: Some((sender, receiver)),
+            stream: Some((Out::Idle(sender), receiver)),
             decoder,
             set,
             mask,
@@ -151,11 +152,15 @@ impl Remote {
         match next {
             Ok(frame) => Ok((frame, &self.set, &self.mask)),
             Err(ended) => {
-                if let Some((sender, receiver)) = self.stream.take()
+                if let Some((out, receiver)) = self.stream.take()
                     && let Some(refusal) = refusal(&ended)
                 {
                     receiver.stop(Code(refusal.code()));
-                    sender.reset(Code(refusal.code()));
+                    // A credit on its way drops with its sender, which resets with
+                    // code 0. The home still sees the stop.
+                    if let Out::Idle(sender) = out {
+                        sender.reset(Code(refusal.code()));
+                    }
                 }
                 Err(self.ended.insert(ended).clone())
             }
@@ -164,10 +169,11 @@ impl Remote {
 
     async fn next(&mut self) -> Result<Frame, Ended> {
         self.grant()?;
-        let (_, receiver) = self
+        let (out, receiver) = self
             .stream
             .as_mut()
             .expect("invariant: a session holds its stream until it ends");
+        let credit = &mut self.credit;
         loop {
             if let Some(start) = self.decoder.body() {
                 let draft = self
@@ -175,11 +181,12 @@ impl Remote {
                     .as_mut()
                     .expect("invariant: a body arrives into its draft");
                 let body = &mut draft.body_mut()[start..];
-                let last = match receiver.recv_into(body).await {
+                let last = match wait(out, credit, receiver.recv_into(body)).await? {
                     Ok(Some(len)) => last(self.decoder.decode(&body[..len]))?,
                     Ok(None) => return Err(finished(&self.decoder)),
                     Err(transport::Error::TooLarge { .. }) => {
-                        let message = recv(receiver, &self.decoder).await?;
+                        let message =
+                            wait(out, credit, recv(receiver, &self.decoder)).await??;
                         last(self.decoder.decode(&message))?
                     }
                     Err(error) => return Err(ended(error)),
@@ -189,7 +196,7 @@ impl Remote {
                 }
                 continue;
             }
-            let message = recv(receiver, &self.decoder).await?;
+            let message = wait(out, credit, recv(receiver, &self.decoder)).await??;
             match self.decoder.decode(&message).map_err(Ended::Message)? {
                 FromHome::Head(head) => {
                     self.head = Some(head);
@@ -222,12 +229,16 @@ impl Remote {
     }
 
     /// Sends the credit once the home's grant is half a window short of the frames
-    /// given back plus a window. A credit that finds no room goes at a later call.
+    /// given back plus a window, unless a credit is on its way. A credit that finds
+    /// no room goes on its way, and [`wait`] sends it.
     fn grant(&mut self) -> Result<(), Ended> {
         let Some((granted, taken)) = &mut self.credit else {
             return Ok(());
         };
         let limit_bytes = *taken + WINDOW;
+        let Some((Out::Idle(sender), _)) = &mut self.stream else {
+            return Ok(());
+        };
         if limit_bytes - *granted < WINDOW / 2 {
             return Ok(());
         }
@@ -237,13 +248,18 @@ impl Remote {
             .alloc(Credit::LEN)
             .map_err(Ended::Pool)?;
         Credit { limit_bytes }.encode(&mut block);
-        let (sender, _) = self
-            .stream
-            .as_mut()
-            .expect("invariant: a session holds its stream until it ends");
-        if sender.try_send(block.freeze()).map_err(ended)?.is_none() {
+        let Some(block) = sender.try_send(block.freeze()).map_err(ended)? else {
             *granted = limit_bytes;
-        }
+            return Ok(());
+        };
+        let Some((Out::Idle(mut sender), receiver)) = self.stream.take() else {
+            unreachable!("invariant: the stream is idle");
+        };
+        let sending = async move {
+            let sent = sender.send(block).await;
+            (sender, limit_bytes, sent)
+        };
+        self.stream = Some((Out::Sending(Box::pin(sending)), receiver));
         Ok(())
     }
 
@@ -255,6 +271,56 @@ impl Remote {
         draft.set_seq(0, head.range.seq);
         draft.freeze(head.path)
     }
+}
+
+/// The sending half of the stream to the home.
+enum Out {
+    /// No credit is on its way.
+    Idle(Sender),
+    /// A credit on its way, which owns the sender until the stream holds all of the
+    /// credit. A dropped [`Remote::take`] never cuts it: a cut send resets the stream.
+    Sending(Pin<Box<dyn Future<Output = Sent>>>),
+}
+
+/// The sender, the limit of the credit that it sent, and the result of the send.
+type Sent = (Sender, u64, Result<(), transport::Error>);
+
+impl fmt::Debug for Out {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Idle(sender) => f.debug_tuple("Idle").field(sender).finish(),
+            Self::Sending(_) => f.write_str("Sending"),
+        }
+    }
+}
+
+/// The output of `future`, while `out` sends the credit on its way, which raises the
+/// grant in `credit` once the stream holds it.
+///
+/// # Errors
+///
+/// The [`Ended`] of a send that failed.
+async fn wait<T>(
+    out: &mut Out,
+    credit: &mut Option<(u64, u64)>,
+    future: impl Future<Output = T>,
+) -> Result<T, Ended> {
+    let mut future = pin!(future);
+    poll_fn(|cx| {
+        if let Out::Sending(sending) = out
+            && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
+        {
+            *out = Out::Idle(sender);
+            if let Err(error) = sent {
+                return Poll::Ready(Err(ended(error)));
+            }
+            if let Some((granted, _)) = credit {
+                *granted = limit_bytes;
+            }
+        }
+        future.as_mut().poll(cx).map(Ok)
+    })
+    .await
 }
 
 /// Sends the header, `open`, and the keys of `set` on `sender`, and waits for the
