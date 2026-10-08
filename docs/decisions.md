@@ -1554,9 +1554,12 @@ How to read this record:
   reply half, if it has one, with the same code; a datagram whose header is not valid
   drops and counts in a status channel. Stop and reset codes 1 to 15 belong to the
   header; each protocol numbers its own from 16. A client session (`Peer::Client`)
-  opens only hub streams, its signed hello is the first hub message, and `node`
-  refuses the other four protocols from a client. The stream and client rules are
-  approved by the coordinator on #90. Rejected: a version agreed once per session
+  opens only hub streams, its hello stream is the first hub stream, and the node's
+  `Challenge` is the first message on it (CLIENT HELLO); `node` refuses the other
+  four protocols from a client. The stream and client rules are approved by the
+  coordinator on #90. The hello stream was changed by `laptop.architect` at
+  2026-10-08T09:53:58Z
+  (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526). Rejected: a version agreed once per session
   (the format flag's flip reaches nodes at different times, so one session can carry
   streams of two versions) and a session per protocol (`transport` stays blind to
   protocols, and it costs five handshakes per peer pair).
@@ -4370,7 +4373,8 @@ How to read this record:
   2026-10-08T07:35:46Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237).
 - **CLIENT HELLO (2026-10-08)** A program's session with the node it connects to
-  has a hello stream and request streams (`wire::hub::client`, kinds 4 and 5). The
+  has a hello stream and request streams (`wire::hub::client`, kinds 4 and 5). Hub
+  kinds are one space: the first byte of a hub stream picks its decoder. The
   hello stream is the first hub stream and lives as long as the session. The node sends
   a `Challenge` (a fresh nonce and its mesh time) first and after each admitted hello;
   the program sends a `Signed` hello that echoes it, first and to renew at half its
@@ -4384,7 +4388,9 @@ How to read this record:
   cap at the node gets `MALFORMED`. `access::Rules::renew` checks a renewal as `admit`
   checks a first hello, after `Error::Changed` for another subject, key, `via`, or
   connection, and takes the carrier from the `Admitted`: a move to another node is a
-  new connection. Stop codes: `REFUSED` 20 for an unknown subject, an unlisted key, or
+  new connection. `Changed` names the first field that differs, an
+  `access::proof::Field` (`laptop.architect`, 2026-10-08,
+  https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181). Stop codes: `REFUSED` 20 for an unknown subject, an unlisted key, or
   a bad signature, which tell about the spec and so share one code (`Signature` too:
   `admit` checks it only for a listed key); each other step its own code, `UNSYNCED`
   21, `STALE` 22, `VIA` 23, `EXPIRED` 24, `CAPPED` 25, `CHANGED` 26. `hub` maps each
@@ -6253,7 +6259,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
-| 1 | `wire` | Defines every message between two nodes, and between a program and the node it connects to, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
+| 1 | `wire` | Defines every message between two nodes, or between a program and the node it connects to, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a proof is of its subject (signed hellos and requests), and whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec`; `document` as a dev-dependency only |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). On macOS, `os::allocate` holds one `fcntl(F_PREALLOCATE)` call, because `rustix` can allocate only part of a new file (architect, #931, https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099). | `env`, `types`, `block` |
