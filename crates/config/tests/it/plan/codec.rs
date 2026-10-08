@@ -94,7 +94,9 @@ fn decodes_each_kind_of_change_that_it_encodes() {
 #[test]
 fn gives_the_definitions_that_an_apply_of_the_plan_stores() {
     let mut spec = Spec::create_empty();
-    for texts in [&[EDGE, INFLUX, EACH][..], &[EDGE, PLANT]] {
+    // The last step changes `edge.value`, whose index stays.
+    let edge = EDGE.replace("\"f64\"", "\"f32\"");
+    for texts in [&[EDGE, INFLUX, EACH][..], &[EDGE, PLANT], &[&edge, PLANT]] {
         let plan = spec.plan(texts, &MEMBERS).expect("no problems");
         let found = plan.definitions(&spec.definitions(), keys(spec.made));
         spec.apply(&plan);
