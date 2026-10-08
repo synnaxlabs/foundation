@@ -358,13 +358,15 @@ fn a_run_past_its_limit_kills_the_command_and_panics_with_its_output() {
     assert_eq!(alive.status.code(), Some(1), "{pid} still runs");
 }
 
-#[test]
+/// Runs `script`, which starts a `sleep 60` that keeps one pipe of the command and
+/// prints its PID, and asserts that the run panics at its limit. Then kills the `sleep`.
 #[cfg(unix)]
-fn a_run_ends_at_its_limit_when_a_process_of_the_command_keeps_a_pipe() {
+fn assert_a_run_ends_at_its_limit(script: &str, input: &[u8]) {
     let mut command = Command::new("sh");
-    command.args(["-c", "sleep 60 & echo $!"]);
-    let limited =
-        std::panic::AssertUnwindSafe(|| run(&os::clock(), Span::SECOND, command, &[]));
+    command.args(["-c", script]);
+    let limited = std::panic::AssertUnwindSafe(|| {
+        run(&os::clock(), Span::SECOND, command, input)
+    });
     let panic = std::panic::catch_unwind(limited).expect_err("the run panics");
     let message = panic.downcast_ref::<String>().expect("a message");
     let pid = message.lines().nth(2).expect("the PID");
@@ -377,6 +379,28 @@ fn a_run_ends_at_its_limit_when_a_process_of_the_command_keeps_a_pipe() {
         )
     );
     assert!(killed.success(), "{pid} was gone");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_ends_at_its_limit_when_a_process_of_the_command_keeps_its_output() {
+    assert_a_run_ends_at_its_limit("sleep 60 2>/dev/null & echo $!", &[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_ends_at_its_limit_when_a_process_of_the_command_keeps_its_errors() {
+    assert_a_run_ends_at_its_limit("sleep 60 >/dev/null & echo $!", &[]);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_ends_at_its_limit_when_a_process_of_the_command_keeps_its_input() {
+    // A background job of `sh` reads `/dev/null` unless it names its input.
+    assert_a_run_ends_at_its_limit(
+        "exec 3<&0; sleep 60 <&3 >/dev/null 2>&1 & echo $!",
+        &vec![0; 1 << 20],
+    );
 }
 
 #[test]
