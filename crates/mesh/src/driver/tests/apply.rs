@@ -11,7 +11,12 @@ use super::*;
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
     /// tick, with each node as a holder.
-    fn apply(&self, node: u8, base: Pointer, definitions: &BTreeMap<Name, Definition>) {
+    pub(super) fn apply(
+        &self,
+        node: u8,
+        base: Pointer,
+        definitions: &BTreeMap<Name, Definition>,
+    ) {
         self.apply_held(node, base, definitions, IDS.into());
     }
 
@@ -63,7 +68,10 @@ pub(super) fn create_subjects(
 }
 
 /// The pointer after `version` changes, at the tree of `definitions`.
-fn pointer(version: u64, definitions: &BTreeMap<Name, Definition>) -> Pointer {
+pub(super) fn pointer(
+    version: u64,
+    definitions: &BTreeMap<Name, Definition>,
+) -> Pointer {
     let update = spec::region::tree(&mut Chunks::default(), definitions);
     Pointer {
         version,
@@ -91,7 +99,7 @@ async fn open_kept(
 }
 
 /// The pointer of a region with no founding definitions.
-fn base() -> Pointer {
+pub(super) fn base() -> Pointer {
     Pointer {
         version: 0,
         root: tree::empty(),
@@ -288,9 +296,11 @@ fn of_two_applies_from_one_base_one_gives_the_pointer_and_the_other_stale() {
         cluster.script(|_| home(9));
         cluster.run(seconds(5));
         let board = cluster.board();
-        let [(_, _, Ok(moved)), (loser, _, Err(stale))] = board.applied.as_slice()
-        else {
-            panic!("run {run}: the calls gave {:?}", board.applied);
+        // The two calls end on two nodes, in either order.
+        let mut applied = board.applied.clone();
+        applied.sort_by_key(|(_, _, result)| result.is_err());
+        let [(_, _, Ok(moved)), (loser, _, Err(stale))] = applied.as_slice() else {
+            panic!("run {run}: the calls gave {applied:?}");
         };
         assert!(
             [pointer(1, &a), pointer(1, &b)].contains(moved),
@@ -375,6 +385,19 @@ fn two_calls_of_one_change_from_one_base_give_one_pointer() {
     for id in IDS {
         assert_eq!(board.pointers[&id], moved, "node {id}");
     }
+}
+
+// The second call finds the pointer that it makes, so the pointer moves once.
+#[test]
+fn a_lone_voter_gives_two_calls_of_one_change_from_one_base_one_pointer() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let moved = pointer(1, &definitions);
+        assert_eq!(mesh.apply(base(), definitions.clone()).await, Ok(moved));
+        assert_eq!(mesh.apply(base(), definitions).await, Ok(moved));
+        assert_eq!(mesh.pointer(), moved);
+    });
 }
 
 #[test]

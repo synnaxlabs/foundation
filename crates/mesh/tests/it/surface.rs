@@ -15,6 +15,7 @@ use mesh::card::{self, Card};
 use mesh::status::Status;
 use mesh::{
     Config, Error, Member, Mesh, Pointer, Stopped, Watch, change, claim, log, region,
+    used,
 };
 use raft::{Position, Term};
 use sim::Sim;
@@ -52,6 +53,11 @@ fn assert_sets<'a, F: Future<Output = Result<(), Error>>>(
 
 fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
     _: fn(&'a Mesh, Pointer, BTreeMap<Name, Definition>) -> F,
+) {
+}
+
+fn assert_gives_the_spec<'a, F: Future<Output = Result<used::Spec, Stopped>>>(
+    _: fn(&'a Mesh) -> F,
 ) {
 }
 
@@ -206,7 +212,7 @@ fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
 }
 
 #[test]
-fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
+fn a_node_opens_its_region_and_reads_its_member_a_home_the_pointer_and_the_spec() {
     solo(|node, tasks| async move {
         let mesh = Mesh::open(create_config(&node, &tasks).await)
             .await
@@ -216,6 +222,12 @@ fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
             root: spec::tree::empty(),
         };
         assert_eq!(mesh.pointer(), founding);
+        let spec = used::Spec {
+            pointer: Some(founding),
+            definitions: Rc::default(),
+            behind: None,
+        };
+        assert_eq!(mesh.spec().await, Ok(spec));
         assert_eq!(mesh.member(KEY), Some(create_member(1, Vec::new())));
         assert_eq!(mesh.member(OTHER), None);
         let mut watch = mesh.watch(INDEX);
@@ -439,6 +451,7 @@ fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
     assert_serves(Mesh::serve);
     assert_sets(Mesh::set_home);
     assert_applies(Mesh::apply);
+    assert_gives_the_spec(Mesh::spec);
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -464,7 +477,9 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Large { .. }
         | Error::Problems(_)
         | Error::Quorum { .. }
-        | Error::Blob(_) => {}
+        | Error::Blob(_)
+        | Error::Files(_)
+        | Error::Stray { .. } => {}
     };
     let _: fn(&Error) = cases;
 }

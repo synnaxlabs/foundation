@@ -41,6 +41,7 @@ use crate::status::{self, Status};
 pub use end::Ended;
 use end::Spawner;
 use send::Senders;
+use used::{Opening, Used};
 
 mod apply;
 mod end;
@@ -48,6 +49,7 @@ mod home;
 mod propose;
 mod send;
 mod stream;
+mod used;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -203,7 +205,18 @@ impl Mesh {
         put(&config.store, &config.pool, &chunks, &founding.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
+        let files = config.files.clone();
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
+        let used = used::open(Opening {
+            files: &files,
+            dir: &config.dir,
+            store: &config.store,
+            prefix: state.prefix(),
+            root: founding.root,
+            definitions: config.founding,
+            chunks,
+        })
+        .await?;
         let unapplied = written(&stored.entries).collect();
         let start = Start {
             hard: stored.hard,
@@ -219,26 +232,18 @@ impl Mesh {
             election_ticks: ELECTION_TICKS,
             heartbeat_ticks: HEARTBEAT_TICKS,
         };
-        let group = Rc::new(RefCell::new(Group {
-            raft: Raft::new(fixed, start)?,
-            state,
-            queues: BTreeMap::new(),
-            sessions: BTreeMap::new(),
-            stopped: Rc::default(),
-            task: None,
-            watches: BTreeMap::new(),
-            proposals: Vec::new(),
-            slots: 0,
-            unapplied,
-            synced: Position::default(),
-            waits: None,
-            fresh: Vec::new(),
-            starter: None,
-            applied: Applied::default(),
-            calls: BTreeMap::new(),
-        }));
+        let raft = Raft::new(fixed, start)?;
+        let group = Group::new(raft, state, unapplied, used);
+        let group = Rc::new(RefCell::new(group));
         let weak = Rc::downgrade(&group);
         let spawner = Spawner::new(config.tasks);
+        spawner.spawn(used::keep(
+            Weak::clone(&weak),
+            Rc::clone(&config.store),
+            files,
+            config.dir,
+            config.clock.clone(),
+        ));
         spawner.spawn(run(
             weak,
             log,
@@ -664,11 +669,40 @@ struct Group {
     // The task of `Senders::run`, while it waits for a new queue.
     starter: Option<Waker>,
     applied: Applied,
-    // The task of each call that waits for the outcome of a try of its proposal.
+    // The task of each call that waits for the outcome of a try of its proposal, or
+    // for a read of the spec.
     calls: BTreeMap<u64, Waker>,
+    used: Used,
 }
 
 impl Group {
+    fn new(
+        raft: Raft,
+        state: region::State,
+        unapplied: BTreeMap<u64, Written>,
+        used: Used,
+    ) -> Self {
+        Self {
+            raft,
+            state,
+            queues: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            stopped: Rc::default(),
+            task: None,
+            watches: BTreeMap::new(),
+            proposals: Vec::new(),
+            slots: 0,
+            unapplied,
+            synced: Position::default(),
+            waits: None,
+            fresh: Vec::new(),
+            starter: None,
+            applied: Applied::default(),
+            calls: BTreeMap::new(),
+            used,
+        }
+    }
+
     // The public key of `key` in the applied state, else in the joins of the log
     // as `raft` holds it. When those name two public keys, the joins below the
     // first configuration entry whose incoming half names `key` decide: the leader
@@ -815,7 +849,7 @@ impl Group {
         for Entry { at, data } in committed {
             let applied = match data {
                 Data::Bytes(bytes) => match Change::decode(&bytes) {
-                    Ok(change) => self.state.apply(change),
+                    Ok(change) => self.apply_change(change),
                     // Every node of this build judges a body the same way.
                     Err(Malformed::Body { kind, length }) => {
                         Err(Refused::Body { kind, length })
@@ -840,9 +874,27 @@ impl Group {
         Ok(())
     }
 
+    // Applies `change`, and gives the task of the spec in use each pointer that moves.
+    // The state never reads the chunks that a `Spec` change lists, so it gets none.
+    fn apply_change(
+        &mut self,
+        mut change: Change,
+    ) -> Result<Option<channel::Key>, Refused> {
+        let listed = match &mut change {
+            Change::Spec { chunks, .. } => Some(mem::take(chunks)),
+            Change::Home { .. } | Change::Join(_) | Change::Ticket { .. } => None,
+        };
+        let applied = self.state.apply(change)?;
+        if let Some(listed) = listed {
+            self.used.committed(self.state.pointer(), listed);
+        }
+        Ok(applied)
+    }
+
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
         self.wake();
+        self.used.wake();
         self.end_senders();
         self.wake_watches();
         self.wake_calls();
@@ -869,6 +921,7 @@ impl Drop for Group {
     // that each mesh dropped.
     fn drop(&mut self) {
         self.wake();
+        self.used.wake();
         self.end_senders();
         self.wake_watches();
     }
@@ -1155,6 +1208,7 @@ mod tests {
     use crate::region::Unfit;
     use crate::status::Many;
     use crate::ticket::Options;
+    use crate::used::{Behind, Spec};
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
@@ -1220,6 +1274,35 @@ mod tests {
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
+        /// The definitions whose tree each node puts in its store next.
+        puts: BTreeMap<u8, BTreeMap<Name, Definition>>,
+        /// What the spec in use of each node was at its last read.
+        specs: BTreeMap<u8, Seen>,
+    }
+
+    /// The spec in use of a node at a read, and what the task of the spec held.
+    #[derive(Debug, PartialEq)]
+    struct Seen {
+        pointer: Option<Pointer>,
+        definitions: BTreeMap<Name, Definition>,
+        behind: Option<Behind>,
+        /// The newest committed pointer that the task did not use.
+        newest: Option<Pointer>,
+        /// The chunks of the tree in use, as `Debug` gives them: `Chunks` has no `Eq`.
+        chunks: String,
+    }
+
+    impl Seen {
+        fn new(mesh: &Mesh, spec: Spec) -> Self {
+            let group = mesh.group.borrow();
+            Self {
+                pointer: spec.pointer,
+                definitions: (*spec.definitions).clone(),
+                behind: spec.behind,
+                newest: group.used.newest.as_ref().map(|newest| newest.pointer),
+                chunks: format!("{:?}", group.used.chunks),
+            }
+        }
     }
 
     fn seconds(count: i64) -> Span {
@@ -1559,6 +1642,32 @@ mod tests {
         }
     }
 
+    /// Puts in the store of node `id` each chunk of the tree of the definitions that
+    /// the board gives it.
+    async fn store(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let Some(definitions) = board.lock().unwrap().puts.remove(&id) else {
+                continue;
+            };
+            let mut chunks = Chunks::default();
+            let update = spec::region::tree(&mut chunks, &definitions);
+            let digests = &update.chunks;
+            put(&mesh.store, &mesh.pool, &chunks, digests)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Reads the spec in use of node `id` once per tick, and puts it on the board.
+    async fn read(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let seen = Seen::new(&mesh, mesh.spec().await.unwrap());
+            board.lock().unwrap().specs.insert(id, seen);
+        }
+    }
+
     /// Three voters, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
@@ -1680,6 +1789,14 @@ mod tests {
             (mesh.clone(), node.clock(), Arc::clone(board));
         tasks.spawn(async move {
             configure(configuring, clock, id, configurations).await;
+        });
+        let (storing, clock, puts) = (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            store(storing, clock, id, puts).await;
+        });
+        let (reading, clock, specs) = (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            read(reading, clock, id, specs).await;
         });
     }
 
@@ -2379,6 +2496,7 @@ mod tests {
 
     mod apply;
     mod home;
+    mod in_use;
     mod send;
     mod serve;
 
@@ -5655,7 +5773,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-            let kept = (names(&[BLOB, "region"]), names(&[LOG]));
+            let kept = (names(&[BLOB, "region"]), names(&[LOG, used::SPEC]));
             assert_eq!(listed, kept, "seed {seed}");
         }
     }

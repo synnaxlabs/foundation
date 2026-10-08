@@ -40,8 +40,9 @@ fn main() {
     many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect();
 }
 
-// The log keeps each entry until raft trims it, so the heap grows with each apply. An
-// apply that takes effect leaves no refusal, so it grows the heap by its entry alone.
+// The raft log keeps each entry in memory until #253, so the heap grows with each
+// apply, and the test compares two runs. An apply that takes effect leaves no
+// refusal, so it grows the heap by its entry alone.
 fn many_applies_on_a_stale_base_hold_no_more_heap_than_applies_that_take_effect() {
     let stale = growth(Base::Founding);
     let taken = growth(Base::Pointer);
@@ -98,6 +99,8 @@ fn growth(base: Base) -> usize {
                 }
             }
             if done == FEW || done == MANY {
+                // The node reads the spec of each new pointer after the apply.
+                drop(mesh.spec().await.expect("the mesh runs"));
                 out.lock().expect("not poisoned").push(ALLOCATOR.held());
             }
         }

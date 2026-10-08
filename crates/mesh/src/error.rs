@@ -1,4 +1,7 @@
 use std::fmt;
+use std::path::PathBuf;
+
+use env::files;
 
 use raft::Position;
 use types::ed25519::PublicKey;
@@ -96,6 +99,13 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
+    /// A file call on the file that names the spec in use failed.
+    Files(files::Error),
+    /// A file in the directory of the spec in use does not name a pointer.
+    Stray {
+        /// The file.
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for Error {
@@ -161,6 +171,13 @@ impl fmt::Display for Error {
                  majority"
             ),
             Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
+            Self::Files(error) => error.fmt(f),
+            Self::Stray { path } => write!(
+                f,
+                "{} is in the directory of the spec in use, but it does not name a \
+                 pointer",
+                path.display()
+            ),
         }
     }
 }
