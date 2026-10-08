@@ -186,14 +186,13 @@ impl Mesh {
 
     // Opens the group with no task that sends: `outgoing` gives each message.
     async fn start(config: Config) -> Result<Self, Error> {
-        let given = config.founding.encode();
         let mut chunks = Chunks::default();
         let region::Founding {
             prefix,
             members,
             voters,
             definitions,
-        } = config.founding;
+        } = config.founding.clone();
         let tree = spec::region::tree(&mut chunks, &definitions);
         let state = region::State::new(prefix, members, tree.root, voters.clone())
             .map_err(Error::Member)?;
@@ -202,7 +201,7 @@ impl Mesh {
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let (log, stored) =
-            open_log(config.files, &config.dir, config.pool, &given).await?;
+            open_log(config.files, &config.dir, config.pool, &config.founding).await?;
         let unapplied = written(&stored.entries).collect();
         let start = Start {
             hard: stored.hard,
@@ -1016,7 +1015,7 @@ async fn open_log(
     files: Files,
     dir: &Path,
     pool: Rc<Pool>,
-    given: &[u8],
+    given: &region::Founding,
 ) -> Result<(Log, log::Stored), Error> {
     files.create_dir(dir).await.map_err(log::Error::from)?;
     files
@@ -5403,8 +5402,8 @@ mod tests {
 
     /// Writes the founding of `config` to its directory, as a first open does.
     async fn found(config: &Config) {
-        let given = config.founding.encode();
-        super::founding::keep(&config.files, &config.dir, &config.pool, &given, false)
+        let (files, dir) = (&config.files, &config.dir);
+        super::founding::keep(files, dir, &config.pool, &config.founding, false)
             .await
             .unwrap();
     }
