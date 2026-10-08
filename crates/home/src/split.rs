@@ -432,8 +432,7 @@ fn encode(
     written
 }
 
-/// A series of `channel` that `codec` refuses at its group's count: a raw series of
-/// the wrong length, or an encoded series whose headers are not valid at that count.
+/// A series of `channel` that `codec` refuses at its group's count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Error {
     /// The series' channel.
@@ -466,7 +465,7 @@ mod tests {
     use types::frame::{Form, Frame, Path, Range};
 
     use super::*;
-    use crate::common::{SCALARS, create_interner, create_pool, key};
+    use crate::common::{create_interner, create_pool, data_type, key};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -509,8 +508,8 @@ mod tests {
         draft
     }
 
-    /// The samples in `values` of `entry`: as many as they hold for a type of fixed
-    /// width, so that a test can give a series of another count, else `count`.
+    /// The count that a fixed-width series of the wrong length holds, so its encoded
+    /// form fails as its raw form does. A variable series holds `count`.
     fn held(set: &KeySet, entry: usize, count: u32, values: &[u8]) -> u32 {
         match set.entries()[entry].data_type.width() {
             Some(width) if width > 0 => {
@@ -1393,29 +1392,11 @@ mod tests {
         state
     }
 
-    /// Any type, with arrays, matrices, and lists of a few elements at most.
-    fn data_type() -> impl Strategy<Value = Type> {
-        let scalar = || prop::sample::select(&SCALARS[..]);
-        prop_oneof![
-            4 => scalar().prop_map(Type::Scalar),
-            1 => (scalar(), 0_u32..4).prop_map(|(element, len)| Type::Array { element, len }),
-            1 => (scalar(), 0_u16..3, 0_u16..3).prop_map(|(element, rows, columns)| {
-                Type::Matrix {
-                    element,
-                    sides: types::sample::Sides { rows, columns },
-                }
-            }),
-            1 => (scalar(), 0_u32..7).prop_map(|(element, max)| Type::List { element, max }),
-            1 => Just(Type::String),
-            1 => Just(Type::Bytes),
-        ]
-    }
-
     /// A key set of 1 to 4 groups of channels of any type, with interleaved slots,
     /// and a write of some of its groups and entries.
     fn writes() -> impl Strategy<Value = (Arc<KeySet>, BTreeMap<u32, Samples>)> {
         let group = (
-            prop::collection::vec(data_type(), 0..4),
+            prop::collection::vec(data_type(0..=3, 0..=2), 0..4),
             any::<bool>(),
             0_u32..1100,
         );
