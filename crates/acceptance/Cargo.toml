@@ -15,6 +15,7 @@ mesh = { path = "../mesh" }
 node = { path = "../node" }
 proptest.workspace = true
 sim = { path = "../sim" }
+spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
 

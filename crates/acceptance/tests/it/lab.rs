@@ -22,11 +22,15 @@ use mesh::region::Founding;
 use mesh::status::Status;
 use transport::Address;
 use types::ed25519::PrivateKey;
+use types::name::Prefix;
 use types::node::SealKey;
 use types::time::Span;
 
 /// The port each node binds, on its host's first address.
 const PORT: u16 = 7000;
+
+/// The private key of the subject `admin`, the first admin of each mesh.
+const ADMIN: PrivateKey = PrivateKey([0; 32]);
 
 /// The address of the port of the node on `host`.
 fn listen(host: &sim::node::Node) -> SocketAddr {
@@ -69,6 +73,8 @@ pub(crate) struct Written {
 #[derive(Debug)]
 struct Member {
     name: String,
+    key: types::node::Key,
+    private_key: PrivateKey,
     host: sim::node::Node,
     /// The region that [`Lab::mesh`] gave the node.
     region: Option<Founding>,
@@ -153,10 +159,13 @@ impl Lab {
     /// Adds a node named `name` on a new simulated host. It starts at the next
     /// [`Lab::run`].
     pub(crate) fn start(&mut self, name: &str) -> Node {
-        assert!(self.members.len() < 255, "lab failure: at most 255 nodes");
+        let byte = u8::try_from(self.members.len() + 1)
+            .expect("lab failure: at most 255 nodes");
         let host = self.sim.node(sim::node::Config::default());
         self.members.push(Member {
             name: name.into(),
+            key: types::node::Key::from_u128(u128::from(byte)),
+            private_key: PrivateKey([byte; 32]),
             host,
             region: None,
             node: None,
@@ -164,21 +173,11 @@ impl Lab {
         Node(self.members.len() - 1)
     }
 
-    /// The key and private key of `node`.
-    fn keys(node: Node) -> (types::node::Key, PrivateKey) {
-        let key =
-            u8::try_from(node.0 + 1).expect("invariant: `start` allows 255 nodes");
-        (
-            types::node::Key::from_u128(u128::from(key)),
-            PrivateKey([key; 32]),
-        )
-    }
-
-    /// Starts each node that has not started.
+    /// Starts each node that has not started. Each lab method that uses a node calls
+    /// it first.
     fn boot(&mut self) {
-        let members = self.members.iter_mut().enumerate();
-        for (index, member) in members.filter(|(_, member)| member.node.is_none()) {
-            let (key, private_key) = Self::keys(Node(index));
+        let members = self.members.iter_mut();
+        for member in members.filter(|member| member.node.is_none()) {
             let host = &member.host;
             let node = node::Node::start(node::Config {
                 shards: host.shards(),
@@ -197,8 +196,8 @@ impl Lab {
                 disk: types::byte::Size::GIBIBYTE,
                 net: host.net(),
                 listen: listen(host),
-                private_key,
-                key,
+                private_key: member.private_key.clone(),
+                key: member.key,
                 region: member.region.clone(),
             });
             member.node = Some(node);
@@ -216,45 +215,18 @@ impl Lab {
         todo!("waits on #1256")
     }
 
-    /// Makes `nodes` the members of one mesh, without a ticket: they found the region
-    /// `lab`, each as a voter, at the first [`Lab::run`].
+    /// Makes `nodes` the members of one mesh, without a ticket: they found the root
+    /// region, each as a voter, with the first admin `admin`, at the first
+    /// [`Lab::run`].
     ///
     /// # Panics
     ///
-    /// When a node runs already or is in another mesh.
+    /// When `nodes` is empty, or when a node runs already, is in another mesh, or is
+    /// listed twice.
     pub(crate) fn mesh(&mut self, nodes: &[Node]) {
-        let members: Vec<mesh::Member> = nodes
-            .iter()
-            .map(|&node| {
-                let (key, private_key) = Self::keys(node);
-                let card = Card {
-                    name: format!("lab.{}", self.members[node.0].name)
-                        .parse()
-                        .expect("lab failure: a node name is a card name"),
-                    public_key: private_key.public(),
-                    seal_key: SealKey::new([9; 32]).unwrap(),
-                    addresses: Addresses::new(vec![Address::Udp(listen(
-                        &self.members[node.0].host,
-                    ))])
-                    .unwrap(),
-                    version: 1,
-                };
-                mesh::Member {
-                    card: card::Signed::sign(key, card, &private_key),
-                    admission: [0; 64],
-                    ephemeral: None,
-                    status: Status::new(BTreeMap::new()).unwrap(),
-                }
-            })
-            .collect();
-        let founding = Founding {
-            prefix: "lab".parse().unwrap(),
-            voters: members.iter().map(|member| member.card.key()).collect(),
-            members,
-            definitions: BTreeMap::new(),
-        };
-        for &node in nodes {
-            let member = &mut self.members[node.0];
+        assert!(!nodes.is_empty(), "lab failure: `mesh` of no node");
+        for (at, &node) in nodes.iter().enumerate() {
+            let member = &self.members[node.0];
             let name = &member.name;
             assert!(
                 member.node.is_none(),
@@ -264,7 +236,44 @@ impl Lab {
                 member.region.is_none(),
                 "lab failure: {name} is in two meshes"
             );
-            member.region = Some(founding.clone());
+            assert!(
+                !nodes[..at].iter().any(|other| other.0 == node.0),
+                "lab failure: {name} is listed twice"
+            );
+        }
+        let members: Vec<mesh::Member> = nodes
+            .iter()
+            .map(|&node| {
+                let member = &self.members[node.0];
+                let mut seal = [member.private_key.0[0]; 32];
+                seal[31] = 0;
+                let card = Card {
+                    name: member
+                        .name
+                        .parse()
+                        .expect("lab failure: a node name is a card name"),
+                    public_key: member.private_key.public(),
+                    seal_key: SealKey::new(seal).unwrap(),
+                    addresses: Addresses::new(vec![Address::Udp(listen(&member.host))])
+                        .unwrap(),
+                    version: 1,
+                };
+                mesh::Member {
+                    card: card::Signed::sign(member.key, card, &member.private_key),
+                    admission: [0; 64],
+                    ephemeral: None,
+                    status: Status::new(BTreeMap::new()).unwrap(),
+                }
+            })
+            .collect();
+        let founding = Founding {
+            prefix: Prefix::ROOT,
+            voters: members.iter().map(|member| member.card.key()).collect(),
+            members,
+            definitions: spec::founding::create(ADMIN.public()),
+        };
+        for &node in nodes {
+            self.members[node.0].region = Some(founding.clone());
         }
     }
 
@@ -526,8 +535,9 @@ fn a_mesh_founds_one_region_of_its_nodes_at_the_first_run() {
     let mut lab = Lab::new(1);
     let (a, b, c) = (lab.start("a"), lab.start("b"), lab.start("c"));
     lab.mesh(&[a, b]);
-    let logs = [a, b, c].map(|node| listed(&lab, node, "mesh/log"));
+    let meshes = [a, b, c].map(|node| listed(&lab, node, "mesh"));
     lab.run(Duration::from_secs(2));
+    // A node gives no read of its region, so the test reads what `mesh` stored.
     let founding = lab.members[a.0].region.clone().unwrap();
     assert_eq!(lab.members[b.0].region, Some(founding.clone()));
     assert_eq!(lab.members[c.0].region, None);
@@ -550,18 +560,18 @@ fn a_mesh_founds_one_region_of_its_nodes_at_the_first_run() {
     assert_eq!(
         cards,
         [
-            (key(1), "lab.a".into(), address(a)),
-            (key(2), "lab.b".into(), address(b)),
+            (key(1), "a".into(), address(a)),
+            (key(2), "b".into(), address(b)),
         ]
     );
     assert_eq!(founding.voters, [key(1), key(2)].into());
-    assert_eq!(founding.prefix.to_string(), "lab");
-    let logs = logs.map(|log| log.lock().unwrap().take().unwrap());
-    let log = Ok(vec![PathBuf::from("lock"), PathBuf::from("log-0")]);
+    assert_eq!(founding.prefix, Prefix::ROOT);
+    assert_eq!(founding.definitions, spec::founding::create(ADMIN.public()));
+    let meshes = meshes.map(|mesh| mesh.lock().unwrap().take().unwrap().map(drop));
     let none = Err(env::files::Error::NotFound {
-        path: PathBuf::from("mesh/log"),
+        path: PathBuf::from("mesh"),
     });
-    assert_eq!(logs, [log.clone(), log, none]);
+    assert_eq!(meshes, [Ok(()), Ok(()), none]);
     lab.stop();
 }
 
@@ -581,6 +591,31 @@ fn a_node_in_two_meshes_panics() {
     let (a, b, c) = (lab.start("a"), lab.start("b"), lab.start("c"));
     lab.mesh(&[a, b]);
     lab.mesh(&[b, c]);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: a is listed twice")]
+fn a_node_listed_twice_in_a_mesh_panics() {
+    let mut lab = Lab::new(1);
+    let a = lab.start("a");
+    lab.mesh(&[a, a]);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `mesh` of no node")]
+fn a_mesh_of_no_node_panics() {
+    Lab::new(1).mesh(&[]);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: at most 255 nodes")]
+fn a_lab_starts_255_nodes_and_panics_at_the_256th() {
+    let mut lab = Lab::new(1);
+    for n in 0..255 {
+        lab.start(&format!("n{n}"));
+    }
+    assert_eq!(lab.members.len(), 255);
+    lab.start("n255");
 }
 
 #[test]
