@@ -2347,13 +2347,14 @@ How to read this record:
   task skips each replayed pointer at or below the one that it knows. This is correct
   while the replay passes through the pointer of the file, and Raft never drops a
   committed entry. Trigger: before a forced takeover (K5) can drop a committed entry,
-  its issue decides how the task meets the new history. `Mesh::open` reads the spec of that file from the
-  store, or uses the founding spec when there is no file. A file that does not name a
-  pointer gives `Error::Stray`, and a failed file call `Error::Files`. The restart read
-  gets one missing chunk for each run of `definitions`, so it costs time squared in the
-  chunks of the tree. Trigger: before a milestone opens a node on a spec of more than
-  `CHUNKS_MAX` chunks, `spec::tree` gets one level of a tree at a time (#1231). Decided
-  by `laptop.architect`, 2026-10-08T11:03:36Z
+  its issue decides how the task meets the new history. `Mesh::open` reads the spec of
+  that file from the store, or uses the founding spec when there is no file. A file
+  that does not name a pointer gives `Error::Stray`, and a failed file call
+  `Error::Files`. The restart read gets one missing chunk for each run of
+  `definitions`, so it costs time squared in the chunks of the tree. Trigger: before a
+  milestone opens a node on a spec of more than `CHUNKS_MAX` chunks, `spec::tree` gets
+  one level of a tree at a time (#1231). Decided by `laptop.architect`,
+  2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178); the
   read with `definitions`, `Cause::Read`, and the two trees, 2026-10-08T11:13:40Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058621907), with
