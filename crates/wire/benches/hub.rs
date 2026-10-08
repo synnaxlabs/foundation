@@ -166,9 +166,9 @@ fn encode_and_decode_a_head(bencher: Bencher<'_, '_>) {
 /// Decodes a credit on one home, after the open and its keys.
 #[divan::bench]
 fn decode_a_credit(bencher: Bencher<'_, '_>) {
-    let mut open = [0; 5];
+    let mut open = [0; 13];
     Open {
-        mode: Mode::Latest,
+        mode: Mode::Complete { limit_bytes: 0 },
         channels: 1,
     }
     .encode(&mut open);

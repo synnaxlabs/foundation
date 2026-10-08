@@ -1,17 +1,16 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
-use spec::definition::Definition;
+use spec::definition;
 use spec::retention::{Error, Policy};
 
-use crate::Found;
+use crate::{Definition, Found};
 
 const NEGATIVE_SPAN: Code = Code::new("config.negative-span");
 const KEYS: [&str; 2] = ["select", "keep"];
 
 /// Checks a `retention` block and gives its policy.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let select = found.select(block, "indexes that it caps", "site_a.**");
     let fix = "Add a `keep` attribute with a span such as \"3d\"";
     let keep = found.required(block, "keep", read::span, fix.into());
@@ -19,7 +18,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         return None;
     };
     match Policy::new(select, keep) {
-        Ok(policy) => Some(Definition::Retention(policy)),
+        Ok(policy) => Some(Definition::Spec(definition::Definition::Retention(policy))),
         Err(error @ Error::Negative(_)) => {
             let at = block
                 .body

@@ -42,6 +42,10 @@ pub(crate) enum Call {
         handle: Handle,
         to: PathBuf,
     },
+    /// A remove through a write handle: the entry must name its file.
+    Unlink {
+        handle: Handle,
+    },
 }
 
 impl Call {
@@ -50,7 +54,7 @@ impl Call {
             Self::Open(_) => Operation::Open,
             Self::List => Operation::List,
             Self::CreateDir => Operation::CreateDir,
-            Self::Remove => Operation::Remove,
+            Self::Remove | Self::Unlink { .. } => Operation::Remove,
             Self::SyncDir => Operation::SyncDir,
             Self::Free => Operation::Free,
             Self::Write { .. } => Operation::WriteAt,
@@ -66,7 +70,8 @@ impl Call {
             Self::Write { handle, .. }
             | Self::Read { handle, .. }
             | Self::Sync { handle }
-            | Self::Rename { handle, .. } => Some(*handle),
+            | Self::Rename { handle, .. }
+            | Self::Unlink { handle } => Some(*handle),
             _ => None,
         }
     }
@@ -111,6 +116,16 @@ pub(crate) enum Held {
 pub(crate) struct Ended {
     pub(crate) result: Result<Done, Error>,
     pub(crate) held: Option<Held>,
+}
+
+/// What a crash leaves of a [`Mode::Create`] open in flight that makes a file. The
+/// file system can make the entry and allocate in either order.
+#[derive(Clone, Copy, Hash)]
+enum Cut {
+    /// The open took effect.
+    Whole,
+    /// The entry, with no bytes.
+    Empty,
 }
 
 struct Flight {
@@ -317,6 +332,9 @@ impl Files {
             Call::Rename { handle, to } => {
                 disk.rename(handle.inode, &path, to).map(|()| Done::Unit)
             }
+            Call::Unlink { handle } => {
+                disk.unlink(handle.inode, &path).map(|()| Done::Unit)
+            }
         };
         if let Some(handle) = call.handle() {
             disk.release(handle);
@@ -362,12 +380,13 @@ impl Files {
         ended.held
     }
 
-    /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
-    /// hold of the node ends, a leaked one too. A call in flight ends as one whose
-    /// future dropped, in the order of its end time. After a `Power` crash only each
-    /// write takes effect, and the disk keeps what is durable. Returns the wakers of
-    /// the closes and the blocks of the calls, for the caller to drop after it
-    /// releases the lock.
+    /// Crashes `node` by `crash` at true time `at`: each call, result, close, and hold
+    /// of the node ends, a leaked one too. A call in flight ends as one whose future
+    /// dropped, in the order of its end time. A create open in flight that makes a file
+    /// can make it with no bytes. After a `Power` crash a `sync` or `sync_dir` in
+    /// flight has no effect, and the disk keeps what is durable and a prefix of its
+    /// log. Returns the wakers of the closes and the blocks of the calls, for the
+    /// caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
@@ -379,6 +398,7 @@ impl Files {
             .into_iter()
             .partition(|(_, key)| flights[key].node == node);
         self.queue = queue;
+        let power = crash == Crash::Power;
         let (mut closes, mut orphans) = (Vec::new(), Vec::new());
         for (_, key) in cut {
             let mut flight = (self.flights.remove(&key))
@@ -387,15 +407,25 @@ impl Files {
             let close = flight.call.handle().map(|handle| handle.key);
             closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
-            let applied =
-                crash == Crash::Process || matches!(flight.call, Call::Write { .. });
-            let (ok, held) = if applied {
+            let drawn = (matches!(flight.call, Call::Open(Mode::Create { .. }))
+                && !flight.failed
+                && self.disks[node].makes(&flight.path))
+            .then(|| match self.rng.below(2) {
+                0 => Cut::Whole,
+                _ => Cut::Empty,
+            });
+            if let Some(Cut::Empty) = drawn {
+                flight.call = Call::Open(Mode::Create { len: 0 });
+            }
+            // A power cut loses what a sync in flight would make durable.
+            let synced = matches!(flight.call, Call::Sync { .. } | Call::SyncDir);
+            let (ok, held) = if power && synced {
+                (false, flight.held)
+            } else {
                 let ended = self.apply(key, flight);
                 (ended.result.is_ok(), ended.held)
-            } else {
-                (false, flight.held)
             };
-            (at, key, kind, ok).hash(&mut self.digest);
+            (at, key, kind, drawn, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
         let leaked: Vec<_> = (self.done)
@@ -404,7 +434,8 @@ impl Files {
         for (_, (_, ended)) in leaked {
             orphans.extend(self.discard(node, ended));
         }
-        self.disks[node].crash(crash, &mut self.rng);
+        let kept = self.disks[node].crash(crash, &mut self.rng);
+        kept.hash(&mut self.digest);
         (closes, orphans)
     }
 

@@ -21,7 +21,7 @@ mod word;
 
 use std::{fmt, iter, mem};
 
-use types::sample::{Scalar, Type};
+use types::sample::{Scalar, Sides, Type};
 
 use crate::vector::Vector;
 
@@ -372,6 +372,13 @@ impl Shape {
             Type::Array { element, len } => Self::Fixed {
                 element: Layout::of(element),
                 len: usize::try_from(len).expect("invariant: a usize holds a u32"),
+            },
+            Type::Matrix {
+                element,
+                sides: Sides { rows, columns },
+            } => Self::Fixed {
+                element: Layout::of(element),
+                len: usize::from(rows).strict_mul(usize::from(columns)),
             },
             Type::List { element, max } => Self::Variable {
                 element: Layout::of(element),
@@ -874,6 +881,12 @@ mod tests {
             scalar().prop_map(Type::Scalar),
             (scalar(), 0..4_u32)
                 .prop_map(|(element, len)| Type::Array { element, len }),
+            (scalar(), 0..3_u16, 0..3_u16).prop_map(|(element, rows, columns)| {
+                Type::Matrix {
+                    element,
+                    sides: Sides { rows, columns },
+                }
+            }),
             (scalar(), 0..6_u32).prop_map(|(element, max)| Type::List { element, max }),
             Just(Type::String),
             Just(Type::Bytes),
@@ -1809,6 +1822,22 @@ mod tests {
             assert_eq!(
                 encode_type(array(Scalar::U16, 3), 1_000, &values),
                 encode(Scalar::U16, &values)
+            );
+        }
+
+        #[test]
+        fn encodes_a_matrix_as_the_array_of_its_elements() {
+            let matrix = Type::Matrix {
+                element: Scalar::F32,
+                sides: Sides {
+                    rows: 2,
+                    columns: 3,
+                },
+            };
+            let values = bytes(4, (0..6_000).map(|n| n % 11));
+            assert_eq!(
+                encode_type(matrix, 1_000, &values),
+                encode_type(array(Scalar::F32, 6), 1_000, &values)
             );
         }
 

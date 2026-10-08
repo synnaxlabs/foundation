@@ -190,26 +190,30 @@ fn refuses_a_measurement_line_protocol_cannot_carry() {
         (
             Measurement::new("a\\b", &[], &["f"]),
             Error::Character {
-                name: "a\\b".into(),
+                part: Part::Measurement,
+                text: "a\\b".into(),
                 character: '\\',
             },
-            "the name \"a\\\\b\" holds '\\\\', which no name may hold",
+            "the measurement name \"a\\\\b\" holds '\\\\', which a line cannot hold",
         ),
         (
             Measurement::new("m", &[("k", "a\nb")], &["f"]),
             Error::Character {
-                name: "a\nb".into(),
+                part: Part::TagValue("k".into()),
+                text: "a\nb".into(),
                 character: '\n',
             },
-            "the name \"a\\nb\" holds '\\n', which no name may hold",
+            "the value \"a\\nb\" of the tag \"k\" holds '\\n', \
+             which a line cannot hold",
         ),
         (
             Measurement::new("m", &[], &["f\r"]),
             Error::Character {
-                name: "f\r".into(),
+                part: Part::FieldKey,
+                text: "f\r".into(),
                 character: '\r',
             },
-            "the name \"f\\r\" holds '\\r', which no name may hold",
+            "the field key \"f\\r\" holds '\\r', which a line cannot hold",
         ),
     ]);
 }
@@ -220,52 +224,184 @@ fn refuses_a_tab_or_nul_in_any_part() {
         (
             Measurement::new("\t#m", &[], &["f"]),
             Error::Character {
-                name: "\t#m".into(),
+                part: Part::Measurement,
+                text: "\t#m".into(),
                 character: '\t',
             },
-            "the name \"\\t#m\" holds '\\t', which no name may hold",
+            "the measurement name \"\\t#m\" holds '\\t', which a line cannot hold",
         ),
         (
             Measurement::new("m\0x", &[], &["f"]),
             Error::Character {
-                name: "m\0x".into(),
+                part: Part::Measurement,
+                text: "m\0x".into(),
                 character: '\0',
             },
-            "the name \"m\\0x\" holds '\\0', which no name may hold",
+            "the measurement name \"m\\0x\" holds '\\0', which a line cannot hold",
         ),
         (
             Measurement::new("m", &[("\tk", "v")], &["f"]),
             Error::Character {
-                name: "\tk".into(),
+                part: Part::TagKey,
+                text: "\tk".into(),
                 character: '\t',
             },
-            "the name \"\\tk\" holds '\\t', which no name may hold",
+            "the tag key \"\\tk\" holds '\\t', which a line cannot hold",
         ),
         (
             Measurement::new("m", &[("k", "a\tb")], &["f"]),
             Error::Character {
-                name: "a\tb".into(),
+                part: Part::TagValue("k".into()),
+                text: "a\tb".into(),
                 character: '\t',
             },
-            "the name \"a\\tb\" holds '\\t', which no name may hold",
+            "the value \"a\\tb\" of the tag \"k\" holds '\\t', \
+             which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[("k2", "a\tb"), ("k1", "a\tb")], &["f"]),
+            Error::Character {
+                part: Part::TagValue("k1".into()),
+                text: "a\tb".into(),
+                character: '\t',
+            },
+            "the value \"a\\tb\" of the tag \"k1\" holds '\\t', \
+             which a line cannot hold",
         ),
         (
             Measurement::new("m", &[], &["f", "\tf"]),
             Error::Character {
-                name: "\tf".into(),
+                part: Part::FieldKey,
+                text: "\tf".into(),
                 character: '\t',
             },
-            "the name \"\\tf\" holds '\\t', which no name may hold",
+            "the field key \"\\tf\" holds '\\t', which a line cannot hold",
         ),
         (
             Measurement::new("m", &[], &["f\0g"]),
             Error::Character {
-                name: "f\0g".into(),
+                part: Part::FieldKey,
+                text: "f\0g".into(),
                 character: '\0',
             },
-            "the name \"f\\0g\" holds '\\0', which no name may hold",
+            "the field key \"f\\0g\" holds '\\0', which a line cannot hold",
         ),
     ]);
+}
+
+/// Characters that InfluxDB 1 and 2 with `validate-keys` drop: each is outside the
+/// general categories L, M, N, P, and S, or is U+FFFD.
+const DROPPED: [char; 14] = [
+    '\u{1}',      // Cc
+    '\u{7f}',     // Cc
+    '\u{85}',     // Cc
+    '\u{a0}',     // Zs
+    '\u{3000}',   // Zs
+    '\u{2028}',   // Zl
+    '\u{2029}',   // Zp
+    '\u{200b}',   // Cf
+    '\u{e000}',   // Co
+    '\u{378}',    // Cn
+    '\u{e0001}',  // Cf
+    '\u{f0000}',  // Co
+    '\u{10ffff}', // Cn
+    '\u{fffd}',   // So, which InfluxDB refuses by name
+];
+
+#[test]
+fn refuses_a_character_influxdb_drops() {
+    refuses(&[
+        (
+            Measurement::new("m\u{1}x", &[], &["f"]),
+            Error::Character {
+                part: Part::Measurement,
+                text: "m\u{1}x".into(),
+                character: '\u{1}',
+            },
+            "the measurement name \"m\\u{1}x\" holds '\\u{1}', \
+             which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[("k\u{a0}", "v")], &["f"]),
+            Error::Character {
+                part: Part::TagKey,
+                text: "k\u{a0}".into(),
+                character: '\u{a0}',
+            },
+            "the tag key \"k\\u{a0}\" holds '\\u{a0}', which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[("k", "a\u{fffd}b")], &["f"]),
+            Error::Character {
+                part: Part::TagValue("k".into()),
+                text: "a\u{fffd}b".into(),
+                character: '\u{fffd}',
+            },
+            "the value \"a\u{fffd}b\" of the tag \"k\" holds '\u{fffd}', \
+             which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[("k", "a\u{e0001}")], &["f"]),
+            Error::Character {
+                part: Part::TagValue("k".into()),
+                text: "a\u{e0001}".into(),
+                character: '\u{e0001}',
+            },
+            "the value \"a\\u{e0001}\" of the tag \"k\" holds '\\u{e0001}', \
+             which a line cannot hold",
+        ),
+        (
+            Measurement::new("m", &[], &["f\u{378}"]),
+            Error::Character {
+                part: Part::FieldKey,
+                text: "f\u{378}".into(),
+                character: '\u{378}',
+            },
+            "the field key \"f\\u{378}\" holds '\\u{378}', which a line cannot hold",
+        ),
+    ]);
+}
+
+#[test]
+fn accepts_each_general_category_influxdb_prints() {
+    let printed = [
+        'Z', 'é', 'ǅ', 'ʰ', '中', // Lu, Ll, Lt, Lm, Lo
+        '\u{301}', '\u{903}', '\u{20dd}', // Mn, Mc, Me
+        '7', 'Ⅻ', '½', // Nd, Nl, No
+        '_', '-', '(', ')', '«', '»', '!', ',', '=', // Pc, Pd, Ps, Pe, Pi, Pf, Po
+        '+', '$', '^', '°', '😀', // Sm, Sc, Sk, So, So outside the BMP
+        ' ',  // U+0020, the one Zs that InfluxDB prints
+    ];
+    for c in printed {
+        let text = format!("a{c}");
+        let t = text.as_str();
+        for got in [
+            Measurement::new(t, &[], &["f"]),
+            Measurement::new("m", &[(t, "v")], &["f"]),
+            Measurement::new("m", &[("k", t)], &["f"]),
+            Measurement::new("m", &[], &[t]),
+        ] {
+            assert!(got.is_ok(), "{c:?}: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn reads_general_categories_of_unicode_17() {
+    assert_eq!(unicode_properties::UNICODE_VERSION, (17, 0, 0));
+}
+
+#[test]
+fn names_the_first_refused_character() {
+    refuses(&[(
+        Measurement::new("m", &[], &["a\0b\tc"]),
+        Error::Character {
+            part: Part::FieldKey,
+            text: "a\0b\tc".into(),
+            character: '\0',
+        },
+        "the field key \"a\\0b\\tc\" holds '\\0', which a line cannot hold",
+    )]);
 }
 
 #[test]
@@ -333,9 +469,13 @@ fn allows_what_is_reserved_only_elsewhere() {
     assert_eq!(text(&out), "time,k=_v,t=# #f=0i 0\n");
 }
 
-fn name() -> impl Strategy<Value = String> {
-    "[^_#\\\\\n\r\t\0][^\\\\\n\r\t\0]{0,8}"
-        .prop_filter("not time", |name| name != "time")
+/// A name, key, or tag value that a line accepts in each part.
+pub(crate) fn name() -> impl Strategy<Value = String> {
+    concat!(
+        r"[[\pL\pM\pN\pP\pS ]--[_#\\\x{fffd}]]",
+        r"[[\pL\pM\pN\pP\pS ]--[\\\x{fffd}]]{0,8}",
+    )
+    .prop_filter("not time", |name| name != "time")
 }
 
 fn field_value() -> impl Strategy<Value = Value> {
@@ -382,22 +522,27 @@ proptest! {
     }
 
     #[test]
-    fn refuses_a_tab_or_nul_anywhere(
+    fn refuses_a_refused_character_anywhere(
         name in name(),
         at in any::<proptest::sample::Index>(),
-        character in proptest::sample::select(vec!['\t', '\0']),
+        character in proptest::sample::select(
+            [['\\', '\n', '\r', '\t', '\0'].as_slice(), &DROPPED].concat()
+        ),
         part in 0..4_usize,
     ) {
         let mut chars: Vec<char> = name.chars().collect();
         chars.insert(at.index(chars.len() + 1), character);
-        let name: String = chars.into_iter().collect();
-        let n = name.as_str();
-        let got = match part {
-            0 => Measurement::new(n, &[("k", "v")], &["f"]),
-            1 => Measurement::new("m", &[(n, "v")], &["f"]),
-            2 => Measurement::new("m", &[("k", n)], &["f"]),
-            _ => Measurement::new("m", &[("k", "v")], &["f", n]),
+        let text: String = chars.into_iter().collect();
+        let n = text.as_str();
+        let (got, part) = match part {
+            0 => (Measurement::new(n, &[("k", "v")], &["f"]), Part::Measurement),
+            1 => (Measurement::new("m", &[(n, "v")], &["f"]), Part::TagKey),
+            2 => (
+                Measurement::new("m", &[("k", n)], &["f"]),
+                Part::TagValue("k".into()),
+            ),
+            _ => (Measurement::new("m", &[("k", "v")], &["f", n]), Part::FieldKey),
         };
-        prop_assert_eq!(got, Err(Error::Character { name, character }));
+        prop_assert_eq!(got, Err(Error::Character { part, text, character }));
     }
 }

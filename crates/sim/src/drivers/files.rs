@@ -196,6 +196,21 @@ impl env::files::Descriptor for Descriptor {
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
         Box::pin(Close(Some(*self)))
     }
+
+    fn remove(
+        self: Box<Self>,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<(), env::files::Error>>>> {
+        let call = Call::Unlink {
+            handle: self.handle,
+        };
+        let wait = self.node.submit(&path, call, None);
+        Box::pin(async move {
+            let result = wait.await.result.map(drop);
+            Close(Some(*self)).await;
+            result
+        })
+    }
 }
 
 impl Drop for Descriptor {

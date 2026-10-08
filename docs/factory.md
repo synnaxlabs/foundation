@@ -89,7 +89,8 @@ that pass in CI.
   case is `box2.connector`: a connector against a locked `hub` contract with a device
   simulator.
 - **Machine work at night.** The red-teams run simulation campaigns, fuzz, and mutants.
-  Each failure becomes a day-lane issue with a reduced repro.
+  Each failure becomes a day-lane issue, or an item of one when its fix is small
+  (`docs/coordination.md`, "Small changes"), with a reduced repro.
 - Night PRs merge through the queue like day PRs.
 
 ## Messages
@@ -105,8 +106,10 @@ that pass in CI.
 
 - A ruleset on `main` requires the CI checks, the merge queue, and code-owner review,
   with zero other approvals.
-- After its local gate and review, the author runs `gh pr merge <n> --auto`. The queue
-  tests each PR on top of `main` and merges it.
+- After its local gate and review, the author runs `gh pr merge <n> --auto`. Two PRs are
+  exceptions, and `laptop.monitor` marks each ready and queues it: a red-team PR after
+  the director approves it, and the director's rule PR after the person approves it.
+  The queue tests each PR on top of `main` and merges it.
 - Code owners (`.github/CODEOWNERS`): the person owns `oracles/` (except the fuzz
   inputs in `oracles/fuzz/`), `.github/`, `CLAUDE.md`, and `.claude/`. Everything else
   merges when its checks pass.
@@ -119,11 +122,17 @@ that pass in CI.
 
 - Tasks, decisions, and approvals live in issues, PRs, and the repo, never only in a
   message or a session's context.
+- All sessions post as one bot. So each comment that a session posts on a PR or an
+  issue (a review round, an architect review, an audit, an approval, a state comment)
+  starts with its name line: `**<session>** · <role>`, for example
+  `**laptop.architect-2** · architect, architecture review`. The role is `builder`,
+  `architect`, `director`, `coordinator`, `monitor`, or `red-team`, and can name the
+  task. A rating (`/review`, "Rating") comes after it.
 - An approval is a link to the person's or the architect's own comment, with its UTC
-  time. Never record a paraphrase as an approval. All sessions post as one bot, so a
-  session's approval or OK starts with its name (`laptop.architect: OK ...`). The one
-  other form: `laptop.director` approves a red-team PR with the line
-  ``Director: approved at `<sha>` ``. An approval that names no session does not count.
+  time. Never record a paraphrase as an approval. A session's approval or OK is a
+  comment whose name line names it. `laptop.director` approves a red-team PR with the
+  line ``Director: approved at `<sha>` ``. An approval that names no session does not
+  count.
 - A new decision says "Supersedes <link>". A ruling ships in the code PR that needs it,
   with the link to the architect's comment. A change to the meaning of a ruling needs a
   new approval before the PR merges.
@@ -133,4 +142,5 @@ that pass in CI.
 
 Opus 5.5 everywhere. Fable only on an issue the person or the architect labels
 `model:fable`. The weekly `code-quality` and `drift` agents run on Sonnet; search
-subagents run on Haiku.
+subagents run on Haiku. COST TRIALS in `docs/decisions.md` runs some reviewers on
+Sonnet.

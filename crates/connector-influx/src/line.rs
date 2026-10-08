@@ -5,6 +5,7 @@ use std::fmt;
 use std::io::Write as _;
 
 use types::time::Stamp;
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
 
 /// One measurement's name, tags, and field keys, checked and escaped once.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,7 +22,8 @@ impl Measurement {
     ///
     /// - [`Error::Empty`] for an empty name, key, or tag value.
     /// - [`Error::Character`] for one with a backslash, a newline, a carriage
-    ///   return, a tab, or NUL.
+    ///   return, a tab, NUL, U+FFFD, or a character outside the general categories
+    ///   L, M, N, P, and S other than the space U+0020.
     /// - [`Error::Reserved`] for a name or key that starts with `_`, or a key
     ///   `time`.
     /// - [`Error::Comment`] for a name that starts with `#`.
@@ -143,12 +145,13 @@ impl Float {
 pub enum Error {
     /// An empty part.
     Empty(Part),
-    /// A name with a character that no name may hold: a backslash, a newline, a
-    /// carriage return, a tab, or NUL.
+    /// A part with a character that [`Measurement::new`] refuses.
     Character {
-        /// The name.
-        name: String,
-        /// The character.
+        /// The part that holds `character`.
+        part: Part,
+        /// The text of the part, as given.
+        text: String,
+        /// The first refused character in `text`.
         character: char,
     },
     /// A name or key that InfluxDB keeps for itself: one that starts with `_`, or
@@ -186,10 +189,21 @@ impl fmt::Display for Error {
                 write!(f, "the value of the tag {key:?} is empty")
             }
             Self::Empty(Part::FieldKey) => write!(f, "a field key is empty"),
-            Self::Character { name, character } => write!(
-                f,
-                "the name {name:?} holds {character:?}, which no name may hold"
-            ),
+            Self::Character {
+                part,
+                text,
+                character,
+            } => {
+                match part {
+                    Part::Measurement => write!(f, "the measurement name {text:?}")?,
+                    Part::TagKey => write!(f, "the tag key {text:?}")?,
+                    Part::TagValue(key) => {
+                        write!(f, "the value {text:?} of the tag {key:?}")?;
+                    }
+                    Part::FieldKey => write!(f, "the field key {text:?}")?,
+                }
+                write!(f, " holds {character:?}, which a line cannot hold")
+            }
             Self::Reserved(name) => {
                 write!(f, "InfluxDB keeps the name {name:?} for itself")
             }
@@ -232,12 +246,10 @@ fn escape(
     if text.is_empty() {
         return Err(Error::Empty(part));
     }
-    if let Some(character) = text
-        .chars()
-        .find(|c| matches!(c, '\\' | '\n' | '\r' | '\t' | '\0'))
-    {
+    if let Some(character) = text.chars().find(|&c| refused(c)) {
         return Err(Error::Character {
-            name: text.into(),
+            part,
+            text: text.into(),
             character,
         });
     }
@@ -250,5 +262,17 @@ fn escape(
     Ok(())
 }
 
+/// Past the backslash, this is what InfluxDB 1 and 2 with `validate-keys` drop. The
+/// newline, carriage return, tab, and NUL are in `Other`.
+fn refused(c: char) -> bool {
+    c == '\\'
+        || c == char::REPLACEMENT_CHARACTER
+        || (c != ' '
+            && matches!(
+                c.general_category_group(),
+                GeneralCategoryGroup::Separator | GeneralCategoryGroup::Other
+            ))
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
