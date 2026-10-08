@@ -7257,6 +7257,84 @@ mod tests {
             }
         }
 
+        /// Runs `pair`, takes what the server got into `receivers` and `read`, and
+        /// writes what each of `senders` holds.
+        fn flush(
+            pair: &mut Pair,
+            receivers: &mut Vec<(Class, Receiver)>,
+            read: &mut [usize; 4],
+            senders: &[&Sender],
+        ) {
+            pair.run(RUN);
+            take(pair, receivers, read);
+            pair.run(RUN);
+            let now = pair.now();
+            for sender in senders {
+                let flushed =
+                    pair::write(&mut pair.client.endpoint, now, sender, &mut None);
+                assert!(flushed.is_ok(), "{flushed:?}");
+            }
+        }
+
+        #[test]
+        fn complete_messages_share_the_budget_once_an_owed_latest_is_silent() {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+                let mut latest = open_sender(&mut pair, Class::Latest);
+                fill(&mut pair, shard, &mut latest);
+                let mut complete =
+                    [Class::Complete; 2].map(|class| open_sender(&mut pair, class));
+                write_all(&mut pair, shard, &mut complete);
+                pair.run(RUN);
+                take(&mut pair, &mut receivers, &mut read);
+                pair.run(RUN);
+                let now = pair.now();
+                for sender in [&latest, &complete[0]] {
+                    let flushed =
+                        pair::write(&mut pair.client.endpoint, now, sender, &mut None);
+                    assert_eq!(flushed, Ok(Poll::Ready(())));
+                }
+                let small = Some(shard.block(&[2; 1000]));
+                let written =
+                    pair::write(&mut pair.client.endpoint, now, &latest, &mut {
+                        small
+                    });
+                assert_eq!(written, Ok(Poll::Ready(())));
+                assert!(owed(&mut pair) < 0, "{}", owed(&mut pair));
+                for _ in 0..4 {
+                    flush(&mut pair, &mut receivers, &mut read, &[&complete[1]]);
+                }
+                let mut first = open_sender(&mut pair, Class::Complete);
+                fill(&mut pair, shard, &mut first);
+                let next =
+                    [Class::Complete; 2].map(|class| open_sender(&mut pair, class));
+                let message = shard.block(&vec![7; MESSAGE_MAX]);
+                for sender in &next {
+                    let now = pair.now();
+                    let mut message = Some(message.clone());
+                    let written = pair::write(
+                        &mut pair.client.endpoint,
+                        now,
+                        sender,
+                        &mut message,
+                    );
+                    assert!(written.is_ok(), "{written:?}");
+                }
+                for _ in 0..6 {
+                    flush(&mut pair, &mut receivers, &mut read, &[&first, &next[0]]);
+                }
+                assert!(owed(&mut pair) < 0, "{}", owed(&mut pair));
+                // `next[1]` holds room, so a second message starts only when the
+                // silent `Latest` no longer rations `Complete`.
+                let mut late = open_sender(&mut pair, Class::Complete);
+                let now = pair.now();
+                let given =
+                    try_write(&mut pair.client, now, &mut late, shard.block(b"b"));
+                assert_eq!(given, Ok(None));
+            });
+        }
+
         #[test]
         fn a_light_latest_load_waits_at_most_a_round_trip_behind_a_complete_backlog() {
             testing::run(1, |shard| {

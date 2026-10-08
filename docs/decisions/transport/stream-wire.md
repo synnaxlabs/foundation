@@ -46,8 +46,8 @@
   and https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6037588359. Who
   writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
-  admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC):
-  https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6053290214. Lost: a
+  admission of new messages: architect-2 (#1998, 2026-10-08 21:12 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069147833. Lost: a
   connection per class, because four handshakes and four congestion controllers
   compete on one path (#55). Settled by the advisor and the coordinator under the
   person's delegation (#789).
