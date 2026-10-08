@@ -875,13 +875,12 @@ impl Group {
     }
 
     // Applies `change`, and gives the task of the spec in use each pointer that moves.
-    // The state never reads the chunks that a `Spec` change lists, so it gets none.
     fn apply_change(
         &mut self,
-        mut change: Change,
+        change: Change,
     ) -> Result<Option<channel::Key>, Refused> {
-        let listed = match &mut change {
-            Change::Spec { chunks, .. } => Some(mem::take(chunks)),
+        let listed = match &change {
+            Change::Spec { chunks, .. } => Some(chunks.clone()),
             Change::Home { .. } | Change::Join(_) | Change::Ticket { .. } => None,
         };
         let applied = self.state.apply(change)?;
