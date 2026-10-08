@@ -7038,6 +7038,43 @@ mod tests {
         }
 
         #[test]
+        fn room_goes_to_a_waiting_complete_while_a_complete_holds_room_and_none_is_owed()
+         {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let [first, latest, complete, catch_up, waiting] = [
+                    Class::CatchUp,
+                    Class::Latest,
+                    Class::Complete,
+                    Class::CatchUp,
+                    Class::Complete,
+                ]
+                .map(|class| open_sender(&mut pair, class));
+                let now = pair.now();
+                let mut write = |sender: &Sender, len: usize| {
+                    let message = Some(shard.block(&vec![1; len]));
+                    let endpoint = &mut pair.client.endpoint;
+                    pair::write(endpoint, now, sender, &mut { message })
+                };
+                // The first message ends, but its bytes keep half the window.
+                assert_eq!(write(&first, NARROW / 2), Ok(Poll::Ready(())));
+                assert_eq!(write(&latest, NARROW / 2), Ok(Poll::Pending));
+                assert_eq!(write(&complete, 1000), Ok(Poll::Pending));
+                let left = NARROW / 2 - 1000;
+                assert_eq!(write(&catch_up, left), Ok(Poll::Pending));
+                assert_eq!(write(&waiting, 1000), Ok(Poll::Pending));
+                assert_eq!(owed(&mut pair), 0);
+                let seen = pair.client.events.len();
+                pair.client.endpoint.cancel(now, &catch_up);
+                pair.run(Duration::ZERO);
+                let writable = Event::Writable {
+                    stream: waiting.key(),
+                };
+                assert!(got(&pair.client, seen, &writable));
+            });
+        }
+
+        #[test]
         fn a_complete_try_write_gives_back_while_a_latest_waits_for_room() {
             testing::run(1, |shard| {
                 let mut pair = narrow(shard);
