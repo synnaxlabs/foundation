@@ -1,12 +1,11 @@
 //! `transport::fuzzing::peer` never panics, and gives the peer that the TLS rules of
-//! a node's server give for a dialer's ALPN and certificate chain. A certificate that
-//! a node issues reads back to its key.
+//! a node's server give for a dialer's certificate chain. A certificate that a node
+//! issues reads back to its key.
 //!
-//! The input is a head byte, then an optional protocol, then the chain. The low two
-//! bits of the head are the number of certificates. Bits 2 and 3 pick the protocol:
-//! 0 is `foundation/1`, 1 is none, and 2 or 3 is a length byte and that many bytes.
-//! Each certificate is a 2-byte big-endian length and that many bytes, cut at the end
-//! of the input. The last 32 bytes, when there are as many, are a private key.
+//! The input is a head byte, then the chain. The low two bits of the head are the
+//! number of certificates. Each certificate is a 2-byte big-endian length and that
+//! many bytes, cut at the end of the input. The last 32 bytes, when there are as
+//! many, are a private key.
 
 #![no_main]
 
@@ -15,7 +14,6 @@ use transport::Peer;
 use transport::fuzzing::{certificate, peer};
 use types::ed25519::PrivateKey;
 
-const ALPN: &[u8] = b"foundation/1";
 /// A `SubjectPublicKeyInfo` up to its 32-byte Ed25519 key.
 const SPKI: &[u8] = b"\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00";
 
@@ -24,20 +22,10 @@ fn take(bytes: &[u8], len: usize) -> (&[u8], &[u8]) {
     bytes.split_at(len.min(bytes.len()))
 }
 
-/// The protocol and the chain in `bytes`.
-fn read(bytes: &[u8]) -> (Option<&[u8]>, Vec<&[u8]>) {
+/// The chain in `bytes`.
+fn read(bytes: &[u8]) -> Vec<&[u8]> {
     let Some((&head, mut rest)) = bytes.split_first() else {
-        return (Some(ALPN), Vec::new());
-    };
-    let protocol = match head >> 2 & 3 {
-        0 => Some(ALPN),
-        1 => None,
-        _ => {
-            let (len, after) = take(rest, 1);
-            let (protocol, after) = take(after, len.first().map_or(0, |&l| l.into()));
-            rest = after;
-            Some(protocol)
-        }
+        return Vec::new();
     };
     let mut chain = Vec::new();
     for _ in 0..head & 3 {
@@ -49,7 +37,7 @@ fn read(bytes: &[u8]) -> (Option<&[u8]>, Vec<&[u8]>) {
         chain.push(der);
         rest = after;
     }
-    (protocol, chain)
+    chain
 }
 
 /// Whether `der` holds `SPKI` followed by `key`.
@@ -59,29 +47,24 @@ fn carries(der: &[u8], key: &[u8; 32]) -> bool {
 }
 
 fuzz_target!(|bytes: &[u8]| {
-    let (protocol, chain) = read(bytes);
-    let got = peer(protocol, &chain);
-    match (protocol == Some(ALPN), chain.as_slice()) {
-        (false, _) => assert_eq!(got, None, "a peer with another protocol"),
-        (true, []) => assert_eq!(got, Some(Peer::Client), "no certificate, no client"),
-        (true, [der]) if der.len() <= 1024 => match got {
+    let chain = read(bytes);
+    let got = peer(&chain);
+    match chain.as_slice() {
+        [] => assert_eq!(got, Some(Peer::Client), "no certificate, no client"),
+        [der] if der.len() <= 1024 => match got {
             None => {}
             Some(Peer::Node(key)) => {
                 assert!(carries(der, &key.to_bytes()), "a key the certificate lacks");
             }
             Some(Peer::Client) => panic!("a certificate gave a client"),
         },
-        (true, _) => assert_eq!(got, None, "a peer from a long chain or certificate"),
+        _ => assert_eq!(got, None, "a peer from a long chain or certificate"),
     }
     if let Some(key) = bytes.last_chunk::<32>() {
         let private_key = PrivateKey(*key);
         let der = certificate(&private_key);
         let node = Some(Peer::Node(private_key.public()));
-        assert_eq!(peer(Some(ALPN), &[&der]), node, "the issued key changed");
-        assert_eq!(
-            peer(Some(ALPN), &[&der, &der]),
-            None,
-            "a chain of two passed"
-        );
+        assert_eq!(peer(&[&der]), node, "the issued key changed");
+        assert_eq!(peer(&[&der, &der]), None, "a chain of two passed");
     }
 });
