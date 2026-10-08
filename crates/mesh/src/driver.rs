@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
@@ -34,8 +35,11 @@ use crate::member::Member;
 use crate::message::Message;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
+pub use end::Ended;
+use end::Spawner;
 use send::Senders;
 
+mod end;
 mod home;
 mod send;
 mod stream;
@@ -51,7 +55,7 @@ fn header(pool: &Pool) -> Result<Block, block::Error> {
 const HEARTBEAT_TICKS: u32 = 1;
 /// The most messages that wait for one member.
 const QUEUE_MAX: usize = 64;
-/// The directory of the log, in the mesh's directory.
+/// The directory of the log, in [`Config::dir`].
 const LOG: &str = "log";
 /// The code of a stream with a message that the mesh refused.
 const REFUSED: Code = Code(16);
@@ -76,8 +80,11 @@ pub struct Config {
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
     pub voters: BTreeSet<node::Key>,
-    /// The mesh's directory.
+    /// The file seam. `os` or `sim` implements it.
     pub files: Files,
+    /// The mesh's directory, relative to the data directory. The mesh makes it, and
+    /// the log goes in `log` in it. Its parent must be there and durable.
+    pub dir: PathBuf,
     /// Times the ticks of the group.
     pub clock: Clock,
     /// Gives each election timeout its random part.
@@ -99,10 +106,14 @@ pub struct Config {
 ///
 /// The group's task ends soon after the last clone drops. A write in progress ends
 /// first, and a write that waits for a block ends at the next tick. Until then, a new
-/// open of the same directory gives [`Error::Log`].
+/// open of the same directory gives [`Error::Log`]. Once the group stops or the
+/// last clone drops, each task that sends ends at once: a dial or a send in
+/// progress stops, and does not wait for its timeout. [`Mesh::ended`] tells when
+/// each task has ended.
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
+    spawner: Spawner,
     pool: Rc<Pool>,
     clock: Clock,
     #[cfg_attr(
@@ -119,7 +130,7 @@ impl fmt::Debug for Mesh {
 }
 
 impl Mesh {
-    /// Reads the log from `config.files`, starts the group as a follower, and spawns
+    /// Reads the log from `config.dir`, starts the group as a follower, and spawns
     /// its task on `config.tasks`. Homes are known again when this node applies the
     /// log, after it hears the leader.
     ///
@@ -149,15 +160,15 @@ impl Mesh {
             "invariant: the transport of a mesh proves the public half of its private \
              key: it proves {proved}, not {own}"
         );
-        let (transport, tasks) = (Rc::clone(&config.transport), config.tasks.clone());
+        let transport = Rc::clone(&config.transport);
         let mesh = Self::start(config).await?;
         let senders = Senders {
             group: Rc::downgrade(&mesh.group),
             transport,
             pool: Rc::clone(&mesh.pool),
-            tasks: tasks.clone(),
+            spawner: mesh.spawner.clone(),
         };
-        tasks.spawn(senders.run());
+        mesh.spawner.spawn(senders.run());
         Ok(mesh)
     }
 
@@ -178,7 +189,7 @@ impl Mesh {
             return Err(Error::NotMember(key));
         }
         let pool = Rc::clone(&config.pool);
-        let (log, stored) = Log::open(config.files, LOG.into(), config.pool).await?;
+        let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
         let unapplied = written(&stored.entries).collect();
         let start = Start {
             hard: stored.hard,
@@ -213,7 +224,8 @@ impl Mesh {
             calls: BTreeMap::new(),
         }));
         let weak = Rc::downgrade(&group);
-        config.tasks.spawn(run(
+        let spawner = Spawner::new(config.tasks);
+        spawner.spawn(run(
             weak,
             log,
             signer,
@@ -222,6 +234,7 @@ impl Mesh {
         ));
         Ok(Self {
             group,
+            spawner,
             pool,
             clock: config.clock,
             entropy: config.entropy,
@@ -232,6 +245,15 @@ impl Mesh {
     #[must_use]
     pub fn key(&self) -> node::Key {
         self.group.borrow().raft.key()
+    }
+
+    /// Gives a future that resolves once each task of the mesh has ended: the group's
+    /// task and each task that sends. The future holds no clone, so it does not keep
+    /// the group running. Once it resolves, the mesh holds no file, and a new open of
+    /// its directory can take the log.
+    #[must_use]
+    pub fn ended(&self) -> Ended {
+        self.spawner.ended()
     }
 
     /// A watch of the home of `index`.
@@ -924,6 +946,19 @@ fn request(body: &Body) -> bool {
     }
 }
 
+// Makes `dir`, durable in its parent, and opens the log in `LOG` in it.
+async fn open_log(
+    files: Files,
+    dir: &Path,
+    pool: Rc<Pool>,
+) -> Result<(Log, log::Stored), log::Error> {
+    files.create_dir(dir).await?;
+    files
+        .sync_dir(dir.parent().unwrap_or(Path::new("")))
+        .await?;
+    Log::open(files, dir.join(LOG), pool).await
+}
+
 // Ticks the group and does what each `Ready` says, in the order that `raft` needs:
 // sign, write, send, apply. It ends when the group stops or its last handle drops.
 // It is the only caller of `Raft::ready`, so the writes keep their order.
@@ -1034,7 +1069,6 @@ mod tests {
     use std::mem::ManuallyDrop;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::num::{NonZeroU32, NonZeroUsize};
-    use std::path::Path;
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use std::task::Wake;
@@ -1144,6 +1178,7 @@ mod tests {
             members: common::create_members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
             files: node.files(),
+            dir: PathBuf::new(),
             clock: node.clock(),
             entropy: node.entropy(),
             tasks: tasks.clone(),
@@ -2058,6 +2093,17 @@ mod tests {
             assert_eq!(format!("{mesh:?}"), "Mesh { .. }");
             let watch = mesh.watch(INDEX);
             assert_eq!(format!("{watch:?}"), "Watch { index: Key(7), .. }");
+        });
+    }
+
+    #[test]
+    fn the_debug_text_of_ended_holds_nothing() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let mut ended = mesh.ended();
+            let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut ended).poll(cx))).await;
+            assert_eq!(polled, Poll::Pending);
+            assert_eq!(format!("{ended:?}"), "Ended { .. }");
         });
     }
 
@@ -5221,12 +5267,208 @@ mod tests {
         });
     }
 
+    /// The config of node 1 of `IDS`, through `Mesh::open`. No node serves the
+    /// address of another member, so each dial waits for [`IDLE`].
+    fn dialing(node: &sim::node::Node, tasks: &Tasks) -> Config {
+        Config {
+            members: IDS.iter().map(|&id| create_voter(id)).collect(),
+            ..config(node, tasks, 1, &IDS, &IDS)
+        }
+    }
+
+    #[test]
+    fn ended_waits_for_the_last_mesh_and_the_log() {
+        solo(|node, tasks| async move {
+            let mesh = Mesh::open(dialing(&node, &tasks)).await.unwrap();
+            let (mut first, second) = (mesh.ended(), mesh.ended());
+            node.clock().sleep(Span::SECOND).await;
+            let polled = poll_fn(|cx| Poll::Ready(Pin::new(&mut first).poll(cx))).await;
+            assert_eq!(polled, Poll::Pending);
+            drop(mesh);
+            first.await;
+            second.await;
+            assert_eq!(Mesh::open(dialing(&node, &tasks)).await.err(), None);
+        });
+    }
+
+    #[test]
+    fn ended_wakes_each_task_that_waits() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            let woken = Rc::new(Cell::new(0));
+            for _ in 0..2 {
+                let (ended, woken) = (mesh.ended(), Rc::clone(&woken));
+                tasks.spawn(async move {
+                    ended.await;
+                    woken.set(woken.get() + 1);
+                });
+            }
+            node.clock().sleep(Span::MILLISECOND).await;
+            drop(mesh);
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(woken.get(), 2);
+        });
+    }
+
+    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
+    #[test]
+    fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
+        for seed in 0..32 {
+            solo_at(seed, move |node, tasks| async move {
+                let config = dialing(&node, &tasks);
+                let transport = Rc::clone(&config.transport);
+                let mesh = Mesh::open(config).await.unwrap();
+                let clock = node.clock();
+                clock.sleep(seconds(5)).await;
+                assert!(Rc::strong_count(&transport) > 2);
+                let ended = mesh.ended();
+                let dropped = clock.now();
+                drop(mesh);
+                ended.await;
+                let waited = clock.now() - dropped;
+                assert!(waited <= TICK, "it ended after {waited}");
+                assert_eq!(Rc::strong_count(&transport), 1, "seed {seed}");
+            });
+        }
+    }
+
+    #[test]
+    fn ended_resolves_when_the_group_stops() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                voters: [key(1)].into_iter().collect(),
+                ..dialing(&node, &tasks)
+            };
+            let mesh = Mesh::open(config).await.unwrap();
+            let cause = fail_sync(&node);
+            let mut watch = mesh.watch(INDEX);
+            assert_eq!(watch.next().await, Ok(None));
+            assert_eq!(watch.next().await, Err(cause));
+            mesh.ended().await;
+        });
+    }
+
+    #[test]
+    fn a_power_cut_right_after_the_open_keeps_the_directory_and_its_log() {
+        let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
+        for seed in 0..32 {
+            let mut sim = Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let node = sim.node(sim::node::Config::default());
+            sim.run_on(&node, |node, tasks| async move {
+                let config = Config {
+                    dir: "region".into(),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                Mesh::start(config).await.unwrap();
+            })
+            .unwrap();
+            sim.crash(&node, Crash::Power);
+            let listed = sim
+                .run_on(&node, |node, _| async move {
+                    let files = node.files();
+                    (
+                        files.list(Path::new("")).await,
+                        files.list(Path::new("region")).await,
+                    )
+                })
+                .unwrap();
+            let kept = (names(&["region"]), names(&[LOG]));
+            assert_eq!(listed, kept, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn an_open_gives_a_failed_sync_of_the_parent_of_its_directory() {
+        solo(|node, tasks| async move {
+            node.fail_file(Path::new(""), Operation::SyncDir);
+            let config = Config {
+                dir: "region".into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let cause = files::Error::Io {
+                path: "".into(),
+                operation: Operation::SyncDir,
+                code: 5,
+            };
+            let failed = Error::Log(log::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
+        });
+    }
+
+    #[test]
+    fn an_open_fails_when_the_parent_of_its_directory_is_not_there() {
+        solo(|node, tasks| async move {
+            let config = Config {
+                dir: "gone/region".into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let cause = files::Error::NotFound {
+                path: "gone/region".into(),
+            };
+            let failed = Error::Log(log::Error::Files(cause));
+            assert_eq!(Mesh::start(config).await.err(), Some(failed));
+        });
+    }
+
+    #[test]
+    fn the_log_is_in_the_directory_of_the_config() {
+        solo(|node, tasks| async move {
+            let dir = Path::new("region");
+            let at = || Config {
+                dir: dir.into(),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let _mesh = Mesh::start(at()).await.unwrap();
+            let busy = Mesh::start(at()).await.err();
+            let path = dir.join(LOG).join("lock");
+            let cause = log::Error::Files(files::Error::Busy { path });
+            assert_eq!(busy, Some(Error::Log(cause)));
+            assert_eq!(open(&node, &tasks, 1, &[1], &[1]).await.err(), None);
+        });
+    }
+
     /// A waker that a test counts the clones of, which `Waker::noop` does not allow.
     struct Idle;
 
     #[expect(clippy::manual_noop_waker, reason = "a test counts its clones")]
     impl Wake for Idle {
         fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn an_ended_polled_twice_holds_one_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut ended = mesh.ended();
+            for _ in 0..2 {
+                assert!(Pin::new(&mut ended).poll(&mut cx).is_pending());
+            }
+            drop(waker);
+            assert_eq!(Arc::strong_count(&held), 2);
+            drop(mesh);
+        });
+    }
+
+    #[test]
+    fn a_dropped_ended_leaves_no_waker() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let held = Arc::new(Idle);
+            let waker = Waker::from(Arc::clone(&held));
+            let mut cx = Context::from_waker(&waker);
+            let mut ended = mesh.ended();
+            assert!(Pin::new(&mut ended).poll(&mut cx).is_pending());
+            drop(ended);
+            drop(waker);
+            assert_eq!(Arc::strong_count(&held), 1);
+            drop(mesh);
+        });
     }
 
     #[test]
