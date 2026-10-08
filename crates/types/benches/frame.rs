@@ -457,6 +457,27 @@ fn reversed_lay(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
 }
 
+/// Lays out a frame for places of each channel in entry order: the home's frame.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn whole_lay(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut places = Places::new(every(case).collect());
+    bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
+}
+
+/// Lays out a frame for places of each channel in a scattered order, which holds no
+/// long run of entry order.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn scattered_lay(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut slots: Vec<channel::Slot> = every(case).collect();
+    slots.sort_by_key(|slot| u64::from(slot.get()).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut places = Places::new(slots.into());
+    bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
+}
+
 /// Charges a frame for places of each channel, last first.
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn reversed_charge(bencher: Bencher<'_, '_>, case: &Case) {

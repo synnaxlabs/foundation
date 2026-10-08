@@ -12,15 +12,13 @@ use crate::hash;
 /// each place, in place order, at the ends of [`ends`] (HUB WIRE). A place is one
 /// listing of a slot. A slot after its first listing, or one that a frame's key set
 /// lacks, holds no series. Keeps what it learns of each key set it lays, until it is
-/// dropped, so only the first frame of a key set allocates: about 16 bytes for each
-/// place in that key set. A node builds key sets only from the spec, which bounds
-/// them.
+/// dropped, so only the first frame of a key set allocates, about 12 bytes for each
+/// place in that key set, and a frame that gives more series than any before it, 32
+/// bytes for each. A node builds key sets only from the spec, which bounds them.
 #[derive(Debug)]
 pub struct Places {
     slots: Box<[Slot]>,
     held: hash::Map<key_set::Key, Held>,
-    /// The bounds of each entry of the last [`Held`] laid, by its position there.
-    bounds: Vec<Option<Range<usize>>>,
     placed: Vec<Placed>,
 }
 
@@ -43,8 +41,6 @@ struct Held {
     mask: Mask,
     /// Each entry that a place names, sorted, with the first place that names it.
     entries: Box<[(u32, u32)]>,
-    /// The position in `entries` of each, in place order.
-    order: Box<[u32]>,
     /// The places name each entry of the key set, so the reader's frame holds each
     /// series of a frame.
     every: bool,
@@ -57,20 +53,20 @@ impl Places {
         Self {
             slots,
             held: hash::Map::default(),
-            bounds: Vec::new(),
             placed: Vec::new(),
         }
     }
 
     /// The series of `frame`, of key set `set`, at the places, in place order. Time
-    /// is O(m log(n/m)) for m places in `set` and n series in `frame`.
+    /// is O(j log(n/j)) for the lesser j and the greater n of the places in `set` and
+    /// the series in `frame`, plus O(k log k) for the k series it gives.
     ///
     /// # Panics
     ///
     /// If `set` is not the key set of `frame`.
     pub fn lay(&mut self, frame: &Frame, set: &KeySet) -> &[Placed] {
         let held = held(&mut self.held, &self.slots, frame, set);
-        lay(held, frame, &mut self.bounds, &mut self.placed);
+        lay(held, frame, &mut self.placed);
         &self.placed
     }
 
@@ -130,27 +126,23 @@ fn each(held: &Held, frame: &Frame, mut f: impl FnMut(usize, Range<usize>)) {
 }
 
 /// Fills `placed` with the series of `frame` at the places of `held`.
-fn lay(
-    held: &Held,
-    frame: &Frame,
-    bounds: &mut Vec<Option<Range<usize>>>,
-    placed: &mut Vec<Placed>,
-) {
-    bounds.clear();
-    bounds.resize(held.entries.len(), None);
-    each(held, frame, |at, range| bounds[at] = Some(range));
+fn lay(held: &Held, frame: &Frame, placed: &mut Vec<Placed>) {
     placed.clear();
-    let present = held.order.iter().filter_map(|&at| {
-        let at = to_usize(at);
-        let range = bounds[at].clone()?;
-        let len = range.len();
-        Some(((to_usize(held.entries[at].1), range), len))
+    each(held, frame, |at, bounds| {
+        placed.push(Placed {
+            place: to_usize(held.entries[at].1),
+            bounds,
+            end: 0,
+        });
     });
-    placed.extend(ends(present).map(|((place, bounds), end)| Placed {
-        place,
-        bounds,
-        end,
-    }));
+    placed.sort_unstable_by_key(|placed| placed.place);
+    let lens = placed.iter_mut().map(|placed| {
+        let len = placed.bounds.len();
+        (placed, len)
+    });
+    for (placed, end) in ends(lens) {
+        placed.end = end;
+    }
 }
 
 /// A place as a `u32`.
@@ -170,8 +162,6 @@ impl Held {
         // Each entry keeps its first place.
         entries.sort_unstable();
         entries.dedup_by_key(|&mut (entry, _)| entry);
-        let mut order: Vec<u32> = (0..to_u32(entries.len())).collect();
-        order.sort_unstable_by_key(|&at| entries[to_usize(at)].1);
         let every = entries.len() == set.entries().len();
         Self {
             mask: Mask::of_entries(
@@ -179,7 +169,6 @@ impl Held {
                 entries.iter().map(|&(entry, _)| to_usize(entry)),
             ),
             entries: entries.into(),
-            order: order.into(),
             every,
         }
     }
