@@ -10,18 +10,14 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use access::proof::Error as Refusal;
 use hub::client::{Client, Config, Error, LIFE};
 use hub::serve;
 use transport::stream::Incoming;
 use transport::{Address, Code, Port};
 use types::ed25519::PrivateKey;
 use types::time::Span;
-use wire::header::MALFORMED;
 use wire::hub::BUSY;
-use wire::hub::client::{
-    BODY_BYTES_MAX, CAPPED, CHANGED, EXPIRED, REFUSED, Response, STALE, UNSYNCED, VIA,
-};
+use wire::hub::client::{BODY_BYTES_MAX, REFUSED, Refusal, Response};
 
 use super::client::{
     AGENT, Got, OTHER, QUIET, SUBJECT, header, home, name, rules, run_program,
@@ -144,12 +140,12 @@ fn refuses_a_hello_of_a_key_the_spec_does_not_list() {
         },
     );
     let got = got.lock().expect("not poisoned").take();
-    assert_eq!(got, Some(Err(Error::Stopped { code: REFUSED })));
-    let refusal = Refusal::Unlisted {
+    assert_eq!(got, Some(Err(Error::Refused(Refusal::Refused))));
+    let unlisted = access::proof::Error::Unlisted {
         subject: name(SUBJECT),
         key: public_key(&OTHER),
     };
-    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(home.served, [Err(serve::Error::Access(unlisted))]);
 }
 
 #[test]
@@ -167,8 +163,11 @@ fn refuses_to_connect_to_a_node_with_no_mesh_time() {
         },
     );
     let got = got.lock().expect("not poisoned").take();
-    assert_eq!(got, Some(Err(Error::Stopped { code: UNSYNCED })));
-    assert_eq!(home.served, [Err(serve::Error::Access(Refusal::Unsynced))]);
+    assert_eq!(got, Some(Err(Error::Refused(Refusal::Unsynced))));
+    assert_eq!(
+        home.served,
+        [Err(serve::Error::Access(access::proof::Error::Unsynced))]
+    );
 }
 
 /// The client renews the hello, so a request long after the first hello's expiry
@@ -288,26 +287,40 @@ async fn read_request(session: &transport::Session) -> Incoming {
     incoming
 }
 
+/// A close with a code of `Refusal` gives the refusal, and a close with 0 or another
+/// code gives the transport error.
 #[test]
-fn gives_the_code_of_a_node_that_closed_the_session() {
-    by_hand(
-        127,
-        |session, node| async move {
-            node.clock().sleep(QUIET).await;
-            session.close(Code(BUSY));
-            node.clock().sleep(QUIET).await;
-        },
-        |client, node| {
-            Box::pin(async move {
+fn gives_the_close_of_a_node_after_admission() {
+    let cases = [
+        (127, BUSY, Error::Refused(Refusal::Busy)),
+        (
+            131,
+            0,
+            Error::Transport(transport::Error::PeerClosed { code: Code(0) }),
+        ),
+        (
+            132,
+            99,
+            Error::Transport(transport::Error::PeerClosed { code: Code(99) }),
+        ),
+    ];
+    for (seed, code, error) in cases {
+        by_hand(
+            seed,
+            move |session, node| async move {
                 node.clock().sleep(QUIET).await;
+                session.close(Code(code));
                 node.clock().sleep(QUIET).await;
-                assert_eq!(
-                    client.request(b"ab").await,
-                    Err(Error::Stopped { code: BUSY })
-                );
-            })
-        },
-    );
+            },
+            move |client, node| {
+                Box::pin(async move {
+                    node.clock().sleep(QUIET).await;
+                    node.clock().sleep(QUIET).await;
+                    assert_eq!(client.request(b"ab").await, Err(error));
+                })
+            },
+        );
+    }
 }
 
 #[test]
@@ -400,64 +413,9 @@ fn gives_the_reply_once_its_body_ends() {
 }
 
 #[test]
-fn names_the_cause_of_each_stop_code() {
-    let cases = [
-        (
-            Error::Stopped { code: 0 },
-            "the node stopped with code 0: the node closed with no cause",
-        ),
-        (
-            Error::Stopped { code: MALFORMED },
-            "the node stopped with code 2: the client broke the client wire",
-        ),
-        (
-            Error::Stopped { code: BUSY },
-            "the node stopped with code 19: the node had no block for the response",
-        ),
-        (
-            Error::Stopped { code: REFUSED },
-            "the node stopped with code 20: the spec has no such subject, does not \
-             list the key for it, or the signature is not valid",
-        ),
-        (
-            Error::Stopped { code: UNSYNCED },
-            "the node stopped with code 21: the node has no mesh time yet",
-        ),
-        (
-            Error::Stopped { code: STALE },
-            "the node stopped with code 22: the hello does not echo the nonce of the \
-             node's last challenge",
-        ),
-        (
-            Error::Stopped { code: VIA },
-            "the node stopped with code 23: the hello names another node as via",
-        ),
-        (
-            Error::Stopped { code: EXPIRED },
-            "the node stopped with code 24: the hello expired",
-        ),
-        (
-            Error::Stopped { code: CAPPED },
-            "the node stopped with code 25: the hello expires past the cap",
-        ),
-        (
-            Error::Stopped { code: CHANGED },
-            "the node stopped with code 26: the renewal changed the subject, key, via, \
-             or connection",
-        ),
-        (
-            Error::Stopped { code: 99 },
-            "the node stopped with code 99: the client does not know the code",
-        ),
-    ];
-    for (error, text) in cases {
-        assert_eq!(error.to_string(), text);
-    }
-}
-
-#[test]
 fn names_each_error() {
     let cases = [
+        (Error::Refused(Refusal::Expired), "the hello expired"),
         (
             Error::Transport(transport::Error::TimedOut),
             "the session failed: the peer stopped answering",
@@ -484,19 +442,17 @@ fn names_each_error() {
     }
 }
 
-/// A node's reset and close with a code each give `Stopped`, so a program sees one
+/// A node's reset and close with a code each give `Refused`, so a program sees one
 /// error for a refusal whichever frame comes first.
 #[test]
-fn gives_a_reset_and_a_close_as_one_stop() {
+fn gives_a_reset_and_a_close_as_one_refusal() {
     let code = Code(REFUSED);
     for error in [
         transport::Error::Reset { code },
         transport::Error::PeerClosed { code },
     ] {
-        assert_eq!(Error::from(error), Error::Stopped { code: REFUSED });
+        assert_eq!(Error::from(error), Error::Refused(Refusal::Refused));
     }
-    assert_eq!(
-        Error::from(transport::Error::TimedOut),
-        Error::Transport(transport::Error::TimedOut)
-    );
+    let reset = transport::Error::Reset { code: Code(0) };
+    assert_eq!(Error::from(reset.clone()), Error::Transport(reset));
 }

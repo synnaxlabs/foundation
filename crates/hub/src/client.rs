@@ -16,11 +16,8 @@ use types::hello::Hello;
 use types::name::Name;
 use types::time::{Monotonic, Span};
 use wire::Protocol;
-use wire::header::MALFORMED;
-use wire::hub::BUSY;
 use wire::hub::client::{
-    BODY_BYTES_MAX, CAPPED, CHANGED, Challenge, EXPIRED, REFUSED, Request, Response,
-    STALE, Signed, UNSYNCED, VIA,
+    BODY_BYTES_MAX, Challenge, Refusal, Request, Response, Signed,
 };
 
 /// How long each hello of a [`Client`] lives. The client renews it at half its life.
@@ -92,9 +89,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] with the code of a refused hello, which CLIENT HELLO gives
-    /// (`REFUSED` to `CHANGED` of `wire::hub::client`), [`Error::Transport`] when the
-    /// dial or the session failed, [`Error::Message`] for a challenge that `wire`
+    /// [`Error::Refused`] for a refused hello, [`Error::Transport`] when the dial or
+    /// the session failed, [`Error::Message`] for a challenge that `wire`
     /// refuses, and [`Error::Pool`] when the pool has no block for the hello.
     pub async fn connect(
         transport: &transport::Client,
@@ -141,8 +137,8 @@ impl Client {
     /// # Errors
     ///
     /// [`Error::Body`] when `body` is over `BODY_BYTES_MAX`, with nothing sent. The
-    /// error that ended the renewal, once the renewal ended. Else [`Error::Stopped`]
-    /// when the node stopped the request or closed the session with a code,
+    /// error that ended the renewal, once the renewal ended. Else [`Error::Refused`]
+    /// when the node stopped the request or closed the session with a refusal,
     /// [`Error::Transport`] when the stream or the session failed;
     /// [`Error::Message`] for a response that `wire` refuses or that ends early;
     /// [`Error::Unanswered`] when the node finished the stream with no response;
@@ -306,15 +302,10 @@ pub enum Error {
         /// The bytes of the body.
         length: usize,
     },
-    /// The node stopped a stream or closed the session with `code`: a code of
-    /// `wire::hub::client` for a refused hello or request, `MALFORMED` for a broken
-    /// client, `BUSY` when the node had no block for the response, or 0 when the
-    /// node closed with no cause.
-    Stopped {
-        /// The node's code.
-        code: u32,
-    },
-    /// The dial, a stream, or the session failed with no code from the node.
+    /// The node stopped a stream or closed the session with a code of `Refusal`.
+    Refused(Refusal),
+    /// The dial, a stream, or the session failed with no code of `Refusal`: also a
+    /// close with 0 or with a code outside the set.
     Transport(transport::Error),
     /// The node sent a message that `wire` refuses, or a body that ended early.
     Message(wire::hub::Error),
@@ -325,26 +316,6 @@ pub enum Error {
     Pool(block::Error),
 }
 
-/// The cause of a stop `code`.
-fn cause(code: u32) -> &'static str {
-    match code {
-        0 => "the node closed with no cause",
-        MALFORMED => "the client broke the client wire",
-        BUSY => "the node had no block for the response",
-        REFUSED => {
-            "the spec has no such subject, does not list the key for it, or the \
-             signature is not valid"
-        }
-        UNSYNCED => "the node has no mesh time yet",
-        STALE => "the hello does not echo the nonce of the node's last challenge",
-        VIA => "the hello names another node as via",
-        EXPIRED => "the hello expired",
-        CAPPED => "the hello expires past the cap",
-        CHANGED => "the renewal changed the subject, key, via, or connection",
-        _ => "the client does not know the code",
-    }
-}
-
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -353,9 +324,7 @@ impl fmt::Display for Error {
                 "the body has {length} bytes, over the {BODY_BYTES_MAX} that a request \
                  holds"
             ),
-            Self::Stopped { code } => {
-                write!(f, "the node stopped with code {code}: {}", cause(*code))
-            }
+            Self::Refused(refusal) => write!(f, "{refusal}"),
             Self::Transport(error) => write!(f, "the session failed: {error}"),
             Self::Message(error) => {
                 write!(f, "the node sent a message that is not valid: {error}")
@@ -376,7 +345,9 @@ impl From<transport::Error> for Error {
     fn from(error: transport::Error) -> Self {
         match error {
             transport::Error::Reset { code }
-            | transport::Error::PeerClosed { code } => Self::Stopped { code: code.0 },
+            | transport::Error::PeerClosed { code } => {
+                Refusal::from_code(code.0).map_or(Self::Transport(error), Self::Refused)
+            }
             error => Self::Transport(error),
         }
     }
