@@ -5014,11 +5014,15 @@ How to read this record:
   `decode` checks only the form: `spec::region::check` of the definitions after the
   plan refuses the rest. `config::plan::Plan::definitions(applied, key)` gives those
   definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
-  from `key`, which the check refuses as dangling. Each item of a plan has one path,
-  under `config::plan`. Plan:
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221,
-  approved by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066727322).
+  from `key`, which the check refuses as dangling. Each call of `key` must give a key
+  that no channel holds and that no earlier call gave. Each item of a plan has one
+  path, under `config::plan`. Plan:
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221. Decided
+  by `laptop.architect-2`: the three methods and the version byte (2026-10-08T16:00:18Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745); one
+  path, the `Error` variants, the new key for a dangling edge, and the `key` contract
+  (2026-10-08T18:45:40Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066727322).
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
