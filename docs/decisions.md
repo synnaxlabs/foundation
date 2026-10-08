@@ -4112,21 +4112,24 @@ How to read this record:
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
   In a file, a `subject` block has one attribute, `keys`: the line of an OpenSSH
-  `.pub` file, or a list of them. `config` keeps the key, not the comment. It reads
-  the base64 with `base64ct`, which refuses text that is not canonical, so one key has
-  one text form. A value that holds `PRIVATE KEY-----` gives `config.private-key`,
-  whose message quotes none of the value. A PEM or RFC 4716 public key gives
-  `config.bad-public-key`, not that alarm. A message quotes at most the first word of
-  a value. The private-key and PEM rules are from `laptop.architect-2` at
-  2026-10-08T05:49:53Z
-  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142),
-  which also decided that `config.subject-is-connector` and its test go in the PR that
-  merges second: #1823, or the #1153 PR that adds `connector` blocks to
-  `config::check`. Lost: `ssh-key`, for one key type with one fixed layout. The first
-  PR that prints a key's `SHA256:` fingerprint or writes a `.pub` line weighs `ssh-key`
-  again, and moves this read to it if it takes `ssh-key` (`laptop.architect-2`,
-  2026-10-08T06:40:01Z,
-  https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054059191).
+  `.pub` file, or a list of them, as `allow` takes one action or a list. `config` keeps
+  the key, not the comment. It reads the base64 with `base64ct`, which refuses text
+  that is not canonical, so one key has one text form. A value that holds
+  `PRIVATE KEY` (the OpenSSH, PEM, and RFC 4716 forms) or `PuTTY-User-Key-File` (a
+  `.ppk` file) gives `config.private-key`, whose message quotes none of the value. A
+  `.pub` line whose comment holds `PRIVATE KEY` gets that alarm too, because a missed
+  private key costs more. A PEM or RFC 4716 public key gives `config.bad-public-key`.
+  A message quotes at most the first word of a value: an algorithm name from a closed
+  table of OpenSSH key types, with `{:?}`. The one-line form, the first-word rule, and
+  the marks of a private key are from `laptop.architect-2` at 2026-10-08T06:42:17Z
+  (https://github.com/synnaxlabs/foundation/pull/1823#issuecomment-6054095085). The
+  ruling at 2026-10-08T05:49:53Z
+  (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142)
+  decided the PEM rule, and that `config.subject-is-connector` and its test go in the
+  PR that merges second: #1823, or the #1153 PR that adds `connector` blocks to
+  `config::check`. The read moves to `ssh-key` if the person approves it
+  (https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054092491), in the
+  PR of #337 that first prints a key's fingerprint.
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies and connectors itself. A policy reaches a name when
