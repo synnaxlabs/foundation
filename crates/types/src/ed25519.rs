@@ -376,7 +376,8 @@ mod tests {
         ) {
             let pair = Pair::new(&PrivateKey(private));
             prop_assert_eq!(pair.public(), PrivateKey(private).public());
-            prop_assert_eq!(pair.public().verify(&message, &pair.sign(&message)), Ok(()));
+            let signature = pair.sign(&message);
+            prop_assert_eq!(pair.public().verify(&message, &signature), Ok(()));
         }
     }
 }
