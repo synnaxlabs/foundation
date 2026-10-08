@@ -1,8 +1,8 @@
 //! A `String` series is refused at the first sample that is not UTF-8, by
 //! `Encoder::encode`, `codec::validate`, and `codec::decode`, and at no other.
 //!
-//! Input: a little-endian `u16` count of ASCII bytes before the first sample, cut to
-//! 4,095, then a byte that gives 1 to 4 copies of the samples, then the samples as
+//! Input: a little-endian `u16` count of ASCII bytes before the first sample, modulo
+//! 4,096, then a byte that gives 1 to 4 copies of the samples, then the samples as
 //! length-prefixed messages.
 
 #![no_main]
@@ -29,7 +29,7 @@ fuzz_target!(|bytes: &[u8]| {
     let mut values = Vec::new();
     let mut end = 0_u32;
     for sample in &samples {
-        end += u32::try_from(sample.len()).unwrap();
+        end += u32::try_from(sample.len()).expect("a sample is at most 4,350 bytes");
         values.extend(end.to_le_bytes());
     }
     for sample in &samples {
