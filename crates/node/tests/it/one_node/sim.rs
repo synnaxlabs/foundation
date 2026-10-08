@@ -189,3 +189,21 @@ fn a_dropped_influx_ends_its_shard() {
     drop(influx);
     assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
 }
+
+#[test]
+#[should_panic(expected = "the simulated InfluxDB serves with no panic")]
+fn a_dropped_influx_panics_when_its_server_panicked() {
+    let mut influx = Influx::default();
+    let shard = start("influx", |_| async { panic!("the server broke") });
+    influx.serving = Some((Token::new(), shard));
+    drop(influx);
+}
+
+#[test]
+#[should_panic(expected = "the simulated InfluxDB serves with no panic")]
+fn a_stopped_influx_panics_when_its_server_panicked() {
+    let mut influx = Influx::default();
+    let shard = start("influx", |_| async { panic!("the server broke") });
+    influx.serving = Some((Token::new(), shard));
+    influx.stop();
+}
