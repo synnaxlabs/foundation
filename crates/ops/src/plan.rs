@@ -77,23 +77,17 @@ pub(crate) fn plan(
     if !diagnostics.is_empty() {
         return Err(Problems { diagnostics, paths });
     }
-    let plan = config::plan(&documents, base, applied, members, kinds).map_err(
-        |diagnostics| Problems {
-            diagnostics,
-            paths: paths.clone(),
-        },
-    )?;
+    let plan = match config::plan(&documents, base, applied, members, kinds) {
+        Ok(plan) => plan,
+        Err(diagnostics) => return Err(Problems { diagnostics, paths }),
+    };
     let mut lines: Vec<Line> = plan
         .changes
         .iter()
         .map(|change| Line::of(change, applied, &paths))
         .collect();
     lines.sort_by(|a, b| a.order.cmp(&b.order));
-    Ok(Planned {
-        base,
-        homes: plan.homes,
-        lines,
-    })
+    Ok(Planned { plan, lines })
 }
 
 /// The `ops.unknown-extension` diagnostic of `path`.
@@ -122,8 +116,7 @@ pub(crate) fn unknown(
 /// A plan, with what the text and the JSON show of it.
 #[derive(Debug)]
 pub(crate) struct Planned {
-    base: spec::Pointer,
-    homes: BTreeMap<Name, Name>,
+    plan: config::Plan,
     /// Each change, in the order the text shows it.
     lines: Vec<Line>,
 }
@@ -160,13 +153,15 @@ impl Planned {
             })
             .collect();
         let homes: Map<String, Value> = self
+            .plan
             .homes
             .iter()
             .map(|(index, home)| (index.to_string(), home.as_str().into()))
             .collect();
         let [added, changed, removed] = self.counts();
+        let base = self.plan.base;
         json!({
-            "base": { "version": self.base.version, "root": self.base.root.to_string() },
+            "base": { "version": base.version, "root": base.root.to_string() },
             "changes": lines,
             "homes": homes,
             "added": added,

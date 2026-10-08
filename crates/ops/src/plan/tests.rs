@@ -138,7 +138,13 @@ fn shows_each_definition_in_file_order_then_the_counts() {
 #[test]
 fn follows_the_order_of_the_files() {
     let a = "channel \"a.time\" { kind = \"index\" }\n";
-    let b = "channel \"b.time\" { kind = \"index\" }\nplacement \"p\" {\n  select = \"*.time\"\n  home = \"edge\"\n}\n";
+    let b = "\
+channel \"b.time\" { kind = \"index\" }
+placement \"p\" {
+  select = \"*.time\"
+  home = \"edge\"
+}
+";
     let planned = run(&[("b.hcl", b), ("a.hcl", a)], &BTreeMap::new()).expect("a plan");
     assert_eq!(
         planned.to_string(),
@@ -243,10 +249,47 @@ fix: Use a file that ends in `.hcl`
 fn names_each_extension_of_the_table_in_the_fix() {
     let mut front_ends = front_ends();
     front_ends.insert("toml", FrontEnd { read: hcl });
+    let two = super::unknown(&PathBuf::from("plant.json"), &front_ends);
+    assert_eq!(two.fix, "Use a file that ends in `.hcl` or `.toml`");
     front_ends.insert("yaml", FrontEnd { read: hcl });
     let diagnostic = super::unknown(&PathBuf::from("plant.json"), &front_ends);
     assert_eq!(
         diagnostic.fix,
         "Use a file that ends in `.hcl`, `.toml`, or `.yaml`"
+    );
+}
+
+#[test]
+fn gives_each_note_with_its_place() {
+    let time = "channel \"a.time\" { kind = \"index\" }\n";
+    let problems = problems(&[("one.hcl", time), ("two.hcl", time)]);
+    assert_eq!(
+        problems.to_string(),
+        "\
+error[config.duplicate-name]: the name \"a.time\" repeats the earlier `channel` name \
+ \"a.time\"
+  --> two.hcl:1:9
+fix: Give each `channel` block a name that differs by more than case
+note: the earlier name
+  --> one.hcl:1:9
+"
+    );
+    assert_eq!(
+        problems.json(),
+        serde_json::json!({ "errors": [{
+            "code": "config.duplicate-name",
+            "message": "the name \"a.time\" repeats the earlier `channel` name \
+                \"a.time\"",
+            "fix": "Give each `channel` block a name that differs by more than case",
+            "file": "two.hcl",
+            "line": 1,
+            "column": 9,
+            "notes": [{
+                "text": "the earlier name",
+                "file": "one.hcl",
+                "line": 1,
+                "column": 9,
+            }],
+        }]})
     );
 }
