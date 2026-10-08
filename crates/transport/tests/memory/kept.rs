@@ -20,7 +20,7 @@ use transport::{Address, Class, Error, Transport};
 use types::time::Span;
 
 use crate::ALLOCATOR;
-use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
+use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
 use crate::fill;
 
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
@@ -161,7 +161,7 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
         let pool = Rc::clone(&config.pool);
         let transport = Transport::new(config, part(&node, 0)).expect("a transport");
         let session = transport
-            .dial(public(&SERVER), &[Address::Udp(address)])
+            .dial(SERVER.public(), &[Address::Udp(address)])
             .await
             .expect("a session");
         let mut sender = session

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+use aws_lc_rs::signature::Ed25519KeyPair;
 use rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
@@ -78,7 +78,7 @@ impl Tls {
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let certificate = issue(&public(private_key).to_bytes(), |tbs| {
+        let certificate = issue(&private_key.public().to_bytes(), |tbs| {
             pair.sign(tbs).as_ref().to_vec()
         });
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
@@ -329,15 +329,6 @@ impl TimeProvider for Epoch {
     }
 }
 
-/// The public key of `private_key`: the key that [`Tls::new`] certifies.
-pub(crate) fn public(private_key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
-        .expect("invariant: any 32 bytes are an Ed25519 private key");
-    let bytes = pair.public_key().as_ref().try_into();
-    PublicKey::new(bytes.expect("invariant: an Ed25519 public key is 32 bytes"))
-        .expect("invariant: aws-lc makes no key of small order")
-}
-
 /// A client like an SDK: it pins the server's key and has no certificate.
 #[cfg(test)]
 pub(crate) fn anonymous(
@@ -364,9 +355,7 @@ pub(crate) fn anonymous(
 mod tests {
     use std::net::{IpAddr, Ipv6Addr};
 
-    use aws_lc_rs::signature::{
-        ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, UnparsedPublicKey,
-    };
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
     use proptest::prelude::*;
     use rustls::client::ResolvesClientCert;
     use rustls::crypto::SupportedKxGroup;
@@ -491,7 +480,7 @@ mod tests {
             VALIDITY,
             &subject,
             SPKI,
-            pair.public_key().as_ref(),
+            &private_key.public().to_bytes(),
         ]
         .concat());
         let signature = pair.sign(&tbs);
@@ -599,8 +588,8 @@ mod tests {
         fn when_key_matches_both_sides_see_the_other_node() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let peers =
-                handshake(Tls::new(&a).client(public(&b)), Tls::new(&b).server());
-            assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
+                handshake(Tls::new(&a).client(b.public()), Tls::new(&b).server());
+            assert_eq!(peers, Ok((Peer::Node(b.public()), Peer::Node(a.public()))));
         }
 
         #[test]
@@ -611,7 +600,7 @@ mod tests {
                 PrivateKey([3; 32]),
             );
             let peers =
-                handshake(Tls::new(&a).client(public(&c)), Tls::new(&b).server());
+                handshake(Tls::new(&a).client(c.public()), Tls::new(&b).server());
             assert_eq!(
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
@@ -622,33 +611,33 @@ mod tests {
         fn when_client_has_no_certificate_the_server_sees_a_client() {
             let b = PrivateKey([2; 32]);
             let peers = handshake(
-                anonymous(default_provider(), public(&b)),
+                anonymous(default_provider(), b.public()),
                 Tls::new(&b).server(),
             );
-            assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Client)));
+            assert_eq!(peers, Ok((Peer::Node(b.public()), Peer::Client)));
         }
 
         #[test]
         fn when_server_sends_tickets_the_node_does_not_resume() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
-            let client = Tls::new(&a).client(public(&b));
+            let client = Tls::new(&a).client(b.public());
             let mut server = (*Tls::new(&b).server()).clone();
             server.send_tls13_tickets = 2;
             let server = Arc::new(server);
             for _ in 0..2 {
                 let peers = handshake(Arc::clone(&client), Arc::clone(&server));
-                assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
+                assert_eq!(peers, Ok((Peer::Node(b.public()), Peer::Node(a.public()))));
             }
         }
 
         #[test]
         fn when_client_is_an_sdk_it_does_not_resume() {
             let b = PrivateKey([2; 32]);
-            let client = anonymous(default_provider(), public(&b));
+            let client = anonymous(default_provider(), b.public());
             let server = Tls::new(&b).server();
             for _ in 0..2 {
                 let peers = handshake(Arc::clone(&client), Arc::clone(&server));
-                assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Client)));
+                assert_eq!(peers, Ok((Peer::Node(b.public()), Peer::Client)));
             }
         }
 
@@ -660,7 +649,7 @@ mod tests {
                 PrivateKey([3; 32]),
             );
             let peers = handshake(
-                borrowing(&Tls::new(&victim), &Tls::new(&thief)).client(public(&b)),
+                borrowing(&Tls::new(&victim), &Tls::new(&thief)).client(b.public()),
                 Tls::new(&b).server(),
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
@@ -670,7 +659,7 @@ mod tests {
         fn when_client_chain_has_more_certificates_the_server_refuses() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let peers = handshake(
-                chained(&Tls::new(&a)).client(public(&b)),
+                chained(&Tls::new(&a)).client(b.public()),
                 Tls::new(&b).server(),
             );
             assert_eq!(
@@ -683,7 +672,7 @@ mod tests {
         fn when_server_chain_has_more_certificates_the_client_refuses() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let peers = handshake(
-                Tls::new(&a).client(public(&b)),
+                Tls::new(&a).client(b.public()),
                 chained(&Tls::new(&b)).server(),
             );
             assert_eq!(
@@ -696,7 +685,7 @@ mod tests {
         fn when_client_certificate_is_padded_the_server_refuses() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let peers =
-                handshake(padded(&a, 60_000).client(public(&b)), Tls::new(&b).server());
+                handshake(padded(&a, 60_000).client(b.public()), Tls::new(&b).server());
             assert_eq!(
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
@@ -707,7 +696,7 @@ mod tests {
         fn when_server_certificate_is_padded_the_client_refuses() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let peers =
-                handshake(Tls::new(&a).client(public(&b)), padded(&b, 60_000).server());
+                handshake(Tls::new(&a).client(b.public()), padded(&b, 60_000).server());
             assert_eq!(
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
@@ -718,14 +707,14 @@ mod tests {
         fn when_both_certificates_are_at_the_limit_each_side_takes_the_other() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let full = |key| padded(key, subject_bytes(key, CERTIFICATE_BYTES_MAX));
-            let peers = handshake(full(&a).client(public(&b)), full(&b).server());
-            assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
+            let peers = handshake(full(&a).client(b.public()), full(&b).server());
+            assert_eq!(peers, Ok((Peer::Node(b.public()), Peer::Node(a.public()))));
         }
 
         #[test]
         fn when_client_key_is_ecdsa_the_server_refuses() {
             let b = PrivateKey([2; 32]);
-            let peers = handshake(ecdsa().client(public(&b)), Tls::new(&b).server());
+            let peers = handshake(ecdsa().client(b.public()), Tls::new(&b).server());
             assert_eq!(
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
@@ -736,7 +725,7 @@ mod tests {
         fn when_both_are_nodes_they_agree_aes_128_gcm_and_the_hybrid() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let (client, _) =
-                connect(Tls::new(&a).client(public(&b)), Tls::new(&b).server())
+                connect(Tls::new(&a).client(b.public()), Tls::new(&b).server())
                     .expect("a handshake");
             let agreed = (
                 client.negotiated_cipher_suite().map(|suite| suite.suite()),
@@ -794,7 +783,7 @@ mod tests {
         fn when_a_node_dials_its_client_hello_offers_the_oracle_lists() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let name = ServerName::from(IpAddr::from(Ipv6Addr::LOCALHOST));
-            let client = Tls::new(&a).client(public(&b));
+            let client = Tls::new(&a).client(b.public());
             let mut client = ClientConnection::new(client, name).expect("a client");
             let mut wire = Vec::new();
             while client.wants_write() {
@@ -825,9 +814,9 @@ mod tests {
                         kx_groups: vec![group],
                         ..default_provider()
                     };
-                    let client = anonymous(provider, public(&b));
+                    let client = anonymous(provider, b.public());
                     let peers = handshake(client, Arc::clone(&server));
-                    let expected = Ok((Peer::Node(public(&b)), Peer::Client));
+                    let expected = Ok((Peer::Node(b.public()), Peer::Client));
                     assert_eq!(peers, expected, "{suite:?} {group:?}");
                 }
             }
@@ -841,7 +830,7 @@ mod tests {
                 PrivateKey([3; 32]),
             );
             let peers = handshake(
-                Tls::new(&a).client(public(&victim)),
+                Tls::new(&a).client(victim.public()),
                 borrowing(&Tls::new(&victim), &Tls::new(&thief)).server(),
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
@@ -851,7 +840,7 @@ mod tests {
         fn when_client_key_is_the_identity_point_the_server_refuses() {
             let b = PrivateKey([2; 32]);
             let peers =
-                handshake(keyless(IDENTITY).client(public(&b)), Tls::new(&b).server());
+                handshake(keyless(IDENTITY).client(b.public()), Tls::new(&b).server());
             assert_eq!(
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
@@ -865,7 +854,7 @@ mod tests {
         #[test]
         fn when_client_offers_no_protocol_the_server_refuses() {
             let b = PrivateKey([2; 32]);
-            let mut config = (*anonymous(default_provider(), public(&b))).clone();
+            let mut config = (*anonymous(default_provider(), b.public())).clone();
             config.alpn_protocols.clear();
             let (_, server) = connect(Arc::new(config), Tls::new(&b).server())
                 .expect("rustls finishes a handshake over TCP with no protocol");
@@ -881,7 +870,7 @@ mod tests {
             let mut config = (*Tls::new(&b).server()).clone();
             config.alpn_protocols.clear();
             let (client, _) =
-                connect(Tls::new(&a).client(public(&b)), Arc::new(config))
+                connect(Tls::new(&a).client(b.public()), Arc::new(config))
                     .expect("rustls finishes a handshake over TCP with no protocol");
             assert_eq!(
                 peer(client.alpn_protocol(), client.peer_certificates()),
@@ -916,7 +905,7 @@ mod tests {
             assert_eq!(der.len(), 1024);
             assert_eq!(
                 key(&CertificateDer::from(der), &[]),
-                Ok(public(&private_key))
+                Ok(private_key.public())
             );
         }
 
@@ -949,17 +938,17 @@ mod tests {
             fn carries_the_public_key(bytes: [u8; 32]) {
                 let private_key = PrivateKey(bytes);
                 let certificate = certificate(&Tls::new(&private_key));
-                prop_assert_eq!(key(&certificate, &[]), Ok(public(&private_key)));
+                prop_assert_eq!(key(&certificate, &[]), Ok(private_key.public()));
             }
 
             #[test]
             fn handshakes_with_any_key(bytes: [u8; 32]) {
                 let (a, b) = (PrivateKey(bytes), PrivateKey([2; 32]));
                 let peers =
-                    handshake(Tls::new(&a).client(public(&b)), Tls::new(&b).server());
+                    handshake(Tls::new(&a).client(b.public()), Tls::new(&b).server());
                 prop_assert_eq!(
                     peers,
-                    Ok((Peer::Node(public(&b)), Peer::Node(public(&a))))
+                    Ok((Peer::Node(b.public()), Peer::Node(a.public())))
                 );
             }
         }
@@ -987,12 +976,8 @@ mod tests {
             let certificate = certificate(&Tls::new(&private_key));
             let der = certificate.as_ref();
             let tbs = &der[CERTIFICATE.len()..][..TBS_BYTES];
-            let signature = &der[der.len() - 64..];
-            let verifier = UnparsedPublicKey::new(
-                &aws_lc_rs::signature::ED25519,
-                public(&private_key).to_bytes(),
-            );
-            assert_eq!(verifier.verify(tbs, signature), Ok(()));
+            let signature = der[der.len() - 64..].try_into().unwrap();
+            assert_eq!(private_key.public().verify(tbs, signature), Ok(()));
         }
     }
 }

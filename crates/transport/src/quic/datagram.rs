@@ -73,7 +73,7 @@ mod tests {
     use crate::quic::pair::{self, Pair, Side};
     use crate::quic::{Datagrams, Endpoint};
     use crate::testing;
-    use crate::{Code, Config, Error, tls};
+    use crate::{Code, Config, Error};
 
     /// The link delay each way.
     const DELAY: Duration = Duration::from_millis(10);
@@ -85,7 +85,7 @@ mod tests {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
         pair.server.endpoint =
             Endpoint::new(config, pair::SERVER_SHARD, NonZeroUsize::MIN);
-        pair.dial(tls::public(&pair::SERVER_KEY));
+        pair.dial(pair::SERVER_KEY.public());
         pair.run(RUN);
         pair
     }
@@ -174,7 +174,7 @@ mod tests {
     fn take_up_to_the_path_limit() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             // The client connects at 47 ms, after a retry. Its first MTU probe
             // returns at 67 ms.
             pair.run(Duration::from_millis(50));
@@ -344,7 +344,7 @@ mod tests {
                 pair::SERVER_SHARD,
                 NonZeroUsize::MIN,
             );
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             let client = pair.client.key.expect("a key");
             assert!(pair.client.endpoint.datagrams(client).is_none());
             pair.run(RUN);

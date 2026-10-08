@@ -28,7 +28,6 @@ use crate::applied::Applied;
 use crate::bytes::block;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Known, Signer};
-use crate::ed25519;
 use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
@@ -153,7 +152,7 @@ impl Mesh {
     /// When `config.transport` proves a key that is not the public half of
     /// `config.private_key`.
     pub async fn open(config: Config) -> Result<Self, Error> {
-        let own = ed25519::public(&ed25519::pair(&config.private_key));
+        let own = config.private_key.public();
         let proved = config.transport.public_key();
         assert!(
             proved == own,
