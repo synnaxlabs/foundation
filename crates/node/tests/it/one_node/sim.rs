@@ -31,6 +31,7 @@ pub(super) struct Opcua {}
 /// The simulated InfluxDB, with the database `plant`. Drop stops it.
 #[derive(Debug, Default)]
 pub(super) struct Influx {
+    /// The tests of this file read it while [`Influx::stored`] waits on #1734.
     store: Arc<Mutex<Store>>,
     /// The address of the first [`Influx::serve`].
     address: Option<SocketAddr>,
@@ -176,4 +177,14 @@ fn influx_stores_each_line_written_to_plant_and_keeps_it_after_a_stop() {
     let store = influx.store.lock().expect("no panic");
     let times: Vec<_> = store.points("m", &[]).map(|point| point.time).collect();
     assert_eq!(times, [Stamp::from_nanos(1), Stamp::from_nanos(2)]);
+}
+
+#[test]
+fn a_dropped_influx_ends_its_shard() {
+    let mut influx = Influx::default();
+    let address = influx.serve();
+    assert_eq!(write(address, "m f=1 1"), "204 No Content");
+    let store = Arc::clone(&influx.store);
+    drop(influx);
+    assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
 }
