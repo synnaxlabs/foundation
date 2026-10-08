@@ -201,20 +201,24 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     });
 }
 
-// The members and the voters are the same for each place, so no rule that reads only
-// them gives the key of each of the three nodes. Only node 1 is a voter.
+// For one set of voters, the members and the voters are the same for each place, so
+// no rule that reads only them gives the key of each of the three nodes. With one
+// voter, two places are not voters. With three, two places are not the first voter.
 #[test]
 fn key_gives_the_key_of_the_config() {
-    for place in [1, 2, 3] {
-        solo(move |node, tasks| async move {
-            let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
-            let config = Config {
-                voters: [key(1)].into(),
-                ..create_voter_config(&node, &tasks, place, members.into())
-            };
-            let mesh = Mesh::open(config).await.unwrap();
-            assert_eq!(mesh.key(), key(place));
-        });
+    for voters in [1..=1, 1..=3] {
+        for place in [1, 2, 3] {
+            let voters = voters.clone();
+            solo(move |node, tasks| async move {
+                let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
+                let config = Config {
+                    voters: voters.map(key).collect(),
+                    ..create_voter_config(&node, &tasks, place, members.into())
+                };
+                let mesh = Mesh::open(config).await.unwrap();
+                assert_eq!(mesh.key(), key(place));
+            });
+        }
     }
 }
 
