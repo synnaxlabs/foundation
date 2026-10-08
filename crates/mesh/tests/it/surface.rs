@@ -1,5 +1,8 @@
-//! What a crate outside `mesh` opens and reads of a region, as `node` and `hub` do.
+//! What a crate outside `mesh` opens, reads, and sets of a region, as `node` and
+//! `hub` do.
 
+use std::collections::BTreeMap;
+use std::future::pending;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
@@ -25,6 +28,8 @@ use wire::Protocol;
 const KEY: node::Key = node::Key::from_u128(1);
 const OTHER: node::Key = node::Key::from_u128(2);
 const INDEX: channel::Key = channel::Key::from_u128(7);
+/// The nodes of a region of three voters. Node `id` has the key of that number.
+const IDS: [u8; 3] = [1, 2, 3];
 /// The port of each transport.
 const PORT: u16 = 7000;
 
@@ -37,28 +42,38 @@ fn assert_serves<'a, F: Future<Output = Result<(), Error>>>(
 ) {
 }
 
-fn assert_error<E: std::error::Error>(_: &E) {}
-
-fn private_key() -> PrivateKey {
-    PrivateKey([1; 32])
+fn assert_sets<'a, F: Future<Output = Result<(), Error>>>(
+    _: fn(&'a Mesh, channel::Key, node::Key) -> F,
+) {
 }
 
-fn public_key() -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key().0).unwrap();
+fn assert_error<E: std::error::Error>(_: &E) {}
+
+fn key(id: u8) -> node::Key {
+    node::Key::from_u128(u128::from(id))
+}
+
+fn private_key(id: u8) -> PrivateKey {
+    PrivateKey([id; 32])
+}
+
+fn public_key(id: u8) -> PublicKey {
+    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key(id).0).unwrap();
     PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
 }
 
-/// The record of the node `KEY`, with a card that the node signed.
-fn create_member() -> Member {
+/// The record of node `id`, with a card that the node signed and that holds
+/// `addresses`.
+fn create_member(id: u8, addresses: Vec<Address>) -> Member {
     let card = Card {
-        name: "plant.node1".parse().unwrap(),
-        public_key: public_key(),
+        name: format!("plant.node{id}").parse().unwrap(),
+        public_key: public_key(id),
         seal_key: SealKey::new([9; 32]).unwrap(),
-        addresses: Addresses::new(Vec::new()).unwrap(),
+        addresses: Addresses::new(addresses).unwrap(),
         version: 1,
     };
     Member {
-        card: card::Signed::sign(KEY, card, &private_key()),
+        card: card::Signed::sign(key(id), card, &private_key(id)),
         admission: [0; 64],
         ephemeral: None,
         status: Status::new([].into()).unwrap(),
@@ -98,23 +113,35 @@ fn create_transport(
 
 /// The config of the region `plant`, whose one member and one voter is the node `KEY`.
 fn create_config(node: &sim::node::Node, tasks: &Tasks) -> Config {
-    create_config_on(node, tasks, private_key())
+    create_voter_config(node, tasks, 1, vec![create_member(1, Vec::new())])
+}
+
+/// The config of node `id` of the region `plant`. Each of `members` is a voter.
+fn create_voter_config(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    id: u8,
+    members: Vec<Member>,
+) -> Config {
+    create_config_on(node, tasks, id, members, private_key(id))
 }
 
 /// That config, on a transport that proves the public key of `transport_key`.
 fn create_config_on(
     node: &sim::node::Node,
     tasks: &Tasks,
+    id: u8,
+    members: Vec<Member>,
     transport_key: PrivateKey,
 ) -> Config {
     let pool = create_pool();
     let transport = create_transport(node, tasks, &pool, transport_key);
     Config {
-        key: KEY,
-        private_key: private_key(),
+        key: key(id),
+        private_key: private_key(id),
         region: "plant".parse::<Prefix>().unwrap(),
-        members: vec![create_member()],
-        voters: [KEY].into(),
+        voters: members.iter().map(|member| member.card.key()).collect(),
+        members,
         files: node.files(),
         clock: node.clock(),
         entropy: node.entropy(),
@@ -165,7 +192,7 @@ fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
 fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
     solo(|node, tasks| async move {
         let mesh = Mesh::open(create_config(&node, &tasks)).await.unwrap();
-        assert_eq!(mesh.member(KEY), Some(create_member()));
+        assert_eq!(mesh.member(KEY), Some(create_member(1, Vec::new())));
         assert_eq!(mesh.member(OTHER), None);
         let mut watch = mesh.watch(INDEX);
         assert_eq!(watch.next().await, Ok(None));
@@ -177,7 +204,8 @@ fn a_node_opens_its_region_and_reads_its_member_and_a_home() {
 #[test]
 fn open_panics_on_a_transport_that_proves_another_key() {
     let ran = run(|node, tasks| async move {
-        let config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
+        let members = vec![create_member(1, Vec::new())];
+        let config = create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32]));
         drop(Mesh::open(config).await);
     });
     assert_eq!(ran, mismatch(PUBLIC_3, PUBLIC_1));
@@ -198,17 +226,97 @@ fn open_panics_on_a_private_key_that_its_transport_does_not_prove() {
 #[test]
 fn open_gives_wrong_key_when_the_transport_proves_the_private_key() {
     solo(|node, tasks| async move {
-        let mut config = create_config_on(&node, &tasks, PrivateKey([3; 32]));
+        let members = vec![create_member(1, Vec::new())];
+        let mut config =
+            create_config_on(&node, &tasks, 1, members, PrivateKey([3; 32]));
         config.private_key = PrivateKey([3; 32]);
         assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
     });
+}
+
+/// Serves each stream of each session that a peer opens to `transport`, as `node`
+/// does.
+async fn accept(mesh: Mesh, transport: Rc<Transport>, tasks: Tasks) {
+    loop {
+        let session = transport.accept().await.unwrap();
+        let Peer::Node(peer) = session.peer() else {
+            panic!("a peer with no node key opened a session");
+        };
+        let (mesh, streams) = (mesh.clone(), tasks.clone());
+        tasks.spawn(async move {
+            while let Ok(mut incoming) = session.accept().await {
+                let mesh = mesh.clone();
+                streams.spawn(async move {
+                    let Ok(Some(header)) = incoming.receiver.recv().await else {
+                        return;
+                    };
+                    let protocol = wire::header::decode(&header).unwrap();
+                    assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                    match mesh.serve(peer, incoming).await {
+                        Ok(()) | Err(Error::Stream(_)) => {}
+                        Err(error) => panic!("a voter refused a message: {error}"),
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// The index whose home node `id` sets.
+fn index(id: u8) -> channel::Key {
+    channel::Key::from_u128(u128::from(id))
+}
+
+// Only one node leads, so at least two of the calls go through the leader.
+#[test]
+fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
+    let mut sim = Sim::new(sim::Config::default());
+    let nodes = IDS.map(|_| sim.node(sim::node::Config::default()));
+    let member = |(id, node): (u8, &sim::node::Node)| {
+        let address = SocketAddr::new(node.addresses()[0], PORT);
+        create_member(id, vec![Address::Udp(address)])
+    };
+    let members: Vec<Member> = IDS.into_iter().zip(&nodes).map(member).collect();
+    let read = Arc::new(Mutex::new(BTreeMap::new()));
+    for (id, node) in IDS.into_iter().zip(&nodes) {
+        let (own, members, read) = (node.clone(), members.clone(), Arc::clone(&read));
+        let main = move |tasks: Tasks| async move {
+            let config = create_voter_config(&own, &tasks, id, members);
+            let transport = Rc::clone(&config.transport);
+            let mesh = Mesh::open(config).await.unwrap();
+            tasks.spawn(accept(mesh.clone(), transport, tasks.clone()));
+            let set = mesh.set_home(index(id), key(id)).await;
+            let mut homes = Vec::new();
+            for of in IDS {
+                let mut watch = mesh.watch(index(of));
+                let mut home = watch.next().await;
+                while home == Ok(None) {
+                    home = watch.next().await;
+                }
+                homes.push(home);
+            }
+            read.lock().unwrap().insert(id, (set, homes));
+            // The other voters need this one until they have each home.
+            pending::<()>().await;
+        };
+        let shard = env::shards::Config {
+            name: format!("voter-{id}"),
+            core: None,
+        };
+        drop(node.shards().start(shard, main).unwrap());
+    }
+    sim.run_for(Span::from_nanos(10 * Span::SECOND.nanos()))
+        .unwrap();
+    let homes: Vec<_> = IDS.into_iter().map(|id| Ok(Some(key(id)))).collect();
+    let expected = IDS.map(|id| (id, (Ok(()), homes.clone()))).into();
+    assert_eq!(*read.lock().unwrap(), expected);
 }
 
 #[test]
 fn a_region_with_two_records_of_one_node_does_not_open() {
     solo(|node, tasks| async move {
         let mut config = create_config(&node, &tasks);
-        config.members.push(create_member());
+        config.members.push(create_member(1, Vec::new()));
         let unfit = region::Unfit::Duplicate { key: KEY };
         assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
     });
@@ -255,8 +363,8 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
     let (node, result) = (nodes[1].clone(), Arc::clone(&sent));
     let main = move |tasks: Tasks| async move {
         let pool = create_pool();
-        let transport = create_transport(&node, &tasks, &pool, PrivateKey([2; 32]));
-        let session = transport.dial(public_key(), &[at]).await.unwrap();
+        let transport = create_transport(&node, &tasks, &pool, private_key(2));
+        let session = transport.dial(public_key(1), &[at]).await.unwrap();
         let mut sender = session.open_sender(Class::Command).await.unwrap();
         for bytes in [&wire::header::encode(Protocol::Mesh)[..], &[0xff]] {
             let mut block = pool.alloc(bytes.len()).unwrap();
@@ -276,11 +384,12 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 }
 
 #[test]
-fn watch_member_next_and_serve_have_the_signatures_that_a_caller_holds() {
+fn watch_member_next_serve_and_set_home_have_the_signatures_that_a_caller_holds() {
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
     assert_gives_a_home(Watch::next);
     assert_serves(Mesh::serve);
+    assert_sets(Mesh::set_home);
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -294,6 +403,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::PeerNotVoter { .. }
         | Error::Claim(_)
         | Error::NotMember(_)
+        | Error::NoVote
         | Error::Member(_)
         | Error::WrongKey
         | Error::Pool(_)
