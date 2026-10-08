@@ -3874,7 +3874,7 @@ mod tests {
     fn the_stretch_buffer_grows_with_the_longest_walk() {
         // A run of 4000 bytes, which goes as a slice of the block, in one part and in
         // adjacent parts of 8 bytes.
-        let one = vec![200..4_200];
+        let one: Vec<_> = iter::once(200..4_200).collect();
         let adjacent = (0..500).map(|at| 200 + at * 8..200 + at * 8 + 8).collect();
         for run in [one, adjacent] {
             testing::run(1, move |shard| {
@@ -3884,8 +3884,7 @@ mod tests {
                 let sender = open_sender(&mut pair, Class::Complete);
                 let now = pair.now();
                 // A stretch of 100 bytes before the run.
-                let parts: Vec<_> = [0..100]
-                    .into_iter()
+                let parts: Vec<_> = iter::once(0..100)
                     .chain(run)
                     .map(|range| Part { range, zeros: 0 })
                     .collect();
