@@ -1149,6 +1149,12 @@ fn fails_a_round_with_raw_html() {
         ("| a |\n| - |\n<source", "<source"),
         ("</source", "</source"),
         ("<! a", "<! a"),
+        ("+ <source", "+ <source"),
+        ("* <source", "* <source"),
+        ("1) <source", "1) <source"),
+        ("-\t<source", "-\t<source"),
+        ("[^1]: <source", "[^1]: <source"),
+        ("> [^a]: <source", "> [^a]: <source"),
     ];
     for (html, line) in cases {
         let comment =
@@ -1164,6 +1170,11 @@ fn fails_a_round_with_raw_html() {
     assert_eq!(check(&record(vec![bot(&summary)])), vec![raw("<b>")]);
     let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<source\n---\n");
     assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<source")]);
+    let noted = ROUND.replace("weakening.\n\n", "weakening.[^1]\n\n[^1]: <source\n\n");
+    assert_eq!(
+        check(&record(vec![bot(&noted)])),
+        vec![raw("[^1]: <source")]
+    );
 }
 
 #[test]
@@ -1363,6 +1374,8 @@ fn reads_only_a_top_level_round_heading() {
         "- <search\n  ## Review round 2",
         "<!-- a -->\n\n```\n## Review round 2\n```",
         "<b>a</b>\n\n~~~\n## Review round 2\n~~~",
+        "So:\n\n```\n## Review round <n>\n\nReviewers: reviewer\n```\n\nA Vec<u8>.",
+        "See:\n\n```\n## Review round 4\n```\n\n<details>\n\nx",
     ] {
         let comment = bot(&format!("{quoted}\n\nNo fields."));
         assert_eq!(
@@ -1378,6 +1391,20 @@ fn reads_only_a_top_level_round_heading() {
         check(&record(vec![before, bot(ROUND)])),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn reads_an_old_round_with_html_as_before() {
+    let fields =
+        "Reviewers: reviewer, architecture, breaker\nRange: `a..b`\nFindings: 2";
+    let html = old(&format!("## Review round 1\n\n{fields}\n\n<div>"));
+    let hidden = old("<search\n## Review round 1\n\nHot path: `send`");
+    for before in [html, hidden] {
+        assert_eq!(
+            check(&record(vec![before, bot(ROUND)])),
+            Vec::<String>::new()
+        );
+    }
 }
 
 #[test]

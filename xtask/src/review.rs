@@ -286,8 +286,8 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Parses `body` as a round comment. `None` when it has no `## Review round <n>`
-/// heading, also one that raw HTML hides when it is not `old`. The fields are
+/// Parses `body` as a round comment. `None` when it has no round heading:
+/// [`Shown::number`], or [`Shown::hidden`] when it is not `old`. The fields are
 /// the first block after the heading, so the findings text cannot set them. The last
 /// block is the end lines ([`END`]), unless the comment is `old`, posted before
 /// [`CUTOFF`].
@@ -487,7 +487,7 @@ impl<'a> Shown<'a> {
                     if top && shown.number.is_some() {
                         shown.blocks.push(index);
                     } else if top && matches!(tag, Tag::Heading { .. }) {
-                        shown.number = line.strip_prefix("## Review round ");
+                        shown.number = heading(line);
                         shown.text.clear();
                     }
                     if paragraph {
@@ -597,8 +597,8 @@ fn heading(line: &str) -> Option<&str> {
 }
 
 /// Whether `prefix`, the source of a line before some text, holds only the indent and
-/// the marks of quotes and list items, so that the text starts a line of a block. An
-/// escaped `<` has its backslash in `prefix`.
+/// the marks of quotes, list items, and footnote labels, so that the text starts a line
+/// of a block. An escaped `<` has its backslash in `prefix`.
 fn marks(prefix: &str) -> bool {
     let mut rest = prefix;
     loop {
@@ -610,7 +610,11 @@ fn marks(prefix: &str) -> bool {
             rest.strip_prefix(['-', '+', '*'])
         };
         let item = item.filter(|after| after.starts_with([' ', '\t']));
-        match item.or_else(|| rest.strip_prefix('>')) {
+        let note = || {
+            let (label, after) = rest.strip_prefix("[^")?.split_once("]:")?;
+            (!label.contains(']')).then_some(after)
+        };
+        match item.or_else(|| rest.strip_prefix('>')).or_else(note) {
             Some(after) => rest = after,
             None => return rest.is_empty(),
         }
