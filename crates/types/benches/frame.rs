@@ -3,10 +3,10 @@
 //! to look each one up, to give its charge, to view the series bytes, to give the end
 //! of each series, to check and walk the series from stored ends, to give the ends of
 //! series from their lengths, to build a frame from ends and a body, to make a view
-//! through a full, a narrow, an almost full, and a half full mask and walk it, to give
-//! the bounds of each series of a view through a full, a narrow, and an almost full
-//! mask, to walk a narrow view one series at a time, and to make a narrow and an almost
-//! full mask, for a dense frame and for frames of 100,000 channels.
+//! through a full, a narrow, an almost full, and a half full mask and walk it, to walk
+//! a narrow view one series at a time, to make a narrow and an almost full mask, and
+//! to lay and charge the frame of a reader's places, for a dense frame and for frames
+//! of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -397,36 +397,6 @@ fn half_walk(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
 }
 
-/// Makes a view through a mask that wants every channel, then sums the length of the
-/// bounds of each of its series.
-#[divan::bench(args = cases(), sample_count = 1000)]
-fn full_bounds(bencher: Bencher<'_, '_>, case: &Case) {
-    let pool = pool();
-    let frame = frame(&pool, case);
-    let mask = Mask::new(&case.set, every(case));
-    bencher.bench_local(|| bound_view(View::new(black_box(&frame), black_box(&mask))));
-}
-
-/// Makes a view through a mask that wants only the last present channel, then sums
-/// the length of the bounds of each of its series.
-#[divan::bench(args = cases(), sample_count = 1000)]
-fn narrow_bounds(bencher: Bencher<'_, '_>, case: &Case) {
-    let pool = pool();
-    let frame = frame(&pool, case);
-    let mask = Mask::new(&case.set, last(case));
-    bencher.bench_local(|| bound_view(View::new(black_box(&frame), black_box(&mask))));
-}
-
-/// Makes a view through a mask that wants every channel but one, then sums the length
-/// of the bounds of each of its series.
-#[divan::bench(args = cases(), sample_count = 1000)]
-fn most_bounds(bencher: Bencher<'_, '_>, case: &Case) {
-    let pool = pool();
-    let frame = frame(&pool, case);
-    let mask = Mask::new(&case.set, most(case));
-    bencher.bench_local(|| bound_view(View::new(black_box(&frame), black_box(&mask))));
-}
-
 /// Makes a mask that wants only the last present channel.
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn narrow_mask(bencher: Bencher<'_, '_>, case: &Case) {
@@ -463,6 +433,15 @@ fn whole_lay(bencher: Bencher<'_, '_>, case: &Case) {
     let pool = pool();
     let frame = frame(&pool, case);
     let mut places = Places::new(every(case).collect());
+    bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
+}
+
+/// Lays out a frame for places of each channel but one, in entry order.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn most_lay(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mut places = Places::new(most(case).collect());
     bencher.bench_local(|| places.lay(black_box(&frame), &case.set).len());
 }
 
@@ -552,8 +531,4 @@ fn last(case: &Case) -> [channel::Slot; 1] {
 
 fn walk_view(view: View<'_>) -> usize {
     view.iter().map(|(_, bytes)| bytes.len()).sum()
-}
-
-fn bound_view(view: View<'_>) -> usize {
-    view.bounds().map(|(_, bounds)| bounds.len()).sum()
 }

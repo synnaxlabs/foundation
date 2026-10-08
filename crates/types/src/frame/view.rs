@@ -159,7 +159,7 @@ impl<'a> View<'a> {
     /// [`Frame::body`], in the order of [`View::iter`]. The bounds are in the frame's
     /// body, not in a frame of only these series: [`split`](super::split) cannot cut
     /// with them. Time is as for [`View::iter`].
-    pub fn bounds(
+    pub(crate) fn bounds(
         &self,
     ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + use<'a> {
         let (_, descriptors, _) = parts(&self.frame.0);

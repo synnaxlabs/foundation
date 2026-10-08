@@ -116,6 +116,15 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
     let slot = |entry: usize| set.entries()[entry].slot;
     // Leaves out key 3, so the frame's only series left is the index.
     let most = Mask::new(set, [0, 1, 3].map(slot));
+    // A mask holds the index of each channel it wants; places name it.
+    let mut places = [
+        Places::new([0, 2].map(slot).into()),
+        Places::new(set.entries().iter().map(|entry| entry.slot).collect()),
+        Places::new([0, 1, 3].map(slot).into()),
+    ];
+    for places in &mut places {
+        places.lay(&frame, set);
+    }
     let (read, allocations) = ALLOCATOR.count(|| {
         let view = View::new(&frame, &narrow);
         let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
@@ -126,10 +135,12 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
         for (_, bytes) in view.iter() {
             most_read += bytes.len();
         }
-        let bounded: usize = [&narrow, &full, &most]
-            .into_iter()
-            .flat_map(|mask| View::new(&frame, mask).bounds())
-            .map(|(_, bounds)| bounds.len())
+        let bounded: usize = places
+            .iter_mut()
+            .map(|places| {
+                let laid = places.lay(&frame, set).iter();
+                laid.map(|placed| placed.bounds.len()).sum::<usize>()
+            })
             .sum();
         (read, full_read, most_read, bounded)
     });
