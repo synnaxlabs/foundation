@@ -224,26 +224,24 @@ fn element(text: &str) -> Result<Scalar, Error> {
     }
 }
 
-/// The array length or list maximum that `text` writes in ASCII digits with no
-/// leading zero.
+/// The array length or list maximum that `text` writes.
 fn count(text: &str) -> Result<u32, Error> {
-    digits(text)
-        .and_then(|digits| digits.parse().ok())
-        .ok_or(Error::Count)
+    digits(text).ok_or(Error::Count)
 }
 
-/// The length of a matrix side that `text` writes in ASCII digits with no leading
-/// zero.
+/// The length of a matrix side that `text` writes.
 fn side(text: &str) -> Result<u16, Error> {
-    digits(text)
-        .and_then(|digits| digits.parse().ok())
-        .ok_or(Error::Matrix)
+    digits(text).ok_or(Error::Matrix)
 }
 
-/// `text` when it is one or more ASCII digits with no leading zero.
-fn digits(text: &str) -> Option<&str> {
-    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    (digits && (text.len() == 1 || !text.starts_with('0'))).then_some(text)
+/// The number that `text` writes in ASCII digits with no leading zero, when it fits a
+/// `T`.
+fn digits<T: FromStr>(text: &str) -> Option<T> {
+    let digits = text.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits || (text.len() > 1 && text.starts_with('0')) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// Why a text is not a sample type. `Display` gives the message: a lower-case clause
