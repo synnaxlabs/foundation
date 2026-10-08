@@ -670,9 +670,10 @@ impl Serve {
     /// serves the node's port, until `guard` completes or the transport stops. A
     /// transport that stops goes into `failed` before any task drops. Then drops the
     /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
-    /// and waits for each task of the mesh to end, the last of which drops the
-    /// transport. Runs no task and takes no session when a shard did not open, or when
-    /// the mesh did not open, which goes into `failed`.
+    /// and, with a mesh, waits for each task of the mesh to end, the last of which
+    /// drops the transport. With no mesh, the transport drops with the port's future.
+    /// Runs no task and takes no session when a shard did not open, or when the mesh
+    /// did not open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
