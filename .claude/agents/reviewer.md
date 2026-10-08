@@ -76,7 +76,10 @@ Check:
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a
   peer, a file, or a user), does "Fuzz targets" in `docs/security.md` name its target,
-  or name it under "No target yet" with an open issue? If not, it is a finding.
+  or name it under "No target yet" with an open issue? If not, it is a finding. Does its
+  target make inputs that reach each arm that the PR adds or changes, such as each
+  `Type` that the decoder takes? If not, an open issue names the gap, or it is a
+  finding. So is each sentence of its entry in "Fuzz targets" that the PR makes false.
 - `unsafe`: does each block have a `// SAFETY:` comment that holds, and a Miri test?
 
 Start the report with the rating and the summary of code quality that "Rating" in
