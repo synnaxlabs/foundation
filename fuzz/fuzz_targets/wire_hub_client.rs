@@ -1,9 +1,11 @@
-//! `wire::hub::client::Gateway` and `Program` never panic, each message encodes to
-//! its bytes and comes in the order of a client stream, each body ends at its length,
-//! each refusal is the one that the order gives, and each valid message made from the
-//! input reads back.
+//! The decoders of `wire::hub::client` never panic, each refuses a message of another
+//! kind with `Error::Kind`, each message that decodes encodes to its bytes, each body
+//! ends at its length, each refusal of a body is the one that its rest gives, and each
+//! valid message made from the input reads back.
 //!
-//! Input: the messages of one stream (`fuzz::messages`), read by both decoders.
+//! Input: the messages of one stream (`fuzz::messages`). Each decoder reads each
+//! message, and the body of the first message, when it is a request or a response,
+//! takes each later message.
 
 #![no_main]
 
@@ -18,155 +20,113 @@ use types::node;
 use types::time::{Interval, Stamp};
 use wire::hub::Error;
 use wire::hub::client::{
-    BODY_BYTES_MAX, Challenge, FromGateway, FromProgram, Gateway, Program, Request,
-    Response, Signed,
+    BODY_BYTES_MAX, Body, Challenge, Request, Response, Signed,
 };
 
-/// What a decoder must take next, kept apart from the decoder.
-#[derive(Clone, Copy, Debug)]
-enum Next {
-    First,
-    Hello,
-    Body { remain: usize },
-    Done,
-}
-
-/// One decoded message of either side: its bytes encoded again, and the body length
-/// for a request or a response.
-enum Event<'m> {
-    Fixed {
-        encoded: Vec<u8>,
-        length: Option<u64>,
-    },
-    Body {
-        bytes: &'m [u8],
-        last: bool,
-    },
-}
-
-fn gateway<'m>(gateway: &mut Gateway, message: &'m [u8]) -> Result<Event<'m>, Error> {
-    gateway.decode(message).map(|event| match event {
-        FromProgram::Signed(signed) => {
-            let mut encoded = vec![0; signed.encoded_len()];
-            signed.encode(&mut encoded);
-            Event::Fixed {
-                encoded,
-                length: None,
-            }
+/// Checks one decoder of kind `kind` on `message`: a decoded message encodes to it,
+/// and a refusal is the one that its first byte gives.
+fn decode<T>(
+    message: &[u8],
+    kind: u8,
+    decode: fn(&[u8]) -> Result<T, Error>,
+    encode: fn(&T) -> Vec<u8>,
+) -> Option<T> {
+    match (message.first(), decode(message)) {
+        (_, Ok(decoded)) => {
+            assert_eq!(encode(&decoded), message, "the message changed");
+            Some(decoded)
         }
-        FromProgram::Request(request) => {
-            let mut encoded = vec![0; Request::LEN];
-            request.encode(&mut encoded);
-            Event::Fixed {
-                encoded,
-                length: Some(request.length),
-            }
+        (None, Err(error)) => panic!("{error:?} is not the refusal of an empty message"),
+        (Some(&first), Err(error)) if first != kind => {
+            assert_eq!(error, Error::Kind { kind: first }, "{message:?}");
+            None
         }
-        FromProgram::Body { bytes, last } => Event::Body { bytes, last },
-    })
+        (Some(_), Err(error)) => {
+            assert!(
+                matches!(
+                    error,
+                    Error::Length { .. }
+                        | Error::Subject
+                        | Error::SmallOrder
+                        | Error::Oversize { .. }
+                ),
+                "{error:?} is not a refusal of the bytes of {message:?}"
+            );
+            None
+        }
+    }
 }
 
-fn program<'m>(program: &mut Program, message: &'m [u8]) -> Result<Event<'m>, Error> {
-    program.decode(message).map(|event| match event {
-        FromGateway::Challenge(challenge) => {
-            let mut encoded = vec![0; Challenge::LEN];
-            challenge.encode(&mut encoded);
-            Event::Fixed {
-                encoded,
-                length: None,
-            }
-        }
-        FromGateway::Response(response) => {
-            let mut encoded = vec![0; Response::LEN];
-            response.encode(&mut encoded);
-            Event::Fixed {
-                encoded,
-                length: Some(response.length),
-            }
-        }
-        FromGateway::Body { bytes, last } => Event::Body { bytes, last },
-    })
+fn challenge(challenge: &Challenge) -> Vec<u8> {
+    let mut out = vec![0; Challenge::LEN];
+    challenge.encode(&mut out);
+    out
 }
 
-/// Whether `error` says only that the bytes of a message do not decode.
-fn malformed(error: Error) -> bool {
-    matches!(
-        error,
-        Error::Empty
-            | Error::Kind { .. }
-            | Error::Length { .. }
-            | Error::Subject
-            | Error::SmallOrder
-            | Error::Oversize { .. }
-    )
+fn signed(signed: &Signed) -> Vec<u8> {
+    let mut out = vec![0; signed.encoded_len()];
+    signed.encode(&mut out);
+    out
 }
 
-/// Each event of the stream in `bytes` must encode to its message and come in the
-/// order of a client stream, and each refusal must be the one that the order gives.
-fn read<D>(
-    bytes: &[u8],
-    mut decoder: D,
-    decode: for<'m> fn(&mut D, &'m [u8]) -> Result<Event<'m>, Error>,
-    fresh: fn() -> D,
-) {
-    let mut next = Next::First;
-    for message in fuzz::messages(bytes) {
-        next = match (next, decode(&mut decoder, message)) {
-            (Next::First | Next::Hello, Ok(Event::Fixed { encoded, length })) => {
-                assert_eq!(encoded, message, "the message changed");
-                match (next, length) {
-                    (_, None) => Next::Hello,
-                    (Next::First, Some(0)) => Next::Done,
-                    (Next::First, Some(length)) => {
-                        assert!(length <= BODY_BYTES_MAX, "a body over the cap came");
-                        Next::Body {
-                            remain: usize::try_from(length).expect("the body fits"),
-                        }
-                    }
-                    (next, Some(_)) => panic!("a request came on {next:?}"),
-                }
-            }
-            (Next::Body { remain }, Ok(Event::Body { bytes, last })) => {
-                assert_eq!(bytes, message, "the body bytes changed");
-                assert!(!bytes.is_empty(), "an empty body message came");
-                let remain = remain
-                    .checked_sub(bytes.len())
-                    .expect("a body message past the body came");
-                assert_eq!(last, remain == 0, "the body ends at another message");
-                if last {
-                    Next::Done
-                } else {
-                    Next::Body { remain }
-                }
-            }
-            (next, Err(error)) => {
-                let correct = match next {
-                    Next::First => malformed(error),
-                    Next::Hello => match decode(&mut fresh(), message) {
-                        Ok(Event::Fixed {
-                            length: Some(_), ..
-                        }) => error == Error::Mixed { kind: 5 },
-                        Ok(_) => false,
-                        Err(alone) => error == alone,
-                    },
-                    Next::Body { remain } => {
-                        let len = message.len();
-                        if len == 0 {
-                            error == Error::Empty
-                        } else {
-                            error == Error::Body { len, remain }
-                        }
-                    }
-                    Next::Done => error == Error::Trailing,
-                };
-                assert!(
-                    correct,
-                    "{error:?} is not the refusal of {message:?} for {next:?}"
-                );
-                next
-            }
-            (next, Ok(_)) => panic!("an event came that {next:?} does not take"),
+fn request(request: &Request) -> Vec<u8> {
+    let mut out = vec![0; Request::LEN];
+    request.encode(&mut out);
+    out
+}
+
+fn response(response: &Response) -> Vec<u8> {
+    let mut out = vec![0; Response::LEN];
+    response.encode(&mut out);
+    out
+}
+
+/// The body of the first message, when it is a request or a response.
+fn first(message: &[u8]) -> Option<(Body, u64)> {
+    if message.is_empty() {
+        assert_eq!(Challenge::decode(message), Err(Error::Empty));
+        assert_eq!(Signed::decode(message), Err(Error::Empty));
+        assert_eq!(Request::decode(message), Err(Error::Empty));
+        assert_eq!(Response::decode(message), Err(Error::Empty));
+        return None;
+    }
+    decode(message, 4, Challenge::decode, challenge);
+    decode(message, 4, Signed::decode, signed);
+    let sent = decode(message, 5, Request::decode, request);
+    let answered = decode(message, 5, Response::decode, response);
+    let (body, length) = match (sent, answered) {
+        (Some(sent), None) => (sent.body(), sent.length),
+        (None, Some(answered)) => (answered.body(), answered.length),
+        (None, None) => return None,
+        (Some(_), Some(_)) => panic!("{message:?} is a request and a response"),
+    };
+    assert!(length <= BODY_BYTES_MAX, "a body over the cap came");
+    Some((body, length))
+}
+
+/// Each message after the first must be taken or refused as the rest of the body
+/// gives.
+fn read(bytes: &[u8]) {
+    let mut messages = fuzz::messages(bytes);
+    let Some((mut body, length)) = messages.next().and_then(first) else {
+        return;
+    };
+    let mut remain = usize::try_from(length).expect("the body fits");
+    assert_eq!(body.remain(), remain, "the body has another length");
+    for message in messages {
+        let len = message.len();
+        let expected = if remain == 0 {
+            Err(Error::Trailing)
+        } else if len == 0 {
+            Err(Error::Empty)
+        } else if len > remain {
+            Err(Error::Body { len, remain })
+        } else {
+            remain -= len;
+            Ok(message)
         };
+        assert_eq!(body.take(message), expected, "{message:?}");
+        assert_eq!(body.remain(), remain, "the rest of the body changed");
     }
 }
 
@@ -192,12 +152,7 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     };
     let mut out = vec![0; signed.encoded_len()];
     signed.encode(&mut out);
-    match Gateway::default().decode(&out) {
-        Ok(FromProgram::Signed(decoded)) => {
-            assert_eq!(decoded, signed, "the hello changed")
-        }
-        other => panic!("a hello did not read back: {other:?}"),
-    }
+    assert_eq!(Signed::decode(&out), Ok(signed), "the hello changed");
 
     let request = Request {
         length: input.int_in_range(0..=BODY_BYTES_MAX)?,
@@ -205,12 +160,7 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     };
     let mut out = [0; Request::LEN];
     request.encode(&mut out);
-    match Gateway::default().decode(&out) {
-        Ok(FromProgram::Request(decoded)) => {
-            assert_eq!(decoded, request, "the request changed")
-        }
-        other => panic!("a request did not read back: {other:?}"),
-    }
+    assert_eq!(Request::decode(&out), Ok(request), "the request changed");
 
     let challenge = Challenge {
         nonce: input.arbitrary()?,
@@ -221,29 +171,18 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     };
     let mut out = [0; Challenge::LEN];
     challenge.encode(&mut out);
-    match Program::default().decode(&out) {
-        Ok(FromGateway::Challenge(decoded)) => {
-            assert_eq!(decoded, challenge, "the challenge changed")
-        }
-        other => panic!("a challenge did not read back: {other:?}"),
-    }
+    assert_eq!(Challenge::decode(&out), Ok(challenge), "the challenge changed");
 
     let response = Response {
         length: input.int_in_range(0..=BODY_BYTES_MAX)?,
     };
     let mut out = [0; Response::LEN];
     response.encode(&mut out);
-    match Program::default().decode(&out) {
-        Ok(FromGateway::Response(decoded)) => {
-            assert_eq!(decoded, response, "the response changed")
-        }
-        other => panic!("a response did not read back: {other:?}"),
-    }
+    assert_eq!(Response::decode(&out), Ok(response), "the response changed");
     Ok(())
 }
 
 fuzz_target!(|bytes: &[u8]| {
-    read(bytes, Gateway::default(), gateway, Gateway::default);
-    read(bytes, Program::default(), program, Program::default);
+    read(bytes);
     write(&mut Unstructured::new(bytes)).expect("an input that ends gives zeros");
 });

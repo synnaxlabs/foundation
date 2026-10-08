@@ -12,9 +12,8 @@
 //! request or response, so the receiver counts it to find where it ends. No message
 //! follows a body.
 //!
-//! [`Gateway`] decodes the messages from the program, and [`Program`] those from the
-//! node. Each takes the kind of the first message as the kind of the stream, and
-//! checks the order and the body of that stream.
+//! Each side knows the kind of each stream, so it calls the `decode` of the message
+//! that it expects, and counts a body with the [`Body`] of its request or response.
 //!
 //! Fields are little-endian.
 //!
@@ -95,8 +94,14 @@ impl Challenge {
         out.put(&self.now.latest.nanos().to_le_bytes());
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let mut fields = fields(bytes);
+    /// Decodes a challenge.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`], [`Error::Kind`] for a message that is not kind 4, and
+    /// [`Error::Length`].
+    pub fn decode(message: &[u8]) -> Result<Self, Error> {
+        let mut fields = fields(message, HELLO)?;
         let nonce = fields.take()?;
         let earliest = stamp(fields.take()?);
         let latest = stamp(fields.take()?);
@@ -136,8 +141,14 @@ impl Signed {
         out.put(&self.signature);
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let mut fields = fields(bytes);
+    /// Decodes a hello.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`], [`Error::Kind`] for a message that is not kind 4,
+    /// [`Error::Length`], [`Error::Subject`], and then [`Error::SmallOrder`].
+    pub fn decode(message: &[u8]) -> Result<Self, Error> {
+        let mut fields = fields(message, HELLO)?;
         let [len] = fields.take()?;
         let subject = fields.take_slice(usize::from(len))?;
         let key = fields.take()?;
@@ -194,12 +205,24 @@ impl Request {
         out.put(&self.signature);
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let mut fields = fields(bytes);
+    /// Decodes a request.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`], [`Error::Kind`] for a message that is not kind 5,
+    /// [`Error::Length`], and [`Error::Oversize`].
+    pub fn decode(message: &[u8]) -> Result<Self, Error> {
+        let mut fields = fields(message, REQUEST)?;
         let length = body(fields.take()?)?;
         let signature = fields.take()?;
         fields.end()?;
         Ok(Self { length, signature })
+    }
+
+    /// The body that follows this request.
+    #[must_use]
+    pub fn body(&self) -> Body {
+        Body::new(self.length)
     }
 }
 
@@ -227,182 +250,72 @@ impl Response {
         out.put(&self.length.to_le_bytes());
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let mut fields = fields(bytes);
+    /// Decodes a response.
+    ///
+    /// # Errors
+    ///
+    /// As [`Request::decode`].
+    pub fn decode(message: &[u8]) -> Result<Self, Error> {
+        let mut fields = fields(message, REQUEST)?;
         let length = body(fields.take()?)?;
         fields.end()?;
         Ok(Self { length })
     }
+
+    /// The body that follows this response.
+    #[must_use]
+    pub fn body(&self) -> Body {
+        Body::new(self.length)
+    }
 }
 
-/// The decoder at the node: it takes each message from the program on one hub
-/// stream, in order, and checks the order and the body of the stream.
-#[derive(Debug, Default)]
-pub struct Gateway {
-    order: Order,
+/// The rest of the body of one request or response.
+#[derive(Debug)]
+pub struct Body {
+    remain: usize,
 }
 
-/// A message from the program, decoded.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FromProgram<'m> {
-    /// A hello. The stream is the hello stream.
-    Signed(Signed),
-    /// A request. The stream is a request stream. Its body follows as `length` bytes
-    /// of `Body` messages; with `length` 0, none follows and the stream is complete.
-    Request(Request),
-    /// One message of the request's body.
-    Body {
-        /// The bytes of the message.
-        bytes: &'m [u8],
-        /// The body ends with this message.
-        last: bool,
-    },
-}
+impl Body {
+    fn new(length: u64) -> Self {
+        let remain = usize::try_from(length)
+            .expect("invariant: a usize holds a body of at most 16 MiB");
+        Self { remain }
+    }
 
-impl Gateway {
-    /// Decodes the next message from the program.
+    /// Takes the next message of the body and gives its bytes.
     ///
     /// # Errors
     ///
-    /// The [`Error`] of a message that does not decode, or that breaks the order or
-    /// the body of the stream: [`Error::Mixed`] for a request on the hello stream,
-    /// [`Error::Body`] for a message longer than the rest of the body, and
-    /// [`Error::Trailing`] for a message after the body. A message of a body has no
-    /// kind, so a message where the body continues is read as body bytes. The stream
-    /// is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and the caller
-    /// stops it.
-    pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromProgram<'m>, Error> {
-        if let Some((bytes, last)) = self.order.body(message)? {
-            return Ok(FromProgram::Body { bytes, last });
+    /// [`Error::Empty`] for an empty message, [`Error::Body`] for more bytes than
+    /// remain, and [`Error::Trailing`] once the body ended.
+    pub fn take<'m>(&mut self, message: &'m [u8]) -> Result<&'m [u8], Error> {
+        let (len, remain) = (message.len(), self.remain);
+        if remain == 0 {
+            return Err(Error::Trailing);
         }
-        let (decoded, length) = match kind(message)? {
-            HELLO => (FromProgram::Signed(Signed::decode(message)?), None),
-            REQUEST => {
-                let request = Request::decode(message)?;
-                (FromProgram::Request(request), Some(request.length))
-            }
-            kind => return Err(Error::Kind { kind }),
-        };
-        self.order.next(length)?;
-        Ok(decoded)
-    }
-}
-
-/// The decoder at the program: it takes each message from the node on one hub
-/// stream, in order, and checks the order and the body of the stream.
-#[derive(Debug, Default)]
-pub struct Program {
-    order: Order,
-}
-
-/// A message from the node, decoded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FromGateway<'m> {
-    /// A challenge. The stream is the hello stream.
-    Challenge(Challenge),
-    /// A response. The stream is a request stream. Its body follows as `length` bytes
-    /// of `Body` messages; with `length` 0, none follows and the stream is complete.
-    Response(Response),
-    /// One message of the response's body.
-    Body {
-        /// The bytes of the message.
-        bytes: &'m [u8],
-        /// The body ends with this message.
-        last: bool,
-    },
-}
-
-impl Program {
-    /// Decodes the next message from the node.
-    ///
-    /// # Errors
-    ///
-    /// As [`Gateway::decode`], for a challenge in place of a hello and a response in
-    /// place of a request.
-    pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromGateway<'m>, Error> {
-        if let Some((bytes, last)) = self.order.body(message)? {
-            return Ok(FromGateway::Body { bytes, last });
+        if len == 0 {
+            return Err(Error::Empty);
         }
-        let (decoded, length) = match kind(message)? {
-            HELLO => (FromGateway::Challenge(Challenge::decode(message)?), None),
-            REQUEST => {
-                let response = Response::decode(message)?;
-                (FromGateway::Response(response), Some(response.length))
-            }
-            kind => return Err(Error::Kind { kind }),
-        };
-        self.order.next(length)?;
-        Ok(decoded)
+        self.remain = remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
+        Ok(message)
+    }
+
+    /// The bytes that remain. The body ended at 0.
+    #[must_use]
+    pub fn remain(&self) -> usize {
+        self.remain
     }
 }
 
-/// The order of one client stream, the same on both sides.
-#[derive(Clone, Copy, Debug, Default)]
-enum Order {
-    /// No message yet: the first message sets the kind of the stream.
-    #[default]
-    First,
-    /// The hello stream, which takes only messages of kind 4.
-    Hello,
-    /// The body of a request stream, with the bytes that remain.
-    Body { remain: usize },
-    /// The request stream after its body, which takes no message.
-    Done,
-}
-
-impl Order {
-    /// Takes `message` as body bytes, with whether the body ends with it, where a body
-    /// continues. Gives `None` where the next message has a kind.
-    fn body<'m>(
-        &mut self,
-        message: &'m [u8],
-    ) -> Result<Option<(&'m [u8], bool)>, Error> {
-        match *self {
-            Self::First | Self::Hello => Ok(None),
-            Self::Done => Err(Error::Trailing),
-            Self::Body { remain } => {
-                let len = message.len();
-                if len == 0 {
-                    return Err(Error::Empty);
-                }
-                let remain =
-                    remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
-                *self = if remain == 0 {
-                    Self::Done
-                } else {
-                    Self::Body { remain }
-                };
-                Ok(Some((message, remain == 0)))
-            }
+/// The fields of `message` after its kind byte, which must be `kind`.
+fn fields(message: &[u8], kind: u8) -> Result<Fields<'_, Error>, Error> {
+    match message.split_first() {
+        None => Err(Error::Empty),
+        Some((&first, rest)) if first == kind => {
+            Ok(Fields::new(rest, Error::Length { len: message.len() }))
         }
+        Some((&kind, _rest)) => Err(Error::Kind { kind }),
     }
-
-    /// Takes a decoded message after [`body`](Self::body) gave `None`: `None` for a
-    /// message of the hello stream, else the body length of a request or response.
-    fn next(&mut self, length: Option<u64>) -> Result<(), Error> {
-        *self = match (*self, length) {
-            (_, None) => Self::Hello,
-            (Self::First, Some(0)) => Self::Done,
-            (Self::First, Some(length)) => Self::Body {
-                remain: body_len(length),
-            },
-            (_, Some(_)) => return Err(Error::Mixed { kind: REQUEST }),
-        };
-        Ok(())
-    }
-}
-
-/// The kind byte of `message`.
-fn kind(message: &[u8]) -> Result<u8, Error> {
-    message.first().copied().ok_or(Error::Empty)
-}
-
-/// The fields of `bytes` after its kind byte.
-fn fields(bytes: &[u8]) -> Fields<'_, Error> {
-    Fields::new(
-        bytes.get(1..).unwrap_or_default(),
-        Error::Length { len: bytes.len() },
-    )
 }
 
 fn stamp(word: [u8; 8]) -> Stamp {
@@ -416,10 +329,6 @@ fn body(word: [u8; 8]) -> Result<u64, Error> {
         return Err(Error::Oversize { length });
     }
     Ok(length)
-}
-
-fn body_len(length: u64) -> usize {
-    usize::try_from(length).expect("invariant: a usize holds a body of at most 16 MiB")
 }
 
 fn assert_body(length: u64) {
