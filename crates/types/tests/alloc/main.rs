@@ -123,13 +123,18 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
         for (_, bytes) in view.iter() {
             most_read += bytes.len();
         }
-        (read, full_read, most_read)
+        let bounded: usize = [&narrow, &full, &most]
+            .into_iter()
+            .flat_map(|mask| View::new(&frame, mask).bounds())
+            .map(|(_, bounds)| bounds.len())
+            .sum();
+        (read, full_read, most_read, bounded)
     });
     assert_eq!(allocations, 0, "the view allocated");
     assert_eq!(
         read,
-        (32, 32, 16),
-        "the views read both series, then the index"
+        (32, 32, 16, 80),
+        "the views read both series, then the index, and bound what they read"
     );
 }
 

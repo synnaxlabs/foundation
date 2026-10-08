@@ -59,10 +59,6 @@ impl Addresses {
 
     // Needs no check of `new`: the count is checked first, and the byte form holds no
     // flow info and no scope.
-    #[cfg_attr(
-        not(any(test, feature = "sim")),
-        expect(dead_code, reason = "the streams of #471 are the first user")
-    )]
     pub(super) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         let count = bytes::take_count(bytes)?;
         if count > u64::from(MAX) {
