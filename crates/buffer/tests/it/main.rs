@@ -13,7 +13,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
@@ -3480,8 +3480,17 @@ fn an_end_gives_the_error_of_a_write_before_the_drop() {
     .expect("the buffer ends");
 }
 
+/// Records that it woke.
+struct Flag(AtomicBool);
+
+impl Wake for Flag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// An `End` polled while the buffer is held stays pending across a commit that
-/// syncs, and gives `Ok` after the drop.
+/// syncs, which does not wake it, and gives `Ok` after the drop, which does.
 #[test]
 fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     let (mut sim, node) = create_node(118);
@@ -3491,16 +3500,23 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
         let mut end = pin!(buffer.ended());
-        let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let polled = end.as_mut().poll(&mut Context::from_waker(&waker));
         assert_eq!(polled, Poll::Pending);
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         assert_eq!(buffer.committed().await, Ok(()));
+        assert!(!flag.0.load(Ordering::Relaxed), "a commit wakes no End");
         let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
         assert_eq!(polled, Poll::Pending);
         drop(buffer);
         assert_eq!(end.await, Ok(()));
+        assert!(
+            flag.0.load(Ordering::Relaxed),
+            "the end of the task wakes it"
+        );
     })
     .expect("the buffer ends");
 }

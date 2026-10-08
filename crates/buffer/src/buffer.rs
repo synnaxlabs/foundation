@@ -282,7 +282,10 @@ struct State {
     taken: u64,
     /// How many deadlines ended with no error.
     commits: u64,
+    /// The waiting [`Commit`]s, which the end of each commit and of the task wakes.
     wakers: Vec<Waker>,
+    /// The waiting [`End`]s, which only the end of the task wakes.
+    ending: Vec<Waker>,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
@@ -310,11 +313,11 @@ impl State {
         }
     }
 
-    /// Wakes `waker` at the next end of a commit or of the task.
-    fn wait(&mut self, waker: &Waker) {
-        if !self.wakers.iter().any(|held| held.will_wake(waker)) {
-            self.wakers.push(waker.clone());
-        }
+    /// Marks the task ended and moves each waiter into `woken`.
+    fn end(&mut self, woken: &mut Vec<Waker>) {
+        self.ended = true;
+        woken.append(&mut self.wakers);
+        woken.append(&mut self.ending);
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -404,6 +407,7 @@ impl Buffer {
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
+                ending: Vec::new(),
                 parked: None,
                 closed: false,
                 ended: false,
@@ -852,8 +856,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         .await;
         if ended {
             let mut state = shared.state.borrow_mut();
-            state.ended = true;
-            woken.append(&mut state.wakers);
+            state.end(&mut woken);
             drop(state);
             for waker in woken.drain(..) {
                 waker.wake();
@@ -887,7 +890,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             Ok(()) => state.synced(sealed.drain(..)),
             Err(error) => {
                 state.failed = Some(error);
-                state.ended = true;
+                state.end(&mut woken);
             }
         }
         woken.append(&mut state.wakers);
@@ -934,7 +937,7 @@ impl Future for Commit {
         if let Some(error) = &state.failed {
             return Poll::Ready(Err(error.clone()));
         }
-        state.wait(cx.waker());
+        wait(&mut state.wakers, cx.waker());
         Poll::Pending
     }
 }
@@ -954,8 +957,15 @@ impl Future for End {
         if state.ended {
             return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
         }
-        state.wait(cx.waker());
+        wait(&mut state.ending, cx.waker());
         Poll::Pending
+    }
+}
+
+/// Puts `waker` in `wakers` unless one there wakes the same task.
+fn wait(wakers: &mut Vec<Waker>, waker: &Waker) {
+    if !wakers.iter().any(|held| held.will_wake(waker)) {
+        wakers.push(waker.clone());
     }
 }
 
