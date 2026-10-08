@@ -2,10 +2,12 @@
 # Runs merged.sh against fixed answers. A stub `gh` prints `$STUB/<n>` on its call <n>,
 # and writes its arguments, one to a line, to `$STUB/args.<n>`. A stub `date` gives a
 # fixed UTC time. A stub `sleep` returns at once, and stops the script when no answer is
-# left. It keeps its files in a new folder from `mktemp -d`. Exit 1 on a failure.
+# left. It keeps its files in a new folder from `mktemp -d`, which it removes at exit.
+# Exit 1 on a failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
 cat > "$tmp/bin/gh" <<'STUB'
 #!/bin/sh
