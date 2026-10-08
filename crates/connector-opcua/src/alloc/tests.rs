@@ -58,6 +58,13 @@ fn a_failure_gives_null() {
 
 #[test]
 fn calloc_gives_zeroes() {
+    let dirty = malloc(32);
+    assert_aligned(dirty);
+    // SAFETY: the block holds 32 bytes.
+    unsafe { dirty.cast::<u8>().write_bytes(0xa5, 32) };
+    // SAFETY: it is a live pointer of `malloc`. The next block of its size is likely
+    // this one.
+    unsafe { free(dirty) };
     let ptr = calloc(4, 8);
     assert_aligned(ptr);
     // SAFETY: the block holds 32 bytes.
