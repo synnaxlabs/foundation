@@ -36,8 +36,9 @@ pub enum Error {
         /// that the bytes cut.
         at: usize,
     },
-    /// The change at `name` states another stored definition than the applied spec
-    /// holds there.
+    /// The change at `name` is not one that `plan` makes from the applied spec: its
+    /// old digest is not the stored one, or the stored or new definition is of a kind
+    /// or at a name that no file defines.
     Mismatch {
         /// The tree key of the change.
         name: Name,
@@ -57,7 +58,8 @@ impl fmt::Display for Error {
             }
             Self::Mismatch { name } => write!(
                 f,
-                "the plan does not match the applied spec at {name}: plan again"
+                "the plan holds a change at {name} that a plan of the applied spec \
+                 cannot make: plan again"
             ),
         }
     }

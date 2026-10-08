@@ -1,11 +1,16 @@
+use std::collections::BTreeMap;
+
 use config::Definition;
 use config::plan::{Error, Plan};
 use proptest::prelude::*;
 use spec::channel::{Edge, Problem};
+use spec::definition::Definition as Stored;
 use spec::region;
+use spec::time::{self, Peers};
 use types::channel::Key;
 use types::digest::Digest;
-use types::name::Prefix;
+use types::ed25519::PrivateKey;
+use types::name::{Prefix, Selector};
 
 use super::{EDGE, INFLUX, PLANT, Spec, name};
 
@@ -176,8 +181,76 @@ fn refuses_a_change_that_states_another_stored_definition() {
     assert_eq!(error, Error::Mismatch { name: value });
     assert_eq!(
         error.to_string(),
-        "the plan does not match the applied spec at a.value: plan again"
+        "the plan holds a change at a.value that a plan of the applied spec cannot \
+         make: plan again"
     );
+}
+
+/// A plan of [`PLANT`] on the empty spec with one change: its change of
+/// `a.@placement` at `at`, with the digest of `old` and with `new` as its definition.
+fn one(at: &str, old: Option<&Stored>, new: Option<Definition>) -> Plan {
+    let mut plan = Spec::create_empty()
+        .plan(&[PLANT], &["n"])
+        .expect("no problems");
+    let mut change = plan.changes.remove(0);
+    change.name = name(at);
+    change.old = old.map(|old| Digest::of(&old.encode()));
+    let entry = change.new.take().expect("the new placement");
+    change.new = new.map(|definition| {
+        let mut entry = entry;
+        entry.definition = definition;
+        entry
+    });
+    plan.changes = vec![change];
+    plan.homes.clear();
+    plan
+}
+
+#[test]
+fn refuses_a_change_that_plan_cannot_make() {
+    let admin = spec::founding::create(PrivateKey([7; 32]).public());
+    let subject = &admin[&name("@admin.@subject")];
+    let select = Selector::new(["a.**"]).expect("a selector");
+    let time = Stored::Time(time::Policy::new(select, Peers::Voters));
+    let blockless = BTreeMap::from([(name("a.@time"), time.clone())]);
+    let placement = Spec::create_empty()
+        .plan(&[PLANT], &["n"])
+        .expect("no problems");
+    let placement = placement.changes[0]
+        .new
+        .clone()
+        .expect("a placement")
+        .definition;
+    let reserved = Plan::decode(&bytes(&[data("@a.value", "f64", None)]));
+    let empty = BTreeMap::new();
+    let cases = [
+        (one("@admin.@subject", Some(subject), None), &admin),
+        (one("a.@time", Some(&time), None), &blockless),
+        (
+            one("a.@time", None, Some(Definition::Spec(time.clone()))),
+            &empty,
+        ),
+        (one("@a.@placement", None, Some(placement.clone())), &empty),
+        (one("a.other", None, Some(placement)), &empty),
+        (reserved.expect("a plan"), &empty),
+    ];
+    for (plan, applied) in cases {
+        let at = plan.changes[0].name.clone();
+        let found = plan.definitions(applied, keys(0));
+        assert_eq!(found, Err(Error::Mismatch { name: at }));
+    }
+}
+
+#[test]
+fn a_change_with_no_definition_changes_nothing_only_at_a_name_with_none() {
+    let mut spec = Spec::create_empty();
+    spec.apply(&spec.plan(&[PLANT], &["n"]).expect("no problems"));
+    let applied = spec.definitions();
+    let found = one("b.@placement", None, None).definitions(&applied, keys(spec.made));
+    assert_eq!(found, Ok(applied.clone()));
+    let found = one("a.@placement", None, None).definitions(&applied, keys(spec.made));
+    let at = name("a.@placement");
+    assert_eq!(found, Err(Error::Mismatch { name: at }));
 }
 
 /// The fixture texts that [`plan_then_definitions_never_refuses`] applies and plans.

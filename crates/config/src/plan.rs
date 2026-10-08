@@ -108,12 +108,17 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// [`Error::Mismatch`] at the first change whose `old` is not the digest of the
-    /// encoded definition at its name in `applied`: `None` at a stored name, `Some` at
-    /// a name with no stored definition, or another digest. A plan that [`plan`] made
-    /// from `applied` never gives it. A change with no old and no new definition,
-    /// which [`Plan::decode`] refuses, gets it at a stored name and changes nothing at
-    /// another name.
+    /// [`Error::Mismatch`] at the first change that [`plan`] cannot make from
+    /// `applied`, which only a hand-made file holds:
+    ///
+    /// - `old` is not the digest of the encoded definition at its name in `applied`:
+    ///   `None` at a stored name, `Some` at a name with no stored definition, or
+    ///   another digest.
+    /// - The stored or the new definition is of a kind that no block of a file
+    ///   defines, or its name is not the tree key of an unreserved label of its kind.
+    ///
+    /// A change with no old and no new definition, which [`Plan::decode`] refuses,
+    /// gets it at a stored name and changes nothing at another name.
     pub fn definitions(
         &self,
         applied: &BTreeMap<Name, definition::Definition>,
@@ -122,7 +127,17 @@ impl Plan {
         let mut definitions = applied.clone();
         for change in &self.changes {
             let stored = definitions.remove(&change.name);
-            if change.old != stored.map(|stored| Digest::of(&stored.encode())) {
+            let new = change.new.as_ref().map(|entry| match &entry.definition {
+                Definition::Spec(definition) => definition.kind(),
+                Definition::Channel(_) => definition::Kind::Channel,
+            });
+            let kinds = stored
+                .as_ref()
+                .map(definition::Definition::kind)
+                .into_iter();
+            if change.old != stored.map(|stored| Digest::of(&stored.encode()))
+                || !kinds.chain(new).all(|kind| planned(&change.name, kind))
+            {
                 return Err(Error::Mismatch {
                     name: change.name.clone(),
                 });
@@ -654,9 +669,15 @@ fn unknown(
     }
 }
 
+/// Reports whether a plan holds a definition of `kind` at `name`: a kind that a block
+/// of a file defines, at the tree key of an unreserved label.
+fn planned(name: &Name, kind: definition::Kind) -> bool {
+    KINDS.iter().any(|(block, _)| *block == kind)
+        && kind.label(name).is_some_and(|label| !label.reserved())
+}
+
 /// The change of each definition whose bytes differ from the stored bytes, in tree key
-/// order. A stored definition whose label is reserved, or whose kind no block defines,
-/// is never removed.
+/// order. A stored definition that is not [`planned`] is never removed.
 fn changes(
     entries: BTreeMap<Name, Entry>,
     mut channels: BTreeMap<Name, Channel>,
@@ -664,11 +685,7 @@ fn changes(
 ) -> Vec<Change> {
     let mut stored: BTreeMap<&Name, &definition::Definition> = applied
         .iter()
-        .filter(|(name, definition)| {
-            let kind = definition.kind();
-            KINDS.iter().any(|(block, _)| *block == kind)
-                && !kind.label(name).is_some_and(|label| label.reserved())
-        })
+        .filter(|(name, definition)| planned(name, definition.kind()))
         .collect();
     let mut changes = Vec::new();
     for (name, entry) in entries {
