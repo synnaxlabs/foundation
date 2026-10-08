@@ -25,7 +25,7 @@ pub(crate) struct State {
     members: BTreeMap<node::Key, Member>,
     tickets: BTreeMap<[u8; 32], Record>,
     homes: BTreeMap<channel::Key, node::Key>,
-    spec: Pointer,
+    pointer: Pointer,
     // Each name that a member holds, its card name and each status channel name, in
     // ASCII lower case, so that two names that differ only in case collide (A3).
     names: BTreeMap<String, node::Key>,
@@ -51,7 +51,7 @@ impl State {
             members: BTreeMap::new(),
             tickets: BTreeMap::new(),
             homes: BTreeMap::new(),
-            spec: Pointer {
+            pointer: Pointer {
                 version: 0,
                 root: founding,
             },
@@ -85,8 +85,8 @@ impl State {
     }
 
     /// The spec pointer.
-    pub(crate) fn spec(&self) -> Pointer {
-        self.spec
+    pub(crate) fn pointer(&self) -> Pointer {
+        self.pointer
     }
 
     /// Applies `change`. Returns the index whose home it moved, or `None` when it moved
@@ -110,24 +110,24 @@ impl State {
                 options,
             } => self.record(public_key, options).map(|()| None),
             Change::Spec { base, root, .. } => {
-                self.move_spec(base, root).map(|()| None)
+                self.move_pointer(base, root).map(|()| None)
             }
         }
     }
 
     // Moves the pointer by compare-and-swap on `base`. The chunks are never read here.
-    fn move_spec(&mut self, base: Pointer, root: Digest) -> Result<(), Refused> {
-        if base != self.spec {
+    fn move_pointer(&mut self, base: Pointer, root: Digest) -> Result<(), Refused> {
+        if base != self.pointer {
             return Err(Refused::Stale {
                 base,
-                pointer: self.spec,
+                pointer: self.pointer,
             });
         }
         let version = base
             .version
             .checked_add(1)
             .expect("invariant: fewer than 2^64 spec changes apply");
-        self.spec = Pointer { version, root };
+        self.pointer = Pointer { version, root };
         Ok(())
     }
 
@@ -450,15 +450,15 @@ mod tests {
             version: 0,
             root: FOUNDING,
         };
-        assert_eq!(state.spec(), founding);
+        assert_eq!(state.pointer(), founding);
         assert_eq!(state.apply(spec(0, 1, 2, &[3])), Ok(None));
         let moved = Pointer {
             version: 1,
             root: digest(2),
         };
-        assert_eq!(state.spec(), moved);
+        assert_eq!(state.pointer(), moved);
         assert_eq!(state.apply(spec(1, 2, 2, &[])), Ok(None));
-        assert_eq!(state.spec().version, 2);
+        assert_eq!(state.pointer().version, 2);
     }
 
     // Of two changes from one base, the first applies and the second is refused.
@@ -467,7 +467,7 @@ mod tests {
         let mut state = state();
         assert_eq!(state.apply(spec(0, 1, 2, &[])), Ok(None));
         let before = state.clone();
-        let moved = state.spec();
+        let moved = state.pointer();
         let cases = [
             (spec(0, 1, 3, &[]), 0, digest(1)),
             (spec(1, 1, 3, &[]), 1, digest(1)),
@@ -1099,9 +1099,9 @@ mod tests {
                         prop_assert!(state.member(join.card.key).is_some());
                     }
                     (Ok(_), Change::Spec { base, root, .. }) => {
-                        prop_assert_eq!(before.spec(), base);
+                        prop_assert_eq!(before.pointer(), base);
                         let next = base.version.checked_add(1).unwrap();
-                        prop_assert_eq!(state.spec(), Pointer { version: next, root });
+                        prop_assert_eq!(state.pointer(), Pointer { version: next, root });
                     }
                     (Ok(_), _) => {}
                 }

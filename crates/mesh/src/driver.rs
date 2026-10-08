@@ -291,7 +291,7 @@ impl Mesh {
     /// problems that keep the node on an earlier spec.
     #[must_use]
     pub fn pointer(&self) -> Pointer {
-        self.group.borrow().state.spec()
+        self.group.borrow().state.pointer()
     }
 
     /// Gives the group `message`, which `peer` sent.
