@@ -149,13 +149,13 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// # Errors
 ///
 /// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value or one
-/// of [`CODE_FLAGS`], a
-/// build that fails, an `#include` or `#import` of a header outside the copy other
-/// than one of [`SYSTEM_HEADERS`] in a system directory, a call of a clock function
-/// from a pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any
-/// other reference to a clock function, such as its address in code or data,
-/// through which any code can call it, each inlined function, an `#include_next`,
-/// and a `#line` directive or line marker in a `.c` or `.h` file of the copy.
+/// of [`CODE_FLAGS`], a build that fails, an `#include` or `#import` of a header
+/// outside the copy other than one of [`SYSTEM_HEADERS`] in a system directory, a
+/// call of a clock function from a pair that [`CLOCK_CALLS`] does not list, a listed
+/// pair with no call, any other reference to a clock function, such as its address in
+/// code or data, through which any code can call it, each inlined function, an
+/// `#include_next`, and a `#line` directive or line marker in a `.c` or `.h` file of
+/// the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let out = root.join("target/open62541/check");
     inspect(&root.join(DEST), &out, Path::new("cc"))
@@ -268,7 +268,9 @@ impl Trees<'_> {
                 // `cmake` writes `-o <object> -c <source>`; `build.rs` and the check
                 // give their own.
                 arguments.next();
-            } else if let Some(dir) = argument.strip_prefix("-I") {
+                continue;
+            }
+            let flag = if let Some(dir) = argument.strip_prefix("-I") {
                 let dir = self.relative(Path::new(dir))?;
                 // A bare `-I` takes the next flag as its directory; `-I-` is a flag.
                 let dir = if dir.as_os_str().is_empty()
@@ -278,14 +280,14 @@ impl Trees<'_> {
                 } else {
                     dir
                 };
-                flags.push(format!("-I{}", dir.display()));
-            } else if argument.starts_with("-D")
-                || argument.starts_with("-std=")
-                || CODE_FLAGS.contains(&argument.as_str())
-            {
-                flags.push(argument.clone());
-            } else if !((argument.starts_with("-W") && !argument.contains(','))
-                || LEFT_OUT.iter().any(|&(flag, _)| flag == argument))
+                format!("-I{}", dir.display())
+            } else {
+                argument.clone()
+            };
+            if kept(&flag) {
+                flags.push(flag);
+            } else if !((flag.starts_with("-W") && !flag.contains(','))
+                || LEFT_OUT.iter().any(|&(left, _)| left == flag))
             {
                 return Err(format!(
                     "`{argument}` is in neither CODE_FLAGS nor LEFT_OUT"
@@ -294,6 +296,18 @@ impl Trees<'_> {
         }
         Ok(flags)
     }
+}
+
+/// Whether `flags.txt` may hold `flag`: a `-D`, `-I`, or `-std` flag with its value,
+/// or one of [`CODE_FLAGS`].
+fn kept(flag: &str) -> bool {
+    CODE_FLAGS.contains(&flag)
+        // A value that starts with `-` makes a flag such as `-I-`, which changes how
+        // `cc` finds a header.
+        || ["-D", "-I", "-std="].iter().any(|p| {
+            flag.strip_prefix(p)
+                .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+        })
 }
 
 /// One compile of the `open62541` library in `compile_commands.json`.
@@ -368,16 +382,7 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     let (sources, flags) = (read("sources.txt")?, read("flags.txt")?);
     let other: Vec<String> = flags
         .lines()
-        // A value that starts with `-` makes a flag such as `-I-`, which changes how
-        // `cc` finds a header.
-        .filter(|flag| {
-            !CODE_FLAGS.contains(flag)
-                && !["-D", "-I", "-std="].iter().any(|p| {
-                    flag.strip_prefix(p).is_some_and(|value| {
-                        !value.is_empty() && !value.starts_with('-')
-                    })
-                })
-        })
+        .filter(|flag| !kept(flag))
         .map(|flag| {
             format!(
                 "flags.txt: `{flag}` is not a -D, -I, or -std flag with its value, or \
@@ -1253,7 +1258,7 @@ End of search list.
             trees.flags(&["cc", "-I/w/build"].map(str::to_owned)),
             Err("/w/build is outside the clone".to_owned())
         );
-        for flag in ["-fplugin=x", "-Wl,-z", "x.c", "-include"] {
+        for flag in ["-fplugin=x", "-Wl,-z", "x.c", "-include", "-D"] {
             assert_eq!(
                 trees.flags(&["cc", flag].map(str::to_owned)),
                 Err(format!("`{flag}` is in neither CODE_FLAGS nor LEFT_OUT"))
