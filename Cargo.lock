@@ -353,6 +353,7 @@ dependencies = [
  "env",
  "http",
  "http-body",
+ "hub",
  "hyper",
  "proptest",
  "sim",

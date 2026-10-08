@@ -26,14 +26,14 @@ q='query($n:Int!){repository(owner:"synnaxlabs",name:"foundation"){
     ... on StatusContext{state}}}}}}}}}}'
 jq='.data.repository.pullRequest |
   (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $nodes |
-  ([$nodes[] | select(.__typename == "CheckRun")]
+  (([$nodes[] | select(.__typename == "CheckRun")]
     | group_by(.checkSuite.workflowRun.workflow.name)
     | map(max_by(.checkSuite.workflowRun.databaseId).checkSuite.workflowRun.databaseId
       as $run
       | map(select(.checkSuite.workflowRun.databaseId == $run))
       | group_by(.name) | map(max_by(.databaseId)))
     | add // [])
-  + [$nodes[] | select(.__typename == "StatusContext") | {conclusion: .state}]
+  + [$nodes[] | select(.__typename == "StatusContext") | {conclusion: .state}])
   as $checks |
   if .state == "MERGED" then "merged"
   elif .state != "OPEN" then "closed"
