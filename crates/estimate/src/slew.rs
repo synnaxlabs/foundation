@@ -103,8 +103,8 @@ impl Slew {
 
     /// The first reading at or after `now` at which the latest edge of mesh time is at
     /// or after `at`, for a local clock that drifts from mesh time by at most `drift`.
-    /// At each reading from `now` to it, the edge is before `at`. It is `now` when the
-    /// edge at `now` has reached `at`. Each stamp has one: at the last reading, the
+    /// At each earlier reading from `now`, the edge is before `at`. It is `now` when
+    /// the edge at `now` has reached `at`. Each stamp has one: at the last reading, the
     /// edge is at the end of a stamp's range.
     #[must_use]
     #[expect(
@@ -116,7 +116,8 @@ impl Slew {
         // the rounding of the growth and of the ticks, so no reading inside a step
         // reaches `at`. A downward slew moves the edge back at each tick, so a search
         // that takes the edge as monotonic can pass the first reading.
-        let rate = i128::from(drift.ppb()).max(i128::from(RATE_PPM) * 1_000);
+        let per_nano = PER_NANO.unsigned_abs();
+        let rate = u128::from(drift.ppb()).max(u128::from(RATE_PPM) * 1_000);
         let mut reading = now;
         loop {
             let latest = self.at(reading, drift).interval().latest;
@@ -124,7 +125,7 @@ impl Slew {
             if gap <= 0 {
                 return reading;
             }
-            let step = -(-(gap - 1) * PER_NANO).div_euclid(PER_NANO + rate);
+            let step = ((gap - 1).unsigned_abs() * per_nano).div_ceil(per_nano + rate);
             let step = u64::try_from(step.max(1)).expect("invariant: a gap fits a u64");
             let next = reading.0.checked_add(step);
             reading =
