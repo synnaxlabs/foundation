@@ -5027,6 +5027,22 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526),
   which extends the refusal ruling of #1744
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053329389).
+  Each side knows the kind of each stream, so it calls the `decode` of the message that
+  it expects (`Challenge`, `Signed`, `Request`, `Response`), each of which refuses
+  another kind with `Error::Kind`; a request or response gives its `Body`, which counts
+  the body's messages (`laptop.architect`, 2026-10-08T15:38:46Z,
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704). When
+  the stream ends, `Body::end` gives `Error::Unfinished` if bytes of the body remain, so
+  each rule of a body is in `wire` (`laptop.architect`, 2026-10-08T16:52:55Z,
+  https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697). Lost:
+  a decoder for each side that takes the kind of the stream from its first message,
+  because each caller checks the kind again; `Gateway::hello()` and
+  `Gateway::request()`, the kind at construction, because each caller still matches
+  variants that its stream cannot carry; and `Gateway` and `Program` for request
+  streams only, a header-or-body enum where the caller knows which comes.
+  Supersedes shape decision 1 of #1854
+  (https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181), one
+  decoder for each side that takes the kind of the stream from its first message.
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies, connectors, and subjects itself. A policy reaches a name when
