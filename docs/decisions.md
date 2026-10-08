@@ -3569,15 +3569,19 @@ How to read this record:
   2026-10-08 02:27 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
   `connector-opcua` reads its `sources.txt`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057244538,
-  2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy: each release
-  file that our build compiles or includes, byte for byte the tag's, and the files that
-  its build generates, which are only that command's output, never edited by hand.
-  `cargo xtask open62541` is the clock check: it builds the copy from its own files with
-  `-g -O0` and finds each call site by its call relocation. It fails on any other
-  reference to a clock function, on each `DW_TAG_inlined_subroutine`, and on an
-  `#include` of a header outside the copy. A test in `cargo test -p xtask` runs it on
-  the committed copy, so it runs on each PR that changes the copy. PR 2 of #435 adds
-  that test with the copy. Decided by `laptop.architect-2`
+  2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy. Each file from
+  the release is byte for byte the file at the tag. Every other file (`src_generated/`,
+  `sources.txt`, `flags.txt`, `VERSION`) is the output of that command alone, never
+  edited by hand. Our change edits only release files. `cargo xtask open62541` is the
+  clock check. It builds the copy from its own files with `-g -O0` and reads the call
+  relocations against the closed list. It fails on a call outside the list, a listed
+  pair with no call, any other reference to a clock function, each
+  `DW_TAG_inlined_subroutine`, and an `#include` of a header outside the copy other
+  than one of a closed list of system headers. It runs on the staged copy before
+  `<tag>` replaces anything, and on the committed copy with no tag. A test in
+  `cargo test -p xtask` runs it on the committed copy. PR 2 of #435 adds that test
+  with the copy, and #1860 makes CI run it on a PR that changes only `patches/`.
+  Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
   2026-10-08 10:08 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
