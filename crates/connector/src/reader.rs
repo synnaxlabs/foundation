@@ -14,7 +14,6 @@ const REPEATED_BLOCK: Code = Code::new("config.repeated-block");
 const BAD_MODE: Code = Code::new("connector.bad-mode");
 const LATEST_HOLD: Code = Code::new("connector.latest-hold");
 const NEGATIVE_SPAN: Code = Code::new("config.negative-span");
-const UNNAMED_HOLD: Code = Code::new("connector.unnamed-hold");
 
 const READER_KEYS: [&str; 3] = ["name", "mode", "hold"];
 
@@ -23,30 +22,31 @@ const READER_KEYS: [&str; 3] = ["name", "mode", "hold"];
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Settings {
-    /// The reader's name. `None` is an ad hoc reader, which holds nothing.
+    /// The reader's name. `None` is the connector's name, which
+    /// `kind::Context::reader` gives when it opens the reader.
     pub name: Option<Name>,
     /// The channels it reads.
     pub select: Selector,
     /// Which frames it gets.
     pub mode: Mode,
     /// How long the buffer keeps samples it has not received after it closes. Zero or
-    /// more, and zero when `name` is `None` or `mode` is `Latest`.
+    /// more, and zero when `mode` is `Latest`.
     pub hold: Span,
 }
 
 /// Reads the `select` attribute of `config` and its one `reader` block, with the
 /// attributes `name`, `mode` (`"complete"` or `"latest"`, as a string or a
-/// reference), and `hold`. With no `reader` block, the reader is ad hoc and complete,
-/// with no hold. `keys` and `blocks` are the kind's own attributes and blocks. Each
-/// other key of `config` that `read` does not read gives
+/// reference), and `hold`. With no `reader` block, the reader has no name, is
+/// complete, and has no hold. `keys` and `blocks` are the kind's own attributes and
+/// blocks. Each other key of `config` that `read` does not read gives
 /// `document.unknown-attribute` or `document.unknown-block`.
 ///
 /// # Errors
 ///
 /// One diagnostic for each problem: an unknown key, no `select`, a value that does
 /// not read, a label, attribute, or block in `reader` that it does not take, a second
-/// `reader` block, a negative `hold`, and a `hold` with no `name` or in `latest` mode,
-/// since only a named complete reader holds.
+/// `reader` block, a negative `hold`, and a `hold` in `latest` mode, since only a
+/// complete reader holds.
 ///
 /// # Panics
 ///
@@ -135,28 +135,15 @@ fn block(
     let mode = attribute("mode").map(|mode| keep(self::mode(&mode.value), diagnostics));
     let hold = attribute("hold");
     let span = hold.map(|hold| keep(self::hold(&hold.value), diagnostics));
-    if let Some(hold) = hold {
-        let at = hold.key_span;
-        if name.is_none() {
-            diagnostics.push(Diagnostic::new(
-                UNNAMED_HOLD,
-                at,
-                "the reader has a `hold` and no `name`, and an ad hoc reader holds \
-                 nothing"
-                    .into(),
-                "Add a `name`, or remove the `hold`".into(),
-            ));
-        }
-        if let Some(Some(Mode::Latest)) = mode {
-            diagnostics.push(Diagnostic::new(
-                LATEST_HOLD,
-                at,
-                "the reader has a `hold` in `latest` mode, and only a complete \
-                 reader holds"
-                    .into(),
-                "Use `mode = \"complete\"`, or remove the `hold`".into(),
-            ));
-        }
+    if let (Some(hold), Some(Some(Mode::Latest))) = (hold, mode) {
+        diagnostics.push(Diagnostic::new(
+            LATEST_HOLD,
+            hold.key_span,
+            "the reader has a `hold` in `latest` mode, and only a complete reader \
+             holds"
+                .into(),
+            "Use `mode = \"complete\"`, or remove the `hold`".into(),
+        ));
     }
     (
         name.flatten(),

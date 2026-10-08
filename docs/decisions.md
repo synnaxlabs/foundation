@@ -3351,11 +3351,11 @@ How to read this record:
 - **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings of
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
-  reader is ad hoc and complete. A second `reader` block is `config.repeated-block`, and
-  `read` reads only the first, where a label is `config.label-count`. A negative `hold`
-  is `config.negative-span` (READER RULES, #94). A `hold` with no `name` or in `latest`
-  mode is `connector.unnamed-hold` or `connector.latest-hold`, since only a named
-  complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
+  reader is complete, has the connector's name, and holds nothing. A second `reader`
+  block is `config.repeated-block`, and `read` reads only the first, where a label is
+  `config.label-count`. A negative `hold` is `config.negative-span` (READER RULES, #94).
+  A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
+  holds. #1785 moves the three `config.*` checks into `document::read`.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3372,6 +3372,19 @@ How to read this record:
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
   03:59 UTC).
+  `Settings::name` is `None` for a reader with no `name`, and `None` is the
+  connector's name. `kind::Context::reader` (#1731) gives that name when it opens the
+  reader, and no other place does. Lost: `name: Name`, with the connector's name
+  passed through `Kind::parse` of every kind for one value that only the reader needs.
+  Proposed by `connector` on #1794
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089), and
+  approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653,
+  2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
+  7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
@@ -4106,6 +4119,15 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6052187547).
   Supersedes the silent `authority` of
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+- **CONNECTOR BLOCK (2026-10-08)** `connector "<name>" { kind, node, ... }` (X22)
+  gives a `spec::connector::Connector` at its own name, which is unique in any case
+  among the keys of every block. `kind` and `node` are names, and each is required. The
+  config is the body without `kind` and `node`. `config::check` takes a
+  `connector::kind::Table`, and the kind that `kind` names checks the config through
+  `Table::check`, with `at` the span of the `kind` value. A kind that the table does
+  not have is `connector.unknown-kind` there. Decided by `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC).
 
 ### 1.12 Access, identity, and secrets
 
@@ -5954,7 +5976,10 @@ Rules:
    `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
    so its tests build a `spec::connector::Connector` (`laptop.architect`,
    2026-10-08T03:01:36Z:
-   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927). A crate
+   https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927), and
+   `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
+   with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
+   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
@@ -5999,7 +6024,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
 | 3 | `daqmx-stub` | Stands in for NI's `libnidaqmx.so` in the tests of `connector-ni`, built as a shared library and as a Rust library. A dev-dependency of `connector-ni` only. | none |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
-| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
+| 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector`; `config-hcl` and `connector-influx` as dev-dependencies only |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |

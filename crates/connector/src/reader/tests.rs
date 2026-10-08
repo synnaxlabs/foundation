@@ -82,7 +82,7 @@ fn reads_a_named_complete_reader_with_a_hold() {
 }
 
 #[test]
-fn reads_an_ad_hoc_complete_reader_with_no_reader_block() {
+fn reads_a_complete_reader_with_no_name_and_no_reader_block() {
     let config = document(&[(0, "select", string("edge.*"))], Vec::new());
     let expected = Settings {
         name: None,
@@ -194,15 +194,15 @@ fn refuses_a_select_that_does_not_read() {
 }
 
 #[test]
-fn refuses_a_hold_with_no_name() {
+fn reads_a_hold_with_no_name() {
     let config = config(&[(80, "hold", string("2h"))]);
-    let expected = refused(
-        "connector.unnamed-hold",
-        80,
-        "the reader has a `hold` and no `name`, and an ad hoc reader holds nothing",
-        "Add a `name`, or remove the `hold`",
-    );
-    assert_eq!(read(&config, &[], &[]), Err(vec![expected]));
+    let expected = Settings {
+        name: None,
+        select: selector("edge.*"),
+        mode: Mode::Complete,
+        hold: "2h".parse().expect("a span"),
+    };
+    assert_eq!(read(&config, &[], &[]), Ok(expected));
 }
 
 #[test]
