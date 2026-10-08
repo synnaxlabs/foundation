@@ -545,11 +545,11 @@ impl Readers {
         }
     }
 
-    /// Ends the session `key`. `now` is the mesh time, or `None` before the home first
-    /// has it. A named complete session holds its position until its `hold` after
-    /// `now`. A waiting frame does not go out, and the last complete session drops the
-    /// queued frames. A close of a closed session changes nothing: a close can arrive
-    /// after a takeover.
+    /// Ends the session `key`. `now` is the mesh time, or `None` when the caller has no
+    /// mesh time yet. A named complete session holds its position until its `hold`
+    /// after `now`. A waiting frame does not go out, and the last complete session
+    /// drops the queued frames. A close of a closed session changes nothing: a close
+    /// can arrive after a takeover.
     ///
     /// # Panics
     ///
@@ -649,7 +649,7 @@ impl Readers {
     /// Removes the named reader: its open session in either mode, and its hold.
     /// Returns its position, open or closed, and the session it had open.
     fn take_over(&mut self, reader: &named::Key) -> (Option<Position>, Option<Key>) {
-        if let Some(i) = self.named(reader) {
+        if let Some(i) = self.session_of(reader) {
             let session = self.remove(i);
             return (Some(session.position), Some(session.key.into()));
         }
@@ -660,7 +660,7 @@ impl Readers {
 
     /// Closes the named reader's open session in either mode at `now`. Returns it.
     fn replace(&mut self, reader: &named::Key, now: Stamp) -> Option<Key> {
-        let Some(i) = self.named(reader) else {
+        let Some(i) = self.session_of(reader) else {
             return self.remove_latest(reader).map(Key::from);
         };
         let key = self.complete[i].key;
@@ -669,7 +669,7 @@ impl Readers {
     }
 
     /// The named reader's open complete session.
-    fn named(&self, reader: &named::Key) -> Option<usize> {
+    fn session_of(&self, reader: &named::Key) -> Option<usize> {
         self.complete
             .iter()
             .position(|s| s.named.as_deref() == Some(reader))
