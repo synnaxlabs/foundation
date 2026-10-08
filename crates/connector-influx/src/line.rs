@@ -92,7 +92,6 @@ impl Measurement {
             let wrote = match value {
                 Value::Float(Float(float)) => write!(out, "{float:e}"),
                 Value::Integer(integer) => write!(out, "{integer}i"),
-                Value::Unsigned(unsigned) => write!(out, "{unsigned}u"),
                 Value::Boolean(boolean) => {
                     out.push(if boolean { b't' } else { b'f' });
                     Ok(())
@@ -116,8 +115,6 @@ pub enum Value {
     Float(Float),
     /// A signed 64-bit integer.
     Integer(i64),
-    /// An unsigned 64-bit integer.
-    Unsigned(u64),
     /// A boolean.
     Boolean(bool),
 }

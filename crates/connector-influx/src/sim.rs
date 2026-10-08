@@ -22,8 +22,8 @@ const TIMES: std::ops::RangeInclusive<i64> = i64::MIN + 2..=i64::MAX - 1;
 /// It keeps the InfluxDB rules that a writer must keep: the syntax, the time range, the
 /// reserved names, one use of each key, finite floats, and one type for each column,
 /// where a tag is a type. Where InfluxDB versions differ in a rule that it keeps, it
-/// keeps the strictest one, but it stores a `u` integer, which InfluxDB 1 OSS refuses.
-/// It keeps no size limit.
+/// keeps the strictest one, so it refuses a `u` integer, as InfluxDB 1 OSS does. It
+/// keeps no size limit.
 #[derive(Debug, Default)]
 pub struct Store {
     measurements: BTreeMap<String, Measurement>,
@@ -69,7 +69,6 @@ struct Column {
 enum Values {
     Float(Vec<f64>),
     Integer(Vec<i64>),
-    Unsigned(Vec<u64>),
     Boolean(Vec<bool>),
     String(Vec<String>),
 }
@@ -91,6 +90,7 @@ impl Store {
     /// - [`Error::Duplicate`] for a key that comes more than once, in tags and fields
     ///   together.
     /// - [`Error::Infinite`] for a float that parses to infinity.
+    /// - [`Error::Unsigned`] for a `u` integer.
     /// - [`Error::Conflict`] for a tag or field whose type differs from the type stored
     ///   for that key in the measurement. A tag is a type.
     ///
@@ -195,15 +195,7 @@ impl Store {
         for (key, value) in &parsed.field_set {
             let key = key.as_str();
             check(key)?;
-            let field = field(value);
-            if let Field::Float(float) = field
-                && float.is_infinite()
-            {
-                return Err(Error::Infinite {
-                    line: text.into(),
-                    field: key.into(),
-                });
-            }
+            let field = field(text, key, value)?;
             conflict(key, field.kind())?;
             fields.insert(key.into(), field);
         }
@@ -352,7 +344,6 @@ impl Column {
         let values = match field {
             Field::Float(_) => Values::Float(Vec::new()),
             Field::Integer(_) => Values::Integer(Vec::new()),
-            Field::Unsigned(_) => Values::Unsigned(Vec::new()),
             Field::Boolean(_) => Values::Boolean(Vec::new()),
             Field::String(_) => Values::String(Vec::new()),
         };
@@ -412,9 +403,6 @@ impl Values {
         match (self, field) {
             (Self::Float(values), Field::Float(value)) => put(values, slot, value),
             (Self::Integer(values), Field::Integer(value)) => put(values, slot, value),
-            (Self::Unsigned(values), Field::Unsigned(value)) => {
-                put(values, slot, value);
-            }
             (Self::Boolean(values), Field::Boolean(value)) => put(values, slot, value),
             (Self::String(values), Field::String(value)) => put(values, slot, value),
             (values, field) => {
@@ -427,7 +415,6 @@ impl Values {
         let field = match self {
             Self::Float(values) => values.get(i).copied().map(Field::Float),
             Self::Integer(values) => values.get(i).copied().map(Field::Integer),
-            Self::Unsigned(values) => values.get(i).copied().map(Field::Unsigned),
             Self::Boolean(values) => values.get(i).copied().map(Field::Boolean),
             Self::String(values) => values.get(i).cloned().map(Field::String),
         };
@@ -438,7 +425,6 @@ impl Values {
         match self {
             Self::Float(values) => Self::Float(split(values, from)),
             Self::Integer(values) => Self::Integer(split(values, from)),
-            Self::Unsigned(values) => Self::Unsigned(split(values, from)),
             Self::Boolean(values) => Self::Boolean(split(values, from)),
             Self::String(values) => Self::String(split(values, from)),
         }
@@ -538,8 +524,6 @@ pub enum Field {
     Float(f64),
     /// A signed 64-bit integer.
     Integer(i64),
-    /// An unsigned 64-bit integer.
-    Unsigned(u64),
     /// A boolean.
     Boolean(bool),
     /// A string.
@@ -551,21 +535,32 @@ impl Field {
         match self {
             Self::Float(_) => Kind::Float,
             Self::Integer(_) => Kind::Integer,
-            Self::Unsigned(_) => Kind::Unsigned,
             Self::Boolean(_) => Kind::Boolean,
             Self::String(_) => Kind::String,
         }
     }
 }
 
-fn field(value: &FieldValue<'_>) -> Field {
-    match value {
+/// The field `key` of the line `text`, or the error that refuses its value.
+fn field(text: &str, key: &str, value: &FieldValue<'_>) -> Result<Field, Error> {
+    Ok(match value {
+        FieldValue::F64(float) if float.is_infinite() => {
+            return Err(Error::Infinite {
+                line: text.into(),
+                field: key.into(),
+            });
+        }
         FieldValue::F64(float) => Field::Float(*float),
         FieldValue::I64(integer) => Field::Integer(*integer),
-        FieldValue::U64(unsigned) => Field::Unsigned(*unsigned),
+        FieldValue::U64(_) => {
+            return Err(Error::Unsigned {
+                line: text.into(),
+                key: key.into(),
+            });
+        }
         FieldValue::Boolean(boolean) => Field::Boolean(*boolean),
         FieldValue::String(string) => Field::String(string.as_str().into()),
-    }
+    })
 }
 
 /// The type of a column: a tag, or the type of a field.
@@ -577,8 +572,6 @@ pub enum Kind {
     Float,
     /// [`Field::Integer`].
     Integer,
-    /// [`Field::Unsigned`].
-    Unsigned,
     /// [`Field::Boolean`].
     Boolean,
     /// [`Field::String`].
@@ -591,7 +584,6 @@ impl fmt::Display for Kind {
             Self::Tag => "tag",
             Self::Float => "float",
             Self::Integer => "integer",
-            Self::Unsigned => "unsigned",
             Self::Boolean => "boolean",
             Self::String => "string",
         })
@@ -642,6 +634,13 @@ pub enum Error {
         /// The field key.
         field: String,
     },
+    /// A field is a `u` integer, which InfluxDB 1 OSS refuses.
+    Unsigned {
+        /// The line.
+        line: String,
+        /// The field key.
+        key: String,
+    },
     /// A key's type differs from the type stored for that key in the measurement. A tag
     /// is a type, so a key is a tag or a field in each line.
     Conflict {
@@ -685,6 +684,11 @@ impl fmt::Display for Error {
                     "the line {line:?} gives the field {field:?} an infinite float"
                 )
             }
+            Self::Unsigned { line, key } => write!(
+                f,
+                "the line {line:?} gives the field {key:?} an unsigned integer, which \
+                 InfluxDB 1 refuses"
+            ),
             Self::Conflict {
                 line,
                 key,
