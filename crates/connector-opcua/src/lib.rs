@@ -1,11 +1,9 @@
 //! Reads, subscribes to, and writes OPC UA servers through open62541, compiled in with
 //! the feature `open62541`.
 
+// Only `link` calls it until the event loop of #435 does.
+#[cfg(test)]
 #[cfg(feature = "open62541")]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "part 2 of #435 gives the kind that uses it")
-)]
 mod ffi;
 #[cfg(test)]
 #[cfg(feature = "open62541")]
