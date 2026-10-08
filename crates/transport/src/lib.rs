@@ -221,6 +221,9 @@ pub struct Status {
     pub waited: Span,
     /// The block commits that the system refused.
     pub refusals: u64,
+    /// The sends that waited for room in the send budget of their session, which
+    /// the peer's window bounds.
+    pub budget_waits: u64,
 }
 
 impl fmt::Debug for Transport {

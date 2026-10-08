@@ -8,7 +8,10 @@
   }`, which holds the digest of the stored bytes and the `Entry` of the files. The
   stored bytes are the `encode` of each applied definition: `decode` takes only
   canonical bytes, so they are the bytes of the tree. The plan holds no channel key
-  (A4). `homes` gives the home of each index that the stored spec has no index at. A
+  (A4). `homes` gives the home of each index of the files, as the placements give it.
+  The apply gives this home only to an index with no home (`laptop.architect-2`,
+  2026-10-08T18:33:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066530508). A
   channel keeps the stored key at its name, and a new name gets `Key::from_u128(n)`, a
   key that no stored channel holds. A definition changes when its encoded bytes differ
   from the stored bytes. A stored definition that no file holds is removed (A2), except
@@ -20,8 +23,14 @@
   edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
   edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
   index, with the node of its first writer: a connector whose `writes` holds the index
-  or a channel on it. Its `Unplaced` is `config.unplaced` at the label of the index,
-  with each placement by its label.
+  or a channel on it. Its `Tie`, or the `Homeless` of its `home`, is `config.unplaced`
+  at the label of the index, with each placement by its label.
+  `place` gives `Result<Placed, Tie>`, and `Placed::home` is `Result<&Name,
+  Homeless>`, so `config` takes the winner from `Placed::placement` also when there is
+  no home. `config` and `spec::placement` each keep a private `label`: the one in
+  `config` fails loud on its own keys, and the `Display` of `Tie` and `Homeless` falls
+  back to the key. Both rules: `laptop.architect-2`, 2026-10-08T21:10:14Z,
+  https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
   `config.writer-nodes` is at the `node` of the first connector on a second node that
@@ -41,13 +50,13 @@
   for the writer, for the connector of a name, and for the name of a key. The problems
   come in `Source` order, then in source order, as the problems of `check` do.
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
-  `Unplaced` is `config.unplaced` at the label of the connector. The fix of
-  `Unplaced::Overlap` is "Move the node to `home` when it is the one node of the
+  `Tie` or `Homeless` is `config.unplaced` at the label of the connector. The fix of
+  `Homeless::Overlap` is "Move the node to `home` when it is the one node of the
   placement, else remove it from the placement": `Overlap` occurs only when the
   placement names no `home`, and a removal that leaves no node gives
   `config.empty-placement`. Two inputs need two edits. In the first, the node is the
   one node of `p`, and `p` wins for a connector on another node. The move then gives
-  `config.connector-home`, whose fix plans. `Unplaced::fix` is static and cannot name
+  `config.connector-home`, whose fix plans. `Homeless::fix` is static and cannot name
   that connector (`laptop.architect`, 2026-10-08T16:51:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 2,
   changed by `laptop.architect`, 2026-10-08T17:23:56Z,
@@ -121,18 +130,18 @@
   applied tree as an input, with which `ops` reads the tree a second time and a missing
   chunk panics in `config`, though #1741 names that case (`Cause::Read`), and, for
   checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
-  `config`, no report for the `Unplaced` of a connector, a check against each connector
-  above the index, with which two nested connectors on two nodes share one placement,
-  the `config.connector-home` fixes "Leave out `home`", which can leave an empty
-  placement or an index with no home, and "Name `n` as the `home`" in each case, which
-  moves the problem between two connectors of one placement, and "Select the connector
-  `a` and each index under its name with a more specific placement", which no placement
-  can follow when `p` names `a` by its exact name, and the `config.split-placement` fix
-  "and each name under it", which also moves the indexes of a nested connector, and,
-  when no placement can win for `c` and each of its indexes at `n`, a fix that names one
-  placement, which moves the index `i` alone or conflicts with the fix of another
-  diagnostic of `c`, case 1 when `p` wins for an index whose nearest connector is on
-  another node, which moves that index away from its connector, and the
+  `config`, no report for the `Tie` or `Homeless` of a connector, a check against each
+  connector above the index, with which two nested connectors on two nodes share one
+  placement, the `config.connector-home` fixes "Leave out `home`", which can leave an
+  empty placement or an index with no home, and "Name `n` as the `home`" in each case,
+  which moves the problem between two connectors of one placement, and "Select the
+  connector `a` and each index under its name with a more specific placement", which no
+  placement can follow when `p` names `a` by its exact name, and the
+  `config.split-placement` fix "and each name under it", which also moves the indexes of
+  a nested connector, and, when no placement can win for `c` and each of its indexes at
+  `n`, a fix that names one placement, which moves the index `i` alone or conflicts with
+  the fix of another diagnostic of `c`, case 1 when `p` wins for an index whose nearest
+  connector is on another node, which moves that index away from its connector, and the
   `config.split-placement` fix "and the index `i`", which gives each split diagnostic of
   `c` another edit, the node of the nearest connector as the home of an index with no
   writer, which guesses a home for data that no connector on that node makes, the

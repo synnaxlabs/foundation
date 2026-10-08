@@ -10,6 +10,7 @@ use document::{Document, Position, Source, Span};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
+use spec::subject::Subject;
 use types::channel::Key;
 use types::name::Name;
 use types::sample;
@@ -414,6 +415,7 @@ fn gives_the_json_of_a_change_and_a_removal() {
     ]);
     let planned = run(&[("site.hcl", &placed_site())], &applied).expect("a plan");
     let json = json(&planned);
+    assert_eq!(json["homes"], serde_json::json!({ "site.time": "edge" }));
     let changes = &json["changes"];
     assert_eq!(
         *changes,
@@ -580,5 +582,110 @@ fix: Rename the file to a UTF-8 name
 error[ops.path-not-utf8]: the path \"a\\xFF.yaml\" is not UTF-8
 fix: Rename the file to a UTF-8 name
 "
+    );
+}
+
+/// Lines that `ssh-keygen -t ed25519` wrote, and the fingerprint that
+/// `ssh-keygen -lf` gives for each.
+const ALICE: &str = concat!(
+    "ssh-ed25519 ",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg",
+    " alice@laptop",
+);
+const ALICE_FINGERPRINT: &str = "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc";
+const BOB: &str = concat!(
+    "ssh-ed25519 ",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6",
+    " bob@site",
+);
+const BOB_FINGERPRINT: &str = "SHA256:yrQ4K597Aogzr4Zp1m1So77Lh8tM3HApOLoy0kzzo3k";
+/// The 32 bytes of the key of `BOB`.
+const BOB_KEY: [u8; 32] = [
+    253, 16, 48, 49, 70, 56, 119, 210, 245, 116, 123, 213, 165, 114, 10, 251, 62, 66,
+    115, 80, 224, 21, 235, 30, 207, 93, 24, 48, 243, 236, 166, 58,
+];
+
+/// A subject labeled `carol` with Bob's key, then Alice's.
+fn carol() -> String {
+    format!("subject \"carol\" {{\n  keys = [\"{BOB}\", \"{ALICE}\"]\n}}\n")
+}
+
+/// The applied subject labeled `alice`, with the key `bytes`.
+fn applied_subject(bytes: [u8; 32]) -> BTreeMap<Name, Definition> {
+    let key = types::ed25519::PublicKey::new(bytes).expect("a key");
+    let subject = Subject::new(vec![key]).expect("a subject");
+    BTreeMap::from([(name("alice.@subject"), Definition::Subject(subject))])
+}
+
+#[test]
+fn shows_the_fingerprint_of_each_key_of_a_subject_by_its_bytes() {
+    let planned =
+        run(&[("people.hcl", &carol())], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        format!(
+            "\
++ subject carol
+    key {ALICE_FINGERPRINT}
+    key {BOB_FINGERPRINT}
+- subject alice
+    key {BOB_FINGERPRINT}
+1 to add, 0 to change, 1 to remove.
+"
+        )
+    );
+}
+
+#[test]
+fn gives_the_fingerprints_of_a_subject_after_the_apply_or_before_a_removal() {
+    let planned =
+        run(&[("people.hcl", &carol())], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        json(&planned)["changes"],
+        serde_json::json!([
+            {
+                "action": "add",
+                "kind": "subject",
+                "name": "carol",
+                "place": { "file": "people.hcl", "line": 1, "column": 9 },
+                "fingerprints": [ALICE_FINGERPRINT, BOB_FINGERPRINT],
+            },
+            {
+                "action": "remove",
+                "kind": "subject",
+                "name": "alice",
+                "fingerprints": [BOB_FINGERPRINT],
+            },
+        ])
+    );
+}
+
+#[test]
+fn gives_the_fingerprints_of_a_change_after_the_apply() {
+    let alice = format!("subject \"alice\" {{\n  keys = [\"{ALICE}\"]\n}}\n");
+    let planned =
+        run(&[("people.hcl", &alice)], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        format!(
+            "\
+~ subject alice
+    key {ALICE_FINGERPRINT}
+0 to add, 1 to change, 0 to remove.
+"
+        )
+    );
+}
+
+#[test]
+fn gives_no_fingerprints_for_another_kind() {
+    let planned =
+        run(&[("site.hcl", &placed_site())], &BTreeMap::new()).expect("a plan");
+    let json = json(&planned);
+    let changes = json["changes"].as_array().expect("changes");
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.get("fingerprints").is_none())
     );
 }
