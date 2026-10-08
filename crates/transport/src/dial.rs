@@ -23,8 +23,9 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// # Errors
 ///
 /// [`Error::Network`] when the socket is broken, or breaks before an attempt connects,
-/// or [`Error::Unreachable`] with each attempt's cause, in the order started, when
-/// none connects.
+/// [`Error::Closed`] with code 0 when the carrier drops before one connects, or
+/// [`Error::Unreachable`] with each attempt's cause, in the order started, when none
+/// connects.
 pub(crate) async fn dial(
     dialer: &quic::Dialer,
     peer: PublicKey,

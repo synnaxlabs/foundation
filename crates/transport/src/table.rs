@@ -496,6 +496,10 @@ mod tests {
                 let dial = pin!(transport.dial(SERVER.public(), &at));
                 assert!(testing::poll_once(dial).await.is_none());
             }
+            // The dial task starts its attempt. Its first packet is still on the link.
+            node.clock()
+                .sleep(testing::spans(Span::MICROSECOND, 100))
+                .await;
             drop(transport);
             node.clock().sleep(testing::IDLE).await;
         });
@@ -665,6 +669,32 @@ mod tests {
             assert_eq!(theirs.closed().await, Error::Closed { code: Code(2) });
             drop(own);
             linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The client drops its transport while its dial waits on a silent address. The
+    // dial starts no attempt at the next address, so the server accepts nothing.
+    #[test]
+    fn a_dial_starts_no_attempt_after_its_transport_dropped() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let [silent] = dead(&server);
+        let addresses = [silent, Address::Udp(testing::address(&server))];
+        testing::transport(&server, SERVER, |transport, node| async move {
+            node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
+            let accept = pin!(transport.accept());
+            assert!(testing::poll_once(accept).await.is_none());
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            {
+                let dial = pin!(transport.dial(SERVER.public(), &addresses));
+                assert!(testing::poll_once(dial).await.is_none());
+            }
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            drop(transport);
+            node.clock().sleep(testing::spans(testing::IDLE, 4)).await;
         });
         assert_eq!(sim.run(), Ok(()));
     }

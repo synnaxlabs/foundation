@@ -145,18 +145,23 @@ impl Dialer {
         self.0.borrow().clock.clone()
     }
 
-    /// Checks that the socket still works.
+    /// Checks that the socket still works and that the carrier did not drop.
     ///
     /// # Errors
     ///
-    /// [`Error::Network`] when the socket broke.
+    /// [`Error::Network`] when the socket broke, else [`Error::Closed`] with code 0
+    /// once the carrier dropped.
     pub(crate) fn check(&self) -> Result<(), Error> {
-        match &self.0.borrow().failed {
-            Some(error) => Err(Error::Network {
+        let state = self.0.borrow();
+        if let Some(error) = &state.failed {
+            return Err(Error::Network {
                 error: error.clone(),
-            }),
-            None => Ok(()),
+            });
         }
+        if state.accepted.is_none() {
+            return Err(Error::Closed { code: Code(0) });
+        }
+        Ok(())
     }
 
     /// The next session that a peer dialed and that no accept took, without a wait.
