@@ -2011,8 +2011,9 @@ How to read this record:
   and no source gives the 16 KiB. Decided by `laptop.architect-2` (#68, 2026-10-08
   07:46 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055243052). The
-  buffer is the connection's and keeps the capacity of the longest stretch, at most
-  `message_bytes_max`. The stretch goes into it in one walk of its parts.
+  buffer is the connection's and keeps its capacity, which grows by doubling with the
+  longest stretch, under twice the peer's `message_bytes_max`. The stretch goes into it
+  in one walk of its parts.
   Lost: a walk that sizes the stretch, then a walk that copies it into a new buffer of
   its length, because the second walk costs more than the second copy (2.31x
   copy-then-send for 1000 ranges of 8 B); a copy into a new `Vec` as the walk goes,
@@ -2022,7 +2023,9 @@ How to read this record:
   08:13 UTC, one walk:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055676016; and 08:25
   UTC, the connection's buffer:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055859489).
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055859489; and
+  2026-10-08 13:26 UTC, its capacity:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6060897050).
   `send` and `try_send` write one part, the whole block, through the same write. One
   whole part with no zeros skips the sum and the walk of the parts, and keeps the same
   cut, list, wait, and reset. `send` and `send_parts` poll the carrier through one
