@@ -4139,14 +4139,19 @@ mod tests {
 
     #[test]
     fn that_end_inside_a_message_break_the_connection() {
-        testing::run(1, |shard| {
-            let mut pair = connected(shard);
-            misframe(
-                &mut pair,
-                &[2, 3, b'a'],
-                "the stream ended inside a message",
-            );
-        });
+        // Inside a body, then inside a prefix of 2, 4, and 8 bytes.
+        let ends: [&[u8]; 4] = [
+            &[2, 3, b'a'],
+            &[2, 0x40],
+            &[2, 0x80, 0, 0],
+            &[2, 0xC0, 0, 0, 0, 0, 0, 0],
+        ];
+        for bytes in ends {
+            testing::run(1, |shard| {
+                let mut pair = connected(shard);
+                misframe(&mut pair, bytes, "the stream ended inside a message");
+            });
+        }
     }
 
     #[test]
