@@ -326,6 +326,30 @@ fn a_call_whose_answer_is_cut_off_gives_the_pointer_of_its_own_change() {
     }
 }
 
+// The leader and a follower make the same change from one base. The second entry
+// finds the pointer that its call makes, so the pointer moves once.
+#[test]
+fn two_calls_of_one_change_from_one_base_give_one_pointer() {
+    let (mut cluster, leader, follower, _) = Cluster::led(0);
+    let definitions = create_subjects(&["plant.a"], 1);
+    let moved = pointer(1, &definitions);
+    cluster.apply(leader, base(), &definitions);
+    cluster.apply(follower, base(), &definitions);
+    cluster.run(seconds(5));
+    // A home after the changes gives the pointer of each node to the board.
+    cluster.script(|_| home(9));
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let mut applied = board.applied.clone();
+    applied.sort_by_key(|&(id, ..)| id);
+    let mut expected = [(leader, moved, Ok(moved)), (follower, moved, Ok(moved))];
+    expected.sort_by_key(|&(id, ..)| id);
+    assert_eq!(applied, expected);
+    for id in IDS {
+        assert_eq!(board.pointers[&id], moved, "node {id}");
+    }
+}
+
 #[test]
 fn an_apply_that_finds_a_later_pointer_of_its_own_root_is_stale() {
     solo(|node, tasks| async move {
