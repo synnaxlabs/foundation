@@ -480,8 +480,9 @@ mod tests {
                 // A power of two, then a limit of that size.
                 limit in prop_oneof![
                     Just(16),
-                    (11..=usize::BITS).prop_flat_map(|bits| {
-                        1_472.max(1 << (bits - 1))..=usize::MAX >> (usize::BITS - bits)
+                    (10..usize::BITS).prop_flat_map(|bits| {
+                        let least = 1_usize << bits;
+                        1_472.max(least)..=least.wrapping_shl(1).wrapping_sub(1)
                     }),
                     Just(usize::MAX),
                 ],
