@@ -238,8 +238,8 @@ impl From<header::Error> for Error {
 /// `tasks`. The task idles while nothing is queued and no commit runs. A drop ends
 /// the task at once when it idles, else at the end of its last commit, which writes
 /// each entry queued at the drop, or earlier at the first file call that fails.
-/// Await an [`End`] past the drop before a reopen, and before the shard ends, which
-/// cancels the task.
+/// Await an [`End`] past the drop, then drop it, before a reopen and before the shard
+/// ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -287,7 +287,8 @@ struct State {
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
-    /// Whether the task ended. A [`Commit`] held past the drop waits for it.
+    /// Whether the task ended. An [`End`], and a [`Commit`] held past the drop, wait
+    /// for it.
     ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
