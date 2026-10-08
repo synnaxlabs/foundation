@@ -346,9 +346,9 @@ fn spill(buffer: &mut Vec<u8>, chunks: &mut Vec<Bytes>, len: usize) {
 /// When `state` holds no whole message.
 fn body(state: &mut State) -> (usize, &mut Vec<u8>) {
     let State::Body { len, have, buffer } = state else {
-        panic!("a reader fills only a whole message");
+        panic!("a reader takes only a whole message");
     };
-    assert!(have == len, "a reader fills only a whole message");
+    assert!(have == len, "a reader takes only a whole message");
     (*len, buffer)
 }
 
@@ -1011,7 +1011,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "a reader fills only a whole message")]
+        #[should_panic(expected = "a reader takes only a whole message")]
         fn when_a_message_is_not_whole_fill_panics() {
             let mut source = Source::new(encode(&[vec![1; 4]]), 2);
             source.open = true;
@@ -1024,7 +1024,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "a reader fills only a whole message")]
+        #[should_panic(expected = "a reader takes only a whole message")]
         fn when_no_message_is_admitted_fill_panics() {
             let mut reader = Reader::new(16);
             drop(reader.fill(None));

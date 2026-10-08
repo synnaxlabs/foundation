@@ -2488,6 +2488,8 @@ mod tests {
             pair.run(RUN);
             let mut receiver = accept(&mut pair.server).receiver;
             let kept = pair.server.kept.replace(Vec::new()).expect("kept");
+            // Else noq or the endpoint copied the bytes, and the test is vacuous.
+            assert!(!kept.iter().all(Bytes::is_unique));
             let now = pair.now();
             let mut short = [0; 99];
             let read = pair
@@ -2499,12 +2501,11 @@ mod tests {
                 bytes_max: 99,
             };
             assert_eq!(read, Err(over));
-            // Else noq or the endpoint copied the bytes, and the test is vacuous.
-            assert!(!kept.is_empty());
             assert!(
                 kept.iter().all(Bytes::is_unique),
                 "a chunk of the message keeps a receive buffer alive past the read"
             );
+            // Private: the copy outside the pool shows in no public count.
             assert_eq!(receiver.reader.held(), (Some((100, 100)), 0));
         });
     }
