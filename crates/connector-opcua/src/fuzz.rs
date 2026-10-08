@@ -284,6 +284,10 @@ mod tests {
         data.resize(data.len() + 100 * 3, 0);
         // 100 zeros: the 4 bytes of each value that #435 needs.
         data.resize(data.len() + 100, 0);
+        let (_, read) = Value::decode(&ffi::types()[VARIANT], &data[2..])
+            .map_err(Status::name)
+            .unwrap();
+        assert_eq!(read, 5 + 100 * 3);
         decode(&data);
     }
 
