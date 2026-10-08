@@ -36,10 +36,10 @@ the head of its range. The rules on `main` at a time are those of the last commi
 `git log --first-parent origin/main` whose PR merged before that time
 (`gh api repos/synnaxlabs/foundation/commits/<sha>/pulls --jq '.[0].merged_at'`), read
 with `git show <sha>:<path>`. Never date a commit of `main` by its commit date: the
-merge queue sets it when it builds a batch. A rule that came into `main` later makes no
-breach of the review. What a rule on `main` at the merge finds in the code is still a
-defect: report it. Report a gap in a rule only when the rule on `main` today still lets
-it through.
+merge queue sets it when it builds a batch. A rule that came into `main` after each
+round whose range holds the code started makes no breach of the review. What a rule at
+the merge commit (`git show <merge>:<path>`) finds in the code is still a defect: report
+it. Report a gap in a rule only when the rule on `main` today still lets it through.
 
 Check, with file and line at the merge commit:
 
