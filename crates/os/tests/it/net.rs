@@ -510,6 +510,27 @@ fn a_listener_on_a_mapped_address_agrees_with_its_streams() {
     });
 }
 
+/// The connect has taken the reset, so the stream gives it with no kernel error left.
+#[test]
+fn a_connect_whose_peer_resets_after_the_handshake_gives_a_stream_that_is_reset() {
+    on_thread("net-connect", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let remote = listener.local();
+        let config = connect_config(remote);
+        let mut connecting = pin!(net.connect(&config));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(connecting.as_mut().poll(&mut cx).is_pending());
+        drop(accept(&mut listener).await);
+        let mut client = connecting.await.expect("the handshake completed");
+        assert_eq!(client.peer(), remote);
+        read_reset(&mut client, remote).await;
+        let reset = Error::Reset { remote };
+        assert_eq!(write(&mut client, &[b"late"]).await, Err(reset.clone()));
+        assert_eq!(close(&mut client).await, Err(reset));
+    });
+}
+
 #[test]
 fn a_connect_to_a_mapped_address_names_plain_ipv4_ends() {
     on_thread("net-mapped", || async {

@@ -9,7 +9,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use env::net::{Connect, Error, Resolve, tcp, udp};
 use rustix::io::Errno;
 use rustix::net::sockopt;
-use tokio::net::TcpSocket;
+use tokio::net::TcpStream;
 
 use self::listener::Listener;
 use self::stream::Stream;
@@ -49,41 +49,48 @@ impl env::net::Driver for Driver {
 
 /// Connects to `config.remote` through the I/O driver of the runtime that polls the
 /// future. The stream it gives is registered with no driver yet, so any thread may
-/// take it.
+/// take it. A peer that resets after the handshake gives a stream that reads
+/// [`Error::Reset`], as in `sim`.
 async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
-    let remote = config.remote;
-    let failed = |code: Errno| stream_error(code, canonical(remote));
-    let socket = match remote {
-        SocketAddr::V4(_) => TcpSocket::new_v4(),
-        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    let remote = canonical(config.remote);
+    let failed = |code: Errno| stream_error(code, remote);
+    let fd = listener::socket(config.remote).map_err(failed)?;
+    apply(fd.as_fd(), &config.options).map_err(failed)?;
+    match rustix::net::connect(&fd, &config.remote) {
+        Ok(()) | Err(Errno::INPROGRESS) => {}
+        Err(code) => return Err(failed(code)),
     }
-    .map_err(|e| failed(errno(&e)))?;
-    apply(socket.as_fd(), &config.options).map_err(failed)?;
-    let stream = socket
-        .connect(remote)
-        .await
-        .map_err(|e| failed(errno(&e)))?;
+    let stream = TcpStream::from_std(fd.into()).map_err(|e| failed(errno(&e)))?;
+    stream.writable().await.map_err(|e| failed(errno(&e)))?;
+    let reset = match stream.take_error() {
+        Ok(None) => None,
+        Ok(Some(e)) | Err(e) => match failed(errno(&e)) {
+            reset @ Error::Reset { .. } => Some(reset),
+            error => return Err(error),
+        },
+    };
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
     let peer = peer(&stream, remote)?;
-    Ok(Box::new(
-        Stream::new(stream, canonical(local), peer).map_err(failed)?,
-    ))
+    let mut stream = Stream::new(stream, canonical(local), peer).map_err(failed)?;
+    if let Some(reset) = reset {
+        // The kernel gave the reset to `take_error`, so a read would see an end of
+        // stream.
+        stream.fail(reset);
+    }
+    Ok(Box::new(stream))
 }
 
 /// The peer of `stream`, connected to `remote`, as the kernel names it: without a
-/// scope or flow label the kernel does not use. A reset since the connect gives
-/// [`Error::Reset`], since the kernel then holds no peer.
+/// scope or flow label the kernel does not use. After a reset the kernel holds no
+/// peer, and it is `remote`.
 fn peer(stream: &std::net::TcpStream, remote: SocketAddr) -> Result<SocketAddr, Error> {
     match stream.peer_addr() {
         Ok(peer) => Ok(canonical(peer)),
-        Err(e) => {
-            let code = match errno(&e) {
-                Errno::NOTCONN => Errno::CONNRESET,
-                code => code,
-            };
-            Err(stream_error(code, canonical(remote)))
-        }
+        Err(e) => match errno(&e) {
+            Errno::NOTCONN => Ok(remote),
+            code => Err(io_error(code)),
+        },
     }
 }
 
@@ -219,16 +226,17 @@ mod tests {
     mod peer {
         use std::time::Duration;
 
+        use rustix::fs::{Mode, OFlags};
+
         use super::*;
 
         #[test]
         #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
-        fn a_peer_that_reset_after_the_connect_is_reset() {
+        fn a_peer_that_reset_after_the_connect_is_the_remote() {
             let listener = std::net::TcpListener::bind(loopback()).unwrap();
             let remote = listener.local_addr().unwrap();
             let client = std::net::TcpStream::connect(remote).unwrap();
             let (server, _) = listener.accept().unwrap();
-            assert_eq!(peer(&client, remote), Ok(remote));
             sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
             drop(server);
             client
@@ -236,7 +244,20 @@ mod tests {
                 .unwrap();
             let read = client.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
             assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
-            assert_eq!(peer(&client, remote), Err(Error::Reset { remote }));
+            assert_eq!(
+                client.peer_addr().map_err(|e| errno(&e)),
+                Err(Errno::NOTCONN)
+            );
+            assert_eq!(peer(&client, remote), Ok(remote));
+        }
+
+        #[test]
+        fn another_failure_gives_its_code() {
+            let null = rustix::fs::open("/dev/null", OFlags::RDONLY, Mode::empty());
+            let stream = std::net::TcpStream::from(null.unwrap());
+            let remote = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4433);
+            let code = Errno::NOTSOCK.raw_os_error();
+            assert_eq!(peer(&stream, remote), Err(Error::Io { code }));
         }
     }
 

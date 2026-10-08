@@ -47,7 +47,7 @@ impl Stream {
     }
 
     /// Records `error` as the end of the stream, and gives it.
-    fn fail(&mut self, error: Error) -> Error {
+    pub(super) fn fail(&mut self, error: Error) -> Error {
         self.failed = Some(error.clone());
         error
     }
