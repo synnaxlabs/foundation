@@ -62,7 +62,6 @@ fn assert_delivered(key: u64, run: &Run) {
 }
 
 #[test]
-#[ignore = "waits on #340, #462, #585, #1931, #1957"]
 fn a_reader_on_one_node_gets_what_a_writer_on_another_wrote_in_order() {
     let run = check(1, sim::link::Config::default());
     assert_delivered(1, &run);
@@ -74,7 +73,6 @@ fn a_reader_on_one_node_gets_what_a_writer_on_another_wrote_in_order() {
 }
 
 #[test]
-#[ignore = "waits on #340, #462, #585, #1931, #1957"]
 fn a_link_that_reorders_drops_and_duplicates_changes_nothing_the_reader_gets() {
     let link = sim::link::Config {
         jitter: Span::from_nanos(2 * Span::MILLISECOND.nanos()),
