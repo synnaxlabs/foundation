@@ -1,7 +1,7 @@
 # Interview log
 
 The chronological log of the design interview (2026-10-04), with the person's words.
-It is history: where it and `docs/decisions.md` differ, `docs/decisions.md` wins. Read
+It is history: where it and `docs/decisions/` differ, `docs/decisions/` wins. Read
 it to learn why a decision was made.
 
 Foundation is a new Synnax Labs product started 2026-10-04: one Rust binary, any OS or

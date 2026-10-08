@@ -1,0 +1,1 @@
+- **RESCOPE** B1 to B7 are starting points tuned by T1 benchmarks.

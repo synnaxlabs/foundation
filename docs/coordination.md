@@ -18,7 +18,7 @@ Most of the cost is context size per turn, so keep each context small:
   Monitor must filter to events you act on.
 - Never fork from a large context. Brief a fresh subagent instead.
 - The person: a `/login` that switches organizations flushes every session's cache.
-- Read only the sections of `docs/decisions.md` and `docs/research/` you need.
+- Read only the records of `docs/decisions/` and `docs/research/` you need.
 - Send reading, searching, and reviews to subagents; keep their results, not their
   file dumps.
 - Finish each issue with its state comment, so compaction or `/clear` loses nothing.
@@ -62,7 +62,7 @@ use memory" (RAM).
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it changes, the tests
-that must pass, and the section of `docs/decisions.md` it builds.
+that must pass, and the records of `docs/decisions/` it builds.
 
 Labels:
 
@@ -74,10 +74,11 @@ Labels:
 - `model:fable` -> runs on Fable. Only the person or the architect adds it.
 - `interface` -> a request to change a public surface or a crate dependency.
 - `oracle` -> it changes `oracles/`.
-- `blocked` -> waiting on another issue, linked in the body.
+- `blocked` -> waiting on another issue, linked in the body, or on a question for the
+  person.
 - `security` -> a security finding.
 
-Builders file the next issues on the milestone path from `docs/decisions.md`, and the
+Builders file the next issues on the milestone path from `docs/decisions/`, and the
 coordinator admits them. Any builder takes any crate. One task is in progress per crate.
 
 ## Pull requests
@@ -104,7 +105,7 @@ coordinator admits them. Any builder takes any crate. One task is in progress pe
 
 Each PR pays a fixed cost: CI, its review rounds, an audit, and a slot in the merge
 queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHANGES in
-`docs/decisions.md`).
+`docs/decisions/operations/small-changes.md`).
 
 - **Small change:** a fix, a test pin, a doc or comment fix, a rename, or a record, of
   under about 50 lines.
@@ -155,8 +156,8 @@ Two cases skip the interface issue:
 ## Cloud machines
 
 Only `laptop.monitor` rents and ends machines. Test machines stay within the test budget
-(`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day, and at most 15
-USD a day for #1139. The ARM RUNNER hosts stay under AWS CEILING, outside the test
+(`docs/decisions/open/mvp.md`): 1000 USD in total and at most 100 USD a day, and at most
+15 USD a day for #1139. The ARM RUNNER hosts stay under AWS CEILING, outside the test
 budget, its limits, and step 3. Step 4 checks each by its instance, because they have no
 `issue` tag. No other session holds AWS credentials. The person decided this
 (https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
@@ -205,15 +206,16 @@ budget, its limits, and step 3. Step 4 checks each by its instance, because they
   once. The person never has to comment on GitHub.
 - **The person reviews only what only the person can decide.** The architect decides
   everything inside the decisions the person made, in a comment on the issue. The
-  builder adds the ruling to `docs/decisions.md` in the code PR, so the record and the
+  builder adds the ruling to `docs/decisions/` in the code PR, so the record and the
   code merge together. Public surfaces (`public-api.txt`) need the architect's approval,
   not the person's. Only four things go to the person: a change to a decision the person
   made, the next milestone, new spend, and a security or license risk. The coordinator
   sends them in one batch a day, except one that blocks the critical path.
 - **A stuck session tells the coordinator at once.** When a permission check refuses
   a call, or work waits on the person, send `coordinator` the refused command, the
-  reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
-  person. Never try to get around a refusal.
+  reason text, and the issue or PR. Then stop the work that waits on it, and take other
+  work meanwhile. The coordinator takes it to the person. Never try to get around a
+  refusal.
 - **A question for the person** states the problem, the fix, its cost, and a
   recommendation. For each option, it says whether it is a patch or the long-term
   path; for a patch, it names the long-term fix. The person decided on 2026-10-05:

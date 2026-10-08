@@ -1,0 +1,1 @@
+- **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
