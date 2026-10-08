@@ -4655,10 +4655,11 @@ How to read this record:
   (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
   `n` and names another node. Its fix is "Name `n` as the `home`, and keep `n` out of
   `standby` and `copies`" when `p` wins for no connector on another node, else "Exclude
-  the connector `a` and its indexes from the `select` of `p`, and select them with a
-  placement whose `home` is `n`", which changes no other connector of `p`. The indexes
-  of a connector are those whose nearest connector it is, as `config.split-placement`
-  reads them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  the connector `a` and its indexes from the `select` of `p`, and select them with
+  another placement whose `home` is `n`", which changes no other connector of `p`, and
+  which lists with `p` each placement that wins for an index of `a`. The indexes of a
+  connector are those whose nearest connector it is, as `config.split-placement` reads
+  them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
   2026-10-08T15:21:54Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, and
@@ -4673,12 +4674,22 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459). Its fix
   is "Make the placement `p` win for the connector `c` and the index `i`", where `p`
   wins for `c`, or for `i` when no placement selects `c` (same comment of 15:21:54Z).
-  When no placement selects `c` and `p` names a `home` that is not the node `n` of `c`,
-  the fix is "Exclude the indexes of the connector `c` from the `select` of `p`, and
-  select the connector and its indexes with a placement whose `home` is `n`", so each
-  index of `c` gives one fix that one edit applies (`laptop.architect`,
-  2026-10-08T15:46:46Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980). A tie
+  When no placement can win for `c` and each of its indexes at the node `n` of `c`, each
+  diagnostic of `c` gives one fix that names each winner, so one edit applies it. When
+  `t` wins for `c` and gets case 2 of `config.connector-home`, the fix is that of case
+  2: "Exclude the connector `c` and its indexes from the `select` of `t` and `r`, and
+  select them with another placement whose `home` is `n`", where `t` and `r` are each
+  placement that wins for `c` or an index of `c`. When no placement selects `c`, and
+  more than one placement wins for the indexes of `c` or one names a `home` that is not
+  `n`, the fix is "Exclude the indexes of the connector `c` from the `select` of `p`,
+  and select the connector and its indexes with another placement whose `home` is
+  `n`", where `p` is each placement that wins for an index of `c`. A list of winners is
+  "`p`", "`p` and `q`", or "`p`, `q`, and `r`", in tree key order. "Another" keeps a
+  listed placement from being the new one, which its exclusion would empty
+  (`laptop.architect`, 2026-10-08T15:46:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
+  2026-10-08T16:04:09Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123). A tie
   for the index or the connector gives no `config.split-placement`. The region check
   and the region of each key (REGION CHECK) come with #1029. Lost: a
   `Planned` with keys (A4), a home on each change, a `config::Error` for a lazy fetch of
@@ -4694,8 +4705,9 @@ How to read this record:
   placement, and "Select the connector `a` and each index under its name with a more
   specific placement", which no placement can follow when `p` names `a` by its exact
   name, and the `config.split-placement` fix "and each name under it", which also
-  moves the indexes of a nested connector, and, when `p` names another home, a fix
-  that moves the index `i` alone, which leaves each other index of `c` split.
+  moves the indexes of a nested connector, and, when no placement can win for `c` and
+  each of its indexes at `n`, a fix that names one placement, which moves the index `i`
+  alone or conflicts with the fix of another diagnostic of `c`.
   Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
@@ -4705,7 +4717,12 @@ How to read this record:
   the `config.connector-home` fix of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556 and
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
-  `chunks` input and its panic of
+  `config.split-placement` fix of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126 when no
+  placement can win for `c` and each of its indexes at `n`, the case 2 text of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171 and the
+  text of https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980,
+  which name one placement and "a placement", the `chunks` input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
