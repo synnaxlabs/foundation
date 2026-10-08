@@ -1,7 +1,7 @@
 //! After a read that gives a whole long message, in one poll or over many, the
-//! receiver keeps a list of at most 64 chunks, not one sized by the message. The count covers each thread, so
-//! this binary has no test harness. The sim runs on one thread, so the count is
-//! exact.
+//! receiver keeps a list of at most 64 chunks, not one sized by the message. The
+//! count covers each thread, so this binary has no test harness. The sim runs on one
+//! thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
