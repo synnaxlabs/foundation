@@ -47,7 +47,13 @@ exception when the patch lands (#55).
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep the
 change small, and list it here with its reason. The patched copy lives in
-`patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
+`patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`). Searches skip `patches/`
+(`.ignore`): to search a copy, give its path or use `rg --no-ignore`. The `fuzz/`
+workspace takes the same patches.
+
+CI does not run the tests of a copy and makes no mutants in it. So the PR that changes
+a copy lists the mutants of its diff, made by hand, and the test that kills each. A
+copy is a path package, so `cargo deny` does not check it against advisories (#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
