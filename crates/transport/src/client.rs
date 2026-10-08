@@ -215,6 +215,7 @@ mod tests {
             let client = bind(&shard, address(&node));
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(SERVER.public()));
+            assert_eq!(format!("{client:?}"), "Client { .. }");
             echo(&shard, &session).await;
             end(&node, session).await;
         });
@@ -294,6 +295,27 @@ mod tests {
             end(&node, session).await;
         });
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_program_has_the_fixed_limits() {
+        testing::run(0, |shard| {
+            let budget = block::Config { budget: 1 << 16 };
+            let memory = Heap::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            let largest = pool.largest();
+            assert!(largest < 1 << 20, "{largest} bytes");
+            let config = Config {
+                pool,
+                ..shard.client()
+            };
+            let setup = config.setup().expect("a setup");
+            assert!(matches!(setup.role, quic::Role::Program));
+            assert_eq!(setup.message_bytes_max, largest);
+            assert_eq!(setup.window_bytes, 1 << 20);
+            assert_eq!(setup.streams_max, NonZeroU32::MIN);
+            assert_eq!(setup.idle, Span::from_nanos(30_000_000_000));
+        });
     }
 
     #[test]
