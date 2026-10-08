@@ -81,14 +81,16 @@ fn session<P>(
 where
     P: Future<Output = ()> + 'static,
 {
-    session_with(seed, synced, POOL, program)
+    session_with(seed, synced, POOL, Some(rules()), program)
 }
 
-/// As [`session`], with a home pool of `pool` bytes.
+/// As [`session`], with a home pool of `pool` bytes, and `rules` given to `Hub::rules`
+/// unless `None`.
 fn session_with<P>(
     seed: u64,
     synced: bool,
     pool: usize,
+    rules: Option<access::Rules>,
     program: impl FnOnce(Agent) -> P + Send + 'static,
 ) -> Home
 where
@@ -114,7 +116,9 @@ where
         if synced {
             test.sync().await;
         }
-        test.hub.rules(rules());
+        if let Some(rules) = rules {
+            test.hub.rules(rules);
+        }
         let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");
         let link = test.hub.link(session.clone());
@@ -454,6 +458,25 @@ fn refuses_a_hello_that_does_not_echo_the_nonce() {
     assert_eq!(
         serve::Error::Stale.to_string(),
         "the hello does not echo the nonce of the node's last challenge"
+    );
+}
+
+#[test]
+fn refuses_each_hello_before_the_first_rules() {
+    let home = session_with(106, true, POOL, None, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(REFUSED));
+    });
+    let refusal = Refusal::Unknown {
+        subject: name(SUBJECT),
+    };
+    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(
+        home.closed,
+        transport::Error::Closed {
+            code: Code(REFUSED)
+        }
     );
 }
 
@@ -829,24 +852,30 @@ fn cuts_a_response_to_the_largest_block_of_the_pool() {
     let body: Vec<u8> = (0..60_000_u32).map(|i| (i % 251) as u8).collect();
     let reversed: Vec<u8> = body.iter().rev().copied().collect();
     let length = u64::try_from(body.len()).expect("fits");
-    let home = session_with(105, true, 1 << 16, move |mut agent| async move {
-        agent.admit().await;
-        let mut stream = agent.open().await;
-        let request = Request {
-            length,
-            signature: Pair::new(&AGENT)
-                .sign(&access::proof::request(CONNECTION, &body)),
-        };
-        let mut out = [0; Request::LEN];
-        request.encode(&mut out);
-        stream.send(&out).await;
-        for chunk in body.chunks(1 << 16) {
-            stream.send(chunk).await;
-            agent.sleep(Span::MILLISECOND).await;
-        }
-        stream.sender.finish().expect("finishes");
-        assert_eq!(stream.response().await, reversed);
-    });
+    let home = session_with(
+        105,
+        true,
+        1 << 16,
+        Some(rules()),
+        move |mut agent| async move {
+            agent.admit().await;
+            let mut stream = agent.open().await;
+            let request = Request {
+                length,
+                signature: Pair::new(&AGENT)
+                    .sign(&access::proof::request(CONNECTION, &body)),
+            };
+            let mut out = [0; Request::LEN];
+            request.encode(&mut out);
+            stream.send(&out).await;
+            for chunk in body.chunks(1 << 16) {
+                stream.send(chunk).await;
+                agent.sleep(Span::MILLISECOND).await;
+            }
+            stream.sender.finish().expect("finishes");
+            assert_eq!(stream.response().await, reversed);
+        },
+    );
     assert!(
         matches!(home.served[0], Ok(Got::Request(_, _))),
         "{:?}",
