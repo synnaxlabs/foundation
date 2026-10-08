@@ -16,6 +16,6 @@ Find:
   tests that change result.
 - Mocks or fakes of our own types where the real type with `sim` inputs would work.
 - Error assertions that check only `is_err()`.
-- Decisions in `docs/decisions.md` that state a behavior no test checks.
+- Decisions in `docs/decisions/` that state a behavior no test checks.
 
 For each finding: the test or code location, the gap, and the test to add.
