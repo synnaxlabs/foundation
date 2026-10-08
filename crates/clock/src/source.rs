@@ -8,7 +8,7 @@ use types::time::{Interval, Monotonic, Span};
 use crate::DRIFT;
 
 /// How often [`Wall::next`] measures the OS clock.
-const PERIOD: Span = Span::SECOND;
+pub(crate) const PERIOD: Span = Span::SECOND;
 
 /// Identifies one source of a [`Clock`](crate::Clock). A removed key is never used
 /// again.
