@@ -97,7 +97,7 @@ fn address(value: &Value) -> Result<Uri, Diagnostic> {
     let uri = connector::http::uri(value)?;
     let part = match (uri.path(), uri.query()) {
         (_, Some(_)) => "a query",
-        ("" | "/", None) => return Ok(uri),
+        ("/", None) => return Ok(uri),
         (_, None) => "a path",
     };
     Err(Diagnostic::new(

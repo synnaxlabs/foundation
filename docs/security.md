@@ -380,6 +380,6 @@ No target yet, because the decoder is private, not built, or not reached from a 
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the header and
 hard state of a mesh log record (#1711), the names of a mesh log directory
 (`mesh::log::sequence`, #1746), each connector's protocol parser, and
-`connector::reader::read` and `connector_influx::Kind::parse`, which no file reaches
-until `config::check` takes a kind table (#1153) and `node` puts the influx kind in its
-table (#1734).
+`connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
+which no file reaches until `config::check` takes a kind table (#1153) and `node` puts
+the influx kind in its table (#1734).
