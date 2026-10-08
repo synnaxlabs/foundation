@@ -1,6 +1,8 @@
 //! Runs the built `foundation` binary as a process.
 
 #![cfg(test)]
+// The simulated servers need `os::net()`, which a `--cfg loom` build lacks.
+#![cfg(not(loom))]
 
 mod one_node;
 mod rig;
