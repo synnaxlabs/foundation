@@ -38,8 +38,11 @@
   (2026-10-08T22:24:43Z, #2020): `Shard::shed` stops carrying an index, the pair of
   `carry`. Its control gate goes, and with it a handoff that waits for room. Each named
   reader of the index stops holding its position. Its frames stay in the buffer, so a
-  later `carry` of the slot continues each path from its tail in the buffer, as after a
-  restart: a lost seq whose gap is not durable is given again (`Outcome::Lost`). Lost: a
+  later `carry` of the slot continues each path from its tail in the buffer, the last
+  entry appended, on disk or not: a lost seq is given again only when no later live
+  entry of the index was appended (`Outcome::Lost`; `laptop.architect`,
+  2026-10-08T23:30:35Z:
+  https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6071097559). Lost: a
   map of the live tail of each shed index, which grows with each index that leaves for
   good, and still gives the seq again after a restart (`laptop.architect`,
   2026-10-08T22:50:41Z:
@@ -55,4 +58,6 @@
   (2026-10-08T22:24:43Z:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814, and the
   `delivery` items, 2026-10-08T22:31:27Z:
-  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046).
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046, and the
+  panic of `Readers::end`, 2026-10-08T22:50:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6070616191).

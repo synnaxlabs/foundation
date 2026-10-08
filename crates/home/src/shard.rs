@@ -214,8 +214,9 @@ pub enum Outcome {
     },
     /// A live group with samples found no room in the ring or the pool. Its seq is a
     /// gap in the log. The gap is durable only when a later live entry of the index,
-    /// with samples or a handoff, is on disk. A restart, or a [`Shard::shed`] of the
-    /// index, before that gives the next frame the same seq.
+    /// with samples or a handoff, is on disk: a restart before that gives the next
+    /// frame the same seq. After a [`Shard::shed`] and a [`Shard::carry`] of the index,
+    /// the next frame gets the same seq only when no later live entry was appended.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -326,7 +327,8 @@ impl Shard {
     /// Stops carrying the index at `slot`: its control gate goes, and with it a handoff
     /// that waits for room. Each named reader of the index stops holding its position.
     /// Its frames stay in the buffer, so a later [`carry`](Self::carry) of `slot`
-    /// continues each path from its tail in the buffer, as after a restart.
+    /// continues each path from its tail in the buffer: the last entry appended, on
+    /// disk or not.
     ///
     /// # Panics
     ///
@@ -3928,7 +3930,7 @@ mod tests {
         }
 
         /// The ring is full, so the handoff of the close waits, and the shed drops it.
-        /// No durable entry follows the lost frames, so their gap goes.
+        /// No entry is appended after the lost frames, so their gap goes.
         #[test]
         fn gives_the_first_lost_seq_again_after_a_shed_and_a_carry_as_after_a_restart()
         {
@@ -3950,6 +3952,7 @@ mod tests {
                     }
                 };
                 shard.close_writer(a);
+                // No public outcome shows a waiting handoff before the shed drops it.
                 assert!(shard.indexes[0].handoff().is_some(), "the handoff waits");
                 shard.shed(Slot::new(0));
                 shard.carry(Slot::new(0));
@@ -3991,6 +3994,57 @@ mod tests {
                 let late = frame(&test.pool, &set, &[(0, &[15]), (1, &[3])]);
                 assert_eq!(shard.write(b, LIVE, late), Ok(&[applied(0, 0, 1)][..]));
                 let next = frame(&test.pool, &set, &[(0, &[25]), (1, &[3])]);
+                assert_eq!(shard.write(b, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
+            });
+        }
+
+        /// The tail in the buffer holds an entry appended before the shed, also one not
+        /// yet on disk, so the lost seq before it is not given again.
+        #[test]
+        fn continues_after_a_later_entry_not_yet_on_disk_after_a_shed_and_a_carry() {
+            run(150, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+                let again = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
+                let room = test.pool.alloc(80).expect("a block");
+                let blocks = test.fill();
+                let subject = "a".repeat(200);
+                let a = shard
+                    .open_writer(writer(&subject, 1, &set))
+                    .expect("synced");
+                drop(room);
+                assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 0, 1)][..]));
+                drop(blocks);
+                assert_eq!(shard.write(a, LIVE, again), Ok(&[applied(0, 1, 1)][..]));
+                shard.close_writer(a);
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
+                shard.shed(Slot::new(0));
+                shard.carry(Slot::new(0));
+                let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+                let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
+                assert_eq!(shard.write(b, LIVE, next), Ok(&[applied(0, 2, 1)][..]));
+            });
+        }
+
+        /// The handoff of the close is the only entry after the lost seq, and it is not
+        /// yet on disk, so the lost seq is not given again.
+        #[test]
+        fn continues_after_a_later_handoff_not_yet_on_disk_after_a_shed_and_a_carry() {
+            run(151, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let gone = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                let blocks = test.fill();
+                assert_eq!(shard.write(a, LIVE, gone), Ok(&[lost(0, 0, 1)][..]));
+                drop(blocks);
+                shard.close_writer(a);
+                assert_eq!(stored(&shard, Slot::new(0), Path::Live), 0);
+                shard.shed(Slot::new(0));
+                shard.carry(Slot::new(0));
+                let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+                let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4])]);
                 assert_eq!(shard.write(b, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
             });
         }
