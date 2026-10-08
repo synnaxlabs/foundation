@@ -6,9 +6,10 @@
   names to node names (S12 (placement part) + B7). An index that `definitions` does not
   hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
   give `Error::Homes`, both before the read of the base tree. `Homes` counts only the
-  listed indexes with no home in this node's state then. `UnknownNode` and the change
-  take only the listed indexes with no home when the call checks the node names, which
-  are among those (`laptop.architect`, 2026-10-08T18:35:16Z:
+  listed indexes with no home in this node's state then. `UnknownNode` looks up only the
+  nodes of the listed indexes with no home when the call checks the node names, which
+  are among those, and the change takes only those indexes (`laptop.architect`,
+  2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A node
   name that no member has gives `Error::UnknownNode`, after `Error::NoVote` and before
   the first put. None of them proposes anything. `Homes` right after `NotIndex` decided
