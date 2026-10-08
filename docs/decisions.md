@@ -775,6 +775,13 @@ How to read this record:
   (2026-10-07T10:59:02Z and 2026-10-07T11:18:03Z):
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036483605 and
   https://github.com/synnaxlabs/foundation/pull/1286#issuecomment-6036799415.
+  A `Commit` answers for the entries appended before its call, and nothing else. Held
+  past the drop, it resolves once the task ended: with `Ok` when those entries are on
+  disk, else with the error that ended the task. A caller that needs each entry on disk
+  before the drop calls `committed` after its last append. Lost: the error of the task
+  to each `Commit` held past the drop, a second meaning only after the drop. Decided by
+  `laptop.architect` (#1234, 2026-10-07T07:06:07Z):
+  https://github.com/synnaxlabs/foundation/issues/1234#issuecomment-6032824731.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group with
   samples of a write: the writer's key set with only that group present, its range,
   and its encoded series. The home stores it, keeps it as the index's newest frame,

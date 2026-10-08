@@ -3311,6 +3311,38 @@ fn a_failed_record_write_ends_the_buffer_with_its_error() {
     .expect("the buffer ends");
 }
 
+/// A `Commit` answers only for the entries appended before its call: past the drop,
+/// a later failed write does not change its result.
+#[test]
+fn a_commit_held_past_the_drop_gives_ok_when_a_later_write_fails() {
+    let (mut sim, node) = create_node(113);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let early = buffer.committed();
+        assert_eq!(buffer.committed().await, Ok(()));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, Some(40), Parts::default())])
+            .expect("queues");
+        let late = buffer.committed();
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(early.await, Ok(()));
+        assert_eq!(late.await, Err(failed));
+    })
+    .expect("the buffer ends");
+}
+
 #[test]
 fn an_append_with_no_block_for_its_record_header_is_refused() {
     run(112, Memory::default(), |shard| async move {
@@ -4089,8 +4121,8 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
     });
 }
 
-/// A `Commit` taken before a later append and held past the drop resolves only when
-/// the task wrote that append and ended, so a reopen after it recovers everything.
+/// A `Commit` taken before a later append and held past the drop resolves once the
+/// task ended, here after it wrote that append, so a reopen recovers both entries.
 #[test]
 fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
     run(137, Memory::default(), |shard| async move {
