@@ -5015,20 +5015,23 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6032037030. One
   shard writes each name in the data directory: shard `i` writes `shard-<i>` and each
   name in it, and shard 0 also writes `lock`, `shards-<n>`, and, with a region, `mesh`
-  and each name in it (#585). A change that gives a name a second writer first changes
-  the check of FILE RENAME, which relies on this (#1503, decided by
-  `laptop.architect-2`, 2026-10-07 19:12 UTC:
+  and each name in it (#585, by `laptop.architect`, 2026-10-08 03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). A change
+  that gives a name a second writer first changes the check of FILE RENAME, which relies
+  on this (#1503, decided by `laptop.architect-2`, 2026-10-07 19:12 UTC:
   https://github.com/synnaxlabs/foundation/pull/1503#issuecomment-6044987221).
 - **DATA DIRECTORY LOCK (2026-10-07)** One node at a time uses a data directory. Before
   the claim reads a name, shard 0 opens the file `lock` in the data directory to write
   (`Mode::Create { len: 0 }`), and drops it after each shard of the node has closed its
-  ring and each task of the mesh has ended (#585). `Busy` on `lock` stops the start with
-  `Error::Directory`, before any name is read. The node never removes `lock`, so an open
-  cannot race with a remove. A crash frees the lock (`env::files`, #392). Lost: no lock,
-  with the `Busy` of each ring only, because two nodes with two core counts can each
-  record a count, and the loser's record then refuses every later start. Also lost: an
-  atomic claim with no lock, because an exclusive create guards one name, and two counts
-  are two names.
+  ring and each task of the mesh has ended (#585, by `laptop.architect`, 2026-10-08
+  03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475). `Busy`
+  on `lock` stops the start with `Error::Directory`, before any name is read. The node
+  never removes `lock`, so an open cannot race with a remove. A crash frees the lock
+  (`env::files`, #392). Lost: no lock, with the `Busy` of each ring only, because two
+  nodes with two core counts can each record a count, and the loser's record then
+  refuses every later start. Also lost: an atomic claim with no lock, because an
+  exclusive create guards one name, and two counts are two names.
   Decided by the architect, #1297:
   https://github.com/synnaxlabs/foundation/issues/1297#issuecomment-6034758419 (#1300).
 - **SHARD HOMES (2026-10-07)** Each shard builds its `home::Shard` over its buffer
@@ -5116,7 +5119,13 @@ How to read this record:
   `Hub` rule comes with PR 4. At the stop, each session and stream future drops, then
   the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
   DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475.
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. This
+  supersedes the stop order of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669.
+  Amended (2026-10-08, #1830, by `laptop.architect-2`, 07:26 UTC): with a mesh, each
+  session and stream future drops, then the mesh, and the transport drops when the
+  last task of the mesh ends, before `lock` drops:
+  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
 - **NODE MESH (#585, 2026-10-08)** `Config::key` is the node's key, beside
   `Config::private_key`; both are patches until #1660 moves them to node-local disk.
   `Config::region: Option<Region>` gives the region that the node is a member of: its
@@ -5129,18 +5138,27 @@ How to read this record:
   membership in its data directory when it founds or joins, and reads it at each start.
   With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last shard
   has opened its buffer and before it takes the first session. Its directory is `mesh`
-  in the data directory (`mesh::Config::dir`), and shard 0 waits for `Mesh::ended`
-  before it drops `lock` (DATA DIRECTORY LOCK). A mesh that does not open stops the
-  node, and `Node::join` gives `Error::Mesh`, ranked with `Error::Buffer` and below
-  `Error::Transport`. Each `wire::Protocol::Mesh` stream of a peer that proved a node
-  key goes to `Mesh::serve`, which checks each message against the region; the error of
-  `serve` ends only its stream. A mesh stream of a client, or of a node with no region,
-  is rejected as NODE PORT says. Shard 0 sets no home yet (PR 4 of #585). A mesh that
-  stops does not stop the node until #1780, before PR 4 gives the mesh to the hub. Lost:
-  `Node::found(region)` at run time, which needs a second open path and a node that runs
-  with no region before it; the key in `Region`, because a node's identity is not region
-  data, and PR 4 needs it with no region. Decided by `laptop.architect-2` (2026-10-08
-  03:37 UTC):
+  in the data directory (`mesh::Config::dir`; the directory by `laptop.architect`,
+  2026-10-08 03:37 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475; the field
+  by `laptop.architect-2`, 03:54 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866, and by
+  `laptop.architect`, 04:00 UTC:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643). Shard 0
+  waits for `Mesh::ended` before it drops `lock` (DATA DIRECTORY LOCK). Each clone of
+  the mesh, also one inside the hub, lives in a future that shard 0 drops at the stop.
+  PR 4 of #585 keeps this (`laptop.architect-2`, 2026-10-08 07:26 UTC:
+  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235). A mesh
+  that does not open stops the node, and `Node::join` gives `Error::Mesh`, ranked with
+  `Error::Buffer` and below `Error::Transport`. Each `wire::Protocol::Mesh` stream of a
+  peer that proved a node key goes to `Mesh::serve`, which checks each message against
+  the region; the error of `serve` ends only its stream. A mesh stream of a client, or
+  of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
+  4 of #585). A mesh that stops does not stop the node until #1780, before PR 4 gives
+  the mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second
+  open path and a node that runs with no region before it; the key in `Region`, because
+  a node's identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
