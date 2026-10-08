@@ -20,13 +20,14 @@ use transport::{Address, Class, Code, Port, Transport};
 use types::channel;
 use types::frame::Path as FramePath;
 use types::node::{PrivateKey, PublicKey};
+use types::sample::Type;
 use types::time::Span;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, RING, SETTLE, Test, fill, scrambled, write, write_series,
-    write_wide,
+    AREA, BODY_MAX, I64, RING, SETTLE, STAMP, Test, fill, scrambled, write,
+    write_series, write_wide,
 };
 
 /// The UDP port of each transport.
@@ -599,10 +600,31 @@ async fn got(peer: &mut Peer, reader: &mut Reader) -> Option<Got> {
     Some(Got { head, ends, body })
 }
 
-fn le(values: &[i64]) -> Vec<u8> {
-    values
+/// The places of the series of `got`, in order.
+fn places(got: &Got) -> Vec<u32> {
+    got.ends.iter().map(|&(place, _)| place).collect()
+}
+
+/// The samples of each series of `got`, in place order, decoded as `types`. Each
+/// series starts at the end before it rounded up to a multiple of 8.
+fn decoded(got: &Got, types: &[Type]) -> Vec<Vec<i64>> {
+    let count = usize::try_from(got.head.range.count).expect("a count");
+    let mut start = 0;
+    got.ends
         .iter()
-        .flat_map(|value| value.to_le_bytes())
+        .zip(types)
+        .map(|(&(_, end), &data_type)| {
+            let end = usize::try_from(end).expect("fits");
+            let mut out = vec![0; count * 8];
+            codec::decode(data_type, count, &got.body[start..end], &mut out)
+                .expect("decodes");
+            start = end.next_multiple_of(8);
+            let (chunks, _) = out.as_chunks::<8>();
+            chunks
+                .iter()
+                .map(|chunk| i64::from_le_bytes(*chunk))
+                .collect()
+        })
         .collect()
 }
 
@@ -624,20 +646,18 @@ fn sends_each_frame_through_the_places_of_the_open() {
     };
     session(56, Class::Complete, false, home, |mut peer| async move {
         let mut reader = open_complete(&mut peer, &[2, 2, 1], 1 << 20).await;
+        let mut first = None;
         for (values, stamps) in [(&[10, 20][..], &[0, 1][..]), (&[30], &[2])] {
             let got = got(&mut peer, &mut reader).await.expect("a frame");
-            let len = u32::try_from(values.len() * 8).expect("fits");
             assert_eq!(got.head.path, FramePath::Live);
             assert_eq!(got.head.series, 2);
-            assert_eq!(got.ends, [(0, len), (2, 2 * len)]);
-            let first = i64::from_le_bytes(
-                got.body[values.len() * 8..][..8].try_into().expect("8"),
-            );
-            let stamps: Vec<_> = stamps
-                .iter()
-                .map(|stamp| first + stamp - stamps[0])
-                .collect();
-            assert_eq!(got.body, [le(values), le(&stamps)].concat());
+            assert_eq!(places(&got), [0, 2]);
+            let [got_values, got_stamps] =
+                <[_; 2]>::try_from(decoded(&got, &[I64, STAMP])).expect("two series");
+            let first = *first.get_or_insert(got_stamps[0]);
+            let stamps: Vec<_> = stamps.iter().map(|stamp| first + stamp).collect();
+            assert_eq!(got_values, values);
+            assert_eq!(got_stamps, stamps);
         }
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
@@ -662,8 +682,8 @@ fn sends_a_frame_once_a_credit_raises_the_grant() {
         let mut reader = open_complete(&mut peer, &[2, 1], 0).await;
         peer.credit(1 << 20).await.expect("sends the credit");
         let got = got(&mut peer, &mut reader).await.expect("a frame");
-        assert_eq!(got.ends, [(0, 8), (1, 16)]);
-        assert_eq!(got.body[..8], le(&[10]));
+        assert_eq!(places(&got), [0, 1]);
+        assert_eq!(decoded(&got, &[I64])[0], [10]);
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });
@@ -696,8 +716,7 @@ fn sends_each_frame_before_a_miss_then_behind() {
                 let mut reader = open_complete(&mut peer, &[1, 2], 1 << 15).await;
                 let mut firsts = Vec::new();
                 while let Some(got) = got(&mut peer, &mut reader).await {
-                    let first = got.body[..8].try_into().expect("8 bytes");
-                    firsts.push(i64::from_le_bytes(first));
+                    firsts.push(decoded(&got, &[STAMP])[0][0]);
                 }
                 assert!(!firsts.is_empty() && firsts.len() < 8, "{firsts:?}");
                 let expected: Vec<_> = (0..)
