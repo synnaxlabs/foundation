@@ -1268,6 +1268,19 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn leaves_the_latest_session_of_another_subject() {
+            let mut readers = Readers::new(0);
+            let name = |name: &str| -> Name { name.parse().expect("valid name") };
+            let a = readers.open_named_latest(name("a"), name("r"), at(0)).key;
+            let b = readers.open_named_latest(name("b"), name("r"), at(1));
+            assert_eq!(b.replaced, None);
+            let c = readers.open(of("c", "r", 10), resume(live(0)), 0, Charge::Whole);
+            assert_eq!(c.replaced, None);
+            let again = readers.open_named_latest(name("a"), name("r"), at(2));
+            assert_eq!(again.replaced, Some(a.into()));
+        }
+
+        #[test]
         fn never_happens_to_unnamed_readers() {
             let mut readers = Readers::new(0);
             readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);

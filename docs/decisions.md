@@ -325,17 +325,17 @@ How to read this record:
 - **S10 (reader)** A reader is a session, not a definition: `Reader { subject: Name,
   name: Option<String>, select: Selector, mode: complete or latest, from: now, oldest,
   seq, time, or resume, max_age, hold: Duration (default 0) }`. Only complete mode holds.
-  A hold is capped by the index's retention. One session per named reader; a new one
-  takes over. Out connectors carry reader settings in their config. Current readers and
-  holds are published on status channels. Supersedes: B1 durable reader, B2 durable
-  and ad-hoc readers. A named reader belongs to the subject that opens it: the home
+  A hold is capped by the index's retention. One session per named reader (subject and
+  name); a new one takes over. Out connectors carry reader settings in their config.
+  Current readers and holds are published on status channels. Supersedes: B1 durable
+  reader, B2 durable and ad-hoc readers. A named reader belongs to the subject that opens it: the home
   keys it by subject and name, and its position record names both. An open by the same
   subject takes over. An open by another subject with the same name opens another
   reader and takes over nothing. Lost: refuse a takeover by another subject (decided by
-  `laptop.architect-2`, 2026-10-08T09:49:27Z,
-  https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444, and
-  `laptop.architect`, 2026-10-08T10:15:04Z,
-  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053).
+  `laptop.architect` in the body of #1851, 2026-10-08T10:01:28Z, and in
+  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053,
+  2026-10-08T10:15:04Z; raised by `laptop.architect-2` in
+  https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444).
 - **RETENTION (architect, #895)** A retention policy `{ select, keep }` caps by store
   time the holds on the indexes it selects (READER RULES), so `buffer` may trim a sample
   past the cap (STORE TRIM). Retention deletes nothing: a ring frees only at its tail,
