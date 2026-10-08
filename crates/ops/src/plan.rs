@@ -95,7 +95,8 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    /// One line for each change, then the counts.
+    /// One line for each change, with a `key` line under it for each fingerprint, then
+    /// the counts.
     pub(crate) fn text(&self) -> String {
         let lines: Vec<String> = self
             .changes

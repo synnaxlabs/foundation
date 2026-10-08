@@ -2931,6 +2931,8 @@ mod tests {
                 string(bare),
                 string(&format!("  {ALICE}\n")),
                 string(&format!("{bare} a comment with words")),
+                string(&ALICE.replace(' ', "\t")),
+                string(&ALICE.replace(' ', "  ")),
                 list(&[string(ALICE)]),
             ];
             for keys in cases {

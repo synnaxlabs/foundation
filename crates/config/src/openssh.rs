@@ -79,9 +79,10 @@ pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
     if text.trim().contains(LINE_BREAKS) {
         return Err(Error::Lines);
     }
+    // `ssh-key` splits the words only at one space, and OpenSSH at any run of spaces
+    // and tabs. `from_openssh` accepts a key length field over 32 when 32 bytes
+    // follow, so the key must write back to the same line.
     let line = format!("{ALGORITHM} {encoded}");
-    // `from_openssh` accepts a key length field over 32 when 32 bytes follow, so the
-    // key must write back to the same line.
     let bytes = ssh_key::PublicKey::from_openssh(&line)
         .ok()
         .filter(|key| key.to_openssh().is_ok_and(|written| written == line))
