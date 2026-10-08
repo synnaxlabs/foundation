@@ -29,6 +29,7 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("config", "config-hcl"),
     ("config", "connector-influx"),
     ("ops", "config-hcl"),
+    ("ops", "transport"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.

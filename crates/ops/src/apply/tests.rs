@@ -1,0 +1,429 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::future::poll_fn;
+use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::rc::Rc;
+use std::task::Poll;
+
+use connector::kind::Table;
+use env::tasks::Tasks;
+use mesh::card::addresses::Addresses;
+use mesh::card::{self, Card};
+use mesh::region::Founding;
+use mesh::status::Status;
+use mesh::{Member, Mesh};
+use sim::Sim;
+use spec::Pointer;
+use spec::channel::{Edge, Problem};
+use spec::definition::Definition;
+use spec::subject::Subject;
+use transport::{Port, Transport};
+use types::channel::Key;
+use types::digest::Digest;
+use types::ed25519::PrivateKey;
+use types::name::Prefix;
+use types::node::{self, SealKey};
+use types::time::Span;
+
+use super::{Applied, apply};
+use crate::error::Error;
+use crate::plan::tests::{PLANT, Reader, files, front_ends, name, placed_site};
+use crate::plan::{Base, Output, plan};
+
+const NODE: node::Key = node::Key::from_u128(1);
+const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
+const ADMIN: PrivateKey = PrivateKey([7; 32]);
+const PORT: u16 = 7000;
+
+/// The record of the one node, `edge`, which the plans name.
+fn create_member() -> Member {
+    let card = Card {
+        name: name("edge"),
+        public_key: PRIVATE_KEY.public(),
+        seal_key: SealKey::new([9; 32]).expect("a seal key"),
+        addresses: Addresses::new(Vec::new()).expect("no addresses"),
+        version: 1,
+    };
+    Member {
+        card: card::Signed::sign(NODE, card, &PRIVATE_KEY),
+        admission: [0; 64],
+        ephemeral: None,
+        status: Status::new([].into()).expect("a status"),
+    }
+}
+
+/// The mesh of a root region whose one member and voter is `edge`, with the
+/// definitions of a first start.
+async fn open(node: &sim::node::Node, tasks: &Tasks) -> Mesh {
+    let budget = block::Config { budget: 1 << 20 };
+    let memory = block::Heap::new(budget.reservation());
+    let pool = Rc::new(block::Pool::new(budget, memory));
+    let at = SocketAddr::new(node.addresses()[0], PORT);
+    let mut parts = Port::bind(&node.net(), at)
+        .expect("a port")
+        .split(NonZeroUsize::MIN);
+    let config = transport::Config {
+        private_key: PRIVATE_KEY,
+        message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+        window_bytes: 1 << 20,
+        streams_max: NonZeroU32::new(16).expect("not zero"),
+        idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+        clock: node.clock(),
+        entropy: node.entropy(),
+        tasks: tasks.clone(),
+        pool: Rc::clone(&pool),
+    };
+    let part = parts.pop().expect("a part");
+    let transport = Transport::new(config, part).expect("a transport");
+    let store = blob::Store::open(blob::Config {
+        files: node.files(),
+        dir: "blob".into(),
+        pool: Rc::clone(&pool),
+    })
+    .await
+    .expect("a store");
+    let member = create_member();
+    let config = mesh::Config {
+        key: NODE,
+        private_key: PRIVATE_KEY,
+        founding: Founding {
+            prefix: Prefix::ROOT,
+            voters: [NODE].into(),
+            members: vec![member],
+            definitions: spec::founding::create(ADMIN.public()),
+            homes: BTreeMap::new(),
+        },
+        files: node.files(),
+        dir: PathBuf::new(),
+        clock: node.clock(),
+        entropy: node.entropy(),
+        tasks: tasks.clone(),
+        transport: Rc::new(transport),
+        pool,
+        store: Rc::new(store),
+    };
+    Mesh::open(config).await.expect("a mesh")
+}
+
+/// Runs `body` with the mesh of [`open`] on the one node of a run.
+fn solo<F: Future<Output = ()> + 'static>(
+    body: impl FnOnce(Mesh) -> F + Send + 'static,
+) {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let ran = sim.run_on(&node, |node, tasks| async move {
+        body(open(&node, &tasks).await).await;
+    });
+    assert_eq!(ran, Ok(()));
+}
+
+/// The plan of `texts` on the spec that `mesh` uses.
+async fn plan_on(mesh: &Mesh, texts: &[(&str, &str)]) -> (Output, config::plan::Plan) {
+    let spec = mesh.spec().await.expect("a spec");
+    let kinds = Table::new().with("influx", Reader).with("opcua", Reader);
+    plan(
+        &files(texts),
+        spec.pointer.expect("a spec in use"),
+        &spec.definitions,
+        &BTreeSet::from([name("edge")]),
+        &front_ends(),
+        &kinds,
+    )
+    .expect("a plan")
+}
+
+/// Gives `Key::from_u128(n)` for each `n` from `from` up.
+fn keys(from: u128) -> impl FnMut() -> Key {
+    let mut next = from;
+    move || {
+        next += 1;
+        Key::from_u128(next)
+    }
+}
+
+fn path() -> &'static Path {
+    Path::new("site.plan")
+}
+
+#[test]
+fn applies_a_plan_and_then_plans_no_change() {
+    solo(|mesh| async move {
+        let (_, planned) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let applied = apply(path(), &planned.encode(), &mesh, keys(0)).await;
+        let pointer = mesh.pointer();
+        assert_eq!(pointer.version, 1);
+        let applied = applied.expect("an apply");
+        assert_eq!(
+            applied,
+            Applied {
+                file: "site.plan".to_owned(),
+                pointer: Base::from(pointer),
+                added: 3,
+                changed: 0,
+                removed: 0,
+            }
+        );
+        assert_eq!(applied.text(), "Applied site.plan: 3 added.\n");
+        let (output, _) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        assert_eq!(output.text(), "0 to add, 0 to change, 0 to remove.\n");
+        let time = &mesh.spec().await.expect("a spec").definitions[&name("site.time")];
+        let Definition::Channel(time) = time else {
+            panic!("a channel at site.time");
+        };
+        assert_eq!(mesh.watch(time.key).next().await, Ok(Some(NODE)));
+    });
+}
+
+#[test]
+fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        apply(path(), &site.encode(), &mesh, keys(0))
+            .await
+            .expect("an apply");
+        let pointer = mesh.pointer();
+        let error = apply(path(), &plant.encode(), &mesh, keys(10))
+            .await
+            .expect_err("a stale plan");
+        assert_eq!(
+            error,
+            Error::Stale {
+                base,
+                pointer: Some(pointer),
+            }
+        );
+        assert_eq!(
+            error.text(),
+            format!(
+                "error[ops.stale-plan]: the spec changed: the spec is at version 1, \
+                 root {}, not at the base version 0, root {} of the plan\nfix: Plan \
+                 again\n",
+                pointer.root, base.root
+            )
+        );
+        assert_eq!(mesh.pointer(), pointer);
+    });
+}
+
+#[test]
+fn gives_a_stale_plan_when_another_apply_commits_first() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let (site, plant) = (site.encode(), plant.encode());
+        let mut first = pin!(apply(path(), &site, &mesh, keys(0)));
+        let mut second = pin!(apply(path(), &plant, &mesh, keys(10)));
+        let (mut a, mut b) = (None, None);
+        poll_fn(|cx| {
+            if a.is_none() {
+                a = match first.as_mut().poll(cx) {
+                    Poll::Ready(applied) => Some(applied),
+                    Poll::Pending => None,
+                };
+            }
+            if b.is_none() {
+                b = match second.as_mut().poll(cx) {
+                    Poll::Ready(applied) => Some(applied),
+                    Poll::Pending => None,
+                };
+            }
+            if a.is_some() && b.is_some() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        let pointer = mesh.pointer();
+        assert_eq!(pointer.version, 1);
+        let stale = Error::Stale {
+            base,
+            pointer: Some(pointer),
+        };
+        let (won, lost) = match (a.expect("an end"), b.expect("an end")) {
+            (Ok(won), lost) | (lost, Ok(won)) => (won, lost),
+            ends => panic!("no apply in {ends:?}"),
+        };
+        assert_eq!(won.pointer, Base::from(pointer));
+        assert_eq!(lost, Err(stale));
+    });
+}
+
+/// The plan of `planned` with one change, at `at`: from the stored definition `old`
+/// to `new`.
+fn one(
+    planned: &config::plan::Plan,
+    at: &str,
+    old: Option<&Definition>,
+    new: Option<Definition>,
+) -> config::plan::Plan {
+    let mut planned = planned.clone();
+    let (_, mut change) = planned.changes.pop_first().expect("a change");
+    change.old = old.map(|old| Digest::of(&old.encode()));
+    let entry = change.new.take().expect("an add");
+    change.new = new.map(|definition| {
+        let mut entry = entry;
+        entry.definition = config::Definition::Spec(definition);
+        entry
+    });
+    planned.changes = BTreeMap::from([(name(at), change)]);
+    planned.homes.clear();
+    planned
+}
+
+#[test]
+fn refuses_a_change_of_a_founding_definition_and_proposes_nothing() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let founding = spec::founding::create(ADMIN.public());
+        let (subject, access) = (name("@admin.@subject"), name("@admin.@access"));
+        let other =
+            Subject::new(vec![PrivateKey([8; 32]).public()]).expect("a subject");
+        let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let cases = [
+            (
+                one(
+                    &planned,
+                    "@admin.@subject",
+                    Some(&founding[&subject]),
+                    Some(Definition::Subject(other)),
+                ),
+                "@admin.@subject",
+            ),
+            (
+                one(&planned, "@admin.@access", Some(&founding[&access]), None),
+                "@admin.@access",
+            ),
+        ];
+        for (planned, at) in cases {
+            let error = apply(path(), &planned.encode(), &mesh, keys(0))
+                .await
+                .expect_err("a founding definition");
+            let mismatch = config::plan::Error::Mismatch { name: name(at) };
+            assert_eq!(error, Error::Plan(mismatch));
+            assert_eq!(
+                error.text(),
+                format!(
+                    "error[ops.bad-plan]: the plan holds a change at {at} that a plan \
+                     of the applied spec cannot make: plan again\nfix: Make a plan \
+                     with `foundation plan`, and apply it with no edits\n"
+                )
+            );
+            assert_eq!(mesh.pointer(), base);
+        }
+    });
+}
+
+#[test]
+fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let error = apply(path(), b"plan", &mesh, keys(0))
+            .await
+            .expect_err("no plan");
+        let version = config::plan::Error::Version { found: b'p' };
+        assert_eq!(error, Error::Plan(version));
+        assert_eq!(
+            error.text(),
+            "error[ops.bad-plan]: the plan has format version 112, and this build \
+             reads only version 1; plan again with this build\nfix: Make a plan with \
+             `foundation plan`, and apply it with no edits\n"
+        );
+        let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let mut bytes = planned.encode();
+        bytes.truncate(2);
+        let error = apply(path(), &bytes, &mesh, keys(0))
+            .await
+            .expect_err("a cut plan");
+        let malformed = config::plan::Error::Malformed { at: 1 };
+        assert_eq!(error, Error::Plan(malformed));
+        assert_eq!(mesh.pointer(), base);
+    });
+}
+
+#[test]
+fn refuses_a_path_that_is_not_utf8_before_it_reads_the_plan() {
+    solo(|mesh| async move {
+        let path = Path::new(OsStr::from_bytes(b"a\xff.plan"));
+        let error = apply(path, b"plan", &mesh, keys(0))
+            .await
+            .expect_err("a path that is not UTF-8");
+        assert_eq!(
+            error.text(),
+            "\
+error[ops.path-not-utf8]: the path \"a\\xFF.plan\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+"
+        );
+    });
+}
+
+#[test]
+fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
+    solo(|mesh| async move {
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        apply(path(), &site.encode(), &mesh, keys(0))
+            .await
+            .expect("an apply");
+        let pointer = mesh.pointer();
+        let spec = mesh.spec().await.expect("a spec");
+        let time = name("site.time");
+        let stored = &spec.definitions[&time];
+        let Definition::Channel(stored_time) = stored else {
+            panic!("a channel at site.time");
+        };
+        let mut removal = one(&site, "site.time", Some(stored), None);
+        removal.base = pointer;
+        let error = apply(path(), &removal.encode(), &mesh, keys(10))
+            .await
+            .expect_err("a dangling edge");
+        let dangling = Problem::Dangling {
+            from: name("site.temp"),
+            edge: Edge::Index,
+            to: stored_time.key,
+        };
+        let problems = vec![spec::region::Problem::Channel(dangling)];
+        let cause = mesh::Error::Problems(problems);
+        assert_eq!(
+            error.text(),
+            format!(
+                "error[ops.apply]: {cause}\nfix: Fix the cause in the message, then \
+                 plan and apply again\n"
+            )
+        );
+        assert_eq!(error, Error::Apply(cause));
+        assert_eq!(mesh.pointer(), pointer);
+    });
+}
+
+#[test]
+fn leaves_out_each_count_of_zero() {
+    let applied = |added, changed, removed| {
+        let pointer = Pointer {
+            version: 1,
+            root: spec::tree::empty(),
+        };
+        let applied = Applied {
+            file: "a\n.plan".to_owned(),
+            pointer: Base::from(pointer),
+            added,
+            changed,
+            removed,
+        };
+        applied.text()
+    };
+    assert_eq!(applied(0, 0, 0), "Applied a\\n.plan: no change.\n");
+    assert_eq!(
+        applied(1, 2, 3),
+        "Applied a\\n.plan: 1 added, 2 changed, 3 removed.\n"
+    );
+    assert_eq!(applied(0, 2, 0), "Applied a\\n.plan: 2 changed.\n");
+    assert_eq!(applied(0, 0, 3), "Applied a\\n.plan: 3 removed.\n");
+}

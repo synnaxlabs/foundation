@@ -10,6 +10,9 @@ const ARGUMENT: Code = Code::new("ops.argument");
 const UNKNOWN: Code = Code::new("ops.unknown-operation");
 const INPUT: Code = Code::new("ops.input");
 const OUTPUT: Code = Code::new("ops.output");
+const BAD_PLAN: Code = Code::new("ops.bad-plan");
+const STALE_PLAN: Code = Code::new("ops.stale-plan");
+const APPLY: Code = Code::new("ops.apply");
 
 /// Why a command line did not run to its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,13 +30,29 @@ pub(crate) enum Error {
     Output { message: String },
     /// The config files have problems: at least one.
     Config(Vec<Problem>),
+    /// The plan file holds no plan that `plan` makes.
+    Plan(config::plan::Error),
+    /// The spec is not at `base`, the spec that the plan changes. It is at `pointer`,
+    /// or the node uses no spec.
+    Stale {
+        base: spec::Pointer,
+        pointer: Option<spec::Pointer>,
+    },
+    /// The region did not apply the plan.
+    Apply(mesh::Error),
 }
 
 impl Error {
     pub(crate) fn status(&self) -> u8 {
         match self {
-            Self::Argument { .. } | Self::Unknown { .. } | Self::Config(_) => 2,
-            Self::Input { .. } | Self::Output { .. } => 1,
+            Self::Argument { .. }
+            | Self::Unknown { .. }
+            | Self::Config(_)
+            | Self::Plan(_) => 2,
+            Self::Input { .. }
+            | Self::Output { .. }
+            | Self::Stale { .. }
+            | Self::Apply(_) => 1,
         }
     }
 
@@ -59,6 +78,16 @@ impl Error {
             Self::Output { .. } => (
                 OUTPUT,
                 "Give standard output a destination that can be written".to_owned(),
+            ),
+            Self::Plan(_) => (
+                BAD_PLAN,
+                "Make a plan with `foundation plan`, and apply it with no edits"
+                    .to_owned(),
+            ),
+            Self::Stale { .. } => (STALE_PLAN, "Plan again".to_owned()),
+            Self::Apply(_) => (
+                APPLY,
+                "Fix the cause in the message, then plan and apply again".to_owned(),
             ),
         };
         Cow::Owned(vec![Problem {
@@ -176,6 +205,23 @@ impl fmt::Display for Error {
                 [one] => f.write_str(&one.message),
                 _ => write!(f, "the config files have {} problems", problems.len()),
             },
+            Self::Plan(error) => error.fmt(f),
+            Self::Stale {
+                base,
+                pointer: Some(pointer),
+            } => write!(
+                f,
+                "the spec changed: the spec is at {pointer}, not at the base {base} \
+                 of the plan"
+            ),
+            Self::Stale {
+                base,
+                pointer: None,
+            } => write!(
+                f,
+                "the node uses no spec, so it cannot apply a plan of the spec at {base}"
+            ),
+            Self::Apply(error) => error.fmt(f),
         }
     }
 }

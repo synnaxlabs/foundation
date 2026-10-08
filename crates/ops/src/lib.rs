@@ -6,6 +6,11 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table entries of #1744 call it")
+)]
+mod apply;
 mod error;
 #[cfg_attr(
     not(test),
