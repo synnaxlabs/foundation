@@ -32,22 +32,28 @@ fn connector() -> Definition {
 
 type Tree = BTreeMap<Name, Definition>;
 
-/// One tree per region, with each policy under its region and each connector in the
-/// root tree.
+/// One tree per region, in the order that each region first comes, with each policy
+/// under its region and each connector in the root tree.
 fn rules(policies: &[(&str, Policy)], connectors: &[&str]) -> Rules {
-    let mut trees = BTreeMap::<&str, Tree>::new();
-    for (i, (region, policy)) in policies.iter().enumerate() {
+    let placed = policies.iter().enumerate().map(|(i, (region, policy))| {
         let label = match *region {
             "" => format!("p{i}"),
             region => format!("{region}.p{i}"),
         };
         let key = Kind::Access.key(&label).unwrap();
-        let tree = trees.entry(region).or_default();
-        tree.insert(key, Definition::Access(policy.clone()));
-    }
-    let root = trees.entry("").or_default();
-    for at in connectors {
-        root.insert(name(at), connector());
+        (*region, key, Definition::Access(policy.clone()))
+    });
+    let rooted = connectors.iter().map(|at| ("", name(at), connector()));
+    let mut trees = Vec::<(&str, Tree)>::new();
+    for (region, key, definition) in placed.chain(rooted) {
+        let at = match trees.iter().position(|(r, _)| *r == region) {
+            Some(at) => at,
+            None => {
+                trees.push((region, Tree::new()));
+                trees.len() - 1
+            }
+        };
+        trees[at].1.insert(key, definition);
     }
     Rules::new(trees.iter().map(|(r, tree)| (r.parse().unwrap(), tree)))
 }
