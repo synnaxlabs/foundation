@@ -85,11 +85,22 @@ state on `main`.
   and a size takes the budget of a size with no block in use (#270). A stream on
   another connection reads while one connection holds its budget (RECV WAITS). Still
   open: many connections before admission (#563), which also bounds the sum of
-  those heap buffers.
-- Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
-  reset to each address it spoofs, with no limit), #620 (a stop after the peer's
-  reset gives the peer the stream's window twice, so a peer grows the connection's
-  receive memory with no bound).
+  those heap buffers. Open: #1482 (an out-of-order frame that noq-proto's assembler
+  holds pins its whole receive allocation, up to 64 KiB, so a peer that sends such
+  frames holds more memory than the budget counts).
+- Each shard's endpoint sends at most one stateless reset to each address in each
+  20 ms window (#607). An address is an IPv4 address or the first 64 bits of an IPv6
+  address. Addresses hash into 65,536 buckets with a key from `Entropy`. Residual risk
+  (#655): a stranger with an ID from a failed dial still gets 50 resets a second for
+  each shard (N x 50 for a node of N shards) sent to each victim address, each smaller
+  than the datagram that caused it. A sender that can use the peer's address (it
+  spoofs it, shares the peer's NAT, or is in the peer's IPv6 /64) takes that peer's
+  resets, and the peer then ends at its idle timeout; peers that share an address
+  share 50 resets a second on each shard. One ID is enough, and a peer whose dial
+  completes gets new IDs with no limit: noq-proto issues a new ID each time the peer
+  retires one.
+- Open: #620 (a stop after the peer's reset gives the peer the stream's window twice,
+  so a peer grows the connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
   session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
   not valid, from one address, stopped every stateless reset; a small datagram of an

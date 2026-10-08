@@ -481,8 +481,31 @@ How to read this record:
   frame. A remote complete reader gets only the series of its view (M2): the home sends
   a frame of those series in the reader's entry order (HUB WIRE), and both ends charge
   that frame. The person chose this on 2026-10-05 ("B is approved ... send only partial
-  frames"), #267. The charge is part of the wire contract: a change to `block`'s header
-  or size classes needs a new wire version (C9d). The classes changed to four per
+  frames"), #267. Each complete session has a `delivery::complete::Charge`: `Whole` (a
+  local reader) spends the home's frame, and `Places` (a remote reader) spends the
+  frame of one series for each slot it lists that the frame holds, in listing order,
+  the first listing of a slot only. Catch-up uses the same `Charge`. So a remote
+  session pins home blocks up to its window times the ratio of the home's frame to its
+  view. laptop.architect decided this on 2026-10-07T22:47:54Z:
+  https://github.com/synnaxlabs/foundation/issues/1642#issuecomment-6048424611.
+  `home::reader::complete::Charge` re-exports it, and `home::Shard::open_complete` takes
+  it, so `hub` does not depend on `delivery`. The `Charge` adds about 7 ns per frame to
+  `release` with one `Whole` session; that is accepted, with the `Places` state boxed,
+  so that a `Whole` session grows by one pointer and not by the size of `Places`.
+  laptop.architect decided both on 2026-10-07T23:13:16Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048741570. The box2
+  rerun gave 8.0 ns per frame at one session and +4.0% at 16; laptop.architect ruled
+  on 2026-10-07T23:38:44Z that the acceptance covers it:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6049045510. The
+  `hash::Map` of those states adds about 0.3 ns per place to `release` at 100k places
+  (+10%); laptop.architect accepted it on 2026-10-07T23:32:22Z:
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185. One layout
+  type for this charge and the frame that `serve` sends, and the two `Places` costs at
+  100k places, are #1648; laptop.architect gave the OK to defer them on
+  2026-10-07T23:22:03Z:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
   window counts charges, not wire bytes. Per-connection framing in `wire` (X35) pins no
   pool memory and does not count. Credits apply only to complete delivery, which is
@@ -1903,7 +1926,19 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z, and
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6042831364,
-  2026-10-07T17:08:02Z).
+  2026-10-07T17:08:02Z). Amended (approved by `laptop.architect`,
+  2026-10-07T20:35:59Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046363822,
+  2026-10-07T20:47:58Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046560645, and
+  2026-10-07T20:51:39Z:
+  https://github.com/synnaxlabs/foundation/pull/1609#issuecomment-6046617974,
+  #1589): the rule is that a message `step` refuses or drops by its header gives no
+  claim. So it also gives no claim of a message for another node, from this node, or
+  from a second leader of this term (`Misrouted`, `Loopback`, `SecondLeader`). One
+  predicate, `Raft::reads`, holds each refusal and drop by the header, and decides
+  both. A grant or a proof that `step` reads past the header and then ignores is
+  still a claim (#1613 holds the design that removes the class).
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;
@@ -2613,38 +2648,47 @@ How to read this record:
   the same type that `wire` and `blob` carry. To change the chunk format or the boundary
   rule changes every root digest.
 - **BLOB STORE (#1226)** `blob::Store` keeps chunks by `types::digest::Digest` on the
-  node's disk through `env::files`. A put returns only after the chunk is durable. A put
-  of a digest that a put stored since the open makes no file call. A get gives bytes
-  only when they hash to the digest; a chunk that fails the check (a write torn by a
-  crash, a bad sector) reads as absent, so the caller fetches it again as for any absent
-  chunk, and the store counts each one in a crate-private count: an `interface` issue
-  makes it public, with a noun for a name, when the first caller (the node's status of
-  its disk) needs it. `env::files` has no rename, so a torn chunk must read as absent,
-  never as a short chunk. A get or a put holds at most one chunk in memory. `put`
-  borrows its chunk (`&Block`). A put whose future is dropped stores nothing that a get
-  gives unchecked: the next get of the digest reads and checks the file, and the next
-  put writes it again. Layout: one flat directory, one file per chunk named by the 64
-  hex digits of its digest, with the chunk's bytes and nothing else, so the bytes are
-  their own check and the layout needs no header, no check field, and no rename. A pack
-  file with an index lost: it needs record headers, a scan of every byte at open, and
-  compaction for removal. Removal of chunks that no kept root reaches is a follow-up.
-  Decided by `laptop.architect` (2026-10-07T17:23:56Z):
-  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. The open
+  node's disk through `env::files`. A put returns only after the chunk is durable. A get
+  gives bytes only when they hash to the digest; a chunk that fails the check (a write
+  torn by a crash, a bad sector) reads as absent, so the caller fetches it again as for
+  any absent chunk, and the store counts each one in a crate-private count: an
+  `interface` issue makes it public, with a noun for a name, when the first caller (the
+  node's status of its disk) needs it. A get or a put holds at most one chunk in memory.
+  `put` borrows its chunk (`&Block`). Layout: one flat directory, one file per chunk
+  named by the 64 hex digits of its digest, with the chunk's bytes and nothing else, so
+  the bytes are their own check and the layout needs no header, no check field, and no
+  rename. A pack file with an index lost: it needs record headers, a scan of every byte
+  at open, and compaction for removal. Removal of chunks that no kept root reaches is a
+  follow-up. Decided by `laptop.architect` (2026-10-07T17:23:56Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6043124789. A torn
+  chunk reads as absent, never as a short chunk, because the bytes are their own check.
+  A write to a second name and a rename (`File::rename`, #1503) lost: each chunk then
+  has a second name, a crash leaves strays at that name, and the open needs a rule for
+  them. Decided by `laptop.architect` (2026-10-07T20:47:57Z), item 1:
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6046560177.
+  Supersedes the reason "`env::files` has no rename" of the rules in
+  https://github.com/synnaxlabs/foundation/issues/1226 (2026-10-07T06:59:56Z). The open
   lists the directory and trusts no name: a get of a listed digest reads and checks its
   bytes, and a put of one writes it again, because a process crash leaves whole bytes in
   the cache that no sync covers, and a put that trusted a read of them would return
   before they are durable. A put refuses a chunk longer than the largest block of the
-  pool before any file call. Decided by the builder (#1515,
+  pool before any file call. A put of a digest that a put stored since the open makes no
+  file call. A put whose future is dropped stores nothing that a get gives unchecked:
+  the next get of the digest reads and checks the file, and the next put writes it
+  again. Decided by the builder (#1515,
   https://github.com/synnaxlabs/foundation/pull/1515) and `laptop.architect`
   (2026-10-07T17:47:50Z):
   https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043557708. Supersedes
   the read on the first put of a listed digest in the plan
   (https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6042962010) and the
-  sentence of item 1 of the ruling, "the next put or get of the digest reads the file
-  first". Every open makes the directory and syncs its parent, because an earlier open
-  can have stopped between the two. A put removes a file of another length at its name
-  and writes the chunk. Decided in review round 1 of #1515 (2026-10-07T17:56:25Z):
-  https://github.com/synnaxlabs/foundation/pull/1515#issuecomment-6043700902.
+  sentence of item 1 of the 17:23:56Z ruling, "the next put or get of the digest reads
+  the file first". Every open makes the directory and syncs its parent, because an
+  earlier open can have stopped between the two. A put removes a file of another length
+  at its name and writes the chunk. A create that gives `Full` syncs the directory one
+  time and opens again, because `Files::remove` counts the room of a removed file as
+  used until `sync_dir` on its directory ends. A second `Full` is the error of the put.
+  Decided by `laptop.architect` (2026-10-07T20:47:57Z):
+  https://github.com/synnaxlabs/foundation/issues/1226#issuecomment-6046560177.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
