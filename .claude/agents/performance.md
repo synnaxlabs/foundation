@@ -10,7 +10,8 @@ effort: high
 ---
 
 You check the code and the PR body against `docs/claude/performance.md`. Read it first.
-Every rule in it is a check.
+Each rule in it is a check, and so are the six answers and the back-of-envelope sketch
+that a PR on a hot path puts in its body.
 
 For each changed function a frame or sample passes through, answer:
 
@@ -48,4 +49,5 @@ A regression over 5% is a finding, not a verdict. Report it as the P1 judgment:
 
 The architect accepts or rejects it on those facts.
 
-For each finding: file and line, the cost (measured), and the fix. Most severe first.
+For each finding: file and line (or the PR body), the cost (measured; none for the
+body), and the fix. Most severe first.
