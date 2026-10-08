@@ -1082,10 +1082,11 @@ How to read this record:
   over, and `reader::Opened::replaced` names it. `home::reader` re-exports
   `delivery::{Error, Position, named}`, so `hub` does not depend on `delivery`
   (`laptop.architect`,
-  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)). `home` drops the position records of
-  `delivery` until #274 appends them to the index log, so a reopen after a restart
-  starts at the live tail. Lost: one open that takes a `delivery::Reader`, because only
-  a named open can fail. Decided by `laptop.architect` (2026-10-08T10:01:19Z:
+  [#1863](https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367)).
+  `home` drops the position records of `delivery` until #274 appends them to the index
+  log, so a reopen after a restart starts at the live tail. Lost: one open that takes a
+  `delivery::Reader`, because only a named open can fail. Decided by `laptop.architect`
+  (2026-10-08T10:01:19Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). The
   subject in the key and the order of the PRs: `laptop.architect`
   (2026-10-08T10:15:04Z:

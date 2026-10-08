@@ -527,9 +527,10 @@ impl Shard {
     /// as [`open_complete`](Self::open_complete) does, but it starts at the reader's
     /// last acked position while the reader holds one: its session is open, or it
     /// closed less than its `hold` ago. Else it starts at the live tail. It takes over
-    /// the open session of the same reader, in either mode. After a close, the reader holds its position for `hold`, in mesh time.
-    /// When the position is below the frames that memory keeps, the reader gets no
-    /// frame: [`take`](Self::take) gives [`Next::Behind`](reader::Next::Behind).
+    /// the open session of the same reader, in either mode. After a close, the reader
+    /// holds its position for `hold`, in mesh time. When the position is below the
+    /// frames that memory keeps, the reader gets no frame: [`take`](Self::take) gives
+    /// [`Next::Behind`](reader::Next::Behind).
     ///
     /// # Errors
     ///
@@ -3751,7 +3752,8 @@ mod tests {
                     .expect("synced")
             }
 
-            /// Opens the named latest reader `name` of `subject` on the index at slot 0.
+            /// Opens the named latest reader `name` of `subject` on the index at
+            /// slot 0.
             fn latest(
                 shard: &mut Shard,
                 subject: &str,
