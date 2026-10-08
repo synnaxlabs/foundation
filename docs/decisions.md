@@ -4656,12 +4656,14 @@ How to read this record:
   placement, else remove it from the placement": `Overlap` occurs only when the
   placement names no `home`, and a removal that leaves no node gives
   `config.empty-placement`. Two inputs need two edits. In the first, the node is the
-  one node of `p`, and `p` wins for a connector on another node, or for an index of
-  one. The move then gives `config.connector-home`, whose fix plans. `Unplaced::fix` is
-  static and cannot name that connector (`laptop.architect`, 2026-10-08T16:51:46Z,
+  one node of `p`, and `p` wins for a connector on another node. The move then gives
+  `config.connector-home`, whose fix plans. `Unplaced::fix` is static and cannot name
+  that connector (`laptop.architect`, 2026-10-08T16:51:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 2,
   changed by `laptop.architect`, 2026-10-08T17:23:56Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065346716).
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065346716, and at
+  2026-10-08T17:30:22Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6065460014).
   In the second, `p` names two or more nodes, and each is the node of an `Overlap` of
   `p`. The removals then give `config.empty-placement`, whose fix names a node
   (`laptop.architect`, 2026-10-08T17:11:23Z,
