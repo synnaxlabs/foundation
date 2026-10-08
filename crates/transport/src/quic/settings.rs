@@ -935,6 +935,21 @@ mod tests {
             }
         }
 
+        #[test]
+        fn at_an_idle_of_10_s_come_at_most_1_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let pair = Pair::new(shard, idle, DELAY);
+                let pair = unanswered(pair, Duration::from_secs(8));
+                gaps(&pair.client, 0)
+            });
+            assert!(gaps.len() >= 5, "{gaps:?}");
+            assert!(
+                gaps.iter().all(|&gap| gap <= Duration::from_secs(1)),
+                "{gaps:?}"
+            );
+        }
+
         // A round trip of 1.2 s with no second sample gives a probe timeout over 2 s.
         #[test]
         fn never_come_before_the_probe_timeout() {
@@ -947,6 +962,35 @@ mod tests {
             let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY).collect();
             assert!(probes.len() >= 10, "{gaps:?}");
             assert!(probes.iter().all(|&&gap| gap > GAP_MAX), "{gaps:?}");
+        }
+
+        // A round trip of 1.6 s makes the cap 1.5 round trips, 2.4 s, over 2 s.
+        #[test]
+        fn on_a_round_trip_of_1_6_s_come_up_to_2_4_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let mut pair = pair(shard, Duration::from_millis(800));
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(10));
+                let connection = pair.client.connection();
+                let stream = connection.streams().open(Dir::Uni).expect("a stream");
+                for _ in 0..30 {
+                    let connection = pair.client.connection();
+                    let mut send = connection.send_stream(stream);
+                    assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+                    pair.run(Duration::from_secs(3));
+                }
+                pair.server.silent = true;
+                let connection = pair.client.connection();
+                let mut send = connection.send_stream(stream);
+                assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+                pair.client.sent.clear();
+                pair.run(Duration::from_secs(60));
+                gaps(&pair.client, 0)
+            });
+            let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY).collect();
+            assert!(probes.iter().any(|&&gap| gap > GAP_MAX), "{gaps:?}");
+            let cap = Duration::from_millis(2_400);
+            assert!(probes.iter().all(|&&gap| gap <= cap), "{gaps:?}");
         }
 
         #[test]
