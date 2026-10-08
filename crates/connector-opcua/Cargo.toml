@@ -19,8 +19,13 @@ cc = { workspace = true, optional = true }
 cc = { workspace = true }
 # Turns on `open62541`, since the bench host runs no features.
 connector-opcua = { path = ".", features = ["open62541"] }
+counting = { path = "../counting" }
 divan = { workspace = true }
 sim = { path = "../sim" }
+
+[[test]]
+name = "alloc"
+harness = false
 
 [[bench]]
 name = "run"
