@@ -67,12 +67,12 @@ fn refused(code: &'static str, at: u32, message: &str, fix: &str) -> Diagnostic 
     Diagnostic::new(Code::new(code), self::at(at), message.into(), fix.into())
 }
 
-/// The diagnostic for a second `reader` block at 95, after the one of `config`.
+/// The diagnostic for another `reader` block at 95, after the one of `config`.
 fn second_reader() -> Diagnostic {
     let mut second = refused(
         "document.repeated-block",
         95,
-        "the connector has a second `reader` block",
+        "the connector has another `reader` block",
         "Join the two into one",
     );
     second.notes.push(Note {
@@ -369,7 +369,7 @@ fn refuses_what_the_reader_block_does_not_take() {
             refused(
                 "document.label-count",
                 55,
-                "the `reader` block has 1 label, and it takes none",
+                "the `reader` block has 1 label, and it takes no labels",
                 "Remove each label, and name the reader with a `name` attribute",
             ),
             refused(

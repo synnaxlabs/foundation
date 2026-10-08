@@ -41,8 +41,8 @@ pub struct Settings {
 /// # Errors
 ///
 /// One diagnostic for each problem: an unknown key, no `select`, a value that does
-/// not read, a label, attribute, or block in `reader` that it does not take, a second
-/// `reader` block, a negative `hold`, and a `hold` in `latest` mode, since only a
+/// not read, a label, attribute, or block in `reader` that it does not take, each
+/// `reader` block after the first, a negative `hold`, and a `hold` in `latest` mode, since only a
 /// complete reader holds.
 ///
 /// # Panics
@@ -117,8 +117,7 @@ fn block(
         .map(|name| keep(document::read::name(&name.value), diagnostics));
     let mode = attribute("mode").map(|mode| keep(self::mode(&mode.value), diagnostics));
     let hold = attribute("hold");
-    let span =
-        hold.map(|hold| keep(document::read::duration(&hold.value), diagnostics));
+    let span = hold.map(|hold| keep(document::read::span(&hold.value), diagnostics));
     if let (Some(hold), Some(Some(Mode::Latest))) = (hold, mode) {
         diagnostics.push(Diagnostic::new(
             LATEST_HOLD,

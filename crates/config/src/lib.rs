@@ -561,13 +561,13 @@ mod tests {
                 refused(
                     "document.label-count",
                     at(0, 0),
-                    "the `node_settings` block has no labels, and it takes 1",
+                    "the `node_settings` block has no labels, and it takes 1 label",
                     fix,
                 ),
                 refused(
                     "document.label-count",
                     at(0, 102),
-                    "the `node_settings` block has 3 labels, and it takes 1",
+                    "the `node_settings` block has 3 labels, and it takes 1 label",
                     fix,
                 ),
             ])
@@ -2581,7 +2581,7 @@ mod tests {
                     refused(
                         "document.label-count",
                         at(0, 2),
-                        "the `channel` block has 2 labels, and it takes 1",
+                        "the `channel` block has 2 labels, and it takes 1 label",
                         "Give the block one label, its name, such as \"site_a.budget\"",
                     ),
                     unknown(

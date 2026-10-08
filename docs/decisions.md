@@ -343,7 +343,7 @@ How to read this record:
   pressure, but at `0s` a reader a few milliseconds behind loses each sample it reads
   from disk, and each read needs `keep` and a clock. Stale commands are the job of
   `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
-  `keep` reads with `document::read::duration`, which refuses a negative span with
+  `keep` reads with `document::read::span`, which refuses a negative span with
   `document.negative-span` at the `keep` value, as it does a reader `hold` (S10,
   DOCUMENT KEYS).
   Ruling and answers:
@@ -3895,11 +3895,16 @@ How to read this record:
   `laptop.architect-2` at 2026-10-08T03:54:12Z
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
   `read::labels::<N>` checks that a block has `N` labels (`document.label-count`),
-  `read::repeated` reports each second block of a keyword that takes one
-  (`document.repeated-block`), and `read::duration` reads a span of zero or more
-  (`document.negative-span`). `config` and `connector::reader` use them, and the
-  `config.*` codes for these went. Decided by `laptop.architect-2` on #1785
-  (RULING_LINK).
+  `read::repeated` reports each block of a keyword that takes one after the first
+  (`document.repeated-block`), and `read::span` refuses a span below zero
+  (`document.negative-span`), since each attribute that reads a span needs zero or
+  more. The first attribute that takes a negative span adds its own reader, named for
+  its meaning, such as an offset. `config` and `connector::reader` use them, and the
+  `config.*` codes for these went. Lost: `read::duration` beside `read::span`, since
+  A9 names `Span` of any sign a duration; `unknown` with a count for each block, which
+  changes each caller of `unknown` for one caller of `repeated`. Decided by
+  `laptop.architect-2` at 2026-10-08T07:04:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
