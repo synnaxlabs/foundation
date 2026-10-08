@@ -63,9 +63,11 @@
   task can hold the socket after `lock` drops, until the runtime of shard 0 drops,
   before `Node::join` returns: with a socket that works, the task ends only once each
   connection drained and the runtime polls it. #2017 makes shard 0 wait for the task
-  before it drops `lock`, by `laptop.architect-2` (21:58 UTC, words of 22:23 UTC):
+  before it drops `lock`, by `laptop.architect-2` (21:58 UTC, words of 22:23 UTC and
+  22:47 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529.
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070577797.
   Supersedes the port clause of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. No test
   sees the drop of the transport itself: the end of shard 0 drops the carrier's task,
