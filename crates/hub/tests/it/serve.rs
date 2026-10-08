@@ -19,7 +19,7 @@ use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code, Port, Transport};
 use types::channel;
 use types::frame::Path as FramePath;
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::{PrivateKey, PublicKey};
 use types::sample::Type;
 use types::time::Span;
 use wire::Protocol;
