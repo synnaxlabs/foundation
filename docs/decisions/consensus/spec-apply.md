@@ -5,27 +5,29 @@
   it, and proposes nothing. `mesh` defines no problem of its own. `homes` maps index
   names to node names (S12 (placement part) + B7). An index that `definitions` does not
   hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
-  give `Error::Homes`, both before the read of the base tree. A node name that no
-  member has gives `Error::UnknownNode`, after `Error::NoVote` and before the first
-  put. None of them proposes anything. `Homes` right after `NotIndex` decided by
-  `laptop.architect`, 2026-10-08T17:01:08Z
+  give `Error::Homes`, both before the read of the base tree. Between the two, it keeps
+  of `homes` only each index with no home in this node's state, and `Homes` and
+  `UnknownNode` count only those (`laptop.architect`, 2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A node
+  name that no member has gives `Error::UnknownNode`, after `Error::NoVote` and before
+  the first put. None of them proposes anything. `Homes` right after `NotIndex` decided
+  by `laptop.architect`, 2026-10-08T17:01:08Z
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210), and
   the order as a whole approved at 2026-10-08T17:15:26Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065202125). It then
-  builds the tree with `spec::region::tree`. The change lists each chunk of the new
-  tree that the tree of the base lacks, or each chunk of the new tree when
-  `Config::store`, the node's `blob::Store`, cannot give the tree of the base. A change
-  that lists more than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and
-  proposes nothing. A base root whose chunk is not a tree node is a base tree that the
-  store cannot give. The node counts itself as the one holder. When the holders are
-  not a majority of each half of the voters, before the propose or at the apply, the
-  call gives `Error::Quorum { held, voters }` for the first half that lacks one, the
-  incoming half first. The count before the propose costs no entry and no put. The node
-  then puts each chunk of the new tree in its store, not only the listed ones, because
-  `diff` never reads a chunk that the two trees share, so a chunk that the store lost is
-  found only by a put. On `Ok`, a put of each chunk of the new tree has returned. BLOB
-  STORE gives what a put holds after a fault. Decided by `laptop.architect`,
-  2026-10-08T12:13:51Z
+  builds the tree with `spec::region::tree`. The change lists each chunk of the new tree
+  that the tree of the base lacks, or each chunk of the new tree when `Config::store`,
+  the node's `blob::Store`, cannot give the tree of the base. A change that lists more
+  than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A
+  base root whose chunk is not a tree node is a base tree that the store cannot give.
+  The node counts itself as the one holder. When the holders are not a majority of each
+  half of the voters, before the propose or at the apply, the call gives `Error::Quorum
+  { held, voters }` for the first half that lacks one, the incoming half first. The
+  count before the propose costs no entry and no put. The node then puts each chunk of
+  the new tree in its store, not only the listed ones, because `diff` never reads a
+  chunk that the two trees share, so a chunk that the store lost is found only by a put.
+  On `Ok`, a put of each chunk of the new tree has returned. BLOB STORE gives what a put
+  holds after a fault. Decided by `laptop.architect`, 2026-10-08T12:13:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), which
   supersedes the postcondition of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
