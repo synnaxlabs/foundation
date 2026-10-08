@@ -121,6 +121,20 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        match self {
+            Self::Empty => "Write a unit such as kPa, or remove the unit",
+            Self::Long { .. } => "Use a unit of at most 32 bytes",
+            Self::Character { .. } => {
+                "Use only printable ASCII characters with no space, such as m/s2"
+            }
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

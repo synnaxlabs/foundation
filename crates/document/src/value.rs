@@ -43,6 +43,23 @@ pub enum Kind {
     Call(Call),
 }
 
+impl Kind {
+    /// The noun for the kind, with its article: "a string", "an integer".
+    #[must_use]
+    pub const fn noun(&self) -> &'static str {
+        match self {
+            Self::Bool(_) => "a bool",
+            Self::Integer(_) => "an integer",
+            Self::Float(_) => "a float",
+            Self::String(_) => "a string",
+            Self::Reference(_) => "a reference",
+            Self::List(_) => "a list",
+            Self::Map(_) => "a map",
+            Self::Call(_) => "a call",
+        }
+    }
+}
+
 /// A finite float. It stores -0.0 as 0.0, so equal floats have equal bits.
 #[derive(Clone, Copy, Debug)]
 pub struct Float(f64);
@@ -99,6 +116,27 @@ impl Eq for Call {}
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn names_each_kind_with_its_article() {
+        let call = Call {
+            function: "node".into(),
+            function_span: None,
+            arguments: Vec::new(),
+        };
+        for (kind, noun) in [
+            (Kind::Bool(true), "a bool"),
+            (Kind::Integer(7), "an integer"),
+            (Kind::Float(Float::new(1.5).unwrap()), "a float"),
+            (Kind::String("200GiB".into()), "a string"),
+            (Kind::Reference("site_a".parse().unwrap()), "a reference"),
+            (Kind::List(Vec::new()), "a list"),
+            (Kind::Map(Map::default()), "a map"),
+            (Kind::Call(call), "a call"),
+        ] {
+            assert_eq!(kind.noun(), noun);
+        }
+    }
 
     mod float {
         use super::*;

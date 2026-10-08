@@ -35,6 +35,25 @@ pub enum Kind<R = channel::Key> {
     Data(Data<R>),
 }
 
+impl<R> Kind<R> {
+    /// Each edge that the channel has, and the channel that it points at, in this
+    /// order: the error then the control channel of an index, or the index then the
+    /// quality channel of a data channel.
+    pub fn edges(&self) -> impl Iterator<Item = (Edge, &R)> {
+        let edges = match self {
+            Self::Index { error, control } => [
+                error.as_ref().map(|to| (Edge::Error, to)),
+                control.as_ref().map(|to| (Edge::Control, to)),
+            ],
+            Self::Data(data) => [
+                Some((Edge::Index, data.index())),
+                data.quality().map(|to| (Edge::Quality, to)),
+            ],
+        };
+        edges.into_iter().flatten()
+    }
+}
+
 /// A data channel: what its values are, their unit, and the channels it points at.
 /// `R` is how an edge names the channel that it points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +208,33 @@ mod tests {
     ];
     const OTHERS: [Scalar; 4] =
         [Scalar::Bool, Scalar::Stamp, Scalar::Span, Scalar::Uuid];
+
+    fn data_on_time(quality: Option<&'static str>) -> Kind<&'static str> {
+        let data_type = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+        Kind::Data(Data::new("edge.time", quality, data_type, None).unwrap())
+    }
+
+    #[test]
+    fn gives_each_edge_in_order() {
+        let index = |error, control| Kind::Index { error, control };
+        for (kind, edges) in [
+            (index(None, None), vec![]),
+            (index(Some("e"), None), vec![(Edge::Error, "e")]),
+            (index(None, Some("c")), vec![(Edge::Control, "c")]),
+            (
+                index(Some("e"), Some("c")),
+                vec![(Edge::Error, "e"), (Edge::Control, "c")],
+            ),
+            (data_on_time(None), vec![(Edge::Index, "edge.time")]),
+            (
+                data_on_time(Some("q")),
+                vec![(Edge::Index, "edge.time"), (Edge::Quality, "q")],
+            ),
+        ] {
+            let found: Vec<_> = kind.edges().map(|(edge, &to)| (edge, to)).collect();
+            assert_eq!(found, edges, "{kind:?}");
+        }
+    }
 
     fn shapes(element: Scalar) -> [DataType; 4] {
         [

@@ -27,7 +27,7 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
     }
     let mut problems = Vec::new();
     for (name, channel) in channels {
-        for (edge, to) in edges(&channel.kind).into_iter().flatten() {
+        for (edge, &to) in channel.kind.edges() {
             match keys.get(&to) {
                 None => problems.push(Problem::Dangling {
                     from: name.clone(),
@@ -48,19 +48,6 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
         }
     }
     problems
-}
-
-fn edges(kind: &Kind) -> [Option<(Edge, channel::Key)>; 2] {
-    match kind {
-        Kind::Index { error, control } => [
-            error.map(|to| (Edge::Error, to)),
-            control.map(|to| (Edge::Control, to)),
-        ],
-        Kind::Data(data) => [
-            Some((Edge::Index, *data.index())),
-            data.quality().map(|to| (Edge::Quality, *to)),
-        ],
-    }
 }
 
 /// An edge to a missing or wrong channel. `Display` gives the message: a lower-case
