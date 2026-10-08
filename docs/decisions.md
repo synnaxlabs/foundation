@@ -4121,8 +4121,8 @@ How to read this record:
   2026-10-08T05:49:53Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6053298142),
   which also decided that `config.subject-is-connector` and its test go in the PR that
-  merges second: this `config` part of #1755, or the #1153 PR that adds `connector`
-  blocks to `config::check`.
+  merges second: #1823, or the #1153 PR that adds `connector` blocks to
+  `config::check`.
 - **REGION PREFIX** `access::Rules::new` takes the definitions of each region tree,
   with the region as a `types::name::Prefix`; `Prefix::ROOT` is the root region. Access
   picks out the policies and connectors itself. A policy reaches a name when
