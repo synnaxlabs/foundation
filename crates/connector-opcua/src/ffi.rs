@@ -12,6 +12,7 @@ pub(crate) struct Status(pub(crate) u32);
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
     pub(crate) const BAD_DECODING_ERROR: Self = Self(0x8007_0000);
+    pub(crate) const BAD_ENCODING_LIMITS_EXCEEDED: Self = Self(0x8008_0000);
     #[cfg(test)]
     pub(crate) const BAD_INTERNAL_ERROR: Self = Self(0x8002_0000);
 

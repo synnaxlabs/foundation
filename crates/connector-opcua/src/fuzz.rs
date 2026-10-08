@@ -36,11 +36,14 @@ pub fn decode(data: &[u8]) {
         once.len(),
         "{name}: the size is not the encoded size"
     );
-    // A `Variant` of N `ExtensionObject` values decodes only when 4N bytes follow its
-    // length (#435), so only an encoding that fails to decode gets zeros after it.
+    // A `Variant` of `ExtensionObject` values decodes only when 4 bytes follow its
+    // length for each value, and the header of the first value fits at each value
+    // (#435). So only an encoding that fails one of those checks gets zeros after it.
     let (again, read) = Value::decode(data_type, &once)
         .or_else(|e| {
-            if e != Status::BAD_DECODING_ERROR {
+            if e != Status::BAD_DECODING_ERROR
+                && e != Status::BAD_ENCODING_LIMITS_EXCEEDED
+            {
                 return Err(e);
             }
             let mut padded = once.clone();
@@ -240,6 +243,38 @@ mod tests {
         data.extend(extension_objects());
         // The input decodes only with the 4 bytes for each value that #435 needs.
         data.extend([0; 7]);
+        decode(&data);
+    }
+
+    /// A `Variant` of a `Range`, whose header is 5 bytes, and a null
+    /// `ExtensionObject` of 3 bytes, then 8 bytes it does not read.
+    fn range_then_null() -> Vec<u8> {
+        let mut bytes = vec![0x96, 2, 0, 0, 0, 0x01, 0, 0x76, 0x03, 0x01, 16, 0, 0, 0];
+        bytes.extend([0; 16]);
+        bytes.extend([0, 0, 0]);
+        bytes.extend([0; 8]);
+        bytes
+    }
+
+    // When this fails, #435 is fixed: remove the padding from `decode`.
+    #[test]
+    fn each_extension_object_needs_the_header_of_the_first() {
+        let variant = &ffi::types()[VARIANT];
+        let bytes = range_then_null();
+        let (value, read) = Value::decode(variant, &bytes)
+            .map_err(Status::name)
+            .unwrap();
+        assert_eq!(read, bytes.len() - 8);
+        let once = value.encode().map_err(Status::name).unwrap();
+        assert_eq!(once, bytes[..read]);
+        let error = Value::decode(variant, &once).err().unwrap();
+        assert_eq!(error.name(), "BadEncodingLimitsExceeded");
+    }
+
+    #[test]
+    fn decode_round_trips_a_range_then_a_null_extension_object() {
+        let mut data = vec![u8::try_from(VARIANT).unwrap(), 0];
+        data.extend(range_then_null());
         decode(&data);
     }
 
