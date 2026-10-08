@@ -5,12 +5,18 @@ use types::sample::Scalar;
 use crate::{Decoder, Error, Layout, VECTOR_LEN};
 
 /// Checks that each sample of a `String` series is UTF-8, given its raw `ends`, which
-/// are valid, and its `elements`.
+/// are valid, and its `elements`. It checks from the first vector of elements that is
+/// not ASCII.
 pub(crate) fn raw(ends: &[u8], elements: &[u8]) -> Result<(), Error> {
-    if elements.is_ascii() {
+    let Some(vector) = elements
+        .chunks(VECTOR_LEN)
+        .position(|vector| !vector.is_ascii())
+    else {
         return Ok(());
-    }
-    check(Pieces::Raw(Some(ends)), 0, elements, Pieces::Raw(None))
+    };
+    let from = vector.strict_mul(VECTOR_LEN);
+    let piece = elements.split_at(from).1;
+    check(Pieces::Raw(Some(ends)), from, piece, Pieces::Raw(None))
 }
 
 /// Checks that each sample of an encoded `String` series of `count` samples is UTF-8,
