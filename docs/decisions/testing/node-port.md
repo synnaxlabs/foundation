@@ -66,18 +66,23 @@
   it, since a new key is a new node to its region. Each other file error on `node.key`
   gives `Error::Directory`. The form is not a contract: only `node` reads it. The seal
   key goes into `node.key` with its first caller, as the tag `foundation/key/2` with 32
-  more bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. `os` makes each
-  file `0600` and each directory `0700` (#1988):
+  more bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. #1988 makes `os`
+  give each file the mode `0600` and each directory `0700`; until then `os` gives `0644`
+  and `0755`:
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
   plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
   time of a new key and the load point, by `laptop.architect-2` (20:10 UTC):
-  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The
-  write back at each start is the fix of a finding of `breaker` in round 1 of #1991.
-  While a Rust caller gives `Config::region`, a founding with a dangling index or two
-  channels of one key makes shard 0 panic. The first PR that gives `node` a
-  `spec::region::check` before each define (#1744 or #1957 PR 2) runs it on
-  `Config::region` too, and then a founding with problems defines no channel (#1741), by
-  `laptop.architect-2`:
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The load
+  point after each buffer opens, the private pool, and the rank above `Error::Blob` and
+  `Error::Mesh` are the amendment
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068057306, which
+  the same comment approves. This supersedes `Config::private_key`, the patch of
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047. The write
+  back at each start is the fix of a finding of `breaker` in round 1 of #1991. While a
+  Rust caller gives `Config::region`, a founding with a dangling index or two channels
+  of one key makes shard 0 panic. The first PR that gives `node` a `spec::region::check`
+  before each define (#1744 or #1957 PR 2) runs it on `Config::region` too, and then a
+  founding with problems defines no channel (#1741), by `laptop.architect-2`:
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
   https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068089189 and
   https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507.

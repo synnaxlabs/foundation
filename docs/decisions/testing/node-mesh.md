@@ -1,11 +1,14 @@
 - **NODE MESH (#585, 2026-10-08)** The node's key and private key come from the file
-  `node.key` (NODE PORT, amended for #1660). `Config::region:
-  Option<mesh::region::Founding>` gives the region that the node is a member of: its
-  prefix, its members (one card has the node's key), the voters before the first entry
-  of the log, and its founding definitions. The caller gives the same region at each
-  start: the node keeps no copy of it. `None` opens no mesh, and the hub of each task
-  then gets no mesh: a node runs with no region before it founds or joins one. Changed
-  by `laptop.architect`, 2026-10-08T18:42:42Z
+  `node.key` (NODE PORT, amended for #1660, by `laptop.architect-2`, 19:52 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831). This
+  supersedes `Config::key` and `Config::private_key` of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452.
+  `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
+  member of: its prefix, its members (one card has the node's key), the voters before
+  the first entry of the log, and its founding definitions. The caller gives the same
+  region at each start: the node keeps no copy of it. `None` opens no mesh, and the hub
+  of each task then gets no mesh: a node runs with no region before it founds or joins
+  one. Changed by `laptop.architect`, 2026-10-08T18:42:42Z
   (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536). The
   long-term path takes it out of `Config`: the node keeps its membership in its data
   directory when it founds or joins, and reads it at each start.
