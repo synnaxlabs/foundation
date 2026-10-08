@@ -195,15 +195,13 @@ impl Node {
                 return Self::failed(Error::Port { listen, error });
             }
         };
-        let (mesh, clock) = clock::Clock::new(config.clock.clone());
         let endpoint = Endpoint {
             part: part.expect("invariant: a port splits into the parts asked for"),
             region: config.region.clone(),
-            monotonic: config.clock.clone(),
-            clock,
+            clock: config.clock.clone(),
             entropy: config.entropy.clone(),
         };
-        Self::launch(config, endpoint, mesh, parts.into_iter().zip(0..count))
+        Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
     /// A node that failed with `error` before any shard started.
@@ -217,11 +215,10 @@ impl Node {
     }
 
     /// Starts the shards of `config`, each with its part and its number in `parts`.
-    /// Shard 0 runs `mesh`, the clock that `endpoint` reads, and opens `endpoint`.
+    /// Shard 0 opens `endpoint`.
     fn launch<M: block::Memory + 'static>(
         config: Config<M>,
         endpoint: Endpoint,
-        mesh: clock::Clock,
         parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
         let Config {
@@ -237,10 +234,11 @@ impl Node {
         let cores = shards.cores().get();
         let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
-        let clock = endpoint.clock.clone();
+        let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let serve = Serve {
             interner: last,
             inbox,
+            time: clock.clone(),
             endpoint,
         };
         let roles = Role::all(mesh, wall, first, serve, cores);
@@ -598,10 +596,12 @@ impl Open {
 }
 
 /// What shard 0 serves the node's tasks and port with: the interner, once the last
-/// shard has opened its buffer, the tasks given to the node, and its endpoint.
+/// shard has opened its buffer, the tasks given to the node, the node's clocks, and
+/// its endpoint.
 struct Serve {
     interner: Take<Interner>,
     inbox: task::Inbox<task::Task>,
+    time: clock::Reader,
     endpoint: Endpoint,
 }
 
@@ -611,32 +611,29 @@ struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
     region: Option<mesh::region::Founding>,
-    monotonic: env::clock::Clock,
-    /// The node's clocks, which time a new key.
-    clock: clock::Reader,
+    clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }
 
 impl Endpoint {
-    /// Loads the node's identity from `files` ([`identity::load`]), then opens the
-    /// node's transport on `pool` and `tasks`, then, when the node has a region, the
-    /// chunk store in directory [`directory::blob`] of `files`, and the mesh of that
-    /// region over both, in directory [`directory::mesh`]. Gives the error of an
-    /// identity, a store, or a mesh that did not load or open.
+    /// Opens the node's transport on `pool` and `tasks` with `identity`, then, when the
+    /// node has a region, the chunk store in directory [`directory::blob`] of `files`,
+    /// and the mesh of that region over both, in directory [`directory::mesh`]. Gives
+    /// the error of a store or a mesh that did not open.
     async fn open(
         self,
+        identity: identity::Identity,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), Error> {
-        let identity = identity::load(&files, &self.clock, &self.entropy).await?;
         let config = transport::Config {
             private_key: identity.private_key.clone(),
             message_bytes_max: MESSAGE,
             window_bytes: WINDOW,
             streams_max: STREAMS,
             idle: IDLE,
-            clock: self.monotonic.clone(),
+            clock: self.clock.clone(),
             entropy: self.entropy.clone(),
             tasks: tasks.clone(),
             pool: Rc::clone(&pool),
@@ -660,7 +657,7 @@ impl Endpoint {
             founding: region,
             files,
             dir: directory::mesh(),
-            clock: self.monotonic,
+            clock: self.clock,
             entropy: self.entropy,
             tasks,
             pool,
@@ -673,14 +670,15 @@ impl Endpoint {
 }
 
 impl Serve {
-    /// Opens the endpoint, then runs each task given with a hub over `home` that knows
-    /// each channel of the region's founding spec, and serves the node's port, until
-    /// `guard` completes or the transport stops. A transport that stops goes into
-    /// `failed` before any task drops. Then drops the tasks, the hub, `home`, `guard`,
-    /// each session and stream future, and the mesh, and waits for each task of the
-    /// mesh to end, the last of which drops the transport. Runs no task and takes no
-    /// session when a shard did not open, or when the mesh did not open, which goes
-    /// into `failed`.
+    /// Loads the node's identity ([`identity::load`]) and opens the endpoint, then
+    /// runs each task given with a hub over `home` that knows each channel of the
+    /// region's founding spec, and serves the node's port, until `guard` completes or
+    /// the transport stops. A transport that stops goes into `failed` before any task
+    /// drops. Then drops the tasks, the hub, `home`, `guard`, each session and stream
+    /// future, and the mesh, and waits for each task of the mesh to end, the last of
+    /// which drops the transport. Runs no task and takes no session when a shard did
+    /// not open, or when the identity did not load or the mesh did not open, which
+    /// goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -698,6 +696,13 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
+        let identity =
+            match identity::load(&files, &pool, &self.time, &self.endpoint.entropy)
+                .await
+            {
+                Ok(identity) => identity,
+                Err(error) => return fail(error),
+            };
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -713,11 +718,14 @@ impl Serve {
                 }
             }));
         }
-        let (transport, mesh) =
-            match self.endpoint.open(files, pool, tasks.clone()).await {
-                Ok(opened) => opened,
-                Err(error) => return fail(error),
-            };
+        let (transport, mesh) = match self
+            .endpoint
+            .open(identity, files, pool, tasks.clone())
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) => return fail(error),
+        };
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // The port's future holds the mesh, so it drops before the wait.
         {

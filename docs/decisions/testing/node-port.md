@@ -51,14 +51,16 @@
   https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
   Once each buffer has opened, shard 0 reads the node's key and private key from the
-  file `node.key` in the data directory, before the transport and the mesh open. The
-  file is 68 bytes: the tag `foundation/key/1`, the node key (UUIDv7, big-endian), the
-  Ed25519 private key, and the CRC32C of those 64 bytes (little-endian). It is one
-  sector, which a crash keeps whole or old. At the first start, shard 0 makes the file
-  with `Mode::Create`; 68 zero bytes are a key not yet written, so shard 0 makes a key
-  (`types::node::Key::v7` at mesh time, once it has one, from `Config::entropy`, and 32
-  random bytes), writes it, and syncs the file and the directory before the transport
-  proves it. A node that joins by ticket (#336) makes its key the same way at its first
+  file `node.key` in the data directory, before the hub, the transport, and the mesh
+  open. The file is 68 bytes: the tag `foundation/key/1`, the node key (UUIDv7,
+  big-endian), the Ed25519 private key, and the CRC32C of those 64 bytes
+  (little-endian). It is one sector, which a crash keeps whole or old. At the first
+  start, shard 0 makes the file with `Mode::Create`; 68 zero bytes are a key not yet
+  written, so shard 0 makes a key (`types::node::Key::v7` at mesh time, once it has one,
+  from `Config::entropy`, and 32 random bytes). At each start, shard 0 writes the key
+  back and syncs the file and the directory before the transport proves it, since a
+  failed sync of an earlier start can leave a key that a read sees but a power cut
+  loses. A node that joins by ticket (#336) makes its key the same way at its first
   start. A file of another length, tag, or checksum gives `Error::Key`, which
   `Node::join` ranks above `Error::Blob` and `Error::Mesh`; the node never writes over
   it, since a new key is a new node to its region. Each other file error on `node.key`
@@ -69,4 +71,13 @@
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
   plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
   time of a new key and the load point, by `laptop.architect-2` (20:10 UTC):
-  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017.
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The
+  write back at each start is the fix of a finding of `breaker` in round 1 of #1991.
+  While a Rust caller gives `Config::region`, a founding with a dangling index or two
+  channels of one key makes shard 0 panic. The first PR that gives `node` a
+  `spec::region::check` before each define (#1744 or #1957 PR 2) runs it on
+  `Config::region` too, and then a founding with problems defines no channel (#1741), by
+  `laptop.architect-2`:
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068089189 and
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507.

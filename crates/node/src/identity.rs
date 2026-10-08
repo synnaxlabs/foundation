@@ -14,14 +14,11 @@ use types::time::Stamp;
 use crate::Error;
 
 /// The name of the file.
-const FILE: &str = "node.key";
+pub(crate) const FILE: &str = "node.key";
 /// The first bytes of the file; a new form gets a new tag.
 const TAG: &[u8; 16] = b"foundation/key/1";
 /// The length of the file.
-const LEN: usize = 68;
-/// The pool that the file's two blocks come from. The shard's pool is not used, so
-/// the load never fails for the shard's budget.
-const POOL: block::Config = block::Config { budget: 4096 };
+pub(crate) const LEN: usize = 68;
 
 /// The node's key and the private key that its transport proves.
 #[derive(Clone, Debug)]
@@ -30,10 +27,12 @@ pub(crate) struct Identity {
     pub(crate) private_key: PrivateKey,
 }
 
-/// The identity in `node.key` of `files`. When the file is not there, or holds only
-/// zero bytes, makes a new one at mesh time from `clock`, once it has mesh time, and
-/// from `entropy`, and makes it durable before it returns. Never writes over a file
-/// that holds a key.
+/// The identity in `node.key` of `files`, with blocks from `pool`. When the file is
+/// not there, or holds only zero bytes, makes a new one at mesh time from `clock`,
+/// once it has mesh time, and from `entropy`. Writes the identity back and makes it
+/// durable before it returns, also one it read: a failed sync of an earlier start can
+/// leave a key that a read sees but a crash loses. Never writes another key over a
+/// file that holds one.
 ///
 /// # Errors
 ///
@@ -41,6 +40,7 @@ pub(crate) struct Identity {
 /// [`Error::Directory`] for a file call that fails.
 pub(crate) async fn load(
     files: &Files,
+    pool: &block::Pool,
     clock: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> Result<Identity, Error> {
@@ -51,18 +51,24 @@ pub(crate) async fn load(
             env::files::Error::Length { .. } => Error::Key,
             error => Error::Directory(error),
         })?;
-    let pool = block::Pool::heap(POOL);
-    let into = pool.alloc(LEN).expect("invariant: the pool holds a key");
+    let into = pool
+        .alloc(LEN)
+        .expect("invariant: a shard's pool holds a key");
     let read = file.read_at(0, into).await.map_err(Error::Directory)?;
     let bytes: &[u8; LEN] = (&*read).try_into().expect("invariant: a read fills it");
-    if *bytes != [0; LEN] {
-        return decode(bytes).ok_or(Error::Key);
-    }
-    clock.reach(Stamp::from_nanos(i64::MIN)).await;
-    let identity = create(clock, entropy);
+    let identity = if *bytes == [0; LEN] {
+        clock.reach(Stamp::from_nanos(i64::MIN)).await;
+        let now = match clock.status() {
+            clock::Status::Synced(now) | clock::Status::Holdover(now, _) => now.time(),
+            clock::Status::Unsynced(_) => unreachable!("invariant: mesh time has come"),
+        };
+        create(now, entropy)
+    } else {
+        decode(bytes).ok_or(Error::Key)?
+    };
     let block = pool
         .copy(&encode(&identity))
-        .expect("invariant: the pool holds a key");
+        .expect("invariant: a shard's pool holds a key");
     file.write_at(0, &[block]).await.map_err(Error::Directory)?;
     file.sync().await.map_err(Error::Directory)?;
     files
@@ -72,16 +78,12 @@ pub(crate) async fn load(
     Ok(identity)
 }
 
-/// A new identity: a UUIDv7 key at mesh time, and a random private key.
-fn create(clock: &clock::Reader, entropy: &env::entropy::Entropy) -> Identity {
+/// A new identity: a UUIDv7 key at `now`, and a random private key.
+fn create(now: Stamp, entropy: &env::entropy::Entropy) -> Identity {
     let mut random = [0; 16];
     entropy.fill(&mut random);
     let mut private_key = [0; 32];
     entropy.fill(&mut private_key);
-    let now = match clock.status() {
-        clock::Status::Synced(now) | clock::Status::Holdover(now, _) => now.time(),
-        clock::Status::Unsynced(_) => unreachable!("invariant: mesh time has come"),
-    };
     // A clock before 1970 still gives a key; its time only orders keys.
     let time = now.max(Stamp::EPOCH);
     Identity {
