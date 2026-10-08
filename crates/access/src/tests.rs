@@ -183,15 +183,21 @@ fn matches_subjects_in_any_region() {
 }
 
 #[test]
-fn takes_a_connector_from_the_tree_of_any_region() {
+fn takes_the_connectors_of_each_region_tree() {
+    let root = Tree::from([(name("gw.daq"), connector())]);
     let site_a = Tree::from([(name("site_a.daq"), connector())]);
     let rules = Rules::new([
-        (Prefix::ROOT, &Tree::new()),
+        (Prefix::ROOT, &root),
         (name("site_a").into(), &site_a),
+        (name("site_b").into(), &Tree::new()),
     ]);
-    let under = grant(&rules, "site_a.daq", "site_a.daq.ai_0");
-    assert_eq!(under.actions(), [Action::Write].into_iter().collect());
-    assert_eq!(under.authority(), Some(Authority::ABSOLUTE));
+    let write = [Action::Write].into_iter().collect();
+    for (subject, on) in [("gw.daq", "gw.daq.ai_0"), ("site_a.daq", "site_a.daq.ai_0")]
+    {
+        let under = grant(&rules, subject, on);
+        assert_eq!(under.actions(), write, "{on}");
+        assert_eq!(under.authority(), Some(Authority::ABSOLUTE), "{on}");
+    }
 }
 
 #[test]
