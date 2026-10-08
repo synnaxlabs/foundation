@@ -355,9 +355,7 @@ pub(crate) fn anonymous(
 mod tests {
     use std::net::{IpAddr, Ipv6Addr};
 
-    use aws_lc_rs::signature::{
-        ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair, UnparsedPublicKey,
-    };
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
     use proptest::prelude::*;
     use rustls::client::ResolvesClientCert;
     use rustls::crypto::SupportedKxGroup;
@@ -978,12 +976,8 @@ mod tests {
             let certificate = certificate(&Tls::new(&private_key));
             let der = certificate.as_ref();
             let tbs = &der[CERTIFICATE.len()..][..TBS_BYTES];
-            let signature = &der[der.len() - 64..];
-            let verifier = UnparsedPublicKey::new(
-                &aws_lc_rs::signature::ED25519,
-                private_key.public().to_bytes(),
-            );
-            assert_eq!(verifier.verify(tbs, signature), Ok(()));
+            let signature = der[der.len() - 64..].try_into().unwrap();
+            assert_eq!(private_key.public().verify(tbs, signature), Ok(()));
         }
     }
 }
