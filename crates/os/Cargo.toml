@@ -46,5 +46,9 @@ harness = false
 name = "now"
 harness = false
 
+[[bench]]
+name = "udp"
+harness = false
+
 [lints]
 workspace = true
