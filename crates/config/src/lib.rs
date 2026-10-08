@@ -1900,17 +1900,21 @@ mod tests {
 
         #[test]
         fn refuses_what_an_access_block_cannot_hold() {
-            let mut attributes = attributes(string("read"), None);
-            attributes.push(("deny", string("write")));
-            assert_eq!(
-                check(&access(&attributes)),
-                Err(vec![refused(
-                    "document.unknown-attribute",
-                    at(0, 16),
-                    "`deny` is not an attribute of the `access` block",
-                    "Use `subjects`, `select`, `allow`, or `authority`, or remove it",
-                )])
-            );
+            // An unknown attribute also hides an `authority` with no `write`.
+            for (authority, key) in [(None, 16), (Some(5), 18)] {
+                let mut attributes = attributes(string("read"), authority);
+                attributes.push(("deny", string("write")));
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![refused(
+                        "document.unknown-attribute",
+                        at(0, key),
+                        "`deny` is not an attribute of the `access` block",
+                        "Use `subjects`, `select`, `allow`, or `authority`, or remove \
+                         it",
+                    )])
+                );
+            }
             assert_inner_blocks_refused(
                 "access",
                 &self::attributes(string("read"), None),
