@@ -2887,6 +2887,11 @@ How to read this record:
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): each task that sends ends
+  at once after the group stops or the last `Mesh` drops. A dial or a send in
+  progress stops, so it never holds `Mesh::ended` for a dial timeout. Decided by
+  `laptop.architect`, 2026-10-08T04:00:49Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -2907,14 +2912,15 @@ How to read this record:
   such a type reads it only through `Display` and `Debug`. A caller that must match one
   gets the crate in its line through an `interface` issue first. `mesh` does not
   re-export such a type: a re-export makes each change to `raft` a change to the surface
-  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
-  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
-  gives it each stream of a peer with `Mesh::serve`. The three are public since the
-  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
-  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
-  rulings: #1460 gave the module its new name. `Error` adds `raft::Error` and
-  `transport::Error` to the types of other crates. `Config` and `serve` add types that
-  the caller builds: `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, of an `Ended` is
+  `Ended { .. }`, and of a `Watch` is its index only. A crate outside `mesh` opens a
+  region with `Config` and `Mesh::open`, and gives it each stream of a peer with
+  `Mesh::serve`. The three are public since the senders (#1410). `Error`,
+  `claim::Error`, and `region::Unfit` are public with them, because `open` and `serve`
+  give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the module
+  its new name. `Error` adds `raft::Error` and `transport::Error` to the types of other
+  crates. `Config` and `serve` add types that the caller builds:
+  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
@@ -2963,6 +2969,24 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
   three types.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir` is the
+  mesh's directory, relative to the data directory. The mesh makes it and syncs its
+  parent, and the log goes in `log` in it. Its parent must be there and durable. `node`
+  gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each task of
+  the mesh has ended: the group's task and each task that sends. It holds no clone, so
+  it does not keep the group running. Once it resolves, the mesh holds no file, and a
+  new open of its directory can take the log. Decided by `laptop.architect`,
+  2026-10-08T04:00:49Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after
+  the ruling on PR 3b, 2026-10-08T03:37:20Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475, and the
+  field over a `Files` call by `laptop.architect-2`, 2026-10-08T03:54:37Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866. Lost: a
+  counting `Tasks` driver in `node`, because `node` then watches the tasks of another
+  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end
+  the group; `env::files::Files::within`, because `env` then gives two ways to scope
+  the files of a crate, beside `buffer::Config::dir`. A change that wants it later
+  moves `buffer` and `mesh` together.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
