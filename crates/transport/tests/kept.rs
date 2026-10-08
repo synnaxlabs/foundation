@@ -72,6 +72,10 @@ enum End {
     /// receiver with no more reads. The reset stream needs no stop, so the drop
     /// allocates nothing.
     Reset,
+    /// It sends a short message after the server's read, then resets the stream. The
+    /// server reads that message, which waits for its prefix, then drops the receiver.
+    /// So the list keeps no growth that a later read gives back.
+    More,
 }
 
 /// What the server's reads give.
@@ -87,7 +91,10 @@ struct Out {
     waited: bool,
     /// Whether the server read the end of the stream after the message.
     ended: bool,
-    /// The polls of the read of the end that give `Pending`.
+    /// The length of the message that the read after the message gives.
+    more: Option<usize>,
+    /// The polls of the read of the end, or of the message after it, that give
+    /// `Pending`.
     ending: usize,
     /// The net heap bytes that the drop of the receiver then gives back.
     kept: usize,
@@ -97,7 +104,7 @@ fn main() {
     for reading in [Reading::Whole, Reading::Parts, Reading::Waited] {
         for (len, end) in [60_000, 100_000, 240_000, 1 << 18]
             .into_iter()
-            .flat_map(|len| [(len, End::Finish), (len, End::Reset)])
+            .flat_map(|len| [(len, End::Finish), (len, End::Reset), (len, End::More)])
         {
             let out = run(reading, len, end);
             assert_eq!(
@@ -123,8 +130,13 @@ fn main() {
                 "{reading:?}, {len} bytes, {end:?}: the read of the end of the stream"
             );
             assert_eq!(
+                out.more,
+                matches!(end, End::More).then_some(SHORT),
+                "{reading:?}, {len} bytes, {end:?}: the read after the message"
+            );
+            assert_eq!(
                 out.ending > 0,
-                matches!(end, End::Finish),
+                !matches!(end, End::Reset),
                 "{reading:?}, {len} bytes, {end:?}: the read of the end gives \
                  `Pending` {} times",
                 out.ending
@@ -167,6 +179,11 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
         match end {
             End::Finish => sender.finish().expect("finished"),
             End::Reset => drop(sender),
+            End::More => {
+                sender.send(filled(&pool, SHORT)).await.expect("sent");
+                node.clock().sleep(GAP).await;
+                drop(sender);
+            }
         }
         node.clock().sleep(LIVE).await;
     })
@@ -175,8 +192,9 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
 }
 
 /// Starts the server on `node`. It reads the short message, then the message of `len`
-/// bytes in the way of `reading`, then, as `end` says, the end once it comes or
-/// nothing until the reset. It then drops the receiver and puts the [`Out`] in `out`.
+/// bytes in the way of `reading`, then, as `end` says, the end once it comes, a short
+/// message, or nothing until the reset. It then drops the receiver and puts the
+/// [`Out`] in `out`.
 fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
@@ -206,14 +224,19 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         .await;
         let waited = transport.status().waited > Span::ZERO;
         let len = read.ok().flatten().map(|block| block.len());
-        let (ended, ending) = match end {
+        let (ended, more, ending) = match end {
             End::Finish => {
                 let (read, ending) = next(&mut receiver, &clock, || ()).await;
-                (matches!(read, Ok(None)), ending)
+                (matches!(read, Ok(None)), None, ending)
             }
             End::Reset => {
                 clock.sleep(DROP).await;
-                (false, 0)
+                (false, None, 0)
+            }
+            End::More => {
+                let (read, ending) = next(&mut receiver, &clock, || ()).await;
+                clock.sleep(DROP).await;
+                (false, read.ok().flatten().map(|block| block.len()), ending)
             }
         };
         let before = ALLOCATOR.held();
@@ -225,6 +248,7 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
             pending,
             waited,
             ended,
+            more,
             ending,
             kept,
         };
