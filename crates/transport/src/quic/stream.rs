@@ -4595,6 +4595,70 @@ mod tests {
         });
     }
 
+    /// The count of `MAX_STREAMS` frames for one-way streams that the server sent.
+    fn announced(pair: &mut Pair) -> u64 {
+        pair.server.connection().stats().frame_tx.max_streams_uni
+    }
+
+    /// Ends the client's `sender`, whose stream the server holds in `incoming`, and
+    /// reads it to its end on the server, which frees the stream.
+    fn end(pair: &mut Pair, sender: &mut Sender, incoming: &mut [Incoming]) {
+        let finished = pair.client.endpoint.finish(pair.now(), sender);
+        assert_eq!(finished, Ok(()));
+        pair.run(RUN);
+        let id = sender.key().id;
+        let at = |incoming: &&mut Incoming| incoming.receiver.key().id == id;
+        let incoming = incoming.iter_mut().find(at).expect("an incoming stream");
+        let now = pair.now();
+        let read = drain(&mut pair.server, now, &mut incoming.receiver);
+        assert_eq!(read, (vec![b"a".to_vec()], true));
+        pair.run(RUN);
+    }
+
+    #[test]
+    fn a_freed_stream_goes_at_once_only_to_a_peer_that_waits_for_one() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let open = |pair: &mut Pair| {
+                let (now, key) = (pair.now(), key(&pair.client));
+                pair.client.endpoint.open_sender(now, key, Class::Complete)
+            };
+            let now = pair.now();
+            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
+                .map(|_| {
+                    let mut sender = open_sender(&mut pair, Class::Complete);
+                    write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+                    sender
+                })
+                .collect();
+            pair.run(RUN);
+            let server = key(&pair.server);
+            let mut incoming: Vec<Incoming> =
+                iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+            let before = announced(&mut pair);
+            end(&mut pair, &mut senders[0], &mut incoming);
+            end(&mut pair, &mut senders[1], &mut incoming);
+            assert_eq!(announced(&mut pair), before, "two of 16 freed, and no wait");
+            end(&mut pair, &mut senders[2], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 1, "three of 16 freed");
+            for _ in 0..3 {
+                assert!(open(&mut pair).is_some());
+            }
+            assert!(open(&mut pair).is_none());
+            pair.run(RUN);
+            assert_eq!(announced(&mut pair), before + 1, "no stream is free");
+            end(&mut pair, &mut senders[3], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 2, "a wait, then a free");
+            assert!(open(&mut pair).is_some());
+            end(&mut pair, &mut senders[4], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 2, "a free, and no wait");
+            assert!(open(&mut pair).is_none());
+            pair.run(RUN);
+            assert_eq!(announced(&mut pair), before + 3, "a free, then a wait");
+            assert!(open(&mut pair).is_some());
+        });
+    }
+
     #[test]
     fn stopped_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {

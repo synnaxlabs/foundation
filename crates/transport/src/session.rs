@@ -530,6 +530,95 @@ mod tests {
     }
 
     #[test]
+    fn an_open_that_waits_for_a_stream_opens_once_a_stream_ends() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX {
+                    let (mut sender, receiver) =
+                        side.session.open(Class::Complete).await.expect("a stream");
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    held.push((sender, receiver));
+                }
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                let (mut sender, mut receiver) = held.remove(0);
+                sender.finish().expect("finished");
+                let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(None));
+                drop((sender, receiver));
+                side.node.clock().sleep(spans(Span::MILLISECOND, 500)).await;
+                let (mut sender, _receiver) =
+                    side.session.open(Class::Complete).await.expect("a stream");
+                sender.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            },
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX {
+                    held.push(side.session.accept().await.expect("a stream"));
+                }
+                let mut first = held.remove(0);
+                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(Some(b"a".to_vec())));
+                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(None));
+                first
+                    .sender
+                    .as_mut()
+                    .expect("a reply half")
+                    .finish()
+                    .expect("finished");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                drop(first);
+                let mut last = side.session.accept().await.expect("a stream");
+                let read = last.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(Some(b"b".to_vec())));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn an_open_that_waits_for_a_stream_opens_once_a_stream_resets() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX {
+                    let (mut sender, receiver) =
+                        side.session.open(Class::Complete).await.expect("a stream");
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    held.push((sender, receiver));
+                }
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                drop(held.remove(0));
+                side.node.clock().sleep(spans(Span::MILLISECOND, 500)).await;
+                let (mut sender, _receiver) =
+                    side.session.open(Class::Complete).await.expect("a stream");
+                sender.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            },
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX {
+                    held.push(side.session.accept().await.expect("a stream"));
+                }
+                let mut first = held.remove(0);
+                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(Some(b"a".to_vec())));
+                drop(first);
+                let mut last = side.session.accept().await.expect("a stream");
+                let read = last.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(Some(b"b".to_vec())));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_stream_keeps_its_session_open_after_the_session_drops() {
         let held = Span::from_nanos(2 * IDLE.nanos());
         let (mut sim, ..) = testing::sessions(
