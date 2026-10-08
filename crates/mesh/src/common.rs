@@ -1,6 +1,7 @@
 //! Test helpers that the modules of `mesh` reuse: keys, signed messages, and a pool.
 //! Node `id` has the private key `[id; 32]`.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use block::Pool;
@@ -303,6 +304,7 @@ pub(crate) fn spec(version: u64, base: u8, root: u8, chunks: &[u8]) -> Change {
         root: digest(root),
         chunks: chunks.iter().copied().map(digest).collect(),
         holders: [key(1)].into(),
+        homes: BTreeMap::new(),
     }
 }
 

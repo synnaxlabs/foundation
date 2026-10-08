@@ -2332,7 +2332,9 @@ How to read this record:
   Byte form: the base version (8 bytes, little-endian), the base root (32), the new root
   (32), the chunk count (2 bytes, little-endian), then each digest (32), in strictly
   rising order, then the holder count (2 bytes, little-endian), then each holder key
-  (16), in strictly rising order. The new version is `base.version + 1`. Lost: a version
+  (16), in strictly rising order, then the home count (2 bytes, little-endian), then
+  each index key (16) and its home key (16), in strictly rising index order (S12
+  (placement part) + B7). The new version is `base.version + 1`. Lost: a version
   in the record, which can disagree with the base. A record lists at most `CHUNKS_MAX` =
   1024 digests, about 32 KiB, so that one record fits in an append of 64 KiB, a node's
   limit; decode refuses a larger count. An entry over a member's limit is never sent,
@@ -2401,24 +2403,34 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
-- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions)` makes the definitions, by tree
-  key, the region's spec through the leader, as `set_home` does, and gives the new
-  pointer. It first runs `spec::region::check` (REGION CHECK) at the region's prefix: a
-  problem gives `Error::Problems`, which holds each problem as `check` gives it, and
-  proposes nothing. `mesh` defines no problem of its own. It then builds the tree with
-  `spec::region::tree`. The change lists each chunk of the new tree that the tree of the
-  base lacks, or each chunk of the new tree when `Config::store`, the node's
-  `blob::Store`, cannot give the tree of the base. A change that lists more than
-  `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A base
-  root whose chunk is not a tree node is a base tree that the store cannot give. The
-  node counts itself as the one holder. When the holders are not a majority of each half
-  of the voters, before the propose or at the apply, the call gives `Error::Quorum {
-  held, voters }` for the first half that lacks one, the incoming half first. The count
-  before the propose costs no entry and no put. The node then puts each chunk of the new
-  tree in its store, not only the listed ones, because `diff` never reads a chunk that
-  the two trees share, so a chunk that the store lost is found only by a put. On `Ok`,
-  a put of each chunk of the new tree has returned. BLOB STORE gives what a put holds
-  after a fault. Decided by `laptop.architect`, 2026-10-08T12:13:51Z
+- **SPEC APPLY (#1083)** `Mesh::apply(base, definitions, homes)` makes the definitions,
+  by tree key, the region's spec through the leader, as `set_home` does, and gives the
+  new pointer. It first runs `spec::region::check` (REGION CHECK) at the region's
+  prefix: a problem gives `Error::Problems`, which holds each problem as `check` gives
+  it, and proposes nothing. `mesh` defines no problem of its own. `homes` maps index
+  names to node names (S12 (placement part) + B7). An index that `definitions` does not
+  hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
+  give `Error::Homes`, both before the read of the base tree. A node name that no
+  member has gives `Error::UnknownNode`, after `Error::NoVote` and before the first
+  put. None of them proposes anything. `Homes` right after `NotIndex` decided by
+  `laptop.architect`, 2026-10-08T17:01:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210), and
+  the order as a whole approved at 2026-10-08T17:15:26Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065202125). It then
+  builds the tree with `spec::region::tree`. The change lists each chunk of the new
+  tree that the tree of the base lacks, or each chunk of the new tree when
+  `Config::store`, the node's `blob::Store`, cannot give the tree of the base. A change
+  that lists more than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and
+  proposes nothing. A base root whose chunk is not a tree node is a base tree that the
+  store cannot give. The node counts itself as the one holder. When the holders are
+  not a majority of each half of the voters, before the propose or at the apply, the
+  call gives `Error::Quorum { held, voters }` for the first half that lacks one, the
+  incoming half first. The count before the propose costs no entry and no put. The node
+  then puts each chunk of the new tree in its store, not only the listed ones, because
+  `diff` never reads a chunk that the two trees share, so a chunk that the store lost is
+  found only by a put. On `Ok`, a put of each chunk of the new tree has returned. BLOB
+  STORE gives what a put holds after a fault. Decided by `laptop.architect`,
+  2026-10-08T12:13:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), which
   supersedes the postcondition of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
@@ -2433,14 +2445,38 @@ How to read this record:
   of a try. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). A call
   whose entry finds the pointer that the call makes, after a lost answer or an equal
-  change of another call, returns that pointer; a later pointer gives `Stale`. Decided
-  by `laptop.architect`, 2026-10-08T10:19:54Z
+  change of another call, returns that pointer, under the home rule below; a later
+  pointer gives `Stale`. Decided by `laptop.architect`, 2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
   equal change of another call, 2026-10-08T11:46:44Z
-  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). The
-  build with `spec::region::tree`, and the build of the root of
-  `Config::founding.definitions` with it in `Mesh::open`, decided by `laptop.architect`,
-  2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A listed
+  home is a proposal: the entry gives it only to an index with none. On `Ok`, the
+  pointer is the call's and each listed index has a home in this node's state when the
+  call settles, the listed one or another. A call whose entry finds `base.next(root)`
+  returns it when each listed index has a home then, and else gives `Stale`. No entry
+  removes a home, so the path on which the call's entry applies needs no check, and both
+  paths give the same result. Trigger: when an entry can remove a home, that path checks
+  too. Decided by `laptop.architect`, 2026-10-08T17:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
+  changed by `laptop.architect` at 2026-10-08T17:34:20Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915), which
+  supersedes item 2 of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958. Those two
+  rulings supersede, in
+  https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107, the `Ok`
+  of an equal change of another call that leaves a listed index with no home. The
+  `Stale` item of `Mesh::apply` names that case, approved by `laptop.architect` at
+  2026-10-08T17:52:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065835401). The
+  reading when the call settles, the invariant, and its trigger, decided by
+  `laptop.architect` at 2026-10-08T18:00:15Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065963448), which
+  supersedes the `Stale` text of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065835401 and the
+  `Ok` text of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915. The build
+  with `spec::region::tree`, and the build of the root of `Config::founding.definitions`
+  with it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771). The
@@ -3171,10 +3207,16 @@ How to read this record:
   an entry, and a newer build can. An entry with no change (the first entry of a leader)
   is not a change of 0 bytes. A committed entry of a known kind whose body does not
   decode is `Refused::Body` on every node, and the group goes on, so one voter that
-  proposes bad bytes cannot halt the region. So a change to the body or to a cap of a
-  known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
-  only after the format flag (C9d) allows it; a node of an older build stops at it and
-  never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
+  proposes bad bytes cannot halt the region. From the first stable release (C9d), a
+  change to the body or to a cap of a known kind (the 64 status entries of a `Join`)
+  takes a new kind, which writers use only after the format flag (C9d) allows it; a
+  node of an older build stops at it and never applies it differently. Decided by
+  `laptop.architect` (2026-10-07T10:55:00Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. The
+  start of the rule was changed by `laptop.architect` at 2026-10-08T17:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958): before
+  it, a format keeps version 1, so the homes of a spec change go in kind 4. It
+  supersedes the start of the rule of
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
   call gives `Error::Stopped` with the first cause. A watch gives the `Stopped` itself,
   also after each `Mesh` drops (MESH SURFACE). `member` has no error (#562): it gives
@@ -3824,6 +3866,20 @@ How to read this record:
   the block has one, else at the block. `copies = []` next to a home or a standby is
   valid (architect, #1150,
   https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037713864).
+  The spec change that adds an index carries its home as `(channel::Key, node::Key)`,
+  in the same entry as the pointer move. `mesh` never runs `place`: `plan` places each
+  new index, and `Mesh::apply` takes the homes by index name and node name. At the
+  apply, each listed index that has no home gets the listed one. A placement never
+  moves a home: a move is `set_home`. The homes are runtime state in the change
+  record, not in the tree. One change gives at most `HOMES_MAX` = 512 homes, of 32
+  bytes each, after a count of 2 bytes that adds to the 33 869 of `HOLDERS_MAX`. So a
+  change at each bound is 50 255 bytes. Decided by `laptop.architect`,
+  2026-10-07T14:25:21Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6040051975), and
+  its plan review, 2026-10-08T17:01:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210).
+  Trigger: before a founding spec can hold an index, it gives each index a home
+  (#1931).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.
@@ -3871,7 +3927,13 @@ How to read this record:
   and cancels it. `ctx` gives hub sessions, status, run commands, secrets, and cancel.
   `hub` and `home` enforce the rules. `connector` is a library of components plus
   ready-made compositions built only from public parts. Supersedes: r8 Q5 actor with
-  device hooks.
+  device hooks. `kind::Context` gives a run its name, config, cancel, clock,
+  randomness, network (`net`), and tasks, and `writer`, `reader`, and `status` come
+  with #1731 (`laptop.architect-2`, 2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677). It is
+  not `Send`: a kind's own thread takes clones of the parts it needs
+  (`laptop.architect-2`, 2026-10-08T18:07:05Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6066078510).
 - **C5 + KINDS OWN THEIR CONFIG** Each kind owns parse, check, discover, and run, built
   on shared components. `config` never knows a kind's fields. A kind returns diagnostics
   with positions plus the channels it reads and writes. Calculations are a kind. The
@@ -3880,7 +3942,13 @@ How to read this record:
   check, resource isolation (own threads with a budget, or another node), determinism
   (time only from samples and ctx), and outputs on the calculation's own index.
   Supersedes: r3 single-expression language, r3 first-input index, r8 JSON Schema
-  check in `config`.
+  check in `config`. The channels of a kind's `check` are from the mesh's side:
+  `reads` are the channels it reads from the mesh (commands for the device, or samples
+  it sends out), and `writes` the channels it writes to the mesh (samples from the
+  device) (`laptop.architect-2`, 2026-10-07T15:17:11Z:
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688; item on
+  #1731, 2026-10-08T06:24:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6053789750).
 - **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
   methods. `kind::Table` erases it inside `connector` with a private trait that takes
   the `Document` and parses again, so callers see one concrete type with no `Any` and
@@ -3947,9 +4015,22 @@ How to read this record:
   7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
-  the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
-  (1 s first, 60 s cap, constants). The waits start again from 1 s after a run that
-  lasted at least 60 s. `Ok` from `run` ends the connector.
+  the caller's token, which the supervisor cancels once the run returns or its future
+  drops, so each task that the run spawned to wait on it ends with the run
+  (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
+  supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
+  entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
+  2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
+  `hub` field lands after #1941 (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789, item 4),
+  as the tests that need a hub wait on #1941 (`laptop.architect`,
+  2026-10-08T17:50:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
+  `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
+  constants). The waits start again from 1 s after a run that lasted at least 60 s.
+  `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
   changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
   `connector` builder in the plan on #338, after `/eb-review`; approved by the
@@ -4095,11 +4176,12 @@ How to read this record:
   and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
-  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and each thread with none draws the same fixed values. So
-  `connector-opcua` (PR 4 of #435) sets the start value with
-  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
-  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  2026-10-08 12:03 UTC). A draw on a thread with no start value aborts
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Nothing in the library sets a start value, also in
+  production. So `connector-opcua` (PR 4 of #435) sets the start value
+  with `UA_random_seed_deterministic`, taken from the randomness of `env`, and never
+  calls `UA_random_seed`, which reads the clock. It does so on each thread before that
   thread calls open62541, and runs each server and each client on one thread. Its
   test server sets the start value of the test at start, and its end-to-end check
   asserts the same run for the same value. A state for each `UA_Server` and
@@ -4108,12 +4190,37 @@ How to read this record:
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  A second change of `src/util/ua_util.c` keeps a flag for each thread, which
+  `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
+  `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
+  calls each of the two draws on a thread with none, and the test asserts the abort
+  and its exact output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Supersedes the record text "each thread with none draws the
+  same fixed values", which cited
+  https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. The
+  line of `UA_random_seed` that sets the flag has no test: no path of our build
+  reaches it, and a test needs a driver whose clock does not abort. Approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC). This change and its driver test ship in a PR of their own,
+  apart from the connector code (same comment).
   The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
   with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
   clock functions give 0, and the 5 POSIX constructors print their name and abort,
   since our config always has an event loop. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
   2026-10-08 02:27 UTC).
+  The copy also holds `arch/common/timer.c` and `timer.h`, which the build with
+  `UA_ARCHITECTURE=none` does not compile. `cargo xtask open62541` takes them from a
+  closed list of extra release files, with the reason of each, and compiles them with
+  the flags of `flags.txt`. The event loop of `connector-opcua` holds a `UA_Timer` and
+  gives it the time of `env`. Lost: timers in Rust, a copy of library code that already
+  takes the time as an input. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC; the release path,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
+  2026-10-08 18:08 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
@@ -6610,7 +6717,7 @@ Storage classes used in the table:
 | Node | Region state: membership record `{ key, card { name, public key, seal key, addresses, version } signed by the node, admission, ephemeral, status keys by name }` (MEMBER RECORD) in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; removal of an ephemeral node after its time offline | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
-| Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
+| Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (the first home of an index that a spec change adds) | `hub` routing through `mesh` watches | `mesh` |
 | Seq blocks | Region state of the home node's region | The home, through lease renewals | A new home after promotion | `mesh` |
 | Index history (re-index) | Region state: spans and seals. The spec keeps only the current index. Which region: X39 | The old home proposes the seal; voters seal at lease end if it is down | `hub` joins spans for readers | `mesh` |
 | Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40), with a version per name in the associated data. Every node takes a write or a delete only at the newest version plus one, and a re-seal only at the newest version, from and to nodes of the secret's placement. A delete is a version with no value. The newest version of a name is never compacted away, also after the spec removes the secret | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it in `secret::store::Sealed`, which refuses a value that does not open at its version | `mesh` (record), `secret` (seal and open) |
