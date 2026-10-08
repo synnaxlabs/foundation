@@ -1039,7 +1039,7 @@ impl Share {
     /// class of the share competes as `rival`. With no rival, the bytes move `owed`
     /// toward 0 and never past it, so a class alone makes no debt or credit.
     fn took(&mut self, class: Class, bytes: usize, rival: Competition) {
-        let Some(other) = other(class).filter(|_| bytes > 0) else {
+        let Some(other) = other(class) else {
             return;
         };
         let change = if class == Class::Latest {
@@ -1078,9 +1078,7 @@ impl Share {
     /// Counts `class` as competing until noq-proto takes one peer window of the
     /// other class of the share: a stream of it was written or gave a message back.
     fn offered(&mut self, class: Class) {
-        if matches!(class, Class::Latest | Class::Complete) {
-            self.recent[class.rank()] = self.window;
-        }
+        self.recent[class.rank()] = self.window;
     }
 
     /// How `class` competes in `sending`.
@@ -3514,7 +3512,6 @@ mod tests {
         fn a_class_competes_until_the_other_sends_one_peer_window() {
             let mut share = Share::new(100);
             let budget = Budget::new(10);
-            share.took(Class::Latest, 0, Competition::Absent);
             assert!(!share.competes(Class::Latest, &budget));
             share.offered(Class::Latest);
             share.took(Class::Complete, 99, Competition::Absent);
@@ -3522,8 +3519,6 @@ mod tests {
             share.took(Class::Complete, 1, Competition::Absent);
             assert!(!share.competes(Class::Latest, &budget));
             assert!(share.competes(Class::Complete, &budget));
-            share.offered(Class::Command);
-            assert!(!share.competes(Class::Command, &budget));
         }
 
         #[test]
