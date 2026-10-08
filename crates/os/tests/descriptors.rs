@@ -24,7 +24,8 @@ fn starved(runtime: &Runtime) -> Result<Vec<std::net::SocketAddr>, Error> {
 
 #[test]
 fn a_lookup_with_no_free_descriptor_is_io() {
-    // A small limit runs out before the table of the host does, which gives `ENFILE`.
+    // A small limit runs out before the table of the host does, so the lookup gives
+    // `EMFILE`, not `ENFILE`.
     let mut limit = process::getrlimit(Resource::Nofile);
     limit.current = Some(128);
     process::setrlimit(Resource::Nofile, limit).unwrap();
