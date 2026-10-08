@@ -55,9 +55,9 @@
   surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
   Amended (2026-10-08T00:13:26Z, #1625): `reader::Session` is the home's side of a
-  reader, which `Reader` drives, and which `Hub::serve` (#1636) will drive. The split
-  costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet host), which
-  adds 0.3% to the write of one frame. Accepted by laptop.architect:
+  reader, which `Reader` drives, and which `Link::serve` drives (HUB LINK, #1946).
+  The split costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet
+  host), which adds 0.3% to the write of one frame. Accepted by laptop.architect:
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
   A doc states what is true at its commit: `Reader` states no credit window, as a
   latest reader has none, and `Session` names `Reader` and each stream of a remote
@@ -72,10 +72,14 @@
   that defines channels at each new spec decides what a known, renamed, or removed
   channel does. Decided by `laptop.architect` (2026-10-08T16:41:41Z:
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349).
-  Supersedes https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575
-  in `Hub::define` and `hub::Channel`.
+  Supersedes the `Hub::define` clause of
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575, the patch
+  that took a `hub::Channel`. Decided by `laptop.architect` (2026-10-08T18:36:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
+  Supersedes item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1926#issuecomment-6066382854.
   Changed by #1969: `Hub::define` takes a spec's definitions and skips each that is not
   a channel (`laptop.architect`, 2026-10-08T18:49:47Z:
   https://github.com/synnaxlabs/foundation/issues/1969#issuecomment-6066796714).
-  Supersedes https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349
-  in the argument of `Hub::define`.
+  Supersedes the argument of `Hub::define` in
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349.
