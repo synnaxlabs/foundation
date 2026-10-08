@@ -271,14 +271,16 @@ state on `main`.
   #348. They do not have the `security` label: each needed a writer of the file, or,
   for the small body of #300, a `Layout` from the node's own config (a new ring with
   a body of 4 to 54 bytes stopped the node at its first `append`).
-- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Fixed: #392
+- Fuzzed: `buffer_open`, which opens the ring and reads each path back. Its inputs
+  reach a record of four blocks, an entry table of four blocks, a tail at each block
+  of the area, a wrap record, a full ring, and the end of the offsets. Fixed: #392
   (three ways a ring lost data it reported durable or could not open), #566 (a write
   of a dead process could land on a ring that a new process opened), #572 (`append`
   took a record over the pool's largest block, and then each open failed), #657 (an
   open reported durable the records a killed process never synced), #553 (a power cut
   after the first open lost the new ring: its directory was not synced in its parent),
-  #393 (two CRC-valid fields stopped the node at open); the `area` and `below_tail`
-  inputs hold the two fields of #393.
+  #393 (two CRC-valid fields stopped the node at open); the `area_16` and
+  `below_tail_16` inputs hold the two fields of #393.
 
 ### Device to connector
 
@@ -371,7 +373,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `types_sample` | `sample::Type` | Prints as the text it was read from |
 | `types_frame_ends` | `frame::Layout::from_ends`, `frame::check`, `frame::split` | Refuses exactly the ends that break a rule, with an error that names a broken rule; the layout is the one that `Layout::new` gives for the lengths; a frame drafted from the ends has them, and `split` cuts its series at them; `check` refuses exactly the ends that do not fit a body whose length the input gives, and `split` cuts a body that `check` took at them. Not reached: the panics of `split`, a body over 64 KiB |
-| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
+| `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private, not built, or not reached from a file:
