@@ -3123,10 +3123,10 @@ How to read this record:
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
   reader is ad hoc and complete. A second `reader` block is `config.repeated-block`, and
-  a label on it is `config.label-count`. A negative `hold` is `config.negative-span`
-  (READER RULES, #94). A `hold` with no `name` or in `latest` mode is
-  `connector.unnamed-hold` or `connector.latest-hold`, since only a named complete
-  reader holds. #1785 moves the three `config.*` checks into `document::read`.
+  `read` reads only the first, where a label is `config.label-count`. A negative `hold`
+  is `config.negative-span` (READER RULES, #94). A `hold` with no `name` or in `latest`
+  mode is `connector.unnamed-hold` or `connector.latest-hold`, since only a named
+  complete reader holds. #1785 moves the three `config.*` checks into `document::read`.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3134,10 +3134,12 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC, and
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
-  2026-10-08 03:05 UTC), and on #1782, which replaces the `KEYS` and `BLOCKS` constants
-  of those rulings
-  (https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967,
-  2026-10-08 03:59 UTC).
+  2026-10-08 03:05 UTC). Supersedes the `KEYS` part of
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152 and
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967, 2026-10-08
+  03:59 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff

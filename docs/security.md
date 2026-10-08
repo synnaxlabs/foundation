@@ -374,8 +374,10 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a table over one block, a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
-No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`),
-`mesh::Member::decode` (the join answer of #336 adds its target), `spec` tree chunks
-(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), and
-each connector's protocol parser.
+No target yet, because the decoder is private, not built, or not reached from a file:
+`transport::message` and `tls` (#55), the QUIC hello
+(`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
+#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the header and
+hard state of a mesh log record (#1711), each connector's protocol parser, and
+`connector::reader::read`, which no file reaches until `config::check` takes a kind
+table (#1153).
