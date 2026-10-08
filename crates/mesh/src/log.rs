@@ -456,18 +456,15 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             .map(|bytes| header(bytes));
         // A record after a torn one, in its file or the next, was written after the
         // torn one was durable: the torn one is damaged. A write fills each file
-        // before the next one, so a file with no record before a record is damaged,
-        // unless `records` gives the version error of the next file.
+        // before the next one, so a file with no record before a record is damaged.
+        // Neither clause reads a number, so each refuses a record of any version.
         let follows = |claimed: usize| {
             bytes
                 .get(start(claimed)..)
                 .is_some_and(|rest| matches!(header(rest), At::Header(_)))
         };
-        let known =
-            matches!(first, Some(At::Header(ref head)) if head.version == VERSION);
         if torn.is_some_and(follows)
-            || (torn.is_some() && matches!(first, Some(At::Header(_))))
-            || (end == 0 && known)
+            || ((torn.is_some() || end == 0) && matches!(first, Some(At::Header(_))))
             || matches!(first, Some(At::Header(ref head)) if head.number > next)
         {
             let offset = wide(start(end));
@@ -2369,8 +2366,9 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
+    // The first defect in file order is the empty `log-0`, at each version of `log-1`.
     #[test]
-    fn gives_the_version_error_for_a_file_of_another_version_after_an_empty_log_0() {
+    fn refuses_an_empty_log_0_before_a_record_of_another_version() {
         let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             drop(open(&node).await.unwrap());
@@ -2383,9 +2381,9 @@ mod tests {
             put(&node, "log-1", 0, &record).await;
         })
         .unwrap();
-        let expected = Error::Version {
-            path: file("log-1"),
-            found: 2,
+        let expected = Error::Corrupt {
+            path: file("log-0"),
+            offset: 0,
         };
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
