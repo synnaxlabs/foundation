@@ -77,6 +77,14 @@ How to read this record:
 - **Process** Each data structure and key decision is proposed with a sketch and
   locked only on agreement. RESCOPE: delivery and wire internals are tuned by
   benchmarks, not interviewed.
+- **DEVX (2026-10-08)** Design each public API for the person, agent, or program that
+  uses it. A public API is any surface that a user reaches: the CLI, MCP, the config
+  language, the client, and each file that a user reads or writes. Each plan for one
+  compares its options by the steps from a new install to the first use, and by the
+  error and fix that each wrong step gives (C7). A step that Foundation can do itself
+  is not a step for the user (FIRST ADMIN). The person, on 2026-10-08: "when we're
+  designing public APIs like this, we really need to think about devx"
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981).
 
 ### 1.2 Data model
 
@@ -3778,6 +3786,19 @@ How to read this record:
   `mesh.changes` record, so every node checks its subject signature and the `secret`
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
+- **FIRST ADMIN (2026-10-08)** A new node has an empty spec, and under BQ12 only a key
+  that the spec names can sign an apply. So the first `foundation start` on an empty
+  data directory creates the spec with one admin subject, and writes the admin's
+  private key into the data directory, readable only by the user who started the
+  node. The CLI on the same host signs with that key, so the first `apply` needs no
+  key step. BQ12 holds as written: each apply, the first one too, is checked against
+  a key in the spec. Lost: the first apply from any local process (any local user
+  could then take the node), and an admin public key given before the first start (a
+  step before the first use). The #1744 plan names the subject, its access policy,
+  and the key file. Decided by the person on 2026-10-08 ("Yes, I approve."):
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
+  question:
+  https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051078801.
 
 ### 1.13 Operations, agents, and the factory
 
