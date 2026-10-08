@@ -71,8 +71,8 @@ https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. Supe
 the text of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517.
 The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
-the empty-list sentence of …6058989337.
-A copy is a
+the empty-list sentence of
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy is a
 path package, so `cargo deny` does not check it against advisories (#1867).
 
 | Crate | Release | Change | Why |
