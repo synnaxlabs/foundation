@@ -30,7 +30,7 @@ impl Subject {
                 return Err(Error::Duplicate { first, second });
             }
         }
-        keys.sort_unstable_by_key(|key| key.to_bytes());
+        keys.sort_unstable();
         Ok(Self { keys })
     }
 

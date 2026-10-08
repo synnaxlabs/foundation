@@ -63,4 +63,7 @@ exclude_re = [
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
+  # A pair or a refusal at or below the lowest floor only takes memory: no outcome
+  # reads it.
+  'crates/mesh/src/applied\.rs:.*replace Applied::trim with \(\)',
 ]

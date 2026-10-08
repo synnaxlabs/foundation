@@ -2,6 +2,10 @@
 
 #![cfg(test)]
 
+mod one_node;
+mod rig;
+mod status;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Output, Stdio};
 

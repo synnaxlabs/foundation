@@ -16,10 +16,12 @@ use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
+use spec::definition::Definition;
+use spec::tree::Chunks;
 use transport::{Code, Session, Transport};
 use types::channel;
 use types::ed25519::{PrivateKey, PublicKey};
-use types::name::Prefix;
+use types::name::{Name, Prefix};
 use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -32,14 +34,17 @@ use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
+use crate::pointer::Pointer;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
 pub use end::Ended;
 use end::Spawner;
 use send::Senders;
 
+mod apply;
 mod end;
 mod home;
+mod propose;
 mod send;
 mod stream;
 
@@ -79,6 +84,9 @@ pub struct Config {
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
     pub voters: BTreeSet<node::Key>,
+    /// The definitions of the region before the first change of its spec, by tree key,
+    /// the same at each open. A node that joins gives them from its join answer.
+    pub founding: BTreeMap<Name, Definition>,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
     /// The mesh's directory, relative to the data directory. The mesh makes it, and
@@ -173,12 +181,13 @@ impl Mesh {
 
     // Opens the group with no task that sends: `outgoing` gives each message.
     async fn start(config: Config) -> Result<Self, Error> {
-        let state =
-            region::State::new(config.region, config.members).map_err(Error::Member)?;
-        let signer = Signer::new(config.key, &config.private_key);
+        let founding =
+            spec::region::tree(&mut Chunks::default(), &config.founding).root;
+        let state = region::State::new(config.region, config.members, founding)
+            .map_err(Error::Member)?;
         match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
-            Some(own) if !signer.owns(own.public_key()) => {
+            Some(own) if own.public_key() != config.private_key.public() => {
                 return Err(Error::WrongKey);
             }
             Some(_) => {}
@@ -187,6 +196,7 @@ impl Mesh {
         if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
+        let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
         let unapplied = written(&stored.entries).collect();
@@ -276,6 +286,14 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The spec pointer in this node's applied state. It answers also after the group
+    /// stops, from the view at the stop. This is the agreed pointer. Its spec can have
+    /// problems that keep the node on an earlier spec.
+    #[must_use]
+    pub fn pointer(&self) -> Pointer {
+        self.group.borrow().state.pointer()
     }
 
     /// Gives the group `message`, which `peer` sent.
@@ -789,26 +807,25 @@ impl Group {
             self.unapplied.retain(|&index, _| index > last);
         }
         for Entry { at, data } in committed {
-            self.applied.push(at);
-            self.wake_calls();
-            let bytes = match data {
-                Data::Bytes(bytes) => bytes,
-                Data::Empty | Data::Voters(_) => continue,
-            };
-            let applied = match Change::decode(&bytes) {
-                Ok(change) => self.state.apply(change),
-                // Every node of this build judges a body the same way.
-                Err(Malformed::Body { kind, length }) => {
-                    Err(Refused::Body { kind, length })
-                }
-                Err(Malformed::Unknown(cause)) => {
-                    return Err(Stopped::Change { at, cause });
-                }
+            let applied = match data {
+                Data::Bytes(bytes) => match Change::decode(&bytes) {
+                    Ok(change) => self.state.apply(change),
+                    // Every node of this build judges a body the same way.
+                    Err(Malformed::Body { kind, length }) => {
+                        Err(Refused::Body { kind, length })
+                    }
+                    Err(Malformed::Unknown(cause)) => {
+                        return Err(Stopped::Change { at, cause });
+                    }
+                },
+                Data::Empty | Data::Voters(_) => Ok(None),
             };
             // A refused change is a no-op on every node.
             if let Ok(Some(_)) = applied {
                 self.wake_watches();
             }
+            self.applied.push(at, applied.map(|_| ()));
+            self.wake_calls();
         }
         Ok(())
     }
@@ -1076,14 +1093,16 @@ mod tests {
     use env::files::{self, Operation};
     use raft::{Answer, Grant, Hard, Proof, Term};
     use sim::{Crash, Sim, link};
+    use spec::tree;
     use transport::{Address, Peer, Port};
+    use types::digest::Digest;
     use types::node::SealKey;
     use types::time::Monotonic;
     use wire::Protocol;
 
     use super::*;
     use crate::card;
-    use crate::change::Unknown;
+    use crate::change::{CHUNKS_MAX, Unknown};
     use crate::common::{self, create_pool, key, message, private, proven, public};
     use crate::region::Unfit;
     use crate::status::Many;
@@ -1121,6 +1140,10 @@ mod tests {
         records: BTreeMap<u8, BTreeMap<u8, Member>>,
         /// The region state of each node, at the same time.
         states: BTreeMap<u8, region::State>,
+        /// The spec pointer of each node, at the same time.
+        pointers: BTreeMap<u8, Pointer>,
+        /// The founding definitions of each voter.
+        founding: BTreeMap<Name, Definition>,
         /// The join request that each node stamps.
         requests: BTreeMap<u8, Request>,
         /// The join that each node stamped.
@@ -1132,6 +1155,11 @@ mod tests {
         /// Each call of `set_home` that returned, in order: its node, the home on
         /// that node at the return, and what the call gave.
         set: Vec<(u8, Option<node::Key>, Result<(), Error>)>,
+        /// The base and the definitions that each node applies next.
+        applies: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
+        /// Each call of `apply` that returned, in order: its node, the pointer on
+        /// that node at the return, and what the call gave.
+        applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
     }
 
     fn seconds(count: i64) -> Span {
@@ -1176,6 +1204,7 @@ mod tests {
             region: "plant".parse().unwrap(),
             members: common::create_members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
+            founding: BTreeMap::new(),
             files: node.files(),
             dir: PathBuf::new(),
             clock: node.clock(),
@@ -1424,6 +1453,21 @@ mod tests {
         }
     }
 
+    /// Applies the spec that the board gives node `id`, and puts the result on the
+    /// board.
+    async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let spec = board.lock().unwrap().applies.remove(&id);
+            let Some((base, definitions)) = spec else {
+                continue;
+            };
+            let result = mesh.apply(base, definitions).await;
+            let pointer = mesh.pointer();
+            board.lock().unwrap().applied.push((id, pointer, result));
+        }
+    }
+
     /// Three voters, each on its own node with its own transport.
     struct Cluster {
         sim: Sim,
@@ -1514,9 +1558,9 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let (hidden, learner) = {
+        let (hidden, learner, founding) = {
             let board = board.lock().unwrap();
-            (board.hidden, board.learner)
+            (board.hidden, board.learner, board.founding.clone())
         };
         let voters: Vec<u8> =
             IDS.into_iter().filter(|&of| Some(of) != learner).collect();
@@ -1531,6 +1575,7 @@ mod tests {
         };
         let config = Config {
             members: IDS.map(member).into(),
+            founding,
             ..base
         };
         let mesh = Mesh::open(config).await.unwrap();
@@ -1557,6 +1602,11 @@ mod tests {
         tasks.spawn(async move {
             set(setting, clock, id, sets).await;
         });
+        let (applying, clock, applies) =
+            (mesh.clone(), node.clock(), Arc::clone(&board));
+        tasks.spawn(async move {
+            apply(applying, clock, id, applies).await;
+        });
         let mut watch = mesh.watch(INDEX);
         loop {
             let home = watch.next().await.unwrap();
@@ -1567,6 +1617,7 @@ mod tests {
             let state = mesh.group.borrow().state.clone();
             let mut board = board.lock().unwrap();
             board.states.insert(id, state);
+            board.pointers.insert(id, mesh.pointer());
             board.homes.entry(id).or_default().push(home);
             board.members.insert(id, records.keys().copied().collect());
             board.records.insert(id, records);
@@ -1640,6 +1691,114 @@ mod tests {
         cluster.start();
         cluster.run(seconds(5));
         assert_eq!(cluster.take(), (Vec::new(), before));
+    }
+
+    // The subject `plant.app` with the key of node 1.
+    fn create_founding() -> BTreeMap<Name, Definition> {
+        let subject = spec::subject::Subject::new(vec![public(1)]).unwrap();
+        let key = spec::definition::Kind::Subject.key("plant.app").unwrap();
+        [(key, Definition::Subject(subject))].into()
+    }
+
+    #[test]
+    fn the_pointer_before_the_first_change_holds_the_root_of_the_founding_tree() {
+        solo(|node, tasks| async move {
+            let empty = Mesh::start(config(&node, &tasks, 1, &[1], &[1])).await;
+            let empty = empty.unwrap().pointer();
+            let none = Pointer {
+                version: 0,
+                root: tree::empty(),
+            };
+            assert_eq!(empty, none);
+            node.clock().sleep(TICK).await;
+            let founding = create_founding();
+            let sets = founding
+                .iter()
+                .map(|(name, value)| tree::Change::Set(name.clone(), value.encode()));
+            let update =
+                tree::apply(&mut Chunks::default(), tree::empty(), sets).unwrap();
+            let config = Config {
+                founding,
+                dir: PathBuf::from("other"),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::start(config).await.unwrap();
+            let expected = Pointer {
+                version: 0,
+                root: update.root,
+            };
+            assert_eq!(mesh.pointer(), expected);
+            assert_ne!(update.root, tree::empty());
+        });
+    }
+
+    // Two spec changes from the founding pointer, then a home: the first applies, and
+    // the second is refused on each voter.
+    #[test]
+    fn three_voters_agree_on_the_spec_pointer_also_after_a_power_cut() {
+        let mut cluster = Cluster::new(2);
+        let founding = create_founding();
+        let base = Pointer {
+            version: 0,
+            root: spec::region::tree(&mut Chunks::default(), &founding).root,
+        };
+        cluster.board.lock().unwrap().founding = founding;
+        let change = |byte| Change::Spec {
+            base,
+            root: common::digest(byte),
+            chunks: [common::digest(byte)].into(),
+        };
+        let changes = [change(1), change(2), home(1)];
+        cluster.script_each(&changes.map(|change| encoded(&change)));
+        cluster.start();
+        cluster.run(seconds(5));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        let pointers: BTreeMap<_, _> = IDS.map(|id| (id, moved)).into();
+        let board = cluster.board();
+        assert_eq!(board.led.len(), 3);
+        assert_eq!(board.pointers, pointers);
+        cluster.board.lock().unwrap().founding = create_founding();
+        for node in &cluster.nodes {
+            cluster.sim.crash(node, Crash::Power);
+        }
+        cluster.start();
+        cluster.run(seconds(5));
+        assert_eq!(cluster.board().pointers, pointers);
+    }
+
+    // Voter 3 starts late, so the leader sends it the record in a catch-up `Append`.
+    #[test]
+    fn a_late_voter_gets_a_spec_change_of_the_most_chunks() {
+        let mut cluster = Cluster::new(3);
+        let founding = create_founding();
+        let base = Pointer {
+            version: 0,
+            root: spec::region::tree(&mut Chunks::default(), &founding).root,
+        };
+        cluster.board.lock().unwrap().founding = founding;
+        let chunks = (0..CHUNKS_MAX)
+            .map(|at| Digest::of(&at.to_le_bytes()))
+            .collect();
+        let change = Change::Spec {
+            base,
+            root: common::digest(1),
+            chunks,
+        };
+        cluster.script_each(&[encoded(&change), encoded(&home(1))]);
+        cluster.start_voter(1);
+        cluster.start_voter(2);
+        cluster.run(seconds(5));
+        cluster.start_voter(3);
+        cluster.run(seconds(5));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        let pointers: BTreeMap<_, _> = IDS.map(|id| (id, moved)).into();
+        assert_eq!(cluster.board().pointers, pointers);
     }
 
     #[test]
@@ -2106,6 +2265,7 @@ mod tests {
         });
     }
 
+    mod apply;
     mod home;
     mod send;
     mod serve;
