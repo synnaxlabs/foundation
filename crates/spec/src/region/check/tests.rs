@@ -5,7 +5,7 @@ use super::*;
 use crate::channel::Edge;
 use crate::definition::tests::kinded;
 use crate::region::common::{
-    access, create_definitions, data, index, name, prefix, record, subject,
+    access, create_definitions, data, index, name, prefix, qualified, record, subject,
 };
 
 fn ungoverned(key: &str, region: &str) -> Problem {
@@ -146,26 +146,33 @@ fn gives_misplaced_before_a_channel_problem_at_one_key() {
 }
 
 // More problems than a sort of short slices handles, so only a stable sort keeps
-// the order at each key.
+// the order at each key, also of the two channel problems.
 #[test]
 fn keeps_the_order_at_each_of_many_keys() {
     let keys: Vec<String> = (0..40).map(|at| format!("plant.@x.c{at:02}")).collect();
     let pairs: Vec<(&str, Definition)> = (100..)
         .zip(&keys)
-        .map(|(at, key)| (key.as_str(), data(at, 9)))
+        .map(|(at, key)| (key.as_str(), qualified(at, 9, Some(8))))
         .collect();
     let problems = check(&prefix("plant"), &create_definitions(&pairs));
-    assert_eq!(problems.len(), 80);
-    for (key, pair) in keys.iter().zip(problems.chunks(2)) {
-        let [first, second] = pair else {
-            panic!("{key}: {pair:?}");
+    assert_eq!(problems.len(), 120);
+    for (key, group) in keys.iter().zip(problems.chunks(3)) {
+        let dangling = |edge, to| {
+            Problem::Channel(channel::Problem::Dangling {
+                from: name(key),
+                edge,
+                to: Key::from_u128(to),
+            })
         };
-        let misplaced = Problem::Misplaced {
-            name: name(key),
-            kind: Kind::Channel,
-        };
-        assert_eq!(*first, misplaced, "{key}");
-        assert!(matches!(second, Problem::Channel(_)), "{key}");
+        let expected = [
+            Problem::Misplaced {
+                name: name(key),
+                kind: Kind::Channel,
+            },
+            dangling(Edge::Index, 9),
+            dangling(Edge::Quality, 8),
+        ];
+        assert_eq!(group, expected, "{key}");
     }
 }
 
