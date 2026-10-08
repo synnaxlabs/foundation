@@ -6219,8 +6219,8 @@ How to read this record:
   datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
   reads the key from its data directory (#1660). The node admits every peer that
   completes the handshake; the mesh checks each message of a mesh stream (NODE MESH).
-  At the stop, each session and stream future drops, then the transport. The bound on
-  the wait for a header is #1628.
+  With no mesh, at the stop, each session and stream future drops, then the transport.
+  The bound on the wait for a header is #1628.
   Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
@@ -6248,9 +6248,9 @@ How to read this record:
   `Hub` rule comes with PR 4. At the stop, each session and stream future drops, then
   the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
   DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. This
-  supersedes the stop order of
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669.
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. For a
+  node with a mesh, this supersedes the sentence "At the stop, each session and stream
+  future drops, then the transport." of this entry.
   Amended (2026-10-08, #1830, by `laptop.architect-2`, 07:26 UTC): with a mesh, each
   session and stream future drops, then the mesh, and the transport drops when the
   last task of the mesh ends, before `lock` drops:
