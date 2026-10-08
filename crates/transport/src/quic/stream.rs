@@ -4,11 +4,11 @@
 
 use std::cell::OnceCell;
 use std::collections::VecDeque;
-use std::ops::{ControlFlow, Range};
+use std::mem;
+use std::ops::Range;
 use std::rc::Rc;
 use std::slice;
 use std::task::Poll;
-use std::{iter, mem};
 
 use block::{Block, Unique};
 use bytes::Bytes;
