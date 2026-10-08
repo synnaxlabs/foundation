@@ -81,7 +81,8 @@ pub struct Entry {
 /// whole (a policy's budgets, for example) only when each of its attributes is known
 /// and reads, and the ones it needs are there. A block directly inside a definition
 /// other than a `connector` does not stop that check: only a connector's kind reads
-/// blocks, so each such block is one problem, and nothing inside it is checked.
+/// blocks, so each such block is one problem, and nothing inside it but a private key
+/// is checked.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
 /// channel knows. A `kind` of connector that is missing, is not a name, or is not in
 /// `kinds` hides each problem of the connector's config, and so does a config nested
@@ -2939,6 +2940,29 @@ mod tests {
                     "{keys:?}"
                 );
             }
+        }
+
+        #[test]
+        fn refuses_a_private_key_in_a_block_inside_a_definition() {
+            let mut policy = settings(
+                0,
+                0,
+                "edge",
+                &[("select", string("edge")), ("disk", string("1GiB"))],
+            );
+            let private = string("-----BEGIN OPENSSH PRIVATE KEY-----");
+            let inner = block(0, 90, "inner", &[], &[("note", private)]);
+            policy.body.blocks.push(inner);
+            assert_eq!(
+                check(&[document(vec![policy])]),
+                Err(vec![refused(
+                    "config.private-key",
+                    at(0, 101),
+                    "the value is a private key, which must never be in a file",
+                    "Remove the private key from this file now, and use the one line \
+                     of its `.pub` file",
+                )])
+            );
         }
 
         #[test]
