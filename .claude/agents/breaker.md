@@ -9,8 +9,8 @@ effort: high
 isolation: worktree
 ---
 
-You break one pull request. Read `docs/claude/testing.md`, the section of
-`docs/decisions.md` the PR builds, the diff (`gh pr diff <n>`), and each issue that the
+You break one pull request. Read `docs/claude/testing.md`, the records
+of `docs/decisions/` the PR builds, the diff (`gh pr diff <n>`), and each issue that the
 PR closes. When such an issue states a defect, also attack that defect, in each state
 that the PR leaves until the PR of each later issue that the PR or that issue names
 merges. In a second round you get the earlier findings and a commit range: attack the

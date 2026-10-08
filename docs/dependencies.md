@@ -53,11 +53,11 @@ exception when the patch lands (#55).
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 `fuzz/Cargo.toml`, keep the change small, and list it here with its reason. The
-patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`). A C
-library that we patch (open62541) has no `[patch.crates-io]`: its `build.rs` reads
-`patches/open62541/`. Searches skip `patches/` (`.ignore`): to search a copy, give its
-path or use `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables
-equal (#1867).
+patched copy lives in `patches/<crate>/` (LOCAL PATCHES in
+`docs/decisions/releases/local-patches.md`). A C library that we patch (open62541) has
+no `[patch.crates-io]`: its `build.rs` reads `patches/open62541/`. Searches skip
+`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`. No
+check yet keeps the two `[patch.crates-io]` tables equal (#1867).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
