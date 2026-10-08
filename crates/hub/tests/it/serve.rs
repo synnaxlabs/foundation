@@ -34,6 +34,9 @@ use super::{
 const PORT: u16 = 7000;
 const HOME: PrivateKey = PrivateKey([1; 32]);
 const PEER: PrivateKey = PrivateKey([2; 32]);
+/// The peer's message limit: the least that `transport` takes, so the home cuts a
+/// body and its ends into several messages.
+const PEER_MESSAGE: usize = 1472;
 /// How long the peer waits for a reply that must not come.
 const QUIET: Span = Span::from_nanos(100_000_000);
 
@@ -43,12 +46,14 @@ fn public_key(key: &PrivateKey) -> PublicKey {
         .expect("a public key")
 }
 
-/// A transport of `node` at `PORT` that proves `key`.
+/// A transport of `node` at `PORT` that proves `key` and takes messages of at most
+/// `message` bytes.
 fn transport(
     node: &sim::node::Node,
     tasks: &Tasks,
     pool: &Rc<Pool>,
     key: PrivateKey,
+    message: usize,
 ) -> Transport {
     let at = SocketAddr::new(node.addresses()[0], PORT);
     let mut parts = Port::bind(&node.net(), at)
@@ -56,7 +61,7 @@ fn transport(
         .split(NonZeroUsize::MIN);
     let config = transport::Config {
         private_key: key,
-        message_bytes_max: NonZeroUsize::new(1 << 16).expect("not 0"),
+        message_bytes_max: NonZeroUsize::new(message).expect("not 0"),
         window_bytes: 1 << 20,
         streams_max: NonZeroU32::new(16).expect("not 0"),
         idle: Span::from_nanos(60 * Span::SECOND.nanos()),
@@ -152,7 +157,7 @@ fn session<H, P>(
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let mut test = Test::new(node.clone(), tasks.clone(), layout).await;
         test.sync().await;
-        let transport = transport(&node, &tasks, &own_pool(), HOME);
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");
         let mut incoming = session.accept().await.expect("a stream");
         let header = incoming.receiver.recv().await.expect("a header");
@@ -171,7 +176,7 @@ fn session<H, P>(
     let node = nodes[1].clone();
     let main = move |tasks: Tasks| async move {
         let pool = own_pool();
-        let transport = transport(&node, &tasks, &pool, PEER);
+        let transport = transport(&node, &tasks, &pool, PEER, PEER_MESSAGE);
         let session = transport
             .dial(public_key(&HOME), &[at])
             .await
@@ -661,6 +666,56 @@ fn sends_each_frame_through_the_places_of_the_open() {
             assert_eq!(got_values, values);
             assert_eq!(got_stamps, stamps);
         }
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A frame of 191 series: its ends and its body each pass `PEER_MESSAGE`, so each
+/// goes in two or more messages.
+#[test]
+fn sends_a_frame_wider_than_a_message_of_the_peer() {
+    const KEYS: std::ops::Range<u128> = 10..200;
+    let home = |test: Test, incoming| async move {
+        let names: Vec<_> = KEYS.map(|key| format!("v{key}")).collect();
+        for (key, name) in KEYS.zip(&names) {
+            test.hub.define(Channel {
+                key: channel::Key::from_u128(key),
+                name: super::name(name),
+                data_type: I64,
+                index: channel::Key::from_u128(1),
+            });
+        }
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        let mut writer = test.writer("a", &names).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            let values: Vec<_> = KEYS
+                .map(|key| [i64::try_from(key).expect("fits")])
+                .collect();
+            let stamps = [now];
+            let series: Vec<_> = KEYS
+                .zip(&values)
+                .map(|(key, value)| (key, &value[..]))
+                .chain([(1, &stamps[..])])
+                .collect();
+            write_series(&mut writer, &series);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+    };
+    session(64, Class::Complete, false, home, |mut peer| async move {
+        let keys: Vec<_> = KEYS.chain([1]).collect();
+        let mut reader = open_complete(&mut peer, &keys, 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        let series = u32::try_from(keys.len()).expect("fits");
+        assert_eq!(places(&got), (0..series).collect::<Vec<_>>());
+        let types: Vec<_> = KEYS.map(|_| I64).collect();
+        let values: Vec<_> = KEYS
+            .map(|key| vec![i64::try_from(key).expect("fits")])
+            .collect();
+        assert_eq!(decoded(&got, &types), values);
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });
