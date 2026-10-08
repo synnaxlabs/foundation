@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use spec::Pointer;
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::PublicKey;
@@ -15,7 +16,6 @@ use spec::definition::Definition;
 use crate::card;
 use crate::change::{Change, Join, Malformed};
 use crate::member::Member;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
 

@@ -8,6 +8,7 @@ use raft::{
     Answer, Body, Data, Entry, Grant, Message, Position, Proof, Ready, Signature, Term,
     Voters,
 };
+use spec::Pointer;
 use transport::Address;
 use types::channel;
 use types::digest::Digest;
@@ -21,7 +22,6 @@ use crate::card::{self, Card};
 use crate::change::{Change, Join};
 use crate::claim::Signer;
 use crate::member::Member;
-use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{Options, Ticket, Voter};
 

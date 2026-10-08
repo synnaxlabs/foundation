@@ -14,7 +14,9 @@ approval; pin the version you build against there.
 | --- | --- | --- | --- | --- | --- |
 | `blake3` | `types` (`types::digest`, for `spec` and `blob`) | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
 | `rustix` | `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
-| `tokio` | `os`, `transport`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
+| `tokio` | `os`, `transport`, `node`, benchmarks | One `LocalRuntime` per shard (C2), and the I/O driver of the TCP streams and listeners of `env::net` (#120) | MIT | 1.53.2 | 2026-10-04 |
+| `mio` | `os` through Tokio `net` | The readiness loop over epoll and kqueue of the TCP streams and listeners of `env::net` (#120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). The person: "yes" (https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6051868744) | MIT | 1.2.4 | 2026-10-08 |
+| `socket2` | `os` through Tokio `net` | Comes with Tokio `net`; `os` makes its sockets with `rustix` (#120, https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6051868744) | MIT or Apache-2.0 | 0.6.5 | 2026-10-08 |
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, `secret` (sealing), `types` (`Pair::new`, `Pair::sign`, `PublicKey::verify`) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
@@ -35,6 +37,7 @@ approval; pin the version you build against there.
 | `http` | `connector` (`http`); `connector-influx` (feature `sim`) | The request and response types of `hyper`, which the client's surface uses (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466), and of the simulated HTTP servers | MIT or Apache-2.0 | 1.5.0 | 2026-10-06 |
 | `http-body` | `connector` (`http`) | The body trait of `hyper`, for the request body and to read the response (R7, #341, https://github.com/synnaxlabs/foundation/issues/341#issuecomment-6021382466) | MIT | 1.1.0 | 2026-10-06 |
 | `rustc-hash` | `types` (`types::hash::Map` and `Set`) | The fixed, fast hasher of every hash map (R16-7, #1321): SipHash cost 8.5 ns of 131 ns per 64 B `transport` write (#1308, #1399). Already in the build through `noq-proto`. The person: "Yeah I approve" (https://github.com/synnaxlabs/foundation/issues/1321#issuecomment-6039851114) | MIT or Apache-2.0 | 2.1.3 | 2026-10-07 |
+| `open62541` (C library, the upstream source files in `patches/open62541/`, not a crate) | `connector-opcua` (from #435 PR 4) | The OPC UA client, with a passive event loop that Rust drives under `sim` (#435). `cargo deny` checks only crates, so `deny.toml` has no entry for it | MPL-2.0; CC0-1.0 in `plugins/`; in `deps/`, MIT (`itoa`, `libc_time`, `mp_printf`, `musl_inet_pton`, `parse_num`), BSL-1.0 (`dtoa`), BSD (`base64`, `open62541_queue.h`), and Apache-2.0 (`pcg_basic`) | 1.5.9 | 2026-10-08 (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6052689544) |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
@@ -48,9 +51,11 @@ exception when the patch lands (#55).
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 `fuzz/Cargo.toml`, keep the change small, and list it here with its reason. The
-patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
-Searches skip `patches/` (`.ignore`): to search a copy, give its path or use
-`rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables equal (#1867).
+patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`). A C
+library that we patch (open62541) has no `[patch.crates-io]`: its `build.rs` reads
+`patches/open62541/`. Searches skip `patches/` (`.ignore`): to search a copy, give its
+path or use `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables
+equal (#1867).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
@@ -77,12 +82,14 @@ https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059938562.
 The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
 the empty-list sentence of
-https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy is a
-path package, so `cargo deny` does not check it against advisories (#1867).
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy of
+a Rust crate is a path package, so `cargo deny` does not check it against advisories
+(#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`) | With one state per process, the values of a test server depend on the draws of other threads (#435) |
 
 ## Tests, benchmarks, and tools
 

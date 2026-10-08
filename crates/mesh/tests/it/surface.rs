@@ -14,11 +14,10 @@ use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
 use mesh::region::Founding;
 use mesh::status::Status;
-use mesh::{
-    Config, Error, Member, Mesh, Pointer, Stopped, Watch, change, claim, log, region,
-};
+use mesh::{Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, region};
 use raft::{Position, Term};
 use sim::Sim;
+use spec::Pointer;
 use spec::definition::Definition;
 use transport::stream::Incoming;
 use transport::{Address, Class, Code, Peer, Port, Transport};

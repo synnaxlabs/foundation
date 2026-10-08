@@ -61,6 +61,7 @@ mod tests {
         Answer, Body, Data, Entry, Grant, Hard, Link, Position, Proof, Signature, Term,
         Voters,
     };
+    use spec::Pointer;
 
     use super::*;
     use types::digest::Digest;
@@ -68,7 +69,6 @@ mod tests {
     use crate::bytes::{put_change, put_position};
     use crate::change::{CHUNKS_MAX, Malformed};
     use crate::common::key;
-    use crate::pointer::Pointer;
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {
@@ -104,6 +104,7 @@ mod tests {
     fn each_spec_change_input_is_what_its_name_says() {
         let inputs = inputs!(
             "mesh_change": "spec",
+            "spec_chunks_0",
             "spec_chunks_1024",
             "spec_chunks_1025",
             "spec_held",
@@ -125,6 +126,7 @@ mod tests {
             holders: [key(1)].into(),
         };
         for (name, chunks) in [
+            ("spec_chunks_0", BTreeSet::new()),
             ("spec_held", [Digest([4; 32]), Digest([5; 32])].into()),
             (
                 "spec_held_chunks_1024",
@@ -160,6 +162,7 @@ mod tests {
             let length = inputs[name].len();
             let body = Malformed::Body { kind: 4, length };
             assert_eq!(Change::decode(inputs[name]), Err(body), "{name}");
+            assert_eq!(round_trip_change(inputs[name]), None, "{name}");
         }
         let mut order = spec(BTreeSet::new());
         let Change::Spec { holders, .. } = &mut order else {
@@ -170,6 +173,49 @@ mod tests {
         order.encode(&mut bytes);
         bytes[77..].rotate_left(16);
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
+    }
+
+    #[test]
+    fn each_spec_change_input_with_a_repeated_or_falling_key_does_not_decode() {
+        let inputs = inputs!(
+            "mesh_change": "spec_chunks_equal",
+            "spec_chunks_falling",
+            "spec_holders_equal",
+        );
+        let encoded = |chunks: &[u8], holders: &[u8]| {
+            let mut bytes = Vec::new();
+            Change::Spec {
+                base: Pointer {
+                    version: 1,
+                    root: Digest([2; 32]),
+                },
+                root: Digest([3; 32]),
+                chunks: chunks.iter().map(|&chunk| Digest([chunk; 32])).collect(),
+                holders: holders.iter().map(|&holder| key(holder)).collect(),
+            }
+            .encode(&mut bytes);
+            bytes
+        };
+        // Each chunk is 32 bytes from byte 75.
+        let mut equal = encoded(&[4, 5], &[]);
+        let mut falling = equal.clone();
+        equal[107..139].fill(4);
+        assert_eq!(inputs["spec_chunks_equal"], equal);
+        falling[75..139].rotate_left(32);
+        assert_eq!(inputs["spec_chunks_falling"], falling);
+        // The count of holders is at byte 107, after one chunk.
+        let mut twice = encoded(&[5], &[3]);
+        twice[107..109].copy_from_slice(&2_u16.to_le_bytes());
+        twice.extend(key(3).as_u128().to_le_bytes());
+        assert_eq!(inputs["spec_holders_equal"], twice);
+        for (name, bytes) in inputs {
+            let body = Malformed::Body {
+                kind: 4,
+                length: bytes.len(),
+            };
+            assert_eq!(Change::decode(bytes), Err(body), "{name}");
+            assert_eq!(round_trip_change(bytes), None, "{name}");
+        }
     }
 
     #[test]

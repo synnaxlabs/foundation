@@ -62,11 +62,7 @@ fn config(address: Value) -> Document {
         vec![block(
             20,
             "reader",
-            &[
-                (30, "name", string("influx")),
-                (40, "mode", string("complete")),
-                (50, "hold", string("2h")),
-            ],
+            &[(40, "mode", string("complete")), (50, "hold", string("2h"))],
         )],
     )
 }
