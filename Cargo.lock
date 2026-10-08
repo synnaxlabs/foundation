@@ -412,6 +412,7 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "counting",
+ "divan",
 ]
 
 [[package]]
