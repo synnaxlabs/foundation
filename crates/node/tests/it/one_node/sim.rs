@@ -31,7 +31,7 @@ pub(super) struct Opcua {}
 /// The simulated InfluxDB, with the database `plant`. Drop stops it.
 #[derive(Debug, Default)]
 pub(super) struct Influx {
-    /// The tests read it while [`Influx::stored`] waits on #1734. The drop test counts
+    /// The tests read it while [`Influx::stored`] waits on #1734. The drop tests count
     /// its owners while a refused connect waits on #2000.
     store: Arc<Mutex<Store>>,
     /// The address of the first [`Influx::serve`].
