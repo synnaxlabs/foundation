@@ -3872,33 +3872,35 @@ mod tests {
 
     #[test]
     fn the_stretch_buffer_grows_with_the_longest_walk() {
-        testing::run(1, |shard| {
-            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial(pair::SERVER_KEY.public());
-            pair.run(RUN);
-            let sender = open_sender(&mut pair, Class::Complete);
-            let now = pair.now();
-            // A stretch of 100 bytes, then a run of 2000 bytes in adjacent parts of
-            // 8 bytes, which goes as a slice of the block.
-            let mut parts = vec![Part {
-                range: 0..100,
-                zeros: 0,
-            }];
-            parts.extend((0..250).map(|at| Part {
-                range: 200 + at * 8..200 + at * 8 + 8,
-                zeros: 0,
-            }));
-            let block = shard.block(&[3; 2_200]);
-            let given = pair.client.endpoint.try_write(now, &sender, block, &parts);
-            assert!(matches!(given, Ok(None)), "{given:?}");
-            let key = key(&pair.client);
-            let connection =
-                crate::quic::find(&mut pair.client.endpoint.connections, key);
-            // Private: the capacity of the buffer shows in no public count.
-            let buffer = &connection.expect("a connection").streams.sending.buffer;
-            let capacity = buffer.capacity();
-            assert!(capacity < 2 * (100 + COPIED_MAX), "{capacity}");
-        });
+        // A run of 4000 bytes, which goes as a slice of the block, in one part and in
+        // adjacent parts of 8 bytes.
+        let one = vec![200..4_200];
+        let adjacent = (0..500).map(|at| 200 + at * 8..200 + at * 8 + 8).collect();
+        for run in [one, adjacent] {
+            testing::run(1, move |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(RUN);
+                let sender = open_sender(&mut pair, Class::Complete);
+                let now = pair.now();
+                // A stretch of 100 bytes before the run.
+                let parts: Vec<_> = [0..100]
+                    .into_iter()
+                    .chain(run)
+                    .map(|range| Part { range, zeros: 0 })
+                    .collect();
+                let block = shard.block(&[3; 4_200]);
+                let given = pair.client.endpoint.try_write(now, &sender, block, &parts);
+                assert!(matches!(given, Ok(None)), "{given:?}");
+                let key = key(&pair.client);
+                let connection =
+                    crate::quic::find(&mut pair.client.endpoint.connections, key);
+                // Private: the capacity of the buffer shows in no public count.
+                let buffer = &connection.expect("a connection").streams.sending.buffer;
+                let capacity = buffer.capacity();
+                assert!(capacity < 2 * (100 + COPIED_MAX), "{capacity}");
+            });
+        }
     }
 
     #[test]
