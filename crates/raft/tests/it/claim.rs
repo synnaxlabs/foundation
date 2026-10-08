@@ -343,7 +343,7 @@ fn a_reply_that_step_ignores_still_claims_its_grant() {
 
 // `step` reads a PreVote past its header and ignores its proof.
 #[test]
-fn a_pre_vote_that_step_ignores_the_proof_of_still_claims_it() {
+fn a_pre_vote_still_claims_the_proof_that_step_ignores() {
     let mut pre_vote = outside(8);
     pre_vote.body = Body::PreVote {
         last: Position::default(),
@@ -355,11 +355,21 @@ fn a_pre_vote_that_step_ignores_the_proof_of_still_claims_it() {
     ];
     assert_eq!(claims(&raft, &pre_vote), want);
     assert_eq!(raft.step(pre_vote), Ok(()));
-    let ready = raft.ready();
-    assert_eq!(ready.messages.len(), 1);
-    assert_eq!(ready.messages[0].to, key(1));
-    let answer = Answer::Granted(None);
-    assert_eq!(ready.messages[0].body, Body::PreVoteReply { answer });
+    let reply = Message {
+        from: key(2),
+        to: key(1),
+        term: Term(8),
+        body: Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        },
+        proof: None,
+        chain: Vec::new(),
+    };
+    let ready = Ready {
+        messages: vec![reply],
+        ..Ready::default()
+    };
+    assert_eq!(raft.ready(), ready);
 }
 
 // `step` refuses a second leader of its term by its header.
