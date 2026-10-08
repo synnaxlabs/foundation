@@ -453,7 +453,12 @@ impl Open {
                 let own = Rc::clone(&pool);
                 let failed = Arc::clone(&self.failed);
                 let hold = async move |home, guard| {
-                    serve.run(home, own, shard, guard, &failed).await;
+                    if let Some(error) = serve.run(home, own, shard, guard).await {
+                        failed.set(Error::Transport(error)).expect(
+                            "invariant: shard 0 serves only once its claim and open \
+                             succeed",
+                        );
+                    }
                 };
                 self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
@@ -613,21 +618,18 @@ impl Endpoint {
 
 impl Serve {
     /// Runs each task given with a hub over `home`, and serves the node's port with
-    /// a transport on `pool`, until `guard` completes or the transport stops. A
-    /// transport that stops goes into `failed`. Then drops the tasks, the hub,
-    /// `home`, `guard`, each session, and the transport. Runs no task and takes no
-    /// session when a shard did not open.
+    /// a transport on `pool`, until `guard` completes or the transport stops. Then
+    /// drops the tasks, the hub, `home`, `guard`, each session, and the transport,
+    /// and gives the error that stopped the transport, if it stopped first. Runs no
+    /// task and takes no session when a shard did not open.
     async fn run(
         self,
         home: home::Shard,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
-        failed: &OnceLock<Error>,
-    ) {
-        let Some(interner) = self.interner.await else {
-            return;
-        };
+    ) -> Option<transport::Error> {
+        let interner = self.interner.await?;
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -636,17 +638,15 @@ impl Serve {
         let transport = self.endpoint.open(pool, tasks.clone());
         let mut port = pin!(route::accept(transport, tasks.clone()));
         let mut guard = pin!(guard);
+        let mut stopped = None;
         let stop = poll_fn(|cx| {
             if guard.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(());
             }
-            port.as_mut().poll(cx).map(|error| {
-                failed.set(Error::Transport(error)).expect(
-                    "invariant: shard 0 serves only once its claim and open succeed",
-                );
-            })
+            port.as_mut().poll(cx).map(|error| stopped = Some(error))
         });
         self.inbox.serve(hub, tasks, stop).await;
+        stopped
     }
 }
 
