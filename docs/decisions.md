@@ -2411,23 +2411,24 @@ How to read this record:
   store gives it. A failed store call or file call is read again each second. The state
   is at most two trees: the chunks of the spec in use, from `spec::region::tree` of its
   definitions, and the chunks of the tree of the newest committed pointer that the task
-  got. A newer pointer drops the chunks of the one it replaces. The pointer in use is
-  one empty file `<version>-<root>` in `<Config::dir>/spec`. A spec takes effect after
-  the create and the sync of the directory of its file. The node then removes each other
-  file in the directory, as `Mesh::open` does, which keeps only the highest version. A
-  failed removal is not a cause: the next change or open removes the file. At an open,
-  the task skips each replayed pointer at or below the one that it knows. This is
-  correct while the replay passes through the pointer of the file, and Raft never drops
-  a committed entry. Trigger: before a forced takeover (K5) can drop a committed entry,
-  its issue decides how the task meets the new history. `Mesh::open` reads the spec of
-  the highest version that a file names from the store, or uses the founding spec when
-  there is no file. A spec that does not read or has problems is not an error of the
-  open: `behind` gives the cause. A file that does not name a pointer gives
-  `Error::Stray`, and a failed file call `Error::Files`. The restart read gets one
-  missing chunk for each run of `definitions`, so it costs time squared in the chunks of
-  the tree. Trigger: before a milestone opens a node on a spec of more than `CHUNKS_MAX`
-  chunks, `spec::tree` gets one level of a tree at a time (#1231). Decided by
-  `laptop.architect`, 2026-10-08T11:03:36Z
+  got. A newer pointer drops the chunks of the one it replaces. The base tree of
+  `Mesh::apply` comes from `Config::store` only, never from the chunks of the spec in
+  use. The pointer in use is one empty file `<version>-<root>` in `<Config::dir>/spec`.
+  A spec takes effect after the create and the sync of the directory of its file. The
+  node then removes each other file in the directory, as `Mesh::open` does, which keeps
+  only the highest version. A failed removal is not a cause: the next change or open
+  removes the file. At an open, the task skips each replayed pointer at or below the one
+  that it knows. This is correct while the replay passes through the pointer of the
+  file, and Raft never drops a committed entry. Trigger: before a forced takeover (K5)
+  can drop a committed entry, its issue decides how the task meets the new history.
+  `Mesh::open` reads the spec of the highest version that a file names from the store,
+  or uses the founding spec when there is no file. A spec that does not read or has
+  problems is not an error of the open: `behind` gives the cause. A file that does not
+  name a pointer gives `Error::Stray`, and a failed file call `Error::Files`. The
+  restart read gets one missing chunk for each run of `definitions`, so it costs time
+  squared in the chunks of the tree. Trigger: before a milestone opens a node on a spec
+  of more than `CHUNKS_MAX` chunks, `spec::tree` gets one level of a tree at a time
+  (#1231). Decided by `laptop.architect`, 2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178); the
   read with `definitions`, `Cause::Read`, and the two trees, 2026-10-08T11:13:40Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058621907), with
@@ -2446,8 +2447,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6062732865). The doc
   of `Mesh::open`, 2026-10-08T15:42:09Z
   (https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498).
-  Supersedes: the wait of `Mesh::spec` in item 4 of 6058455178, and the text of
-  `Behind::pointer` in 6061345871.
+  Supersedes: the base tree from the spec in use in item 2 of
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178, the wait
+  of `Mesh::spec` in item 4 of the same comment, and the text of `Behind::pointer` in
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871.
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
@@ -4772,7 +4775,7 @@ How to read this record:
   a lazy fetch of chunks, a provisional tree and `tree::diff`, which writes chunks that
   the plan drops, and the chunks of the applied tree as an input, with which `ops` reads
   the tree a second time and a missing chunk panics in `config`, though #1741 names that
-  case (`Cause::Tree`). Supersedes the `chunks` input and its panic of
+  case (`Cause::Read`). Supersedes the `chunks` input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its
