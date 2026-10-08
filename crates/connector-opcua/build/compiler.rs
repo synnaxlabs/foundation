@@ -1,14 +1,14 @@
 use cc::Tool;
 
-/// Refuses `tool` unless it reads GCC driver flags, the form of each flag in
-/// `flags.txt`. GCC and clang do. MSVC and clang-cl warn on each and go on.
+/// Refuses `tool` when `cc` takes it for MSVC or clang-cl. `flags.txt` holds GCC
+/// driver flags, and those compilers warn on each one and go on.
 pub(crate) fn check(tool: &Tool) -> Result<(), String> {
-    if tool.is_like_gnu() || tool.is_like_clang() {
+    if !tool.is_like_msvc() {
         return Ok(());
     }
     Err(format!(
-        "connector-opcua: the compiler {} is not GCC or clang; flags.txt holds GCC \
-         driver flags, so only GCC and clang can build open62541",
+        "connector-opcua: the compiler {} is like MSVC; flags.txt holds GCC driver \
+         flags, which it does not read, so it cannot build open62541",
         tool.path().display()
     ))
 }

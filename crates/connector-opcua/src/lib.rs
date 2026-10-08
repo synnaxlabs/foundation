@@ -28,14 +28,14 @@ mod tests {
     }
 
     #[test]
-    fn check_refuses_a_compiler_that_does_not_read_gcc_flags() {
+    fn check_refuses_a_compiler_like_msvc() {
         for path in ["/missing/cl.exe", "/missing/clang-cl"] {
             assert_eq!(
                 compiler::check(&tool(path)),
                 Err(format!(
-                    "connector-opcua: the compiler {path} is not GCC or clang; \
-                     flags.txt holds GCC driver flags, so only GCC and clang can \
-                     build open62541"
+                    "connector-opcua: the compiler {path} is like MSVC; flags.txt holds \
+                     GCC driver flags, which it does not read, so it cannot build \
+                     open62541"
                 ))
             );
         }
