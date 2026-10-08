@@ -121,7 +121,8 @@ impl Plan {
     /// change. A channel keeps the key of the stored channel at its name, and a new
     /// name gets a key from `key`, in name order. An edge to a name that is no channel
     /// after the plan gets a key from `key` too, which [`spec::region::check`] refuses
-    /// as dangling. `key` must give keys that no channel holds.
+    /// as dangling. Each call of `key` must give a key that no channel holds and that
+    /// no earlier call gave.
     #[must_use]
     pub fn definitions(
         &self,
