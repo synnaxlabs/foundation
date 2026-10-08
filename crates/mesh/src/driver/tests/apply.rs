@@ -842,6 +842,39 @@ fn an_equal_change_with_fewer_homes_gives_stale() {
     });
 }
 
+// As above, but a home of `SECOND` applies in the batch of the second call's entry,
+// after it. The call reads the homes when it settles, so it gives `Ok`.
+#[test]
+fn an_equal_change_gives_ok_when_a_later_home_applies_in_its_batch() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let definitions = create_indexes(2);
+        let moved = pointer(1, &definitions);
+        let first = create_homes(1, "plant.node1");
+        let applied = mesh.apply(base(), definitions.clone(), first).await;
+        assert_eq!(applied, Ok(moved));
+        let both = create_homes(2, "plant.node1");
+        assert!(mesh.group.borrow().proposals.is_empty());
+        let mut call = pin!(mesh.apply(base(), definitions, both));
+        while mesh.group.borrow().proposals.is_empty() {
+            assert!(now(call.as_mut()).await.is_pending());
+            if mesh.group.borrow().proposals.is_empty() {
+                node.clock().sleep(Span::MILLISECOND).await;
+            }
+        }
+        let later = Change::Home {
+            index: SECOND,
+            home: key(2),
+        };
+        let mut set = pin!(mesh.propose(later));
+        assert!(now(set.as_mut()).await.is_pending());
+        assert_eq!(mesh.group.borrow().proposals.len(), 2);
+        assert_eq!(call.await, Ok(moved));
+        assert!(set.await.is_ok());
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+    });
+}
+
 // `INDEX` keeps its home from the first call, so both equal calls give `Ok`.
 #[test]
 fn two_equal_calls_with_a_kept_home_give_ok() {

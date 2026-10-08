@@ -28,10 +28,11 @@ impl Mesh {
     /// committed and this node applied it. It tries again when a new leader replaces
     /// the entry, and after each tick while no leader takes it, as [`Mesh::set_home`]
     /// does. On `Ok`, the pointer is the one this call makes, and each index of `homes`
-    /// has a home, its listed one or the one it had. A call whose entry finds that
-    /// pointer, after a lost answer or an equal change of another call, returns it when
-    /// each index of `homes` has a home, and else gives `Stale`. A retry that finds a
-    /// later pointer gives `Stale`, even when an entry of this call applied before it.
+    /// has a home in this node's state when the call settles, the listed one or
+    /// another. A call whose entry finds that pointer, after a lost answer or an equal
+    /// change of another call, returns it when each index of `homes` has a home then,
+    /// and else gives `Stale`. A retry that finds a later pointer gives `Stale`, even
+    /// when an entry of this call applied before it.
     ///
     /// # Errors
     ///
@@ -51,8 +52,9 @@ impl Mesh {
     ///   when a call of the store fails.
     /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
     ///   each half of the voters, before the proposal or at the apply.
-    /// - [`Error::Stale`] when the pointer at the apply is not `base`, and is not the
-    ///   pointer this call makes with a home for each index of `homes`.
+    /// - [`Error::Stale`] when the pointer at the apply of its entry is not `base`, and
+    ///   either it is not the pointer this call makes, or an index of `homes` has no
+    ///   home in this node's state when the call settles.
     ///
     /// # Panics
     ///

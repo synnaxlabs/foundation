@@ -2409,10 +2409,12 @@ How to read this record:
   equal change of another call, 2026-10-08T11:46:44Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A
   listed home is a proposal: the entry gives it only to an index with none. On `Ok`,
-  the pointer is the call's and each listed index has a home in the state, the listed
-  one or the one it had. A call whose entry finds `base.next(root)` returns it when
-  each listed index has a home, and else gives `Stale`; the path on which the call's
-  entry applies checks nothing, so both paths give the same result. Decided by
+  the pointer is the call's and each listed index has a home in this node's state when
+  the call settles, the listed one or another. A call whose entry finds
+  `base.next(root)` returns it when each listed index has a home then, and else gives
+  `Stale`. No entry removes a home, so the path on which the call's entry applies
+  needs no check, and both paths give the same result. Trigger: when an entry can
+  remove a home, that path checks too. Decided by
   `laptop.architect`, 2026-10-08T17:20:54Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
   changed by `laptop.architect` at 2026-10-08T17:34:20Z
@@ -2425,8 +2427,12 @@ How to read this record:
   `Stale` item of `Mesh::apply` names that case, approved by `laptop.architect` at
   2026-10-08T17:52:34Z
   (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065835401). The
-  build with `spec::region::tree`, and the build of the root of `Config::founding` with
-  it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
+  reading when the call settles, the invariant, and its trigger, decided by
+  `laptop.architect` at 2026-10-08T18:00:15Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065963448), which
+  supersedes the `Stale` text of 17:52:34Z. The build with `spec::region::tree`, and
+  the build of the root of `Config::founding` with it in `Mesh::open`, decided by
+  `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771). The
