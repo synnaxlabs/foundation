@@ -355,11 +355,12 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }
 
-/// GCC 10 and later, and Clang, default to `-moutline-atomics` on 64-bit Arm Linux,
-/// which the host build does not show. So this preprocesses each source of the copy
-/// as the host build does and compiles it for 64-bit Arm with that default. The
-/// preprocessing is the host's, so the test finds the names that the code generation
-/// for Arm adds, not the names of a branch of the source for Arm only.
+/// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
+/// Clang when it finds GCC 9.3.1 or later, which the host build does not show. So
+/// this preprocesses each source of the copy as the host build does and compiles it
+/// for 64-bit Arm with that default. The preprocessing is the host's, so the test
+/// finds the names that the code generation for Arm adds, not the names of a branch
+/// of the source for Arm only.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
@@ -397,7 +398,7 @@ fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
                 .arg("-o")
                 .arg(&text)
                 .status()
-                .unwrap();
+                .expect("needs Clang");
             assert!(status.success(), "{source}");
             let status = std::process::Command::new("clang")
                 .args([
