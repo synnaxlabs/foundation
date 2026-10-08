@@ -67,8 +67,8 @@ pub struct Entry {
 /// whole (a policy's budgets, for example) only when each of its attributes is known
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
-/// A bad `kind` of channel hides the problems of the attributes that a kind of channel
-/// knows.
+/// A bad `kind` of channel hides the problems of each attribute that a kind of channel
+/// knows, except the edges (`index`, `quality`, `error`, and `control`).
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found {
         channels: channels(documents),
@@ -2444,8 +2444,8 @@ mod tests {
                         "document.unknown-attribute",
                         at(0, 112),
                         "`other` is not an attribute of the `channel` block",
-                        "Use `control`, `data_type`, `error`, `index`, `kind`, `quality`, \
-                         or `unit`, or remove it",
+                        "Use `control`, `data_type`, `error`, `index`, `kind`, \
+                         `quality`, or `unit`, or remove it",
                     ),
                     unknown(
                         at(0, 115),

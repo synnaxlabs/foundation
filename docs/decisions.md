@@ -3895,7 +3895,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
   After a bad `kind`, `check` checks the edges and gives `document.unknown-attribute`
   for each attribute that no kind knows. It leaves each other attribute, since its
-  problem depends on the kind. Decided by `laptop.architect-2` (2026-10-08T02:41Z,
+  problem depends on the kind. Decided by `laptop.architect-2` (2026-10-08T02:41:50Z,
   https://github.com/synnaxlabs/foundation/issues/1758).
 - **ACCESS BLOCK (2026-10-08)** `access "<name>" { subjects, select, allow, authority }`
   (C8) gives a `spec::access::Policy` at `<name>.@access`. `subjects` and `select` are
