@@ -30,7 +30,7 @@ impl fmt::Debug for Status {
 
 /// `UA_String` and `UA_ByteString`.
 #[repr(C)]
-pub(crate) struct UaString {
+pub(crate) struct Bytes {
     pub(crate) length: usize,
     pub(crate) data: *mut u8,
 }
@@ -42,11 +42,9 @@ unsafe extern "C" {
     pub(crate) fn UA_DateTime_localTimeUtcOffset() -> i64;
 
     pub(crate) fn UA_EventLoop_new_POSIX(logger: *const c_void) -> *mut c_void;
-    pub(crate) fn UA_ConnectionManager_new_POSIX_TCP(name: UaString) -> *mut c_void;
-    pub(crate) fn UA_ConnectionManager_new_POSIX_UDP(name: UaString) -> *mut c_void;
-    pub(crate) fn UA_ConnectionManager_new_POSIX_Ethernet(
-        name: UaString,
-    ) -> *mut c_void;
-    pub(crate) fn UA_InterruptManager_new_POSIX(name: UaString) -> *mut c_void;
+    pub(crate) fn UA_ConnectionManager_new_POSIX_TCP(name: Bytes) -> *mut c_void;
+    pub(crate) fn UA_ConnectionManager_new_POSIX_UDP(name: Bytes) -> *mut c_void;
+    pub(crate) fn UA_ConnectionManager_new_POSIX_Ethernet(name: Bytes) -> *mut c_void;
+    pub(crate) fn UA_InterruptManager_new_POSIX(name: Bytes) -> *mut c_void;
 
 }

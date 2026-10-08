@@ -2,7 +2,7 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
-use crate::ffi::{self, Status, UaString};
+use crate::ffi::{self, Bytes, Status};
 
 #[test]
 fn the_copy_names_a_status_code() {
@@ -48,7 +48,7 @@ fn call_refused() {
     let Ok(name) = std::env::var(CHILD) else {
         return;
     };
-    let empty = || UaString {
+    let empty = || Bytes {
         length: 0,
         data: std::ptr::null_mut(),
     };
