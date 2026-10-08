@@ -69,9 +69,9 @@
   kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
   the move of `Pointer` to a layer 1 crate, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); the
-  founding as agreed region state that a check at each open must not stop, the check of
-  the founding by the node that founds the region, and a founding with problems at a
-  later build, 2026-10-08T08:41:43Z
+  founding as agreed region state, and that a check at each open stops a node on a later
+  build whose checks find more problems, the check of the founding by the node that
+  founds the region, and a founding with problems at a later build, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
   bound of an `Append` in bytes, 2026-10-08T08:44:55Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with
