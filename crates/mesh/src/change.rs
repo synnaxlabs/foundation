@@ -3,6 +3,7 @@
 use std::fmt;
 
 use types::channel;
+use types::digest::Digest;
 use types::ed25519::PublicKey;
 use types::node;
 use types::time::Stamp;
@@ -12,6 +13,7 @@ use crate::bytes::{
     take_public_key, take_stamp,
 };
 use crate::card;
+use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::Options;
 
@@ -34,6 +36,16 @@ pub(crate) enum Change {
         /// What the ticket admits.
         options: Options,
     },
+    /// Moves the spec pointer from `base` to version `base.version + 1` at `root`.
+    Spec {
+        /// The pointer that the change was made on.
+        base: Pointer,
+        /// The root digest of the new tree.
+        root: Digest,
+        /// The digests of the new tree's chunks that a voter must hold, in strictly
+        /// rising order, at most [`CHUNKS_MAX`].
+        chunks: Vec<Digest>,
+    },
 }
 
 /// A change that admits a node. Every node checks it at apply, so its card is not yet
@@ -55,6 +67,11 @@ pub(crate) struct Join {
 const HOME: u8 = 1;
 const JOIN: u8 = 2;
 const TICKET: u8 = 3;
+const SPEC: u8 = 4;
+
+/// The most chunk digests that one `Spec` change lists, so that the change (about
+/// 32 KiB) fits in an append of 64 KiB with room for the rest of the message.
+pub(crate) const CHUNKS_MAX: usize = 1024;
 
 impl Change {
     /// Adds the one byte form of the change to `out`: a kind byte, then the body of
@@ -67,6 +84,8 @@ impl Change {
     /// - Ticket: the public key, the prefix behind a length byte, the reusable byte (0
     ///   or 1), the expiry in nanoseconds (8 bytes), and the ephemeral span behind a
     ///   presence byte.
+    /// - Spec: the base version (8 bytes), the base root, the new root, the count of
+    ///   chunks (2 bytes), and each chunk digest. A digest is its 32 bytes.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Home { index, home } => {
@@ -90,6 +109,18 @@ impl Change {
                 put_public_key(*public_key, out);
                 options.encode(out);
             }
+            Self::Spec { base, root, chunks } => {
+                out.push(SPEC);
+                out.extend(base.version.to_le_bytes());
+                out.extend(base.root.0);
+                out.extend(root.0);
+                let count = u16::try_from(chunks.len())
+                    .expect("invariant: a spec change lists at most 1024 chunks");
+                out.extend(count.to_le_bytes());
+                for chunk in chunks {
+                    out.extend(chunk.0);
+                }
+            }
         }
     }
 
@@ -105,6 +136,7 @@ impl Change {
             HOME => take_home,
             JOIN => take_join,
             TICKET => take_ticket,
+            SPEC => take_spec,
             _ => return Err(Unknown::Kind { kind }.into()),
         };
         take_body(&mut rest)
@@ -137,6 +169,27 @@ fn take_ticket(bytes: &mut &[u8]) -> Option<Change> {
         public_key: take_public_key(bytes)?,
         options: Options::decode(bytes)?,
     })
+}
+
+fn take_spec(bytes: &mut &[u8]) -> Option<Change> {
+    let base = Pointer {
+        version: u64::from_le_bytes(take(bytes)?),
+        root: Digest(take(bytes)?),
+    };
+    let root = Digest(take(bytes)?);
+    let count = usize::from(u16::from_le_bytes(take(bytes)?));
+    if count > CHUNKS_MAX {
+        return None;
+    }
+    let mut chunks: Vec<Digest> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let chunk = Digest(take(bytes)?);
+        if chunks.last().is_some_and(|&last| last >= chunk) {
+            return None;
+        }
+        chunks.push(chunk);
+    }
+    Some(Change::Spec { base, root, chunks })
 }
 
 /// Bytes that are not a change record.
@@ -204,7 +257,8 @@ mod tests {
 
     use super::*;
     use crate::common::{
-        home, index, join, name, options, public, record, status_bytes, with_status,
+        digest, home, index, join, name, options, public, record, spec, status_bytes,
+        with_status,
     };
 
     fn encoded(change: &Change) -> Vec<u8> {
@@ -257,6 +311,61 @@ mod tests {
     }
 
     #[test]
+    fn a_spec_change_has_a_fixed_byte_form() {
+        let mut expected = vec![4];
+        expected.extend(7_u64.to_le_bytes());
+        expected.extend([1; 32]);
+        expected.extend([2; 32]);
+        expected.extend([2, 0]);
+        expected.extend([3; 32]);
+        expected.extend([9; 32]);
+        assert_eq!(encoded(&spec(7, 1, 2, &[3, 9])), expected);
+        assert_eq!(encoded(&spec(0, 1, 2, &[]))[73..], [0, 0]);
+    }
+
+    #[test]
+    fn a_spec_change_whose_chunks_do_not_strictly_rise_does_not_decode() {
+        for chunks in [[3, 3], [9, 3]] {
+            let mut bytes = encoded(&spec(7, 1, 2, &[3, 9]));
+            bytes.truncate(75);
+            for chunk in chunks {
+                bytes.extend([chunk; 32]);
+            }
+            let length = bytes.len();
+            let error = Change::decode(&bytes).unwrap_err();
+            assert_eq!(error, Malformed::Body { kind: 4, length });
+        }
+    }
+
+    #[test]
+    fn a_spec_change_with_more_than_1024_chunks_does_not_decode() {
+        let most: Vec<Digest> = (0..CHUNKS_MAX)
+            .map(|at| {
+                let mut chunk = [0; 32];
+                chunk[..2].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
+                Digest(chunk)
+            })
+            .collect();
+        let change = Change::Spec {
+            base: Pointer {
+                version: 7,
+                root: digest(1),
+            },
+            root: digest(2),
+            chunks: most,
+        };
+        let mut bytes = encoded(&change);
+        assert_eq!(Change::decode(&bytes), Ok(change));
+        bytes[73..75].copy_from_slice(&1025_u16.to_le_bytes());
+        bytes.extend([0xff; 32]);
+        let length = bytes.len();
+        assert_eq!(
+            Change::decode(&bytes),
+            Err(Malformed::Body { kind: 4, length })
+        );
+    }
+
+    #[test]
     fn decode_refuses_empty_bytes() {
         let error = Change::decode(&[]).unwrap_err();
         assert_eq!(error, Malformed::Unknown(Unknown::Empty));
@@ -266,7 +375,7 @@ mod tests {
     #[test]
     fn decode_refuses_an_unknown_kind() {
         let mut bytes = encoded(&home(1, 2));
-        for kind in [0, 4] {
+        for kind in [0, 5] {
             bytes[0] = kind;
             let error = Change::decode(&bytes).unwrap_err();
             assert_eq!(error, Malformed::Unknown(Unknown::Kind { kind }));
@@ -369,7 +478,21 @@ mod tests {
                     },
                 )
             });
-        prop_oneof![homes, joins, tickets]
+        let specs = (
+            any::<u64>(),
+            any::<[u8; 32]>(),
+            any::<[u8; 32]>(),
+            prop::collection::btree_set(any::<[u8; 32]>(), 0..4),
+        )
+            .prop_map(|(version, base, root, chunks)| Change::Spec {
+                base: Pointer {
+                    version,
+                    root: Digest(base),
+                },
+                root: Digest(root),
+                chunks: chunks.into_iter().map(Digest).collect(),
+            });
+        prop_oneof![homes, joins, tickets, specs]
     }
 
     proptest! {

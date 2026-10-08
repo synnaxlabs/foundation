@@ -16,10 +16,13 @@ use env::entropy::Entropy;
 use env::files::Files;
 use env::tasks::Tasks;
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
+use spec::definition::Definition;
+use spec::tree::{self, Chunks};
 use transport::{Code, Session, Transport};
 use types::channel;
+use types::digest::Digest;
 use types::ed25519::PublicKey;
-use types::name::Prefix;
+use types::name::{Name, Prefix};
 use types::node::{self, PrivateKey};
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -32,6 +35,7 @@ use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::Message;
+use crate::pointer::Pointer;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
 pub use end::Ended;
@@ -79,6 +83,9 @@ pub struct Config {
     /// member. A node that joins gives the founding voters from its join answer. A node
     /// with no voter takes no request.
     pub voters: BTreeSet<node::Key>,
+    /// The definitions of the region before the first change of its spec, by tree key,
+    /// the same at each open. A node that joins gives them from its join answer.
+    pub founding: BTreeMap<Name, Definition>,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
     /// The mesh's directory, relative to the data directory. The mesh makes it, and
@@ -173,8 +180,9 @@ impl Mesh {
 
     // Opens the group with no task that sends: `outgoing` gives each message.
     async fn start(config: Config) -> Result<Self, Error> {
-        let state =
-            region::State::new(config.region, config.members).map_err(Error::Member)?;
+        let founding = root(&config.founding);
+        let state = region::State::new(config.region, config.members, founding)
+            .map_err(Error::Member)?;
         match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
             Some(own) if own.public_key() != config.private_key.public() => {
@@ -276,6 +284,14 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The spec pointer in this node's applied state. It answers also after the group
+    /// stops, from the view at the stop. This is the agreed pointer. Its spec can have
+    /// problems that keep the node on an earlier spec.
+    #[must_use]
+    pub fn pointer(&self) -> Pointer {
+        self.group.borrow().state.spec()
     }
 
     /// Gives the group `message`, which `peer` sent.
@@ -546,6 +562,17 @@ impl fmt::Display for Unstamped {
 }
 
 impl std::error::Error for Unstamped {}
+
+/// The root of the tree of `definitions`. Its chunks are dropped until the store of
+/// #1741 keeps them.
+fn root(definitions: &BTreeMap<Name, Definition>) -> Digest {
+    let sets = definitions
+        .iter()
+        .map(|(name, definition)| tree::Change::Set(name.clone(), definition.encode()));
+    tree::apply(&mut Chunks::default(), tree::empty(), sets)
+        .expect("invariant: a change of the empty tree reads no chunk")
+        .root
+}
 
 /// A watch of the home of one index.
 pub struct Watch {
@@ -1121,6 +1148,10 @@ mod tests {
         records: BTreeMap<u8, BTreeMap<u8, Member>>,
         /// The region state of each node, at the same time.
         states: BTreeMap<u8, region::State>,
+        /// The spec pointer of each node, at the same time.
+        pointers: BTreeMap<u8, Pointer>,
+        /// The founding definitions of each voter.
+        founding: BTreeMap<Name, Definition>,
         /// The join request that each node stamps.
         requests: BTreeMap<u8, Request>,
         /// The join that each node stamped.
@@ -1176,6 +1207,7 @@ mod tests {
             region: "plant".parse().unwrap(),
             members: common::create_members(members),
             voters: voters.iter().map(|&id| key(id)).collect(),
+            founding: BTreeMap::new(),
             files: node.files(),
             dir: PathBuf::new(),
             clock: node.clock(),
@@ -1514,9 +1546,9 @@ mod tests {
         id: u8,
         board: Arc<Mutex<Board>>,
     ) -> ! {
-        let (hidden, learner) = {
+        let (hidden, learner, founding) = {
             let board = board.lock().unwrap();
-            (board.hidden, board.learner)
+            (board.hidden, board.learner, board.founding.clone())
         };
         let voters: Vec<u8> =
             IDS.into_iter().filter(|&of| Some(of) != learner).collect();
@@ -1531,6 +1563,7 @@ mod tests {
         };
         let config = Config {
             members: IDS.map(member).into(),
+            founding,
             ..base
         };
         let mesh = Mesh::open(config).await.unwrap();
@@ -1567,6 +1600,7 @@ mod tests {
             let state = mesh.group.borrow().state.clone();
             let mut board = board.lock().unwrap();
             board.states.insert(id, state);
+            board.pointers.insert(id, mesh.pointer());
             board.homes.entry(id).or_default().push(home);
             board.members.insert(id, records.keys().copied().collect());
             board.records.insert(id, records);
@@ -1640,6 +1674,82 @@ mod tests {
         cluster.start();
         cluster.run(seconds(5));
         assert_eq!(cluster.take(), (Vec::new(), before));
+    }
+
+    // The subject `plant.app` with the key of node 1.
+    fn create_founding() -> BTreeMap<Name, Definition> {
+        let subject = spec::subject::Subject::new(vec![public(1)]).unwrap();
+        let key = spec::definition::Kind::Subject.key("plant.app").unwrap();
+        [(key, Definition::Subject(subject))].into()
+    }
+
+    #[test]
+    fn the_pointer_before_the_first_change_holds_the_root_of_the_founding_tree() {
+        solo(|node, tasks| async move {
+            let empty = Mesh::start(config(&node, &tasks, 1, &[1], &[1])).await;
+            let empty = empty.unwrap().pointer();
+            let none = Pointer {
+                version: 0,
+                root: tree::empty(),
+            };
+            assert_eq!(empty, none);
+            node.clock().sleep(TICK).await;
+            let founding = create_founding();
+            let sets = founding
+                .iter()
+                .map(|(name, value)| tree::Change::Set(name.clone(), value.encode()));
+            let update =
+                tree::apply(&mut Chunks::default(), tree::empty(), sets).unwrap();
+            let config = Config {
+                founding,
+                dir: PathBuf::from("other"),
+                ..config(&node, &tasks, 1, &[1], &[1])
+            };
+            let mesh = Mesh::start(config).await.unwrap();
+            let expected = Pointer {
+                version: 0,
+                root: update.root,
+            };
+            assert_eq!(mesh.pointer(), expected);
+            assert_ne!(update.root, tree::empty());
+        });
+    }
+
+    // Two spec changes from the founding pointer, then a home: the first applies, and
+    // the second is refused on each voter.
+    #[test]
+    fn three_voters_agree_on_the_spec_pointer_also_after_a_power_cut() {
+        let mut cluster = Cluster::new(2);
+        let founding = create_founding();
+        let base = Pointer {
+            version: 0,
+            root: root(&founding),
+        };
+        cluster.board.lock().unwrap().founding = founding;
+        let change = |byte| Change::Spec {
+            base,
+            root: common::digest(byte),
+            chunks: vec![common::digest(byte)],
+        };
+        let changes = [change(1), change(2), home(1)];
+        cluster.script_each(&changes.map(|change| encoded(&change)));
+        cluster.start();
+        cluster.run(seconds(5));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        let pointers: BTreeMap<_, _> = IDS.map(|id| (id, moved)).into();
+        let board = cluster.board();
+        assert_eq!(board.led.len(), 3);
+        assert_eq!(board.pointers, pointers);
+        cluster.board.lock().unwrap().founding = create_founding();
+        for node in &cluster.nodes {
+            cluster.sim.crash(node, Crash::Power);
+        }
+        cluster.start();
+        cluster.run(seconds(5));
+        assert_eq!(cluster.board().pointers, pointers);
     }
 
     #[test]

@@ -2064,6 +2064,32 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
+- **SPEC CHANGE (#1083)** A `Spec` change record (kind 4) moves a region's spec
+  pointer by compare-and-swap. It holds the base pointer, the new root, and the digests
+  of the new tree's chunks, never their bytes, so `mesh` moves the pointer without the
+  chunks. Byte form: the base version (8 bytes, little-endian), the base root (32), the
+  new root (32), the chunk count (2 bytes, little-endian), then each digest (32), in
+  strictly rising order. The new version is `base.version + 1`. Lost: a version in the
+  record, which can disagree with the base. A record lists at most `CHUNKS_MAX` = 1024
+  digests, about 32 KiB, so that it fits in an append of 64 KiB, a node's limit, with
+  room for the rest of the message; decode refuses a larger count. An entry over a
+  member's limit is never sent, and `raft` sends it again with no end (#1361). #1741
+  decides how a change of more new chunks applies. Every member applies a change whose
+  base is the pointer, and refuses one whose base is not (`Refused::Stale`), so of two
+  changes from one base only the first applies. The state machine never reads chunks
+  and never runs a check: a committed spec with problems moves the pointer, and the
+  node keeps the last spec it used (#1741). The pointer before the first change is
+  version 0 at the root of the tree of `Config::founding`. No BQ12 signature check on
+  the change in this milestone (#1213). Trigger: `mesh::Pointer` moves to a layer 1
+  crate in a refactor PR before a `wire` message carries it. Decided by
+  `laptop.architect`: chunks through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a
+  spec with problems, 2026-10-07T07:03:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
+  founding definitions, 2026-10-08T06:12:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
+  kind, its byte form, `CHUNKS_MAX`, and `Refused::Stale`, 2026-10-08T08:22:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
