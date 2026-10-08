@@ -56,8 +56,10 @@ pub struct Config {
     /// transport. Each message that the client sends takes a block from it, which the
     /// stream holds until the node has it. So a request needs room for the bytes
     /// that the session holds in flight, up to the node's
-    /// [`transport::Config::window_bytes`], and gives [`Error::Pool`] when the pool
-    /// has none.
+    /// [`transport::Config::window_bytes`], plus the next chunk of the body, which
+    /// takes its block before it waits for the window, and the blocks of the header
+    /// and the request. A chunk is at most [`block::Pool::largest`]. A request gives
+    /// [`Error::Pool`] when the pool has no room.
     pub pool: Rc<block::Pool>,
 }
 

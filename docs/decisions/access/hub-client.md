@@ -15,7 +15,10 @@
   `Config` holds its own `pool`, which a program may share with the transport. The
   stream holds each block of a body until the node has it, so a request needs room for
   the bytes that the session holds in flight, up to the node's
-  `transport::Config::window_bytes`, and gives `Error::Pool` when the pool has none.
+  `transport::Config::window_bytes`, plus the next chunk of the body, which takes its
+  block before it waits for the window, and the blocks of the header and the request.
+  A chunk is at most `block::Pool::largest`. A request gives `Error::Pool` when the
+  pool has no room.
   `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
   client closes the session with `Code(0)`. A node's stop and close with a code are one
   error: `Error::Refused(wire::hub::client::Refusal)`, a closed set in `wire` with

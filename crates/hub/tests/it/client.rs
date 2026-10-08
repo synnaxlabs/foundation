@@ -948,3 +948,41 @@ fn gives_a_reset_and_a_close_as_one_refusal() {
     let reset = transport::Error::Reset { code: Code(0) };
     assert_eq!(Error::from(reset.clone()), Error::Transport(reset));
 }
+
+/// A pool with room for the node's window, one more chunk of the body, and the blocks
+/// of the header and the request sends a body at the cap; one byte less gives
+/// `Error::Pool`.
+#[test]
+fn sends_a_body_at_the_cap_from_the_smallest_pool_with_room() {
+    let smallest = (1 << 20) + (1 << 16) + 1088;
+    for (budget, expected) in [
+        (smallest, Ok(())),
+        (
+            smallest - 1,
+            Err(Error::Pool(block::Error::Exhausted {
+                requested: 65_536,
+                available: 65_023,
+            })),
+        ),
+    ] {
+        serve_session(
+            143,
+            true,
+            POOL,
+            Some(rules()),
+            move |node, tasks, at| async move {
+                let config = block::Config { budget };
+                let pool = block::Pool::new(
+                    config.clone(),
+                    block::Heap::new(config.reservation()),
+                );
+                let client = connect_with(&node, tasks, at, AGENT, Rc::new(pool))
+                    .await
+                    .expect("connects");
+                let cap = usize::try_from(BODY_BYTES_MAX).expect("fits");
+                let got = client.request(&body(cap)).await.map(drop);
+                assert_eq!(got, expected, "a pool of {budget} bytes");
+            },
+        );
+    }
+}
