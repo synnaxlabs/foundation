@@ -2485,4 +2485,41 @@ mod port {
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
     }
+
+    /// A task whose drop panics as the transport stops: `join` ranks the transport's
+    /// error above the panic.
+    #[test]
+    fn a_panic_as_the_transport_stops_gives_the_transport_error() {
+        struct Panics;
+        impl Drop for Panics {
+            fn drop(&mut self) {
+                panic!("a task's drop panics");
+            }
+        }
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        node.spawn(|_| {
+            let panics = Panics;
+            async move {
+                std::future::pending::<()>().await;
+                drop(panics);
+            }
+        });
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        host.fail_udp(listen(&host));
+        assert_eq!(
+            sim.run(),
+            Err(sim::Error::Panicked {
+                thread: "shard-0".into(),
+                message: "a task's drop panics".into(),
+                seed: 0,
+            })
+        );
+        assert_eq!(sim.run(), Ok(()));
+        let error = transport::Error::Network {
+            error: env::net::Error::Io { code: 5 },
+        };
+        assert_eq!(node.join(), Err(Error::Transport(error)));
+    }
 }

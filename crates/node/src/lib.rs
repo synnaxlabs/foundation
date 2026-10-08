@@ -454,12 +454,7 @@ impl Open {
                 let own = Rc::clone(&pool);
                 let failed = Arc::clone(&self.failed);
                 let hold = async move |home, guard| {
-                    if let Some(error) = serve.run(home, own, shard, guard).await {
-                        failed.set(Error::Transport(error)).expect(
-                            "invariant: shard 0 serves only once its claim and open \
-                             succeed",
-                        );
-                    }
+                    serve.run(home, own, shard, guard, &failed).await;
                 };
                 self.keep(files, pool, tasks, guard, hold).await;
                 for shard in closed {
@@ -619,9 +614,9 @@ impl Endpoint {
 
 impl Serve {
     /// Runs each task given with a hub over `home`, and serves the node's port with
-    /// a transport on `pool`, until `guard` completes or the transport stops. Then
-    /// drops the tasks, the hub, `home`, and `guard`, and gives the error that stopped
-    /// the transport, if it stopped first. Each session and the transport drop after
+    /// a transport on `pool`, until `guard` completes or the transport stops. A
+    /// transport that stops goes into `failed` before any task drops. Then drops the
+    /// tasks, the hub, `home`, and `guard`. Each session and the transport drop after
     /// `guard` when `guard` completes, and before the tasks when the transport stops.
     /// Runs no task and takes no session when a shard did not open.
     async fn run(
@@ -630,8 +625,11 @@ impl Serve {
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
         guard: Guard,
-    ) -> Option<transport::Error> {
-        let interner = self.interner.await?;
+        failed: &OnceLock<Error>,
+    ) {
+        let Some(interner) = self.interner.await else {
+            return;
+        };
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -640,15 +638,19 @@ impl Serve {
         let transport = self.endpoint.open(pool, tasks.clone());
         let mut port = pin!(route::accept(transport, tasks.clone()));
         let mut guard = pin!(guard);
-        let mut stopped = None;
         let stop = poll_fn(|cx| {
             if guard.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(());
             }
-            port.as_mut().poll(cx).map(|error| stopped = Some(error))
+            // Set before the tasks drop, so that `join` ranks it above a panic in a
+            // task's drop.
+            port.as_mut().poll(cx).map(|error| {
+                failed.set(Error::Transport(error)).expect(
+                    "invariant: shard 0 serves only once its claim and open succeed",
+                );
+            })
         });
         self.inbox.serve(hub, tasks, stop).await;
-        stopped
     }
 }
 
