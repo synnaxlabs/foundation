@@ -261,25 +261,21 @@ mod tests {
             |side| async move {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
                 let complete = 2;
-                side.session
-                    .0
-                    .raw(&[[complete].as_slice(), &message::prefix(65_000)].concat());
+                let header = [[complete].as_slice(), &message::prefix(65_000)].concat();
+                side.session.0.raw(&header);
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 let mut senders: Vec<crate::stream::Sender> = Vec::new();
                 for fill in 1..=4 {
-                    if fill == 3 {
+                    if fill > 2 {
                         side.node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
                     }
                     if fill == 4 {
-                        side.node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
                         senders.remove(2).reset(Code(16));
                     }
                     let opened = side.session.open_sender(Class::Complete).await;
                     let mut sender = opened.expect("a stream");
-                    sender
-                        .send(side.block(&vec![fill; LEN]))
-                        .await
-                        .expect("sent");
+                    let block = side.block(&vec![fill; LEN]);
+                    sender.send(block).await.expect("sent");
                     senders.push(sender);
                 }
                 let closed = Error::PeerClosed { code: Code(4) };
@@ -302,20 +298,14 @@ mod tests {
                 assert!(poll_once(waiting.as_mut()).await.is_none());
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 assert!(poll_once(waiting.as_mut()).await.is_none());
-                let mut whole = vec![0; LEN];
-                assert_eq!(first.recv_into(&mut whole).await, Ok(Some(LEN)));
+                let read = first.recv_into(&mut vec![0; LEN]).await;
+                assert_eq!(read, Ok(Some(LEN)));
                 assert_eq!(waiting.await, Ok(Some(LEN)));
                 assert_eq!(buffer, vec![2; LEN]);
                 let mut third = side.session.accept().await.expect("a stream").receiver;
                 assert_eq!(third.recv_into(&mut short).await, Err(over.clone()));
-                let read = loop {
-                    match third.recv_into(&mut short).await {
-                        Err(error) if error == over => {
-                            side.node.clock().sleep(Span::MILLISECOND).await;
-                        }
-                        read => break read,
-                    }
-                };
+                side.node.clock().sleep(spans(Span::MILLISECOND, 400)).await;
+                let read = third.recv_into(&mut short).await;
                 assert_eq!(read, Err(Error::Reset { code: Code(16) }));
                 let mut fourth =
                     side.session.accept().await.expect("a stream").receiver;
