@@ -65,7 +65,8 @@
   `os` gives the kernel's answer (on Linux, `Unreachable` or `Io { code: 22 }`), and
   `sim` gives `Io { code: 99 }`. For port 0, `os` gives the kernel's answer. Until
   #1972 patches `noq-udp`, such a transmit can turn GSO and the IPv4 ECN mark off for
-  the life of the socket. Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02 UTC, #1965,
+  the life of the socket. Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02
+  UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066909518,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743).
   Supersedes "or the errno" of item 2 of
