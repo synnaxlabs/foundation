@@ -23,10 +23,10 @@ impl Mesh {
     /// store cannot give the tree of `base`. A follower forwards the change to the
     /// leader. Returns the new pointer once its entry has committed and this node
     /// applied it. It tries again when a new leader replaces the entry, and after
-    /// each tick while no leader takes it, as [`Mesh::set_home`] does. A retry that
-    /// finds the pointer it makes, from an entry whose answer was lost, also returns
-    /// it. A retry that finds a later pointer gives `Stale`, even when an entry of
-    /// this call applied before it.
+    /// each tick while no leader takes it, as [`Mesh::set_home`] does. A call whose
+    /// entry finds the pointer that the call makes, after a lost answer or an equal
+    /// change of another call, returns that pointer. A retry that finds a later
+    /// pointer gives `Stale`, even when an entry of this call applied before it.
     ///
     /// # Errors
     ///
@@ -35,7 +35,7 @@ impl Mesh {
     /// these, `Pool`, and `Blob` propose anything.
     ///
     /// - [`Error::Problems`] when the spec has problems.
-    /// - [`Error::Large`] when the change lists more chunks than one change lists.
+    /// - [`Error::Large`] when the change lists more chunks than one change can list.
     /// - [`Error::NoVote`] and [`Error::Stopped`] as for [`Mesh::set_home`].
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.

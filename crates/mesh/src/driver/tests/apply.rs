@@ -184,7 +184,7 @@ fn apply_refuses_a_tree_of_more_chunks_than_one_change_lists() {
         assert_eq!(applied, Poll::Ready(Err(error.clone())));
         assert_eq!(
             error.to_string(),
-            "the spec has 1025 chunks, more than the 1024 that one change lists"
+            "the change lists 1025 chunks, more than the 1024 that one change can list"
         );
     });
 }
@@ -534,7 +534,7 @@ fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing(
 }
 
 // Voter 1 makes 2 a voter, then proposes a change that only it holds. Each voter
-// refuses it at the apply, since the holders are 1 of the 2 voters. The home after it
+// refuses it at the apply, because the holders are 1 of the 2 voters. The home after it
 // shows that each applied past it.
 #[test]
 fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {

@@ -107,8 +107,9 @@ pub struct Config {
     /// The transport of this shard. It proves the public half of `private_key`. The
     /// mesh dials each other member on it.
     pub transport: Rc<Transport>,
-    /// This node's chunk store. The mesh puts in it the chunks of the founding tree
-    /// at each open, and the chunks of each spec change that this node proposes.
+    /// This node's chunk store. The mesh puts in it the chunks of the founding tree at
+    /// each open and of each spec change that this node proposes, and reads from it
+    /// the tree of the base of a change.
     pub store: Rc<blob::Store>,
 }
 
@@ -144,7 +145,8 @@ impl fmt::Debug for Mesh {
 impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
     /// its task on `config.tasks`. Homes are known again when this node applies the
-    /// log, after it hears the leader.
+    /// log, after it hears the leader. It puts each chunk of the founding tree in
+    /// `config.store`.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the
@@ -157,8 +159,8 @@ impl Mesh {
     /// - [`Error::NotMember`] when `config.members` lacks this node or a voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
-    /// - [`Error::Pool`] when the pool has no block for a chunk of the founding tree,
-    ///   and [`Error::Blob`] when its put in `config.store` fails.
+    /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
+    ///   when a call of the store fails.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     ///

@@ -74,9 +74,10 @@ pub enum Error {
         /// The pointer when the change applied.
         pointer: Pointer,
     },
-    /// The tree of a spec has more chunks than one change lists. Apply a smaller spec.
+    /// A spec change lists more chunks than one change can list. Apply the change in
+    /// smaller steps.
     Large {
-        /// The count of chunks of the tree.
+        /// The count of chunks that the change lists.
         chunks: usize,
         /// The most chunks that one change lists.
         most: usize,
@@ -142,8 +143,8 @@ impl fmt::Display for Error {
             ),
             Self::Large { chunks, most } => write!(
                 f,
-                "the spec has {chunks} chunks, more than the {most} that one change \
-                 lists"
+                "the change lists {chunks} chunks, more than the {most} that one \
+                 change can list"
             ),
             Self::Problems(problems) => {
                 f.write_str("the spec has problems")?;
