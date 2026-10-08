@@ -25,7 +25,7 @@
   2026-10-08T04:42:33Z,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
   round heading is the first top-level `## Review round <n>` heading. In a round
-  posted after the cutoff with no such heading, it is the first line of a top-level
+  posted after the cutoff with no such heading, it is the first line in a top-level
   HTML block that is `## Review round <n>` after at most three spaces, since GitHub
   reads some of these blocks as text and shows the line as a heading. The fields are
   the first top-level block after it, and the end lines are the last one, each when it
@@ -44,8 +44,8 @@
   https://github.com/synnaxlabs/foundation/issues/1783, with the rulings of the
   director at 2026-10-08T21:47:24Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
-  approved by the director at 2026-10-08T21:59:14Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069844452).
+  approved by the director at 2026-10-08T22:52:30Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6070638383).
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,

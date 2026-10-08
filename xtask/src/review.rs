@@ -435,7 +435,7 @@ struct Shown<'a> {
     /// line of text that starts with `<` and a letter, `!`, `/`, or `?`. GitHub can
     /// read such a line in a different way, or hide the text after it.
     html: Option<&'a str>,
-    /// The text after `## Review round ` in the first line of a top-level HTML block
+    /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
     hidden: Option<&'a str>,
