@@ -75,12 +75,7 @@ pub fn check(
         }
     }
     for problem in channel::check(&channels) {
-        let key = match &problem {
-            channel::Problem::Duplicate { second, .. } => second,
-            channel::Problem::Dangling { from, .. }
-            | channel::Problem::Wrong { from, .. } => from,
-        };
-        problems.push((key.clone(), Problem::Channel(problem)));
+        problems.push((problem.name().clone(), Problem::Channel(problem)));
     }
     problems.sort_by(|a, b| a.0.cmp(&b.0));
     problems.into_iter().map(|(_, problem)| problem).collect()

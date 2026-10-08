@@ -105,6 +105,14 @@ impl Problem {
             Self::Wrong { edge, .. } => edge.need().1,
         }
     }
+
+    // The channel that the problem is at.
+    pub(crate) const fn name(&self) -> &Name {
+        match self {
+            Self::Duplicate { second, .. } => second,
+            Self::Dangling { from, .. } | Self::Wrong { from, .. } => from,
+        }
+    }
 }
 
 impl fmt::Display for Problem {
