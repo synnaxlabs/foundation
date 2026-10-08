@@ -32,7 +32,8 @@ pub enum Error {
     },
     /// The bytes at `at` are not what [`Plan::encode`] writes there.
     Malformed {
-        /// The offset of the first wrong byte, or of the field that the bytes cut.
+        /// The offset of the field that holds the first wrong byte, or of the field
+        /// that the bytes cut.
         at: usize,
     },
 }
@@ -94,7 +95,8 @@ impl Plan {
     /// # Errors
     ///
     /// - [`Error::Version`] when the format version is not the one this build writes.
-    /// - [`Error::Malformed`] at the first byte that [`Plan::encode`] does not write.
+    /// - [`Error::Malformed`] at the field that holds the first byte that
+    ///   [`Plan::encode`] does not write, or at the field that the bytes cut.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let mut reader = Reader { bytes, at: 0 };
         let version = reader.byte()?;

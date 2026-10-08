@@ -5010,7 +5010,8 @@ How to read this record:
   name order, and the homes in name order. A `Spec` definition is its `spec` encoding; a
   channel kind holds its edges as names, so the plan still holds no channel key (A4).
   The bytes hold no span. Another version is `plan::Error::Version`, which says to
-  plan again; other bytes are `plan::Error::Malformed` at the first wrong byte.
+  plan again; other bytes are `plan::Error::Malformed` at the offset of the field that
+  holds the first wrong byte, or of the field that the bytes cut.
   `decode` checks only the form: `spec::region::check` of the definitions after the
   plan refuses the rest. `config::plan::Plan::definitions(applied, key)` gives those
   definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key

@@ -1,3 +1,4 @@
+use config::Definition;
 use config::plan::{Error, Plan};
 use proptest::prelude::*;
 use spec::channel::{Edge, Problem};
@@ -362,6 +363,28 @@ fn refuses_a_spec_definition_that_is_a_channel() {
             at: CHANGES + 8 + 6 + 3
         }
     );
+}
+
+#[test]
+fn refuses_a_wrong_byte_inside_a_spec_definition_at_its_count() {
+    let [added, _] = plans();
+    let inner = added
+        .changes
+        .iter()
+        .find_map(|change| match &change.new.as_ref()?.definition {
+            Definition::Spec(definition) => Some(definition.encode()),
+            _ => None,
+        })
+        .expect("a spec definition");
+    let mut found = added.encode();
+    let start = found
+        .windows(inner.len())
+        .position(|window| window == inner.as_slice())
+        .expect("the spec bytes");
+    // The tag of the definition, after its format version.
+    found[start + 1] = 0xff;
+    let error = Plan::decode(&found).expect_err("an unknown tag");
+    assert_eq!(error, Error::Malformed { at: start - 8 });
 }
 
 /// Each plan of [`plans`], with a part of its changes and homes, and another base
