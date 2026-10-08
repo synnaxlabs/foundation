@@ -5724,9 +5724,10 @@ mod tests {
                 founding,
                 ..config(&node, &tasks, 1, &[1], &[1]).await
             };
-            let mesh = Mesh::start(config).await.unwrap();
+            let chunks = Rc::clone(&config.chunks);
+            Mesh::start(config).await.unwrap();
             for digest in update.chunks {
-                let chunk = mesh.chunks.get(digest).await.unwrap().unwrap();
+                let chunk = chunks.get(digest).await.unwrap().unwrap();
                 assert_eq!(Some(&*chunk), tree.get(digest), "{digest}");
             }
         });

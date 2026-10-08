@@ -79,6 +79,17 @@ pub(super) fn create_large(count: usize) -> BTreeMap<Name, Definition> {
     create_subjects(&labels, 64)
 }
 
+/// The mesh of node 1 in a region of `voters`, and its chunk store.
+async fn open_kept(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    voters: &[u8],
+) -> (Mesh, Rc<blob::Store>) {
+    let config = config(node, tasks, 1, voters, voters).await;
+    let chunks = Rc::clone(&config.chunks);
+    (Mesh::start(config).await.unwrap(), chunks)
+}
+
 /// The pointer of a region with no founding definitions.
 fn base() -> Pointer {
     Pointer {
@@ -363,10 +374,10 @@ fn a_lone_voter_puts_each_chunk_of_its_change_in_its_store_and_lists_it() {
     let (moved, applied) = (pointer(1, &definitions), definitions.clone());
     let digests = update.chunks.clone();
     let entries = solo_stored(move |node, tasks| async move {
-        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
         assert_eq!(mesh.apply(base(), applied).await, Ok(moved));
         for digest in digests {
-            let chunk = mesh.chunks.get(digest).await.unwrap().unwrap();
+            let chunk = store.get(digest).await.unwrap().unwrap();
             assert_eq!(Some(&*chunk), tree.get(digest), "{digest}");
         }
     });
@@ -407,9 +418,6 @@ fn a_change_lists_only_the_chunks_that_the_tree_of_its_base_lacks() {
     assert_eq!(chunks, lacked.into_iter().collect());
 }
 
-// The store lacks the root of the first base, and holds a chunk that is not a node of
-// a tree as the root of the second. Each change is stale, and lists the whole tree.
-
 /// A store that lost a chunk which the base shares with the new tree gets it again,
 /// though the change lists only the chunks that the base lacks: `diff` never reads a
 /// shared chunk.
@@ -435,10 +443,10 @@ fn a_change_puts_a_lost_chunk_that_its_base_shares_with_the_new_tree() {
         node.clock().sleep(Span::MILLISECOND).await;
         let path = Path::new(BLOB).join(shared.to_string());
         node.files().remove(&path).await.unwrap();
-        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        assert!(mesh.chunks.get(shared).await.unwrap().is_none());
+        let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
+        assert!(store.get(shared).await.unwrap().is_none());
         mesh.apply(moved, second).await.unwrap();
-        let held = mesh.chunks.get(shared).await.unwrap();
+        let held = store.get(shared).await.unwrap();
         assert_eq!(held.as_deref(), tree.get(shared));
     });
     let [_, Change::Spec { chunks, .. }] =
@@ -463,10 +471,10 @@ fn a_change_to_the_tree_of_its_base_puts_a_lost_root() {
         node.clock().sleep(Span::MILLISECOND).await;
         let path = Path::new(BLOB).join(root.to_string());
         node.files().remove(&path).await.unwrap();
-        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        assert!(mesh.chunks.get(root).await.unwrap().is_none());
+        let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
+        assert!(store.get(root).await.unwrap().is_none());
         mesh.apply(moved, definitions).await.unwrap();
-        let held = mesh.chunks.get(root).await.unwrap();
+        let held = store.get(root).await.unwrap();
         assert_eq!(held.as_deref(), tree.get(root));
     });
     let [_, Change::Spec { chunks, .. }] =
@@ -477,6 +485,8 @@ fn a_change_to_the_tree_of_its_base_puts_a_lost_root() {
     assert_eq!(chunks, BTreeSet::new());
 }
 
+// The store lacks the root of the first base, and holds a chunk that is not a node of
+// a tree as the root of the second. Each change is stale, and lists the whole tree.
 #[test]
 fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
     let definitions = create_subjects(&["plant.a", "plant.b"], 1);
@@ -484,9 +494,9 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
     let corrupt = Digest::of(b"x");
     let bases = [Digest([7; 32]), corrupt].map(|root| Pointer { version: 0, root });
     let entries = solo_stored(move |node, tasks| async move {
-        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let chunk = mesh.pool.copy(b"x").unwrap();
-        mesh.chunks.put(corrupt, &chunk).await.unwrap();
+        let (mesh, store) = open_kept(&node, &tasks, &[1]).await;
+        let chunk = create_pool().copy(b"x").unwrap();
+        store.put(corrupt, &chunk).await.unwrap();
         for at in bases {
             let stale = Error::Stale {
                 base: at,
@@ -508,12 +518,12 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
 #[test]
 fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
-        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let (mesh, store) = open_kept(&node, &tasks, &IDS).await;
         let definitions = create_subjects(&["plant.a"], 1);
         let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
         let quorum = Error::Quorum { held: 1, voters: 3 };
         assert_eq!(mesh.apply(base(), definitions).await, Err(quorum.clone()));
-        assert!(mesh.chunks.get(root).await.unwrap().is_none());
+        assert!(store.get(root).await.unwrap().is_none());
         assert_eq!(
             quorum.to_string(),
             "1 of 3 voters hold the chunks of the spec change, not a majority"
@@ -569,6 +579,63 @@ fn a_failed_put_gives_the_error_of_the_store_and_proposes_nothing() {
         assert_eq!(mesh.pointer(), base());
     });
     assert_eq!(specs(&entries), []);
+}
+
+#[test]
+fn a_change_counts_only_the_chunks_it_lists_against_the_most() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let moved = mesh.apply(base(), create_large(1950)).await.unwrap();
+        let larger = create_large(1951);
+        let expected = pointer(2, &larger);
+        assert_eq!(mesh.apply(moved, larger).await, Ok(expected));
+    });
+}
+
+#[test]
+fn a_pool_with_no_block_for_a_chunk_gives_pool_and_proposes_nothing() {
+    let definitions = create_subjects(&["plant.a"], 1);
+    let mut tree = Chunks::default();
+    let update = spec::region::tree(&mut tree, &definitions);
+    let [root] = update.chunks[..] else {
+        unreachable!("{} chunks", update.chunks.len())
+    };
+    let requested = tree.get(root).unwrap().len();
+    let entries = solo_stored(move |node, tasks| async move {
+        let pool = small_pool();
+        let config = Config {
+            pool: Rc::clone(&pool),
+            ..config(&node, &tasks, 1, &[1], &[1]).await
+        };
+        let mesh = Mesh::start(config).await.unwrap();
+        let _held = fill(&pool);
+        let applied = mesh.apply(base(), definitions).await;
+        assert_eq!(applied, Err(exhausted(requested)));
+        assert_eq!(mesh.pointer(), base());
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+#[test]
+fn a_failed_read_of_the_base_tree_gives_the_error_of_the_store() {
+    let first = create_subjects(&["plant.a"], 1);
+    let moved = pointer(1, &first);
+    let entries = solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert_eq!(mesh.apply(base(), first).await, Ok(moved));
+        let path = Path::new(BLOB).join(moved.root.to_string());
+        node.fail_file(&path, Operation::Open);
+        let second = create_subjects(&["plant.b"], 1);
+        let cause = files::Error::Io {
+            path,
+            operation: Operation::Open,
+            code: 5,
+        };
+        let failed = Error::Blob(blob::Error::Files(cause));
+        assert_eq!(mesh.apply(moved, second).await, Err(failed));
+        assert_eq!(mesh.pointer(), moved);
+    });
+    assert_eq!(specs(&entries).len(), 1);
 }
 
 /// The spec changes of `entries`, in order.
