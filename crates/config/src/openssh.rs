@@ -87,7 +87,10 @@ pub(crate) fn public_key(text: &str) -> Result<PublicKey, Error> {
     // follow, so the key must write back to the same line.
     let line = format!("{ALGORITHM} {encoded}");
     let key = ssh_key::PublicKey::from_openssh(&line).or(Err(Error::NotEd25519))?;
-    if key.to_openssh().ok().as_deref() != Some(line.as_str()) {
+    let written = key.to_openssh().unwrap_or_else(|_| {
+        unreachable!("invariant: `ssh-key` writes each Ed25519 key that it reads")
+    });
+    if written != line {
         return Err(Error::NotEd25519);
     }
     let Some(&Ed25519PublicKey(bytes)) = key.key_data().ed25519() else {
