@@ -11,13 +11,13 @@
   a change only because its new bytes equal the stored bytes: with a true `old`, at a
   planned name and kind, such a change states nothing false and changes nothing. #337 PR
   2b, which applies the homes, does no check of its own: `Mesh::apply` refuses a name
-  that is not an index (`NotIndex`) and a home that is no member for an index with no
-  home (`UnknownNode`), and gives no home to an index that has one (`laptop.architect`,
-  2026-10-08T18:35:16Z:
+  that is not an index (`NotIndex`) and, for an index with no home, a home that is no
+  member (`UnknownNode`), and gives no home to an index that has one
+  (`laptop.architect`, 2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). No
   check of its own decided by `laptop.architect-2`, 2026-10-08T21:30:44Z
   (https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069434343), which
-  changes "PR 2b checks the homes" of
+  changes "#337 PR 2b, which applies the homes, checks each one" of
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742.
   `config::plan::Plan::definitions(applied, key)` gives those definitions with the key
   rule of PLAN SURFACE, and an edge to no channel gets a key from `key`, which the check
