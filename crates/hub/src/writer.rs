@@ -180,8 +180,9 @@ impl Writer {
     ///
     /// [`Failure::Removed`] once a channel of the writer is removed, on this and every
     /// later call. Else [`Failure::Home`] with the home's error.
-    /// [`Error::Resend`](crate::home::Error::Resend) for a frame labeled resend. [`Error::Full`](crate::home::Error::Full) for a backfill
-    /// frame with no room: write it again on a timer.
+    /// [`Error::Resend`](crate::home::Error::Resend) for a frame labeled resend.
+    /// [`Error::Full`](crate::home::Error::Full) for a backfill frame with no room:
+    /// write it again on a timer.
     /// [`Error::Large`](crate::home::Error::Large) for a frame too large for one write:
     /// split it. [`Error::Disk`](crate::home::Error::Disk) after a failed commit: the
     /// shard takes no more frames.
