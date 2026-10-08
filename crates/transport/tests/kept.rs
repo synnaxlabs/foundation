@@ -87,6 +87,8 @@ struct Out {
     waited: bool,
     /// Whether the server read the end of the stream after the message.
     ended: bool,
+    /// The polls of the read of the end that give `Pending`.
+    ending: usize,
     /// The net heap bytes that the drop of the receiver then gives back.
     kept: usize,
 }
@@ -119,6 +121,13 @@ fn main() {
                 out.ended,
                 matches!(end, End::Finish),
                 "{reading:?}, {len} bytes, {end:?}: the read of the end of the stream"
+            );
+            assert_eq!(
+                out.ending > 0,
+                matches!(end, End::Finish),
+                "{reading:?}, {len} bytes, {end:?}: the read of the end gives \
+                 `Pending` {} times",
+                out.ending
             );
             assert!(
                 out.kept <= KEPT_MAX,
@@ -197,13 +206,14 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         .await;
         let waited = transport.status().waited > Span::ZERO;
         let len = read.ok().flatten().map(|block| block.len());
-        let ended = match end {
+        let (ended, ending) = match end {
             End::Finish => {
-                matches!(next(&mut receiver, &clock, || ()).await.0, Ok(None))
+                let (read, ending) = next(&mut receiver, &clock, || ()).await;
+                (matches!(read, Ok(None)), ending)
             }
             End::Reset => {
                 clock.sleep(DROP).await;
-                false
+                (false, 0)
             }
         };
         let before = ALLOCATOR.held();
@@ -215,6 +225,7 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
             pending,
             waited,
             ended,
+            ending,
             kept,
         };
     });
