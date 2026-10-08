@@ -5,8 +5,8 @@ use types::time::Stamp;
 
 use crate::{Config, Hub};
 
-/// A hub on a new shard in `env`, and the mesh time once the clock has one. It defines
-/// no channel. [`home::testing::shard`] states the shard's ring.
+/// A hub on the shard that [`home::testing::shard`] gives in `env`, and the mesh time
+/// that it gives. It defines no channel.
 ///
 /// # Panics
 ///

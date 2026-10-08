@@ -29,9 +29,9 @@ pub struct Env {
 /// it.
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
-/// otherwise. A commit starts 10 ms after the write it holds.
-/// A commit takes whole 4 KiB blocks (one for a frame, three for 64), and nothing frees
-/// the ring until #160, so a run fills it at 1023 one-frame commits.
+/// otherwise. A commit starts 10 ms after the write it holds. A commit takes whole
+/// 4 KiB blocks (one for a frame, three for 64), and nothing frees the ring until #160,
+/// so a run fills it at 1023 one-frame commits.
 ///
 /// # Panics
 ///
