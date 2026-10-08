@@ -174,10 +174,13 @@ mod tests {
         rustix::fs::fcntl_setfl(fd, OFlags::empty()).unwrap();
         let accepted = rustix::net::accept(fd).unwrap();
         let kept = super::super::tests::kept;
-        assert_eq!(
-            sockopt::socket_send_buffer_size(&accepted),
-            Ok(kept(1 << 16))
-        );
+        let sent = sockopt::socket_send_buffer_size(&accepted).unwrap();
+        if cfg!(target_os = "macos") {
+            // macOS rounds it up to whole segments, of at most 16 KiB on loopback.
+            assert!((1 << 16..(1 << 16) + (1 << 14)).contains(&sent), "{sent}");
+        } else {
+            assert_eq!(sent, kept(1 << 16));
+        }
         assert_eq!(
             sockopt::socket_recv_buffer_size(&accepted),
             Ok(kept(1 << 15))

@@ -244,11 +244,12 @@ mod tests {
             let remote = listener.local_addr().unwrap();
             let client = std::net::TcpStream::connect(remote).unwrap();
             let (server, _) = listener.accept().unwrap();
-            sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
-            drop(server);
+            // macOS refuses an option on a socket after a reset.
             client
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
+            sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
+            drop(server);
             let read = client.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
             assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
             assert_eq!(client.peer_addr().map_err(|e| errno(&e)), Err(RESET));
