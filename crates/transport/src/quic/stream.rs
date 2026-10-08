@@ -4702,6 +4702,8 @@ mod tests {
         assert_eq!(one(&parts[7..8]), [("one", body[3800..3801].to_vec())]);
         let long = body[3900..=3900 + COPIED_MAX].to_vec();
         assert_eq!(one(&parts[8..9]), [("slice", long)]);
+        let most = [part(0..COPIED_MAX, 0)];
+        assert_eq!(one(&most), [("one", body[..COPIED_MAX].to_vec())]);
         assert_eq!(one(&parts[10..]), [("copied", vec![0; 3])]);
         assert_eq!(pieces(&block, &[]), []);
     }
@@ -4713,7 +4715,10 @@ mod tests {
                 (0..20_usize, 0..20_usize, proptest::bool::ANY, 0..4_u8),
                 0..6,
             ),
+            wide in proptest::bool::ANY,
         ) {
+            // A block of `usize::MAX` bytes sums with no bound on the sum.
+            let bytes = if wide { usize::MAX } else { 16 };
             let parts: Vec<_> = drawn
                 .into_iter()
                 .map(|(start, end, huge, zeros)| {
@@ -4721,10 +4726,10 @@ mod tests {
                     Part { range: start..end, zeros }
                 })
                 .collect();
-            let outside = parts
-                .iter()
-                .find(|part| part.range.start > part.range.end || part.range.end > 16);
-            let sized = std::panic::catch_unwind(|| size(&parts, 16));
+            let outside = parts.iter().find(|part| {
+                part.range.start > part.range.end || part.range.end > bytes
+            });
+            let sized = std::panic::catch_unwind(|| size(&parts, bytes));
             match outside {
                 None => {
                     let sum = parts.iter().map(|part| part.range.len()).sum::<usize>();
@@ -4735,8 +4740,8 @@ mod tests {
                 Some(part) => {
                     let Range { start, end } = part.range;
                     let message = format!(
-                        "the range {start}..{end} of a part is not in a block of 16 \
-                         bytes"
+                        "the range {start}..{end} of a part is not in a block of \
+                         {bytes} bytes"
                     );
                     let given = sized.expect_err("a panic");
                     let given = given.downcast_ref::<String>();
