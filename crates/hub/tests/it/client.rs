@@ -112,7 +112,7 @@ where
     let node = nodes[0].clone();
     let main = move |tasks: env::tasks::Tasks| async move {
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout, pool).await;
+        let mut test = Test::new(node.clone(), tasks.clone(), layout, pool, None).await;
         if synced {
             test.sync().await;
         }

@@ -706,6 +706,7 @@ impl Serve {
             node: key,
             time: self.time,
             entropy,
+            mesh: mesh.clone(),
         });
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         // The port's future holds the mesh, so it drops before the wait.

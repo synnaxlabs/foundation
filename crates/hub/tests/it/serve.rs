@@ -28,14 +28,14 @@ use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, scrambled, write,
-    write_series, write_wide,
+    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, region,
+    scrambled, write, write_series, write_wide,
 };
 
 /// The UDP port of each transport.
 pub(super) const PORT: u16 = 7000;
 pub(super) const HOME: PrivateKey = PrivateKey([1; 32]);
-const PEER: PrivateKey = PrivateKey([2; 32]);
+pub(super) const PEER: PrivateKey = PrivateKey([2; 32]);
 /// The peer's message limit: the least that `transport` takes, so the home cuts a
 /// body and its ends into several messages.
 const PEER_MESSAGE: usize = 1472;
@@ -76,7 +76,7 @@ pub(super) fn transport(
 }
 
 /// The reader's node: its end of one hub stream.
-struct Peer {
+pub(super) struct Peer {
     node: sim::node::Node,
     pool: Rc<Pool>,
     sender: Sender,
@@ -92,7 +92,7 @@ impl Peer {
     }
 
     /// Sends an open of `keys` in `mode`, the keys in one message.
-    async fn open(&mut self, mode: Mode, keys: &[u128]) {
+    pub(super) async fn open(&mut self, mode: Mode, keys: &[u128]) {
         let channels = u32::try_from(keys.len()).expect("the keys fit a u32");
         let open = Open { mode, channels };
         let mut out = vec![0; open.encoded_len()];
@@ -104,14 +104,17 @@ impl Peer {
         self.send(&out).await.expect("sends the keys");
     }
 
-    async fn credit(&mut self, limit_bytes: u64) -> Result<(), transport::Error> {
+    pub(super) async fn credit(
+        &mut self,
+        limit_bytes: u64,
+    ) -> Result<(), transport::Error> {
         let mut out = [0; Credit::LEN];
         Credit { limit_bytes }.encode(&mut out);
         self.send(&out).await
     }
 
     /// The next message from the home, `None` once the home finished.
-    async fn recv(&mut self) -> Result<Option<Vec<u8>>, transport::Error> {
+    pub(super) async fn recv(&mut self) -> Result<Option<Vec<u8>>, transport::Error> {
         let receiver = self.receiver.as_mut().expect("a two-way stream");
         Ok(receiver.recv().await?.map(|block| block.to_vec()))
     }
@@ -144,6 +147,22 @@ fn session<H, P>(
     H: Future<Output = ()> + 'static,
     P: Future<Output = ()> + 'static,
 {
+    session_in(seed, class, one_way, false, home, peer);
+}
+
+/// As [`session`], with the home's node in the region of [`region::open`] when
+/// `regional`.
+pub(super) fn session_in<H, P>(
+    seed: u64,
+    class: Class,
+    one_way: bool,
+    regional: bool,
+    home: impl FnOnce(Test, Link, Incoming) -> H + Send + 'static,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -157,15 +176,16 @@ fn session<H, P>(
     let node = nodes[0].clone();
     let main = move |tasks: Tasks| async move {
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout, POOL).await;
+        let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
+        let region = if regional {
+            Some(region::open(&node, &tasks, Rc::clone(&transport)).await)
+        } else {
+            None
+        };
+        let mut test =
+            Test::new(node.clone(), tasks.clone(), layout, POOL, region).await;
         test.sync().await;
-        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let session = transport.accept().await.expect("a session");
-        let mut incoming = session.accept().await.expect("a stream");
-        let header = incoming.receiver.recv().await.expect("a header");
-        let header = header.expect("the header comes before the finish");
-        assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
-        drop(header);
+        let (session, incoming) = accept(&transport).await;
         let link = test.hub.link(session.clone());
         home(test, link, incoming).await;
         drop(session.closed().await);
@@ -212,6 +232,17 @@ fn session<H, P>(
     sim.run().expect("the run ends");
 }
 
+/// The first session of `transport`, and its first stream, after the stream's header.
+async fn accept(transport: &Transport) -> (transport::Session, Incoming) {
+    let session = transport.accept().await.expect("a session");
+    let mut incoming = session.accept().await.expect("a stream");
+    let header = incoming.receiver.recv().await.expect("a header");
+    let header = header.expect("the header comes before the finish");
+    assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
+    drop(header);
+    (session, incoming)
+}
+
 /// Runs a session whose home only serves it, and gives what `serve` returned, or
 /// `None` when it did not return.
 fn served<P>(
@@ -240,14 +271,14 @@ where
 }
 
 /// Serves `incoming` on `link`, which must end with no request.
-async fn serve(link: &Link, incoming: Incoming) -> Result<(), serve::Error> {
+pub(super) async fn serve(link: &Link, incoming: Incoming) -> Result<(), serve::Error> {
     let served = link.serve(incoming).await?;
     assert!(matches!(served, Served::Ended), "{served:?}");
     Ok(())
 }
 
 /// The stop code that a send of the peer gets once the home stopped the stream.
-async fn stopped(peer: &mut Peer) -> transport::Error {
+pub(super) async fn stopped(peer: &mut Peer) -> transport::Error {
     loop {
         if let Err(error) = peer.credit(0).await {
             return error;

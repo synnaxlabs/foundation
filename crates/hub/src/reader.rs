@@ -13,7 +13,7 @@ use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
-use crate::State;
+use crate::{Located, State};
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -77,6 +77,13 @@ pub enum Error {
     ManyIndexes,
     /// The reader names no channel.
     Empty,
+    /// The home of the index is another node. Remote readers are not built yet.
+    Remote {
+        /// The home.
+        home: types::node::Key,
+    },
+    /// The mesh stopped, so the home of the index is not known.
+    Mesh(mesh::Stopped),
 }
 
 impl fmt::Display for Error {
@@ -87,6 +94,12 @@ impl fmt::Display for Error {
                 "the channels are on more than one index: open a reader per index",
             ),
             Self::Empty => f.write_str("a reader names at least one channel"),
+            Self::Remote { home } => write!(
+                f,
+                "the home of the index is node {home}, and a reader reads only at \
+                 this node"
+            ),
+            Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
         }
     }
 }
@@ -107,15 +120,14 @@ pub struct Reader {
 
 impl Reader {
     /// Opens a reader on the index of `channels`.
-    pub(crate) fn open(
+    pub(crate) async fn open(
         state: &Rc<RefCell<State>>,
         channels: &[Name],
         mode: Mode,
     ) -> Result<Self, Error> {
-        let mut slots = Vec::with_capacity(channels.len());
-        let slot = {
-            let mut borrowed = state.borrow_mut();
-            let borrowed = &mut *borrowed;
+        let mut keys = Vec::with_capacity(channels.len());
+        let index = {
+            let borrowed = state.borrow();
             let mut index = None;
             for name in channels {
                 let channel = borrowed
@@ -125,10 +137,20 @@ impl Reader {
                 if *index.get_or_insert(channel.index) != channel.index {
                     return Err(Error::ManyIndexes);
                 }
-                slots.push(borrowed.interner.slots().assign(channel.key));
+                keys.push(channel.key);
             }
-            let index = index.ok_or(Error::Empty)?;
-            borrowed.interner.slots().assign(index)
+            index.ok_or(Error::Empty)?
+        };
+        match crate::locate(state, index).await.map_err(Error::Mesh)? {
+            Located::Here => {}
+            Located::Remote(home) => return Err(Error::Remote { home }),
+        }
+        let (mut slots, slot) = {
+            let mut borrowed = state.borrow_mut();
+            let assigned = borrowed.interner.slots();
+            let slots: Vec<_> =
+                keys.into_iter().map(|key| assigned.assign(key)).collect();
+            (slots, assigned.assign(index))
         };
         // A frame without the reader's channels still shows that time moved.
         slots.push(slot);

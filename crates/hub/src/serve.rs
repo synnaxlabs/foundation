@@ -18,10 +18,10 @@ use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
 use wire::hub::client::STALE;
-use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, UNKNOWN, ends};
+use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::State;
 use crate::reader::{Credit, Ended, Session};
+use crate::{Located, State};
 
 pub use client::{Reply, Request};
 
@@ -41,6 +41,10 @@ pub enum Error {
     NoIndex,
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
+    /// The mesh names another node as the home of the open's index. Code `NOT_HOME`.
+    NotHome,
+    /// The mesh stopped, so the home of the open's index is not known. Code `FAILED`.
+    Mesh(mesh::Stopped),
     /// The home's buffer failed. Code `FAILED`.
     Buffer(env::files::Error),
     /// The home's pool had no block for a reply (`Exhausted` or `Refused`). Code
@@ -74,7 +78,8 @@ impl Error {
             Self::Access(error) => Some(Code(client::code(error))),
             Self::Stale => Some(Code(STALE)),
             Self::Unknown(_) => Some(Code(UNKNOWN)),
-            Self::Buffer(_) => Some(Code(FAILED)),
+            Self::NotHome => Some(Code(NOT_HOME)),
+            Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
             Self::Pool(_) => Some(Code(BUSY)),
             Self::Stream(_) => None,
         }
@@ -103,6 +108,10 @@ impl fmt::Display for Error {
                     "the open names channel {key}, which this node does not know"
                 )
             }
+            Self::NotHome => f.write_str(
+                "the mesh names another node as the home of the open's index",
+            ),
+            Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
             Self::Buffer(error) => write!(f, "the buffer of the shard failed: {error}"),
             Self::Pool(error) => {
                 write!(f, "the home's pool had no block for a reply: {error}")
@@ -258,8 +267,9 @@ struct Opened {
     layout: Layout,
 }
 
-/// Reads the open and its keys, checks each key as it arrives, and opens the session
-/// in the order of the keys. Gives `None` when the peer finishes first.
+/// Reads the open and its keys, checks each key as it arrives, waits until the mesh
+/// names a home for the index, and opens the session in the order of the keys. Gives
+/// `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -305,7 +315,12 @@ async fn open(
             break;
         }
     }
-    let index = index.and_then(|(_, slot)| slot).ok_or(Error::NoIndex)?;
+    let Some((of, Some(index))) = index else {
+        return Err(Error::NoIndex);
+    };
+    if let Located::Remote(_) = crate::locate(state, of).await.map_err(Error::Mesh)? {
+        return Err(Error::NotHome);
+    }
     let slots: Box<[Slot]> = slots.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
