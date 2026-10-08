@@ -464,6 +464,96 @@ fn ends_with_the_error_of_the_stream_when_the_peer_resets_it() {
     );
 }
 
+/// Runs a session at a node in a region whose mesh names no home, and gives what
+/// `serve` returned, or `None` when it did not return in 10 s.
+fn served_homeless<P>(
+    seed: u64,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Option<Result<(), serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
+    let result = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&result);
+    let home = move |test: Test, link: Link, incoming| async move {
+        let mut serving = pin!(serve(&link, incoming));
+        let mut deadline = pin!(test.clock.sleep(Span::from_nanos(10_000_000_000)));
+        let served = poll_fn(|cx| {
+            if let Poll::Ready(served) = serving.as_mut().poll(cx) {
+                return Poll::Ready(Some(served));
+            }
+            deadline.as_mut().poll(cx).map(|()| None)
+        })
+        .await;
+        *kept.lock().expect("not poisoned") = served;
+    };
+    session_in(seed, Class::Complete, false, true, home, peer);
+    result.lock().expect("not poisoned").take()
+}
+
+#[test]
+fn finishes_when_the_peer_finishes_while_the_open_waits_for_a_home() {
+    let served = served_homeless(76, |mut peer| async move {
+        peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 2]).await;
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+    assert_eq!(served, Some(Ok(())));
+}
+
+#[test]
+fn ends_with_the_error_of_the_stream_when_the_peer_resets_it_while_the_open_waits_for_a_home()
+ {
+    let served = served_homeless(77, |mut peer| async move {
+        peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 2]).await;
+        peer.sleep(QUIET).await;
+        let Peer { node, sender, .. } = peer;
+        sender.reset(Code(7));
+        node.clock().sleep(QUIET).await;
+    });
+    let reset = transport::Error::Reset { code: Code(7) };
+    assert_eq!(served, Some(Err(serve::Error::Stream(reset))));
+}
+
+/// The credit that the peer sends while the open waits for a home raises the grant
+/// of 0 once the session opens, so the session gets the frame written after it.
+#[test]
+fn keeps_a_credit_sent_while_the_open_waits_for_a_home() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let test = Rc::new(test);
+        let writing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            writing.clock.sleep(SETTLE).await;
+            writing.set_home(region::TIME, super::NODE).await;
+            let mut writer = writing.writer("a", &["value"]).await;
+            writing.clock.sleep(SETTLE).await;
+            write(&mut writer, &[writing.now()], &[10]);
+            writing.clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session_in(
+        78,
+        Class::Complete,
+        false,
+        true,
+        home,
+        |mut peer| async move {
+            let mode = Mode::Complete { limit_bytes: 0 };
+            peer.open(mode, &[2, 1]).await;
+            peer.credit(1 << 20).await.expect("sends the credit");
+            let mut reader = Reader::new(&Open { mode, channels: 2 });
+            let opened = peer.recv().await.expect("receives").expect("a message");
+            assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            assert_eq!(places(&got), [0, 1]);
+            assert_eq!(decoded(&got, &[I64])[0], [10]);
+            peer.sender.finish().expect("finishes");
+            assert_eq!(peer.recv().await, Ok(None));
+        },
+    );
+}
+
 #[test]
 fn stops_an_open_on_a_stream_of_another_class_as_malformed() {
     let opens = [

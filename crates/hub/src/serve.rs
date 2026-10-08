@@ -329,7 +329,9 @@ async fn open(
     let Some((of, Some(index))) = index else {
         return Err(Error::NoIndex);
     };
-    crate::carry(state, of).await?;
+    let Some(granted) = wait(state, of, home, receiver).await? else {
+        return Ok(None);
+    };
     let slots: Box<[Slot]> = slots.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
@@ -340,11 +342,49 @@ async fn open(
         }
         Mode::Latest => (Session::latest(state, slots.clone(), index), None),
     };
+    if let Some(credit) = &credit {
+        credit.grant(granted);
+    }
     Ok(Some(Opened {
         session,
         credit,
         layout: Layout::new(slots, index),
     }))
+}
+
+/// Waits until the home carries `index`, and reads the peer meanwhile. Gives the
+/// highest grant that the peer sent, 0 for none, or `None` when the peer finished
+/// first.
+async fn wait(
+    state: &Rc<RefCell<State>>,
+    index: channel::Key,
+    home: &mut Home,
+    receiver: &mut Receiver,
+) -> Result<Option<u64>, Error> {
+    let mut carry = pin!(crate::carry(state, index));
+    let mut granted = 0;
+    loop {
+        let mut recv = pin!(receiver.recv());
+        let read = poll_fn(|cx| match carry.as_mut().poll(cx) {
+            Poll::Ready(carried) => Poll::Ready(Err(carried)),
+            Poll::Pending => recv.as_mut().poll(cx).map(Ok),
+        })
+        .await;
+        let message = match read {
+            Err(carried) => {
+                carried?;
+                return Ok(Some(granted));
+            }
+            Ok(read) => match read? {
+                Some(message) => message,
+                None => return Ok(None),
+            },
+        };
+        let FromReader::Credit(grant) = home.decode(&message)? else {
+            unreachable!("invariant: after the keys run, Home gives only credits");
+        };
+        granted = granted.max(grant.limit_bytes);
+    }
 }
 
 /// A block of the home's pool that holds `reply`.

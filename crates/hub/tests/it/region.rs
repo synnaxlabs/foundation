@@ -28,7 +28,7 @@ use super::{
 
 /// The other member of the region, which is not a voter.
 const OTHER: types::node::Key = types::node::Key::from_u128(2);
-const TIME: channel::Key = channel::Key::from_u128(1);
+pub(super) const TIME: channel::Key = channel::Key::from_u128(1);
 const TIME_B: channel::Key = channel::Key::from_u128(3);
 /// The first file of the mesh's log.
 const LOG: &str = "mesh/log/log-0";
@@ -111,7 +111,7 @@ where
 
 impl Test {
     /// Sets `home` as the home of `index` in the region.
-    async fn set_home(&self, index: channel::Key, home: types::node::Key) {
+    pub(super) async fn set_home(&self, index: channel::Key, home: types::node::Key) {
         let region = self.region.as_ref().expect("a region");
         region.set_home(index, home).await.expect("sets the home");
     }
