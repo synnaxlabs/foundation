@@ -20,6 +20,7 @@ approval; pin the version you build against there.
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `crc32c` | `buffer`, the `buffer_open` fuzz target | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
 | `bytes` | `transport`, `connector` (`http`), `connector-influx` (feature `sim`) | The buffer type of `noq-proto`'s stream and datagram calls (#55), and of the body of each `connector` HTTP request and response, as `hyper` takes it (R7), also in the simulated HTTP servers | MIT | 1.12.1 | 2026-10-04 |
+| `base64ct` | `config` | Strict, constant-time base64 of the OpenSSH public key of a subject (#1755). No dependencies, default features only. The person, 2026-10-08T03:54:15Z, through laptop.monitor: "yes" (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051829870) | Apache-2.0 or MIT | 1.8.3 | 2026-10-08 |
 | `clap` | `ops` | The command line, generated from the operation table (C7, r7 area 8) | MIT or Apache-2.0 | 4.6.7 | 2026-10-05 |
 | `schemars` | `ops` | JSON Schemas of operation inputs for MCP tools (C7, r7 area 8) | MIT | 1.2.2 | 2026-10-05 |
 | `serde` | `ops` | Typed operation input and output for `--json` and MCP | MIT or Apache-2.0 | 1.0.229 | 2026-10-05 |
@@ -45,9 +46,39 @@ exception when the patch lands (#55).
 ## Local patches
 
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
-carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep the
-change small, and list it here with its reason. The patched copy lives in
-`patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
+carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
+`fuzz/Cargo.toml`, keep the change small, and list it here with its reason. The
+patched copy lives in `patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
+Searches skip `patches/` (`.ignore`): to search a copy, give its path or use
+`rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables equal (#1867).
+
+CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
+PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
+<diff>` gives when run in the copy's directory, where `<diff>` is `git diff
+--relative=patches/<crate> <merge base>`, with the cargo-mutants version that
+`.github/workflows/ci.yaml` pins, and with the test outside the copy that kills it. Each
+changed code line of a `.rs` file in the copy (trimmed, not empty and not starting with
+`//`, as REVIEW CHECK counts it) on which no mutant of the list starts, such as a
+`const`, a `use` line, or a field, gets a hand mutant: the line as the release has it,
+or no line when the release has none. The list names, for each hand mutant, the test
+outside the copy that kills it, or the build error that it gives. A changed code line
+with neither is a finding. The `breaker` of the PR runs each mutant on the list, and
+each hand mutant. The root `Cargo.toml` excludes `.claude`: cargo skips a workspace that
+excludes the path and looks further up, so cargo in a copy inside an agent worktree
+finds no workspace once the `Cargo.toml` of the main checkout holds this exclude.
+Decided by laptop.architect-2, 2026-10-08T11:36:09Z:
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. Supersedes
+(b) of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058668724 and
+the text of https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517
+from "So the PR". The first sentence of the rule stays from
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517
+(laptop.architect-2, 2026-10-08T11:24:06Z), confirmed at 2026-10-08T12:32:38Z:
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059938562.
+The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
+the empty-list sentence of
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy is a
+path package, so `cargo deny` does not check it against advisories (#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |

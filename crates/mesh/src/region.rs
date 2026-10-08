@@ -9,6 +9,8 @@ use types::ed25519::PublicKey;
 use types::name::{Name, Prefix};
 use types::node;
 
+use raft::Voters;
+
 use crate::card;
 use crate::change::{Change, Join, Malformed};
 use crate::member::Member;
@@ -26,6 +28,9 @@ pub(crate) struct State {
     tickets: BTreeMap<[u8; 32], Record>,
     homes: BTreeMap<channel::Key, node::Key>,
     pointer: Pointer,
+    // The voters as of the last entry applied: the last `Voters` entry, or the
+    // founding voters.
+    voters: Voters,
     // Each name that a member holds, its card name and each status channel name, in
     // ASCII lower case, so that two names that differ only in case collide (A3).
     names: BTreeMap<String, node::Key>,
@@ -35,7 +40,8 @@ pub(crate) struct State {
 
 impl State {
     /// The state of the region with prefix `region`, with `members`, each under the key
-    /// of its card, no ticket or home, and the spec at version 0 with root `founding`.
+    /// of its card, no ticket or home, the spec at version 0 with root `founding`, and
+    /// the founding `voters`.
     ///
     /// # Errors
     ///
@@ -45,6 +51,7 @@ impl State {
         region: Prefix,
         members: Vec<Member>,
         founding: Digest,
+        voters: BTreeSet<node::Key>,
     ) -> Result<Self, Unfit> {
         let mut state = Self {
             region,
@@ -55,6 +62,10 @@ impl State {
                 version: 0,
                 root: founding,
             },
+            voters: Voters {
+                incoming: voters,
+                outgoing: BTreeSet::new(),
+            },
             names: BTreeMap::new(),
             status: BTreeSet::new(),
         };
@@ -63,6 +74,11 @@ impl State {
             state.insert(member, names);
         }
         Ok(state)
+    }
+
+    /// The prefix of the region.
+    pub(crate) fn prefix(&self) -> &Prefix {
+        &self.region
     }
 
     /// The member with `key`, or `None` when the region has no such member.
@@ -109,25 +125,37 @@ impl State {
                 public_key,
                 options,
             } => self.record(public_key, options).map(|()| None),
-            Change::Spec { base, root, .. } => {
-                self.move_pointer(base, root).map(|()| None)
-            }
+            Change::Spec {
+                base,
+                root,
+                holders,
+                ..
+            } => self.move_pointer(base, root, &holders).map(|()| None),
         }
     }
 
-    // Moves the pointer by compare-and-swap on `base`. The chunks are never read here.
-    fn move_pointer(&mut self, base: Pointer, root: Digest) -> Result<(), Refused> {
+    /// Makes `voters` the voters of the entries after it: the configuration of a
+    /// `Voters` entry, applied in log order.
+    pub(crate) fn set_voters(&mut self, voters: Voters) {
+        self.voters = voters;
+    }
+
+    // Moves the pointer by compare-and-swap on `base`, when the holders of its chunks
+    // are a quorum. The chunks are never read here.
+    fn move_pointer(
+        &mut self,
+        base: Pointer,
+        root: Digest,
+        holders: &BTreeSet<node::Key>,
+    ) -> Result<(), Refused> {
         if base != self.pointer {
             return Err(Refused::Stale {
                 base,
                 pointer: self.pointer,
             });
         }
-        let version = base
-            .version
-            .checked_add(1)
-            .expect("invariant: fewer than 2^64 spec changes apply");
-        self.pointer = Pointer { version, root };
+        quorum(&self.voters, holders)?;
+        self.pointer = base.next(root);
         Ok(())
     }
 
@@ -234,6 +262,28 @@ impl State {
     }
 }
 
+/// Whether `holders` are a majority of each half of `voters`.
+///
+/// # Errors
+///
+/// [`Refused::Quorum`] for the first half that lacks a majority, the incoming half
+/// first.
+pub(crate) fn quorum(
+    voters: &Voters,
+    holders: &BTreeSet<node::Key>,
+) -> Result<(), Refused> {
+    let outgoing = (!voters.outgoing.is_empty()).then_some(&voters.outgoing);
+    for half in std::iter::once(&voters.incoming).chain(outgoing) {
+        let held = half.intersection(holders).count();
+        // `held` is at most `half.len()`, so neither side overflows.
+        if held.saturating_mul(2) <= half.len() {
+            let voters = half.len();
+            return Err(Refused::Quorum { held, voters });
+        }
+    }
+    Ok(())
+}
+
 /// What a node that joins gives the voter that admits it.
 #[cfg_attr(
     not(test),
@@ -284,6 +334,14 @@ pub(crate) enum Refused {
         /// The spec pointer.
         pointer: Pointer,
     },
+    /// The holders of the chunks of a `Spec` change are not a majority of a half of
+    /// the voters as of the entry.
+    Quorum {
+        /// The voters of that half that hold the chunks.
+        held: usize,
+        /// The voters of that half.
+        voters: usize,
+    },
     /// The bytes of a committed entry of a known kind are not the body of that kind,
     /// as [`Malformed::Body`].
     Body {
@@ -318,6 +376,11 @@ impl fmt::Display for Refused {
             Self::Stale { base, pointer } => write!(
                 f,
                 "the base {base} of a spec change is not the pointer {pointer}"
+            ),
+            Self::Quorum { held, voters } => write!(
+                f,
+                "{held} of {voters} voters hold the chunks of a spec change, not a \
+                 majority"
             ),
             Self::Body { kind, length } => Malformed::Body {
                 kind: *kind,
@@ -417,9 +480,13 @@ mod tests {
 
     // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
     fn state() -> State {
-        let mut state =
-            State::new(name("plant").into(), create_members(&[1, 2]), FOUNDING)
-                .unwrap();
+        let mut state = State::new(
+            name("plant").into(),
+            create_members(&[1, 2]),
+            FOUNDING,
+            [node(1)].into(),
+        )
+        .unwrap();
         let recorded = state.apply(record(7, options("plant.edge", false)));
         assert_eq!(recorded, Ok(None));
         state
@@ -461,6 +528,58 @@ mod tests {
         assert_eq!(state.pointer().version, 2);
     }
 
+    fn keys<'a>(ids: impl IntoIterator<Item = &'a u8>) -> BTreeSet<node::Key> {
+        ids.into_iter().map(|&id| node(id)).collect()
+    }
+
+    fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+        Voters {
+            incoming: keys(incoming),
+            outgoing: keys(outgoing),
+        }
+    }
+
+    #[test]
+    fn holders_are_a_quorum_only_as_a_majority_of_each_half() {
+        let short = |held, voters| Err(Refused::Quorum { held, voters });
+        let cases = [
+            (voters(&[1], &[]), keys(&[1]), Ok(())),
+            (voters(&[1], &[]), keys(&[]), short(0, 1)),
+            (voters(&[1, 2], &[]), keys(&[1]), short(1, 2)),
+            (voters(&[1, 2], &[]), keys(&[1, 2]), Ok(())),
+            (voters(&[1, 2, 3], &[]), keys(&[2, 3]), Ok(())),
+            (voters(&[1, 2, 3], &[]), keys(&[3, 4]), short(1, 3)),
+            (voters(&[1, 2, 3], &[1]), keys(&[2, 3]), short(0, 1)),
+            (voters(&[1, 2], &[1, 2, 3]), keys(&[1]), short(1, 2)),
+            (voters(&[1, 2, 3], &[1, 2]), keys(&[1, 2]), Ok(())),
+        ];
+        for (voters, holders, expected) in cases {
+            let quorum = quorum(&voters, &holders);
+            assert_eq!(quorum, expected, "{voters:?} {holders:?}");
+        }
+        assert_eq!(
+            Refused::Quorum { held: 1, voters: 2 }.to_string(),
+            "1 of 2 voters hold the chunks of a spec change, not a majority"
+        );
+    }
+
+    // The voters of the last `Voters` entry count for each change after it.
+    #[test]
+    fn a_spec_change_is_refused_when_its_holders_are_not_a_quorum_of_the_voters() {
+        let mut state = state();
+        state.set_voters(voters(&[1, 2], &[1]));
+        let short = Refused::Quorum { held: 1, voters: 2 };
+        assert_eq!(state.apply(spec(0, 1, 2, &[])), Err(short));
+        assert_eq!(state.pointer().version, 0);
+        let mut held = spec(0, 1, 2, &[]);
+        let Change::Spec { holders, .. } = &mut held else {
+            unreachable!()
+        };
+        *holders = keys(&[1, 2]);
+        assert_eq!(state.apply(held), Ok(None));
+        assert_eq!(state.pointer().version, 1);
+    }
+
     // Of two changes from one base, the first applies and the second is refused.
     #[test]
     fn a_spec_change_on_a_stale_base_is_refused() {
@@ -488,9 +607,13 @@ mod tests {
 
     #[test]
     fn new_refuses_two_members_with_one_key() {
-        let error =
-            State::new(name("plant").into(), create_members(&[1, 2, 1]), FOUNDING)
-                .unwrap_err();
+        let error = State::new(
+            name("plant").into(),
+            create_members(&[1, 2, 1]),
+            FOUNDING,
+            [node(1)].into(),
+        )
+        .unwrap_err();
         assert_eq!(error, Unfit::Duplicate { key: node(1) });
         assert_eq!(
             error.to_string(),
@@ -503,7 +626,7 @@ mod tests {
         let mut reserved = create_members(&[1, 2]);
         reserved[1].card = signed(2, "plant.@changes");
         assert_eq!(
-            State::new(name("plant").into(), reserved, FOUNDING),
+            State::new(name("plant").into(), reserved, FOUNDING, [node(1)].into()),
             Err(Unfit::Reserved {
                 name: name("plant.@changes")
             })
@@ -511,7 +634,7 @@ mod tests {
         let mut outside = create_members(&[1, 2]);
         outside[1].card = signed(2, "factory.node2");
         assert_eq!(
-            State::new(name("plant").into(), outside, FOUNDING),
+            State::new(name("plant").into(), outside, FOUNDING, [node(1)].into()),
             Err(Unfit::Outside {
                 name: name("factory.node2"),
                 region: name("plant").into()
@@ -520,7 +643,8 @@ mod tests {
         let mut long = create_members(&[1, 2]);
         long[1].status = status([(long_status(256 - 12), index(1))]);
         assert_eq!(
-            State::new(name("plant").into(), long, FOUNDING).unwrap_err(),
+            State::new(name("plant").into(), long, FOUNDING, [node(1)].into())
+                .unwrap_err(),
             Unfit::Long {
                 name: name("plant.node2"),
                 status: long_status(256 - 12),
@@ -532,7 +656,8 @@ mod tests {
     fn the_root_region_holds_a_member_and_a_ticket_under_any_prefix() {
         let mut members = create_members(&[1, 2]);
         members[1].card = signed(2, "factory.node2");
-        let mut state = State::new(Prefix::ROOT, members, FOUNDING).unwrap();
+        let mut state =
+            State::new(Prefix::ROOT, members, FOUNDING, [node(1)].into()).unwrap();
         assert_eq!(state.apply(record(8, options("site_a", false))), Ok(None));
         let join = join(8, 3, "site_a.pt_1");
         assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(None));
@@ -869,7 +994,7 @@ mod tests {
         let mut taken = create_members(&[1, 2]);
         taken[1].card = signed(2, "plant.NODE1");
         assert_eq!(
-            State::new(name("plant").into(), taken, FOUNDING),
+            State::new(name("plant").into(), taken, FOUNDING, [node(1)].into()),
             Err(Unfit::Taken {
                 name: name("plant.NODE1"),
                 key: node(1)
@@ -879,7 +1004,7 @@ mod tests {
         reused[0].status = status([(name("disk"), index(20))]);
         reused[1].status = status([(name("disk"), index(20))]);
         assert_eq!(
-            State::new(name("plant").into(), reused, FOUNDING),
+            State::new(name("plant").into(), reused, FOUNDING, [node(1)].into()),
             Err(Unfit::Reused { key: index(20) })
         );
     }
@@ -1087,8 +1212,10 @@ mod tests {
         fn a_refused_change_changes_nothing(
             steps in prop::collection::vec(steps(), 0..16),
         ) {
+            let members = create_members(&[1, 2]);
+            let voters = keys(&[1]);
             let mut state =
-                State::new(name("plant").into(), create_members(&[1, 2]), FOUNDING).unwrap();
+                State::new(name("plant").into(), members, FOUNDING, voters).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());
@@ -1106,6 +1233,25 @@ mod tests {
                     (Ok(_), _) => {}
                 }
             }
+        }
+
+        // More holders never lose a quorum, and every voter is one.
+        #[test]
+        fn more_holders_keep_a_quorum(
+            incoming in prop::collection::btree_set(0..6_u8, 1..5),
+            outgoing in prop::collection::btree_set(0..6_u8, 0..5),
+            holders in prop::collection::btree_set(0..6_u8, 0..6),
+            more in prop::collection::btree_set(0..6_u8, 0..6),
+        ) {
+            let voters = Voters {
+                incoming: keys(&incoming),
+                outgoing: keys(&outgoing),
+            };
+            let all = keys(holders.union(&more));
+            if quorum(&voters, &keys(&holders)).is_ok() {
+                prop_assert_eq!(quorum(&voters, &all), Ok(()));
+            }
+            prop_assert_eq!(quorum(&voters, &keys(incoming.union(&outgoing))), Ok(()));
         }
 
         // The applied state is the last home that each index was given.

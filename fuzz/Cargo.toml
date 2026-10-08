@@ -10,6 +10,10 @@ cargo-fuzz = true
 # Outside the root workspace: the targets need the pinned nightly.
 [workspace]
 
+# The local patches of the root `Cargo.toml`: docs/dependencies.md.
+[patch.crates-io]
+noq-proto = { path = "../patches/noq-proto" }
+
 [dependencies]
 block = { path = "../crates/block" }
 buffer = { path = "../crates/buffer" }
@@ -252,6 +256,13 @@ bench = false
 [[bin]]
 name = "wire_hub_home"
 path = "fuzz_targets/wire_hub_home.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_hub_client"
+path = "fuzz_targets/wire_hub_client.rs"
 test = false
 doc = false
 bench = false

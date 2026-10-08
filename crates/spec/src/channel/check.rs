@@ -63,8 +63,8 @@ pub fn check(channels: &BTreeMap<Name, Channel>) -> Vec<Problem> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
     /// The channel `second` has the key of `first`, which is before it in name order.
-    /// Keys are given once, so only a defect gives this. The message does not show
-    /// the key.
+    /// Keys are given once, so only a defect or a node that breaks the protocol gives
+    /// this. The message does not show the key.
     Duplicate {
         /// The first channel with the key.
         first: Name,

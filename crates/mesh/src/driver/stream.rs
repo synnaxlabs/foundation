@@ -142,6 +142,11 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Member(_)
         | Error::WrongKey
         | Error::Pool(_)
-        | Error::Stopped(_) => Some(REFUSED),
+        | Error::Stopped(_)
+        | Error::Stale { .. }
+        | Error::Large { .. }
+        | Error::Problems(_)
+        | Error::Quorum { .. }
+        | Error::Blob(_) => Some(REFUSED),
     }
 }

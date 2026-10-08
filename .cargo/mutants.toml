@@ -33,6 +33,9 @@ exclude_re = [
   # The boundary draw is a 64-bit hash against a multiple of 2^64. Equality needs a
   # draw that is an exact multiple of 2^16, so no input tells `<` from `<=`.
   'crates/spec/src/tree/chunker\.rs:.*replace < with <= in boundary',
+  # A false `valid` sends each series to the check of each sample, which gives the same
+  # result more slowly.
+  'crates/codec/src/text\.rs:.*replace valid -> bool with false',
   # Ticks are unique, so no sector is written at the tick that a write started.
   'crates/sim/src/disk\.rs:.*replace > with >= in File::write',
   # The coin is fair: either side gives the same set of outcomes.
@@ -60,4 +63,7 @@ exclude_re = [
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
+  # A pair or a refusal at or below the lowest floor only takes memory: no outcome
+  # reads it.
+  'crates/mesh/src/applied\.rs:.*replace Applied::trim with \(\)',
 ]
