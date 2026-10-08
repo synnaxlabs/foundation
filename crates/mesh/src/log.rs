@@ -454,6 +454,12 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
         let first = segments
             .get(segment.saturating_add(1))
             .map(|bytes| header(bytes));
+        // The number of a header of another version has no meaning here. `records`
+        // gives the error of that file.
+        let known = match first {
+            Some(At::Header(ref head)) if head.version == VERSION => Some(head.number),
+            _ => None,
+        };
         // A record after a torn one, in its file or the next, was written after the
         // torn one was durable: the torn one is damaged.
         let follows = |claimed: usize| {
@@ -462,8 +468,8 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
                 .is_some_and(|rest| matches!(header(rest), At::Header(_)))
         };
         if torn.is_some_and(follows)
-            || (torn.is_some() && matches!(first, Some(At::Header(_))))
-            || matches!(first, Some(At::Header(ref head)) if head.number > next)
+            || (torn.is_some() && known.is_some())
+            || known.is_some_and(|number| number > next)
         {
             let offset = wide(start(end));
             return Err(Error::Corrupt { path: file, offset });
@@ -1908,6 +1914,31 @@ mod tests {
                 offset: 0,
             };
             assert_eq!(stored(&mut sim, &node), Err(expected), "file {number}");
+        }
+    }
+
+    // The number 9 of the next file is after the end, and a torn record ends `log-1`
+    // in the second case. A number of another version has no meaning to this build.
+    #[test]
+    fn gives_the_version_error_for_a_next_file_of_another_version() {
+        for torn in [false, true] {
+            let (mut sim, node) = create_node(0);
+            create_three_files(&mut sim, &node);
+            sim.run_on(&node, move |node, _| async move {
+                let mut record = encode(9, None, &[bytes(4, 10)]);
+                record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+                sign(&mut record);
+                put(&node, "log-2", 0, &record).await;
+                if torn {
+                    put(&node, "log-1", wide(HEADER) + 5, &[0xFF]).await;
+                }
+            })
+            .unwrap();
+            let expected = Error::Version {
+                path: file("log-2"),
+                found: 2,
+            };
+            assert_eq!(stored(&mut sim, &node), Err(expected), "torn {torn}");
         }
     }
 
