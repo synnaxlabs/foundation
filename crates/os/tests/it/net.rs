@@ -510,6 +510,17 @@ fn a_listener_on_a_mapped_address_agrees_with_its_streams() {
     });
 }
 
+/// Connects to `remote`, reached through `listener`, whose stream resets after the
+/// handshake and before the connect ends.
+async fn connect_reset(net: &Net, listener: &mut Listener, remote: SocketAddr) -> Tcp {
+    let config = connect_config(remote);
+    let mut connecting = pin!(net.connect(&config));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(connecting.as_mut().poll(&mut cx).is_pending());
+    drop(accept(listener).await);
+    connecting.await.expect("the handshake completed")
+}
+
 /// The connect has taken the reset, so the stream gives it with no kernel error left.
 #[test]
 fn a_connect_whose_peer_resets_after_the_handshake_gives_a_stream_that_is_reset() {
@@ -517,17 +528,40 @@ fn a_connect_whose_peer_resets_after_the_handshake_gives_a_stream_that_is_reset(
         let net = net();
         let mut listener = listen(&net);
         let remote = listener.local();
-        let config = connect_config(remote);
-        let mut connecting = pin!(net.connect(&config));
-        let mut cx = Context::from_waker(Waker::noop());
-        assert!(connecting.as_mut().poll(&mut cx).is_pending());
-        drop(accept(&mut listener).await);
-        let mut client = connecting.await.expect("the handshake completed");
+        let mut client = connect_reset(&net, &mut listener, remote).await;
         assert_eq!(client.peer(), remote);
         read_reset(&mut client, remote).await;
         let reset = Error::Reset { remote };
         assert_eq!(write(&mut client, &[b"late"]).await, Err(reset.clone()));
         assert_eq!(close(&mut client).await, Err(reset));
+    });
+}
+
+/// After a reset the kernel holds no peer, so the stream names the remote as
+/// `canonical` gives it, as `sim` does.
+#[test]
+fn a_connect_reset_in_its_handshake_names_the_remote_it_was_given() {
+    on_thread("net-connect", || async {
+        let net = net();
+        let mut v4 = listen(&net);
+        let local = v4.local();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), local.port());
+        let any = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), local.port());
+        let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0);
+        let mut v6 = net.listen(&listen_config(v6)).expect("::1 binds");
+        let port = v6.local().port();
+        let scoped = SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 2, 7).into();
+        let cases = [
+            (false, mapped, local),
+            (false, any, any),
+            (true, scoped, scoped),
+        ];
+        for (on_v6, remote, named) in cases {
+            let listener = if on_v6 { &mut v6 } else { &mut v4 };
+            let mut client = connect_reset(&net, listener, remote).await;
+            assert_eq!(client.peer(), named, "{remote}");
+            read_reset(&mut client, named).await;
+        }
     });
 }
 
