@@ -33,6 +33,11 @@ proptest.workspace = true
 sim = { path = "../sim" }
 
 [[bench]]
+name = "line"
+harness = false
+test = true
+
+[[bench]]
 name = "sim"
 harness = false
 test = true
