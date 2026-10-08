@@ -3905,7 +3905,11 @@ How to read this record:
 - **REVIEW CHECK (2026-10-07)** The required status `review` (`cargo xtask review`,
   `.github/workflows/review.yaml`) passes a PR only when its review is done. It reads
   only round comments by the factory bot, in the format of `/review`, "Round comment".
-  Each round names the reviewers REVIEW TIERS requires; `performance` is never required.
+  Each round comment parses, also an earlier one, and ends with its `Deferred:`,
+  `Public surface:`, and `Hot path:` lines, in that order. Each round names the
+  reviewers REVIEW TIERS requires, and `performance` when its `Hot path:` line does not
+  start with `none`. Decided by the director in
+  https://github.com/synnaxlabs/foundation/issues/1467.
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not

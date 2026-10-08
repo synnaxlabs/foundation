@@ -25,7 +25,14 @@ Breaker: skipped, the range changes no `.rs` line but comments
 Range: `38cba24f..c77c67d7`
 Findings: none
 
-No bug, no lost coverage, no oracle weakening.";
+No bug, no lost coverage, no oracle weakening.
+
+Deferred: none
+Public surface: none
+Hot path: none";
+
+/// The end lines of `ROUND`.
+const END: &str = "\n\nDeferred: none\nPublic surface: none\nHot path: none";
 
 fn bot(body: &str) -> Comment {
     Comment {
@@ -63,8 +70,10 @@ fn check(record: &Record) -> Vec<String> {
 #[test]
 fn passes_the_last_round_of_1089() {
     let earlier = bot(
-        "## Review round 2\n\nReviewers: reviewer, breaker\nRange: `a..b`\n\
-                       Findings: 2",
+        &("## Review round 2\n\nReviewers: reviewer, breaker\nRange: `a..b`\n\
+           Findings: 2"
+            .to_string()
+            + END),
     );
     assert_eq!(
         check(&record(vec![earlier, bot(ROUND)])),
@@ -73,16 +82,89 @@ fn passes_the_last_round_of_1089() {
 }
 
 #[test]
-fn passes_1089_with_its_rounds_before_the_fixed_format() {
+fn fails_a_free_form_earlier_round() {
     let first = bot(
         "## Review round 1\n\nConfirmed findings, most severe first.\n\n\
                      1. **`Checked::new` overflows the stack**.",
     );
-    let second = bot("## Review round 2\n\nReviewer and breaker on \
-                      `8a33cd71^..c0261dd1`. No correctness defect.");
     assert_eq!(
-        check(&record(vec![first, second, bot(ROUND)])),
-        Vec::<String>::new()
+        check(&record(vec![first, bot(ROUND)])),
+        vec![
+            "review round 1 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+                .to_string()
+        ]
+    );
+}
+
+/// The problem of a round 3 that does not end with its `name:` line.
+fn unended(name: &str) -> String {
+    format!(
+        "review round 3 does not end with a `{name}:` line. End each round with its \
+         `Deferred:`, `Public surface:`, and `Hot path:` lines, in that order, in the \
+         format of .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
+#[test]
+fn fails_a_round_with_no_end_line() {
+    let cases = [
+        ("Deferred: none\n", unended("Deferred")),
+        ("Public surface: none\n", unended("Public surface")),
+        ("\nHot path: none", unended("Hot path")),
+    ];
+    for (line, problem) in cases {
+        let round = ROUND.replace(line, "");
+        assert_eq!(check(&record(vec![bot(&round)])), vec![problem], "{line}");
+    }
+}
+
+#[test]
+fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
+    let swapped = ROUND.replace(
+        "Deferred: none\nPublic surface: none",
+        "Public surface: none\nDeferred: none",
+    );
+    assert_eq!(
+        check(&record(vec![bot(&swapped)])),
+        vec![unended("Public surface")]
+    );
+    let trailed = ROUND.to_string() + "\n\nThanks.";
+    assert_eq!(
+        check(&record(vec![bot(&trailed)])),
+        vec![unended("Hot path")]
+    );
+    let spaced = ROUND.replace("\nHot path:", "\n\n  Hot path:") + "\n  \n";
+    assert_eq!(check(&record(vec![bot(&spaced)])), Vec::<String>::new());
+}
+
+#[test]
+fn a_round_that_names_a_hot_path_needs_performance() {
+    let hot = later("reviewer, breaker")
+        .replace("Hot path: none", "Hot path: stream::Sender::send");
+    assert_eq!(
+        check(&record(vec![bot(&hot)])),
+        vec![
+            "review round 3 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+    let measured = hot.replace("breaker\n", "breaker, performance\n");
+    assert_eq!(check(&record(vec![bot(&measured)])), Vec::<String>::new());
+    let cold = later("reviewer, breaker").replace(
+        "Hot path: none",
+        "Hot path: none, `send` runs once per stream",
+    );
+    assert_eq!(check(&record(vec![bot(&cold)])), Vec::<String>::new());
+    let docs = ROUND.replace("Hot path: none", "Hot path: `Sender::send`");
+    let mut record = record(vec![bot(&docs)]);
+    record.files = vec!["docs/decisions.md".to_string()];
+    assert_eq!(
+        check(&record),
+        vec![
+            "review round 3 names no performance, which this round requires."
+                .to_string()
+        ]
     );
 }
 
@@ -304,7 +386,8 @@ fn each_earlier_round_names_the_reviewers_it_requires() {
 
 #[test]
 fn reads_the_fields_only_from_the_block_after_the_heading() {
-    let round = later("reviewer") + "\nReviewers: reviewer, breaker";
+    let round =
+        later("reviewer").replace("No bug", "Reviewers: reviewer, breaker\nNo bug");
     assert_eq!(
         check(&record(vec![bot(&round)])),
         vec!["review round 3 names no breaker, which this round requires.".to_string()]

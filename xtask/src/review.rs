@@ -46,15 +46,8 @@ struct Round {
     from: String,
     end: String,
     findings: u32,
-}
-
-/// A round comment that does not parse.
-#[derive(Debug)]
-struct Malformed {
-    /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is in the fixed
-    /// format, not an older one.
-    fixed: bool,
-    problem: String,
+    /// The `Hot path:` line names a function, so the round requires `performance`.
+    hot: bool,
 }
 
 /// Checks that the review of PR `pr` is done at commit `head`: its last round
@@ -124,9 +117,8 @@ fn problems(
     for (i, round) in rounds.iter().enumerate() {
         let round = match round {
             Ok(round) => round,
-            Err(e) if i + 1 < rounds.len() && !e.fixed => continue,
-            Err(e) => {
-                problems.push(e.problem.clone());
+            Err(problem) => {
+                problems.push(problem.clone());
                 continue;
             }
         };
@@ -181,17 +173,21 @@ fn problems(
 
 /// The reviewers that `round` must name for a PR that changes `files`, by REVIEW
 /// TIERS in `docs/decisions.md`: on round 1, `reviewer`, plus `architecture` and
-/// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR.
-/// `performance` depends on what the code does, so no round requires it here.
+/// `breaker` for a code PR; on a later round, `reviewer`, plus `breaker` for a code PR;
+/// and `performance` when the round names a hot path.
 fn required(round: &Round, files: &[String]) -> Vec<&'static str> {
     let code = files.iter().any(|f| history::code_path(f));
-    if code && round.number <= 1 {
+    let mut required = if code && round.number <= 1 {
         vec!["reviewer", "architecture", "breaker"]
     } else if code {
         vec!["reviewer", "breaker"]
     } else {
         vec!["reviewer"]
+    };
+    if round.hot {
+        required.push("performance");
     }
+    required
 }
 
 /// A problem when no director verdict by the bot has the line
@@ -216,8 +212,9 @@ fn approval(record: &Record, head: &str) -> Option<String> {
 
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>` line.
 /// The fields are the first block of lines after that line, so the findings text
-/// cannot set them.
-fn round(body: &str) -> Option<Result<Round, Malformed>> {
+/// cannot set them. The comment ends with its `Deferred:`, `Public surface:`, and
+/// `Hot path:` lines.
+fn round(body: &str) -> Option<Result<Round, String>> {
     let mut lines = body.lines().map(str::trim);
     let number = lines.find_map(|l| l.strip_prefix("## Review round "))?;
     let lines = lines
@@ -235,12 +232,10 @@ fn round(body: &str) -> Option<Result<Round, Malformed>> {
             findings.get_or_insert(value);
         }
     }
-    let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     let Ok(number) = number.parse::<u32>() else {
-        return Some(Err(Malformed {
-            fixed,
-            problem: format!("`## Review round {number}` has no round number"),
-        }));
+        return Some(Err(format!(
+            "`## Review round {number}` has no round number"
+        )));
     };
     let missing = |name| {
         format!(
@@ -264,6 +259,7 @@ fn round(body: &str) -> Option<Result<Round, Malformed>> {
                 )
             })?,
         };
+        let hot = hot_path(body, number)?;
         Ok(Round {
             number,
             reviewers: reviewers
@@ -275,9 +271,34 @@ fn round(body: &str) -> Option<Result<Round, Malformed>> {
             from: from.to_string(),
             end: end.to_string(),
             findings,
+            hot: !hot.starts_with("none"),
         })
     };
-    Some(fields().map_err(|problem| Malformed { fixed, problem }))
+    Some(fields())
+}
+
+/// The value of the `Hot path:` line of round `number`, whose comment `body` must end
+/// with its `Deferred:`, `Public surface:`, and `Hot path:` lines, in that order.
+fn hot_path(body: &str, number: u32) -> Result<&str, String> {
+    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty()).rev();
+    // The value of the next line from the end, which must be the `name:` line.
+    let mut last = |name| {
+        lines
+            .next()
+            .and_then(|l| l.strip_prefix(name)?.strip_prefix(": "))
+            .ok_or_else(|| {
+                format!(
+                    "review round {number} does not end with a `{name}:` line. End each \
+                     round with its `Deferred:`, `Public surface:`, and `Hot path:` \
+                     lines, in that order, in the format of \
+                     .claude/skills/review/SKILL.md, \"Round comment\"."
+                )
+            })
+    };
+    let hot = last("Hot path")?;
+    last("Public surface")?;
+    last("Deferred")?;
+    Ok(hot)
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.
