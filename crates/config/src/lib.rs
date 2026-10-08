@@ -3179,6 +3179,20 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_key_length_longer_than_the_key() {
+            let start = &b"\0\0\0\x0bssh-ed25519\0\0\0"[..];
+            for length in [0x21, 0xff] {
+                let blob = [start, &[length], &ALICE_KEY].concat();
+                let keys = string(&line("ssh-ed25519", &blob));
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![bad(at(0, 11), NOT_ED25519)]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
         fn refuses_two_lines_split_by_any_line_break() {
             for split in ['\n', '\x0b', '\x0c', '\r', '\u{85}', '\u{2028}', '\u{2029}']
             {
