@@ -123,7 +123,8 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// [`SYSTEM_HEADERS`] in a system directory, a call of a clock function from a
 /// pair that [`CLOCK_CALLS`] does not list, a listed pair with no call, any other
 /// reference to a clock function, such as its address in code or data, through
-/// which any code can call it, each inlined function, and an `#include_next`.
+/// which any code can call it, each inlined function, an `#include_next`, and a
+/// `#line` directive or line marker in a `.c` or `.h` file of the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     inspect(&root.join(DEST), &root.join("target/open62541/check"))
 }
@@ -319,7 +320,7 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
     let dirs = system_dirs(&verbose.map_err(|e| vec![e])?.1);
     let objects = build(copy, &sources, &flags, out).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
-    let mut problems = Vec::new();
+    let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
     for (source, object, preprocessed) in objects {
         let disassembly = exec(Command::new("objdump").arg("-dr").arg(&object))
             .map_err(|e| vec![e])?;
@@ -351,6 +352,51 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
     } else {
         Err(problems)
     }
+}
+
+/// An error for each `#line` directive or line marker in a `.c` or `.h` file under
+/// `dir` of the copy in `copy`, by path and line. Either moves the file that
+/// [`includes`] reads.
+fn line_directives(copy: &Path, dir: &Path) -> Result<Vec<String>, String> {
+    let error = |path: &Path, e| format!("{}: {e}", copy.join(path).display());
+    let mut paths = std::fs::read_dir(copy.join(dir))
+        .and_then(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| dir.join(entry.file_name())))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| error(dir, e))?;
+    paths.sort();
+    let mut problems = Vec::new();
+    for path in paths {
+        if copy.join(&path).is_dir() {
+            problems.extend(line_directives(copy, &path)?);
+            continue;
+        }
+        if !path.extension().is_some_and(|e| e == "c" || e == "h") {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(copy.join(&path)).map_err(|e| error(&path, e))?;
+        for (index, line) in text.lines().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix('#').map(str::trim_start)
+            else {
+                continue;
+            };
+            let word = rest.split(|c: char| !c.is_ascii_alphanumeric()).next();
+            if word.is_some_and(|w| {
+                w == "line" || w.starts_with(|c: char| c.is_ascii_digit())
+            }) {
+                problems.push(format!(
+                    "{}:{}: holds a line directive, which moves the file that the \
+                     include check reads",
+                    path.display(),
+                    index + 1
+                ));
+            }
+        }
+    }
+    Ok(problems)
 }
 
 /// Whether `path`, relative to the copy, stays inside it.
@@ -809,6 +855,64 @@ Disassembly of section .text.log:
             ]
         );
         remove(&root).unwrap();
+    }
+
+    #[test]
+    fn line_directives_names_each_line_directive_and_marker() {
+        let copy = temp("lines");
+        create_files(
+            &copy,
+            &[
+                (
+                    "src/a.c",
+                    "#line 5 \"x.y\"\n  #  12 \"b\"\n#lines\n// #line 1\n",
+                ),
+                ("src/b.txt", "#line 1\n"),
+                ("include/c.h", "#define line 1\n# 1 \"c.y\" 1\n#line\n"),
+            ],
+        );
+        let held = |at: &str| {
+            format!(
+                "{at}: holds a line directive, which moves the file that the include check reads"
+            )
+        };
+        assert_eq!(
+            line_directives(&copy, Path::new("")),
+            Ok(vec![
+                held("include/c.h:2"),
+                held("include/c.h:3"),
+                held("src/a.c:1"),
+                held("src/a.c:2")
+            ])
+        );
+        let missing = copy.join("missing");
+        assert_eq!(
+            line_directives(&missing, Path::new("")),
+            Err(format!(
+                "{}/: No such file or directory (os error 2)",
+                missing.display()
+            ))
+        );
+        remove(&copy).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn check_refuses_a_line_directive_in_the_copy() {
+        let (root, repo, result) = run_after("line", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let path = root.join("patches/open62541/src/util/ua_util.c");
+        let old = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("#line 1 \"gen.y\"\n{old}")).unwrap();
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                "src/util/ua_util.c:1: holds a line directive, which moves the file that \
+                 the include check reads"
+                    .to_owned(),
+            ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
     #[test]
