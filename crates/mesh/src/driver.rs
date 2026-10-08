@@ -150,8 +150,8 @@ impl Mesh {
     ///   voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.founding.members`.
-    /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
-    ///   when a call of the store fails.
+    /// - [`Error::Pool`] when the pool has no block for a chunk or the founding file,
+    ///   and [`Error::Blob`] when a call of the store fails.
     /// - [`Error::Founding`] when the first open of `config.dir` kept another
     ///   founding, with the members of each in key order.
     /// - [`Error::Unfounded`] when the log holds a record, and `config.dir` holds no

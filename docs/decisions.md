@@ -3248,10 +3248,11 @@ How to read this record:
   gives `Error::Files`, and a pool with no block for it gives `Error::Pool`, not
   `Error::Log`, which names a part that did not fail (`laptop.architect`,
   2026-10-08T16:10:01Z:
-  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064069802). Lost: a digest of the whole value
-  in the file, because the operator cannot see which field differs and the region does
-  not read back; one variant per field, four variants for one contract; the root of the
-  definitions alone, because the file is then not the whole value.
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064069802). Lost:
+  a digest of the whole value in the file, because the operator cannot see which field
+  differs and the region does not read back; one variant per field, four variants for
+  one contract; the root of the definitions alone, because the file is then not the
+  whole value.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can

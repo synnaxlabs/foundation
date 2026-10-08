@@ -34,8 +34,8 @@ const CHECK: usize = 8;
 /// - [`Error::Founding`] when the first open wrote another founding.
 /// - [`Error::Unfounded`] when the log holds a record and `dir` holds no founding, or
 ///   a founding that does not read back whole.
-/// - [`Error::Log`] with [`log::Error::Files`] when a file call fails, or with
-///   [`log::Error::Pool`] when the pool has no block.
+/// - [`Error::Pool`] when the pool has no block.
+/// - [`Error::Log`] with [`log::Error::Files`] when a file call fails.
 pub(super) async fn keep(
     files: &Files,
     dir: &Path,
@@ -79,7 +79,7 @@ async fn read(files: &Files, path: &Path, pool: &Pool) -> Result<Vec<u8>, Error>
     while bytes.len() < len {
         let part = pool
             .alloc(len.saturating_sub(bytes.len()).min(pool.largest()))
-            .map_err(log::Error::Pool)?;
+            .map_err(Error::Pool)?;
         let part = file
             .read_at(offset(bytes.len()), part)
             .await
@@ -109,7 +109,7 @@ async fn write(
         .map_err(failed)?;
     let mut at = 0;
     for part in bytes.chunks(pool.largest()) {
-        let block = block(pool, part).map_err(log::Error::Pool)?;
+        let block = block(pool, part).map_err(Error::Pool)?;
         file.write_at(at, &[block]).await.map_err(failed)?;
         at = at.saturating_add(offset(part.len()));
     }
