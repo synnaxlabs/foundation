@@ -84,3 +84,36 @@ impl Drop for Iteration {
 
 /// A timer callback that does nothing.
 unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
+
+#[cfg(test)]
+mod tests {
+    use types::time::Span;
+
+    use super::Iteration;
+
+    #[test]
+    fn a_run_runs_the_due_timers() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let clock = sim.node(sim::node::Config::default()).clock();
+        let iteration = Iteration::new(clock, 1);
+        let first = iteration.events.next().expect("a timer waits");
+        sim.run_for(Span::MILLISECOND).expect("the run has no task");
+        iteration.run();
+        assert_eq!(
+            iteration.events.next(),
+            Some(first + Span::MILLISECOND),
+            "{iteration:?}"
+        );
+    }
+
+    #[test]
+    fn the_debug_gives_the_next_timer() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let clock = sim.node(sim::node::Config::default()).clock();
+        let iteration = Iteration::new(clock, 0);
+        assert_eq!(
+            format!("{iteration:?}"),
+            "Iteration { next: Some(Monotonic(3601000000000)), .. }"
+        );
+    }
+}
