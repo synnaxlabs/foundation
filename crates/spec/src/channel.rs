@@ -77,6 +77,34 @@ impl<R> Kind<R> {
         };
         edges.into_iter().flatten()
     }
+
+    /// The same kind, with each edge mapped by `f`. Units are not checked again.
+    ///
+    /// # Errors
+    ///
+    /// The first error of `f`, in the order index, quality, error, control.
+    pub fn try_map<S, E>(
+        self,
+        mut f: impl FnMut(R) -> Result<S, E>,
+    ) -> Result<Kind<S>, E> {
+        Ok(match self {
+            Self::Index { error, control } => Kind::Index {
+                error: error.map(&mut f).transpose()?,
+                control: control.map(&mut f).transpose()?,
+            },
+            Self::Data(Data {
+                index,
+                quality,
+                data_type,
+                unit,
+            }) => Kind::Data(Data {
+                index: f(index)?,
+                quality: quality.map(f).transpose()?,
+                data_type,
+                unit,
+            }),
+        })
+    }
 }
 
 /// A data channel: what its values are, their unit, and the channels it points at.
@@ -261,6 +289,79 @@ mod tests {
                 let unit = (element == Scalar::F64).then_some("kPa");
                 let data = data(data_type.clone(), unit).unwrap();
                 assert_eq!(data.data_type(), &data_type);
+            }
+        }
+    }
+
+    mod try_map {
+        use super::*;
+
+        fn data(
+            index: &'static str,
+            quality: Option<&'static str>,
+        ) -> Kind<&'static str> {
+            let unit = Some(Unit::new("kPa").unwrap());
+            let data_type = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+            Kind::Data(Data::new(index, quality, data_type, unit).unwrap())
+        }
+
+        /// Maps each edge in `kind` with `upper`, and gives each edge it saw.
+        fn map(
+            kind: Kind<&'static str>,
+        ) -> (Result<Kind<String>, String>, Vec<&'static str>) {
+            let mut seen = Vec::new();
+            let mapped = kind.try_map(|to| {
+                seen.push(to);
+                if to.starts_with("bad") {
+                    Err(format!("no {to}"))
+                } else {
+                    Ok(to.to_uppercase())
+                }
+            });
+            (mapped, seen)
+        }
+
+        #[test]
+        fn maps_each_edge_and_keeps_the_rest() {
+            let unit = Some(Unit::new("kPa").unwrap());
+            let data_type = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+            let upper = Data::new("T".into(), Some("Q".into()), data_type, unit);
+            assert_eq!(
+                map(data("t", Some("q"))),
+                (Ok(Kind::Data(upper.unwrap())), vec!["t", "q"])
+            );
+            let both = Kind::Index {
+                error: Some("e"),
+                control: Some("c"),
+            };
+            let upper = Kind::Index {
+                error: Some("E".into()),
+                control: Some("C".into()),
+            };
+            assert_eq!(map(both), (Ok(upper), vec!["e", "c"]));
+            let neither = Kind::Index {
+                error: None,
+                control: None,
+            };
+            let upper = Kind::Index {
+                error: None,
+                control: None,
+            };
+            assert_eq!(map(neither), (Ok(upper), vec![]));
+        }
+
+        #[test]
+        fn gives_the_first_error_in_edge_order() {
+            let index = |error, control| Kind::Index { error, control };
+            for (kind, first, seen) in [
+                (data("bad_t", Some("bad_q")), "bad_t", vec!["bad_t"]),
+                (data("t", Some("bad_q")), "bad_q", vec!["t", "bad_q"]),
+                (index(Some("bad_e"), Some("bad_c")), "bad_e", vec!["bad_e"]),
+                (index(Some("e"), Some("bad_c")), "bad_c", vec!["e", "bad_c"]),
+                (index(None, Some("bad_c")), "bad_c", vec!["bad_c"]),
+            ] {
+                let expected = (Err(format!("no {first}")), seen);
+                assert_eq!(map(kind.clone()), expected, "{kind:?}");
             }
         }
     }
