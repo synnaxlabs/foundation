@@ -7288,10 +7288,14 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
-   https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
+   https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). A
+   layer 3 crate may take `hub` with `sim`, so its tests build a hub through
+   `hub::testing::open`, on the shard of `home::testing::shard` (`laptop.architect`,
+   2026-10-08T17:50:53Z:
+   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). The
    `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
-   code could call the ring), the hub tests in `node`, and a second way to build a shard
-   in `home`.
+   code could call the ring), the hub tests in `node`, and a builder that takes a
+   `sim::node::Node`, which adds an edge on `sim`.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2

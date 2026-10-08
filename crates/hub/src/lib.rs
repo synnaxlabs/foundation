@@ -5,6 +5,8 @@ mod channel;
 mod commit;
 pub mod reader;
 pub mod serve;
+#[cfg(feature = "sim")]
+pub mod testing;
 pub mod writer;
 
 use std::cell::RefCell;

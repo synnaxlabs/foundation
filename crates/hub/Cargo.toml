@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes `testing` to the tests of `hub` and the crates above it.
+sim = ["home/sim"]
+
 [dependencies]
 block = { path = "../block" }
 env = { path = "../env" }
@@ -20,6 +24,8 @@ buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
+# Turns on `sim`, since the bench host runs no features.
+hub = { path = ".", features = ["sim"] }
 sim = { path = "../sim" }
 
 [[test]]
