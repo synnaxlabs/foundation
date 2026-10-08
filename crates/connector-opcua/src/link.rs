@@ -296,11 +296,14 @@ fn the_copy_links_the_timer() {
     assert_eq!(distinct.len(), functions.len());
 }
 
-/// Each symbol outside the copy and `shim.c` that they may name, in glibc on x86-64
-/// and 64-bit Arm, at each optimization level. None gives or takes a heap block, so no
-/// block crosses between the allocator of libc and `src/alloc.rs`.
-const OUTSIDE: [&str; 41] = [
+/// Each symbol outside the copy and `shim.c` that they may name, in glibc and in the
+/// outline atomics of libgcc: on x86-64 with GCC or Clang at each optimization level,
+/// and on 64-bit Arm with Clang at `-O2` and `-moutline-atomics`. None gives or takes a
+/// heap block, so no block crosses between the allocator of libc and `src/alloc.rs`.
+const OUTSIDE: [&str; 44] = [
     "_GLOBAL_OFFSET_TABLE_",
+    "__aarch64_cas8_acq_rel",
+    "__aarch64_swp8_acq_rel",
     "__ctype_b_loc",
     "__errno_location",
     "__fprintf_chk",
@@ -314,6 +317,7 @@ const OUTSIDE: [&str; 41] = [
     "__tls_get_addr",
     "abort",
     "access",
+    "bcmp",
     "connector_opcua_calloc",
     "connector_opcua_free",
     "connector_opcua_malloc",
@@ -343,18 +347,19 @@ const OUTSIDE: [&str; 41] = [
     "write",
 ];
 
-/// The symbols that `nm` with `flag` gives for the archives of this build.
-fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
-    let out = std::path::Path::new(env!("OUT_DIR"));
+/// The symbols that `nm` with `flag` gives for `files`.
+fn names(
+    files: &[std::path::PathBuf],
+    flag: &str,
+) -> std::collections::BTreeSet<String> {
     let output = std::process::Command::new("nm")
         .args(["-P", flag])
-        .arg(out.join("libopen62541.a"))
-        .arg(out.join("libshim.a"))
+        .args(files)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
-    // A line that names an object of the archive has one word.
+    // A line that names a file or an object of an archive has one word.
     text.lines()
         .filter_map(|line| {
             let mut words = line.split_whitespace();
@@ -364,8 +369,17 @@ fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// The symbols that `nm` with `flag` gives for the archives of this build.
+fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
+    let out = std::path::Path::new(env!("OUT_DIR"));
+    names(&[out.join("libopen62541.a"), out.join("libshim.a")], flag)
+}
+
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs GNU nm and the glibc symbols"
+)]
 fn the_c_names_only_the_listed_symbols_outside_it() {
     let defined = symbols("--defined-only");
     let undefined = symbols("--undefined-only");
@@ -375,6 +389,81 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     let unlisted: Vec<&str> = outside
         .into_iter()
         .filter(|name| !OUTSIDE.contains(name))
+        .collect();
+    assert!(unlisted.is_empty(), "the C names {unlisted:?}");
+}
+
+/// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
+/// Clang with libgcc 9.3.1 or later, or with `-rtlib=compiler-rt`. The host build does
+/// not show it. So this preprocesses each source of the copy as the host build does,
+/// and compiles it for 64-bit Arm with that default. The preprocessing is the host's,
+/// so the test finds the names that the code generation for Arm adds, not the names of
+/// a branch of the source for Arm only.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs GNU nm, Clang, and the glibc symbols"
+)]
+fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = root.join("../../patches/open62541");
+    let out = std::path::Path::new(env!("OUT_DIR")).join("arm");
+    std::fs::create_dir_all(&out).unwrap();
+    let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
+    let sources = std::fs::read_to_string(copy.join("sources.txt")).unwrap();
+    let header = format!(
+        "-DUA_ARCH_HEADER=\"{}\"",
+        root.join("src/alloc.h").display()
+    );
+    let objects: Vec<_> = sources
+        .lines()
+        .enumerate()
+        .map(|(i, source)| {
+            let text = out.join(format!("{i}.i"));
+            let object = out.join(format!("{i}.o"));
+            let mut preprocess = std::process::Command::new("clang");
+            preprocess.arg("-E").arg(&header);
+            for flag in flags.lines() {
+                match flag.strip_prefix("-I") {
+                    Some(dir) => {
+                        preprocess.arg(format!("-I{}", copy.join(dir).display()))
+                    }
+                    None => preprocess.arg(flag),
+                };
+            }
+            let status = preprocess
+                .arg(copy.join(source))
+                .arg("-o")
+                .arg(&text)
+                .status()
+                .expect("needs Clang");
+            assert!(status.success(), "{source}");
+            let status = std::process::Command::new("clang")
+                .args([
+                    "--target=aarch64-linux-gnu",
+                    "-moutline-atomics",
+                    "-O2",
+                    "-w",
+                    "-c",
+                ])
+                .arg(&text)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{source}");
+            object
+        })
+        .collect();
+    let defined = symbols("--defined-only");
+    let undefined = names(&objects, "--undefined-only");
+    assert!(
+        undefined.contains("connector_opcua_malloc"),
+        "{undefined:?}"
+    );
+    let unlisted: Vec<String> = undefined
+        .into_iter()
+        .filter(|name| !defined.contains(name) && !OUTSIDE.contains(&name.as_str()))
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }
