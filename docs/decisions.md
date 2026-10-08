@@ -4458,6 +4458,35 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411. When a
   caller outside the tests of `node` builds a result channel, file an `interface` issue
   for a result from `spawn`.
+- **NODE PORT (2026-10-07)** `Node::start` binds the node's one port at `Config::listen`
+  on `Config::net` before any shard starts; a failed bind starts no shard, and
+  `Node::join` gives `Error::Port`. The port's one part (#77) moves to shard 0, which
+  builds the transport with `Config::private_key` once the last shard has opened its
+  buffer (X42), so the node takes no session before that. Its limits are patches until
+  #1662 makes them settings, as LIMITS of SHARD HOMES is: window 1 MiB, 64 streams of
+  each kind, idle 30 s, and messages of the smaller of 64 KiB and the pool's largest
+  block. Each session runs in its own future, and each stream of it reads its header in
+  its own future, so a late header delays no other stream. One exhaustive `match` on
+  `wire::Protocol` in `node` routes each stream; until a protocol has a server, its arm
+  stops the stream with `Code(wire::header::REJECTED)` and resets the reply half with
+  the same code, as for a header that does not decode, or for a first message with bytes
+  after the header. The node reads no datagram until the first protocol that takes
+  datagrams has a server (#1661). `Config::private_key` is a patch until `Node::start`
+  reads the key from its data directory (#1660). The node admits every peer that
+  completes the handshake until the mesh states its rule. At the stop, each session and
+  stream future drops, then the transport. The bound on the wait for a header is #1628.
+  A transport that stops with an error ends the routing and the node runs on with no
+  port, until #1647 stops the node. #1647 merges before the first protocol in `route`
+  gets a server. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
+  datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047.
+  Amended (2026-10-07, #1649 round 1, a finding of `performance` that
+  `laptop.integrator-1` deferred, 23:41 UTC): the window caps a session at the window
+  over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
+  bandwidth-delay product. The number of sessions has no bound until #1628.
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

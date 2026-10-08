@@ -115,8 +115,8 @@ state on `main`.
 - The first message of a stream, and each datagram, starts with a `wire` header
   (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
   counts such a datagram. A client opens only hub streams; `node` refuses the other
-  protocols from a client. `wire::header` landed; the dispatch table in `node` is not
-  built.
+  protocols from a client. `node` stops and resets each stream until a protocol has a
+  server. It reads no datagram yet (#1661), and admits every peer (#1628).
 
 ### Subject to owner
 
