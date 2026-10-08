@@ -143,7 +143,7 @@ async fn create_config_on(
 ) -> Config {
     let pool = create_pool();
     let transport = create_transport(node, tasks, &pool, transport_key);
-    let chunks = blob::Store::open(blob::Config {
+    let store = blob::Store::open(blob::Config {
         files: node.files(),
         dir: "blob".into(),
         pool: Rc::clone(&pool),
@@ -164,7 +164,7 @@ async fn create_config_on(
         tasks: tasks.clone(),
         transport: Rc::new(transport),
         pool,
-        chunks: Rc::new(chunks),
+        store: Rc::new(store),
     }
 }
 

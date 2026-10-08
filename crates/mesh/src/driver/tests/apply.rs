@@ -86,8 +86,8 @@ async fn open_kept(
     voters: &[u8],
 ) -> (Mesh, Rc<blob::Store>) {
     let config = config(node, tasks, 1, voters, voters).await;
-    let chunks = Rc::clone(&config.chunks);
-    (Mesh::start(config).await.unwrap(), chunks)
+    let store = Rc::clone(&config.store);
+    (Mesh::start(config).await.unwrap(), store)
 }
 
 /// The pointer of a region with no founding definitions.

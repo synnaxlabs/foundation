@@ -18,7 +18,7 @@ use crate::region::{self, Refused};
 impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
     /// `base`. It puts each chunk of the new tree in
-    /// [`Config::chunks`](super::Config::chunks). The change lists each chunk of the
+    /// [`Config::store`](super::Config::store). The change lists each chunk of the
     /// new tree that the tree of `base` lacks, or each chunk of the new tree when the
     /// store cannot give the tree of `base`. A follower forwards the change to the
     /// leader. Returns the new pointer once its entry has committed and this node
@@ -73,7 +73,7 @@ impl Mesh {
         region::quorum(self.group.borrow().raft.voters(), &holders).map_err(refused)?;
         // Each chunk, not only the listed ones: the store can lack a chunk that the
         // base shares with the new tree, and `diff` never reads a shared chunk.
-        put(&self.chunks, &self.pool, &chunks, &update.chunks).await?;
+        put(&self.store, &self.pool, &chunks, &update.chunks).await?;
         let listed = listed.into_iter().collect();
         self.settle_spec(attempt, base, root, listed, holders).await
     }
@@ -125,7 +125,7 @@ impl Mesh {
                 Err(tree::Error::Missing(digest)) => digest,
                 Err(tree::Error::Corrupt(_)) => return Ok(update.chunks.clone()),
             };
-            match self.chunks.get(missing).await.map_err(Error::Blob)? {
+            match self.store.get(missing).await.map_err(Error::Blob)? {
                 Some(chunk) => chunks.insert(chunk.to_vec()),
                 None => return Ok(update.chunks.clone()),
             };

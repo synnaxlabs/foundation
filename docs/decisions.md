@@ -2186,7 +2186,7 @@ How to read this record:
   problem gives `Error::Problems`, which holds each problem as `check` gives it, and
   proposes nothing. `mesh` defines no problem of its own. It then builds the tree with
   `spec::region::tree`. The change lists each chunk of the new tree that the tree of the
-  base lacks, or each chunk of the new tree when `Config::chunks`, the node's
+  base lacks, or each chunk of the new tree when `Config::store`, the node's
   `blob::Store`, cannot give the tree of the base. A change that lists more than
   `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing. A base
   root whose chunk is not a tree node is a base tree that the store cannot give. The
@@ -3076,7 +3076,7 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
   Amended (2026-10-08, PR 1 of #1741): with a region, `node` opens the chunk store in
   `blob` in the data directory before the mesh, and gives it as
-  `mesh::Config::chunks`. A store that does not open stops the node with
+  `mesh::Config::store`. A store that does not open stops the node with
   `node::Error::Blob`.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of

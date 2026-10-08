@@ -654,7 +654,7 @@ impl Endpoint {
         let Some(region) = self.region else {
             return Ok((transport, None));
         };
-        let chunks = blob::Store::open(blob::Config {
+        let store = blob::Store::open(blob::Config {
             files: files.clone(),
             dir: directory::blob(),
             pool: Rc::clone(&pool),
@@ -676,7 +676,7 @@ impl Endpoint {
             tasks,
             pool,
             transport: Rc::clone(&transport),
-            chunks: Rc::new(chunks),
+            store: Rc::new(store),
         };
         let mesh = mesh::Mesh::open(config).await.map_err(Error::Mesh)?;
         Ok((transport, Some(mesh)))

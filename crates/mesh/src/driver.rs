@@ -109,7 +109,7 @@ pub struct Config {
     pub transport: Rc<Transport>,
     /// This node's chunk store. The mesh puts in it the chunks of the founding tree
     /// at each open, and the chunks of each spec change that this node proposes.
-    pub chunks: Rc<blob::Store>,
+    pub store: Rc<blob::Store>,
 }
 
 /// One node's part in the group of a region. Clones share it. The group runs until
@@ -126,7 +126,7 @@ pub struct Mesh {
     group: Rc<RefCell<Group>>,
     spawner: Spawner,
     pool: Rc<Pool>,
-    chunks: Rc<blob::Store>,
+    store: Rc<blob::Store>,
     clock: Clock,
     #[cfg_attr(
         not(test),
@@ -158,7 +158,7 @@ impl Mesh {
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.members`.
     /// - [`Error::Pool`] when the pool has no block for a chunk of the founding tree,
-    ///   and [`Error::Blob`] when its put in `config.chunks` fails.
+    ///   and [`Error::Blob`] when its put in `config.store` fails.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     ///
@@ -198,7 +198,7 @@ impl Mesh {
         )
         .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &config.voters)?;
-        put(&config.chunks, &config.pool, &chunks, &founding.chunks).await?;
+        put(&config.store, &config.pool, &chunks, &founding.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
@@ -248,7 +248,7 @@ impl Mesh {
             group,
             spawner,
             pool,
-            chunks: config.chunks,
+            store: config.store,
             clock: config.clock,
             entropy: config.entropy,
         })
@@ -1256,7 +1256,7 @@ mod tests {
         voters: &[u8],
     ) -> Config {
         let pool = create_pool();
-        let chunks = blob::Store::open(blob::Config {
+        let store = blob::Store::open(blob::Config {
             files: node.files(),
             dir: BLOB.into(),
             pool: Rc::clone(&pool),
@@ -1283,7 +1283,7 @@ mod tests {
                 Rc::clone(&pool),
             )),
             pool,
-            chunks: Rc::new(chunks),
+            store: Rc::new(store),
         }
     }
 
@@ -5724,10 +5724,10 @@ mod tests {
                 founding,
                 ..config(&node, &tasks, 1, &[1], &[1]).await
             };
-            let chunks = Rc::clone(&config.chunks);
+            let store = Rc::clone(&config.store);
             Mesh::start(config).await.unwrap();
             for digest in update.chunks {
-                let chunk = chunks.get(digest).await.unwrap().unwrap();
+                let chunk = store.get(digest).await.unwrap().unwrap();
                 assert_eq!(Some(&*chunk), tree.get(digest), "{digest}");
             }
         });
