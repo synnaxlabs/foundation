@@ -5080,7 +5080,7 @@ impl Connection {
                         "peer claims to be blocked opening more than {} {} streams",
                         limit, dir
                     );
-                    // The `queue_max_stream_id` after the payload sends the credit.
+                    // The `queue_max_stream_id` after the payload sends `MAX_STREAMS`.
                     self.streams.received_streams_blocked(dir, limit);
                 }
                 Frame::StopSending(frame::StopSending { id, error_code }) => {
@@ -6945,6 +6945,7 @@ impl Connection {
     /// - Pending PATH_CHALLENGE frames on the active and previous path if just migrated.
     /// - Pending PATH_RESPONSE frames.
     /// - Pending data to send in STREAM frames.
+    /// - Queued STREAMS_BLOCKED frames.
     /// - Pending DATAGRAM frames to send.
     ///
     /// See also [`PacketSpace::can_send`] which keeps track of all other frame types that
@@ -6960,7 +6961,8 @@ impl Connection {
                 .get(&path_id)
                 .is_some_and(|pns| pns.pending_path_responses.has_pending_on_path(network_path));
 
-        // Stream control frames are checked in PacketSpace::can_send, only check data here.
+        // Stream control frames in `pending` are checked in PacketSpace::can_send. A
+        // STREAMS_BLOCKED waits in StreamsState until a packet is built, so check it here.
         let other = self.streams.can_send_stream_data()
             || self.streams.can_send_streams_blocked()
             || self
