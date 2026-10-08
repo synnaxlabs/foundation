@@ -123,16 +123,19 @@ async fn renew(
     if !take(shared, receiver, sender).await? {
         return Ok(Served::Ended);
     }
-    let mut renewals = pin!(async {
-        while take(shared, receiver, sender).await? {}
-        Ok(Served::Ended)
-    });
-    let mut expiry = pin!(expiry(shared));
-    poll_fn(|cx| match renewals.as_mut().poll(cx) {
-        Poll::Ready(served) => Poll::Ready(served),
-        Poll::Pending => expiry.as_mut().poll(cx).map(Err),
-    })
-    .await
+    loop {
+        // A fresh wait for each renewal, since a renewal can move the expiry earlier.
+        let mut renewal = pin!(take(shared, receiver, sender));
+        let mut expiry = pin!(expiry(shared));
+        let renewed = poll_fn(|cx| match renewal.as_mut().poll(cx) {
+            Poll::Ready(renewed) => Poll::Ready(renewed),
+            Poll::Pending => expiry.as_mut().poll(cx).map(Err),
+        })
+        .await?;
+        if !renewed {
+            return Ok(Served::Ended);
+        }
+    }
 }
 
 /// Sends a challenge, then checks the hello that answers it and keeps it. Gives

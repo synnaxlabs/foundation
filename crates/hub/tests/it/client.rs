@@ -520,6 +520,33 @@ fn keeps_the_session_past_the_first_expiry_after_a_renewal() {
     );
 }
 
+/// A renewal that moves the expiry earlier closes the session at the new expiry.
+#[test]
+fn closes_the_session_at_the_expiry_of_a_renewal_that_moves_it_earlier() {
+    let short = Span::from_nanos(2 * Span::SECOND.nanos());
+    let expires = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&expires);
+    let home = session(102, true, move |mut agent| async move {
+        let challenge = agent.admit().await;
+        let mut hello = Agent::hello(challenge);
+        hello.expires = challenge.now.latest + short;
+        *kept.lock().expect("not poisoned") = Some(hello.expires);
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
+    });
+    let expires = expires.lock().expect("not poisoned").expect("a hello");
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        home.served.as_slice()
+    else {
+        panic!("one expiry, not {:?}", home.served);
+    };
+    assert_eq!(*at, expires);
+    assert!(
+        *now >= expires && *now < expires + Span::from_nanos(10_000_000),
+        "the node closed the session at the renewed expiry: {now:?}, {expires:?}"
+    );
+}
+
 #[test]
 fn refuses_a_renewal_on_another_connection() {
     let home = session(89, true, |mut agent| async move {
