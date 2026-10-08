@@ -52,7 +52,8 @@ impl env::net::Driver for Driver {
 /// take it.
 async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     let remote = config.remote;
-    let failed = |code: Errno| stream_error(code, remote);
+    let peer = canonical(remote);
+    let failed = |code: Errno| stream_error(code, peer);
     let socket = match remote {
         SocketAddr::V4(_) => TcpSocket::new_v4(),
         SocketAddr::V6(_) => TcpSocket::new_v6(),
@@ -66,8 +67,13 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
     Ok(Box::new(
-        Stream::new(stream, local, remote).map_err(failed)?,
+        Stream::new(stream, canonical(local), peer).map_err(failed)?,
     ))
+}
+
+/// `address` as `sim` names it: an IPv4 address on an IPv6 socket is an IPv4 address.
+fn canonical(address: SocketAddr) -> SocketAddr {
+    SocketAddr::new(address.ip().to_canonical(), address.port())
 }
 
 /// Sets `options` on a TCP socket.
@@ -123,7 +129,7 @@ mod tests {
     }
 
     /// Linux keeps twice the buffer size it is given, for its own bookkeeping.
-    fn kept(bytes: usize) -> usize {
+    pub(super) fn kept(bytes: usize) -> usize {
         if cfg!(target_os = "linux") {
             bytes * 2
         } else {
@@ -161,6 +167,20 @@ mod tests {
             let mut options = options(false);
             options.unsent_bytes_max = usize::MAX;
             assert_eq!(apply(fd.as_fd(), &options), Err(Errno::INVAL));
+        }
+    }
+
+    mod canonical {
+        use super::*;
+
+        #[test]
+        fn unmaps_an_ipv4_address_and_keeps_the_rest() {
+            let mapped: SocketAddr = "[::ffff:127.0.0.1]:8080".parse().unwrap();
+            let plain: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+            assert_eq!(canonical(mapped), plain);
+            assert_eq!(canonical(plain), plain);
+            let v6: SocketAddr = "[::1]:8080".parse().unwrap();
+            assert_eq!(canonical(v6), v6);
         }
     }
 

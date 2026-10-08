@@ -1,7 +1,7 @@
 //! A TCP listener: the kernel's socket, polled through Tokio.
 
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::task::{Context, Poll, ready};
 
 use env::net::{Error, listener, tcp};
@@ -12,13 +12,12 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::socket::Socket;
 use super::stream::Stream;
-use super::{apply, errno, io_error};
+use super::{apply, canonical, errno, io_error};
 
-/// A listening socket. Each accepted stream gets `options`.
+/// A listening socket.
 pub(super) struct Listener {
     socket: Socket<std::net::TcpListener, TcpListener>,
     local: SocketAddr,
-    options: tcp::Options,
 }
 
 impl Listener {
@@ -27,25 +26,40 @@ impl Listener {
     /// with the runtime of this thread at once.
     pub(super) fn listen(config: &tcp::Listen) -> Result<Self, Error> {
         let local = config.local;
-        let in_use = |code| match code {
-            Errno::ADDRINUSE => Error::AddressInUse { local },
-            code => io_error(code),
-        };
         let fd = socket(local).map_err(io_error)?;
         sockopt::set_socket_reuseaddr(&fd, true).map_err(io_error)?;
-        // Linux sizes the window of each stream from the buffers of the listener.
+        // Each accepted stream inherits the options, and Linux sizes the window of
+        // each stream from the buffers of the listener.
         apply(fd.as_fd(), &config.options).map_err(io_error)?;
-        rustix::net::bind(&fd, &local).map_err(in_use)?;
-        let backlog = i32::try_from(config.backlog).unwrap_or(i32::MAX);
-        rustix::net::listen(&fd, backlog).map_err(in_use)?;
+        bind(fd.as_fd(), local)?;
+        listen(fd.as_fd(), local, config.backlog)?;
         let listener = std::net::TcpListener::from(fd);
         let local = listener.local_addr().map_err(|e| io_error(errno(&e)))?;
         Ok(Self {
             socket: Socket::Idle(listener),
-            local,
-            options: config.options,
+            local: canonical(local),
         })
     }
+}
+
+/// `EADDRINUSE` on `local` is `AddressInUse`.
+fn in_use(local: SocketAddr) -> impl Fn(Errno) -> Error {
+    move |code| match code {
+        Errno::ADDRINUSE => Error::AddressInUse { local },
+        code => io_error(code),
+    }
+}
+
+/// Binds `fd` to `local`.
+fn bind(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
+    rustix::net::bind(fd, &local).map_err(in_use(local))
+}
+
+/// Makes `fd`, bound to `local`, listen. Linux lets two `SO_REUSEADDR` sockets bind
+/// one address while neither listens, and refuses the second `listen`.
+fn listen(fd: BorrowedFd<'_>, local: SocketAddr, backlog: u32) -> Result<(), Error> {
+    let backlog = i32::try_from(backlog).unwrap_or(i32::MAX);
+    rustix::net::listen(fd, backlog).map_err(in_use(local))
 }
 
 /// A non-blocking TCP socket of the family of `address`, closed on exec. On macOS,
@@ -65,19 +79,8 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
-/// `address` as `sim` names it: an IPv4 peer of an IPv6 listener is an IPv4 address.
-fn canonical(address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(address.ip().to_canonical(), address.port())
-}
-
-/// A stream the kernel accepted, with the options of the listener set: not every OS
-/// hands the TCP options of the listener to its streams.
-fn accepted(
-    stream: TcpStream,
-    peer: SocketAddr,
-    options: &tcp::Options,
-) -> Result<Stream, Error> {
-    apply(stream.as_fd(), options).map_err(io_error)?;
+/// A stream the kernel accepted, with the options of the listener inherited.
+fn accepted(stream: TcpStream, peer: SocketAddr) -> Result<Stream, Error> {
     let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
     let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
     Stream::new(stream, canonical(local), canonical(peer)).map_err(io_error)
@@ -98,7 +101,7 @@ impl listener::Driver for Listener {
             .map_err(io_error)?;
         let (stream, peer) =
             ready!(listener.poll_accept(cx)).map_err(|e| io_error(errno(&e)))?;
-        let stream = accepted(stream, peer, &self.options)?;
+        let stream = accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
 }
@@ -111,6 +114,74 @@ mod tests {
 
     fn loopback() -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)
+    }
+
+    fn options() -> tcp::Options {
+        tcp::Options {
+            send_buffer_bytes: 1 << 16,
+            recv_buffer_bytes: 1 << 15,
+            unsent_bytes_max: 1 << 14,
+            delayed: true,
+        }
+    }
+
+    /// A socket with `SO_REUSEADDR`, bound to `local`.
+    fn bound(local: SocketAddr) -> (OwnedFd, SocketAddr) {
+        let fd = socket(local).unwrap();
+        sockopt::set_socket_reuseaddr(&fd, true).unwrap();
+        bind(fd.as_fd(), local).unwrap();
+        let local = rustix::net::getsockname(&fd).unwrap();
+        (fd, local.try_into().unwrap())
+    }
+
+    #[test]
+    fn a_bind_to_a_listening_address_is_in_use() {
+        let (first, local) = bound(loopback());
+        listen(first.as_fd(), local, 1).unwrap();
+        let second = socket(local).unwrap();
+        sockopt::set_socket_reuseaddr(&second, true).unwrap();
+        assert_eq!(
+            bind(second.as_fd(), local),
+            Err(Error::AddressInUse { local })
+        );
+    }
+
+    /// macOS refuses the second bind instead.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_second_listen_on_a_bound_address_is_in_use() {
+        let (first, local) = bound(loopback());
+        let (second, _) = bound(local);
+        assert_eq!(listen(first.as_fd(), local, 1), Ok(()));
+        assert_eq!(
+            listen(second.as_fd(), local, 1),
+            Err(Error::AddressInUse { local })
+        );
+    }
+
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+    fn an_accepted_socket_has_the_options_of_the_listener() {
+        let config = tcp::Listen {
+            local: loopback(),
+            backlog: 1,
+            options: options(),
+        };
+        let listener = Listener::listen(&config).unwrap();
+        let _client = std::net::TcpStream::connect(listener.local).unwrap();
+        let fd = listener.socket.fd().unwrap();
+        let accepted = rustix::net::accept(fd).unwrap();
+        let kept = super::super::tests::kept;
+        assert_eq!(
+            sockopt::socket_send_buffer_size(&accepted),
+            Ok(kept(1 << 16))
+        );
+        assert_eq!(
+            sockopt::socket_recv_buffer_size(&accepted),
+            Ok(kept(1 << 15))
+        );
+        assert_eq!(sockopt::tcp_nodelay(&accepted), Ok(false));
+        assert_eq!(super::super::lowat::get(accepted.as_fd()), Ok(1 << 14));
     }
 
     mod socket {
@@ -140,20 +211,6 @@ mod tests {
             assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET6));
             let fd = super::socket(loopback()).unwrap();
             assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET));
-        }
-    }
-
-    mod canonical {
-        use super::*;
-
-        #[test]
-        fn unmaps_an_ipv4_address_and_keeps_the_rest() {
-            let mapped: SocketAddr = "[::ffff:127.0.0.1]:8080".parse().unwrap();
-            let plain: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-            assert_eq!(canonical(mapped), plain);
-            assert_eq!(canonical(plain), plain);
-            let v6: SocketAddr = "[::1]:8080".parse().unwrap();
-            assert_eq!(canonical(v6), v6);
         }
     }
 }

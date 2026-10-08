@@ -4217,8 +4217,9 @@ How to read this record:
   it lacks, from one `libc::setsockopt`. Until #119 and #1095 land, `os::net()` is
   behind the cargo feature `net`, and its `udp` and `resolve` of a host name panic
   ("os::net has no UDP driver yet", "os::net has no resolver yet"); the last of the
-  two removes the feature and the panic. Decided by the architect, #120
-  (https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843).
+  two removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
+  02:32 UTC, #120,
+  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843).
   Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
   lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a

@@ -24,7 +24,7 @@ pub(super) struct Stream {
     /// `poll_close` ran: the FIN is queued.
     closed: bool,
     /// The error that ended the stream. The kernel reports a reset once and then an
-    /// end of stream, so each later poll gives this instead.
+    /// end of stream, so each later write, close, and read of no bytes gives this.
     failed: Option<Error>,
 }
 
@@ -83,15 +83,17 @@ impl tcp::Driver for Stream {
         cx: &mut Context<'_>,
         buffer: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
-        if let Some(failed) = &self.failed {
-            return Poll::Ready(Err(failed.clone()));
-        }
         let peer = self.peer;
         let mut read = ReadBuf::new(buffer);
-        match ready!(self.live()?.poll_read(cx, &mut read)) {
-            Ok(()) => Poll::Ready(Ok(read.filled().len())),
-            Err(e) => Poll::Ready(Err(self.fail(stream_error(errno(&e), peer)))),
-        }
+        // The kernel keeps the bytes that came before a reset, so they come first.
+        let outcome = match ready!(self.live()?.poll_read(cx, &mut read)) {
+            Ok(()) => match (read.filled().len(), &self.failed) {
+                (0, Some(failed)) => Err(failed.clone()),
+                (read, _) => Ok(read),
+            },
+            Err(e) => Err(self.fail(stream_error(errno(&e), peer))),
+        };
+        Poll::Ready(outcome)
     }
 
     fn poll_write(
@@ -99,11 +101,12 @@ impl tcp::Driver for Stream {
         cx: &mut Context<'_>,
         buffers: &[IoSlice<'_>],
     ) -> Poll<Result<usize, Error>> {
-        if let Some(failed) = &self.failed {
-            return Poll::Ready(Err(failed.clone()));
-        }
         let peer = self.peer;
-        let (closed, stream) = (self.closed, self.live()?);
+        let (closed, failed) = (self.closed, self.failed.clone());
+        let stream = self.live()?;
+        if let Some(failed) = failed {
+            return Poll::Ready(Err(failed));
+        }
         if closed {
             // A reset after the close is the stream's end. Without one, the write
             // is a misuse, as `sim` reports it.
@@ -119,21 +122,24 @@ impl tcp::Driver for Stream {
     }
 
     fn poll_close(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if let Some(failed) = &self.failed {
-            return Poll::Ready(Err(failed.clone()));
-        }
         let peer = self.peer;
-        let (closed, stream) = (self.closed, self.live()?);
+        let (closed, failed) = (self.closed, self.failed.clone());
+        let stream = self.live()?;
+        if let Some(failed) = failed {
+            return Poll::Ready(Err(failed));
+        }
         if closed {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(match Self::pending(&stream) {
+                Some(code) => Err(self.fail(stream_error(code, peer))),
+                None => Ok(()),
+            });
         }
         // The linger goes first: macOS refuses an option on a socket shut both ways.
         let shut = match sockopt::set_socket_linger(&*stream, None) {
             Ok(()) => match rustix::net::shutdown(&*stream, Shutdown::Write) {
-                // The connection ended with no poll that reported why: a reset,
-                // unless the kernel holds another code.
+                // The connection ended with no poll that reported why.
                 Err(Errno::NOTCONN) => {
-                    Err(Self::pending(&stream).unwrap_or(Errno::CONNRESET))
+                    Err(Self::pending(&stream).unwrap_or(Errno::NOTCONN))
                 }
                 outcome => outcome,
             },
@@ -170,6 +176,7 @@ mod tests {
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener};
     use std::os::fd::{AsFd, OwnedFd};
+    use std::task::Waker;
 
     use tcp::Driver as _;
 
@@ -197,15 +204,59 @@ mod tests {
     fn drop_closed(client: std::net::TcpStream) -> OwnedFd {
         let kept = rustix::io::dup(client.as_fd()).unwrap();
         let mut stream = stream(client);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
+        on_runtime(|| async {
             assert_eq!(poll_fn(|cx| stream.poll_close(cx)).await, Ok(()));
             drop(stream);
         });
         kept
+    }
+
+    /// Runs `body` on a runtime with an I/O driver and a timer.
+    fn on_runtime<T, F: Future<Output = T>>(body: impl FnOnce() -> F) -> T {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        runtime.block_on(body())
+    }
+
+    /// Linux ends a stream whose peer reads nothing with `ETIMEDOUT` once the window
+    /// probes run past `TCP_USER_TIMEOUT`. The first error is the stream's answer for
+    /// each later poll, also when it is no reset.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_write_and_a_close_after_a_timeout_the_read_found_give_the_timeout() {
+        let (client, server) = create_pair();
+        sockopt::set_socket_send_buffer_size(&client, 1 << 16).unwrap();
+        sockopt::set_socket_recv_buffer_size(&server, 1 << 12).unwrap();
+        sockopt::set_tcp_user_timeout(&client, 1).unwrap();
+        let mut stream = stream(client);
+        let timed_out = Error::TimedOut {
+            remote: stream.peer,
+        };
+        let bound = Duration::from_secs(10);
+        on_runtime(|| {
+            tokio::time::timeout(bound, async {
+                let block = vec![0; 1 << 16];
+                let bytes = [IoSlice::new(&block)];
+                // The first poll registers the socket and is pending.
+                let mut filled = poll_fn(|cx| stream.poll_write(cx, &bytes)).await;
+                let mut cx = Context::from_waker(Waker::noop());
+                while let Poll::Ready(written) = stream.poll_write(&mut cx, &bytes) {
+                    filled = written;
+                }
+                assert!(matches!(filled, Ok(1..)), "{filled:?}");
+                let found = poll_fn(|cx| stream.poll_read(cx, &mut [0; 8])).await;
+                assert_eq!(found, Err(timed_out.clone()));
+                let written = poll_fn(|cx| stream.poll_write(cx, &[])).await;
+                assert_eq!(written, Err(timed_out.clone()));
+                let closed = poll_fn(|cx| stream.poll_close(cx)).await;
+                assert_eq!(closed, Err(timed_out));
+            })
+        })
+        .expect("the probes time out in the bound");
+        drop(server);
     }
 
     #[test]

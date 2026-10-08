@@ -4,6 +4,7 @@
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -388,6 +389,46 @@ fn each_poll_after_a_write_found_the_reset_is_reset() {
 }
 
 #[test]
+fn a_second_close_after_an_unseen_reset_is_reset() {
+    on_thread("net-close-twice", || async {
+        let net = net();
+        let (_listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(close(&mut client).await, Ok(()));
+        let remote = reset_unseen(server, &mut client).await;
+        assert_eq!(close(&mut client).await, Err(Error::Reset { remote }));
+    });
+}
+
+/// Writes to `tcp` until a write fails, and gives the failure.
+async fn write_until_failed(tcp: &mut Tcp) -> Error {
+    let failed = timeout(BOUND, async {
+        loop {
+            if let Err(e) = write(tcp, &[b"x"]).await {
+                break e;
+            }
+        }
+    });
+    failed.await.expect("the reset arrives in the bound")
+}
+
+#[test]
+fn bytes_the_peer_sent_before_a_reset_a_write_found_are_still_read() {
+    on_thread("net-reset-data", || async {
+        let net = net();
+        let (_listener, mut client, mut server) = create_pair(&net).await;
+        let remote = client.local();
+        assert_eq!(write(&mut client, &[b"data"]).await, Ok(4));
+        drop(client);
+        let reset = Error::Reset { remote };
+        assert_eq!(write_until_failed(&mut server).await, reset);
+        let mut received = [0; 8];
+        assert_eq!(read(&mut server, &mut received).await, Ok(4));
+        assert_eq!(&received[..4], b"data");
+        assert_eq!(read(&mut server, &mut received).await, Err(reset));
+    });
+}
+
+#[test]
 fn a_write_after_the_close_is_a_broken_pipe() {
     on_thread("net-write-closed", || async {
         let net = net();
@@ -445,6 +486,21 @@ fn an_ipv4_peer_of_an_any_v6_listener_has_a_plain_ipv4_address() {
         let server = accept(&mut listener).await;
         assert_eq!(server.peer(), client.local());
         assert_eq!(server.local(), client.peer());
+    });
+}
+
+#[test]
+fn a_listener_on_a_mapped_address_agrees_with_its_streams() {
+    on_thread("net-mapped", || async {
+        let net = net();
+        let mapped: SocketAddr = "[::ffff:127.0.0.1]:0".parse().unwrap();
+        let mut listener = net.listen(&listen_config(mapped)).unwrap();
+        let client = connect(&net, listener.local()).await;
+        let server = accept(&mut listener).await;
+        assert_eq!(listener.local().ip(), LOCALHOST);
+        assert_eq!(server.local(), listener.local());
+        assert_eq!(client.peer(), server.local());
+        assert_eq!(server.peer(), client.local());
     });
 }
 
@@ -566,6 +622,22 @@ fn a_poll_after_the_close_on_a_second_thread_panics() {
 }
 
 #[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_poll_after_a_reset_on_a_second_thread_panics() {
+    let (mut server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, client, mut server) = create_pair(&net).await;
+        let remote = client.local();
+        drop(client);
+        read_reset(&mut server, remote).await;
+        (server, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut server, &[b"y"]).await);
+    });
+}
+
+#[test]
 #[should_panic(expected = "a TCP listener polls only on the thread of its first poll")]
 fn a_listener_poll_on_a_second_thread_panics() {
     let (mut listener, _client, _server) = on_thread("net-first", || async {
@@ -588,6 +660,16 @@ fn a_first_stream_poll_with_no_runtime_panics() {
     });
     let mut cx = Context::from_waker(Waker::noop());
     drop(client.poll_read(&mut cx, &mut [0; 8]));
+}
+
+#[test]
+#[should_panic(expected = "must be called from the context of a Tokio 1.x runtime")]
+fn a_connect_with_no_runtime_panics() {
+    let net = net();
+    let listener = listen(&net);
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut connecting = pin!(connect(&net, listener.local()));
+    drop(connecting.as_mut().poll(&mut cx));
 }
 
 #[test]
