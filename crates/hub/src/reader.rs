@@ -28,7 +28,7 @@ pub enum Mode {
     /// ends with [`Ended::Behind`] after the frames before it. A frame that comes when
     /// the frames the session has not given back (the one it holds and those it has
     /// not taken) reach a window waits for the next call, and the session misses it
-    /// when the next commit of its index comes first.
+    /// when the next commit comes first.
     Complete,
     /// The newest live frame, before its commit.
     Latest,

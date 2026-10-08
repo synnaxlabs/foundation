@@ -504,13 +504,13 @@ impl Shard {
     /// samples after the commit that holds it, while the bytes it has spent are
     /// below its credit: a frame spends what `charge` says. A frame that finds the
     /// credit spent waits for a [`grant`](Self::grant), and so does each later frame.
-    /// A frame that still waits at the next commit of the index is a miss: the reader
-    /// gets neither it nor a later frame, and [`take`](Self::take) then gives
-    /// [`Next::Behind`](reader::Next::Behind). [`woken`](Self::woken) names the
-    /// reader once for a miss with no frame waiting, and not for a miss while frames
-    /// wait. The home does not read a missed frame back from disk yet. Close the
-    /// reader and open a new one. The new one starts at the live tail of its open, so
-    /// the frames from the miss to there reach neither reader.
+    /// A frame that still waits at the next commit is a miss: the reader gets neither
+    /// it nor a later frame, and [`take`](Self::take) then gives
+    /// [`Next::Behind`](reader::Next::Behind). [`woken`](Self::woken) names the reader
+    /// once for a miss with no frame waiting, and not for a miss while frames wait.
+    /// The home does not read a missed frame back from disk yet. Close the reader and
+    /// open a new one. The new one starts at the live tail of its open, so the frames
+    /// from the miss to there reach neither reader.
     ///
     /// # Panics
     ///
@@ -3090,8 +3090,7 @@ mod tests {
         }
 
         #[test]
-        fn gives_a_complete_reader_no_frame_after_one_that_waits_for_credit_at_a_commit()
-         {
+        fn misses_a_frame_that_waits_for_credit_at_the_next_commit() {
             run(37, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
@@ -3113,6 +3112,26 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
                 assert_eq!(missed(&mut shard, session, 0), []);
+            });
+        }
+
+        #[test]
+        fn misses_a_frame_that_waits_for_credit_at_a_commit_of_another_index() {
+            run(39, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_complete(Slot::new(0), 1, Charge::Whole).into();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                write(&test, &mut shard, a, &[20]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                let other = frame(&test.pool, &set, &[(2, &[30])]);
+                assert_eq!(shard.write(a, LIVE, other), Ok(&[applied(2, 0, 1)][..]));
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(missed(&mut shard, reader, 0), []);
             });
         }
 

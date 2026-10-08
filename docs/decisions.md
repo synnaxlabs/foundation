@@ -534,10 +534,11 @@ How to read this record:
   splits a frame. After a refusal, the session gets no later frame until it has the
   refused one; frames from catch-up spend credit too. A live frame that finds the
   credit spent waits for a grant, and so does each later one: a grant gives them, oldest
-  first, while the credit covers them. A frame that still waits when a later release of
-  its index gives a frame is a miss. So a session that grants after each take gets each
-  frame of a commit of any size, and a session pins at most its window plus the frames
-  of one release (#1170). A frame costs its charge,
+  first, while the credit covers them. A frame that still waits at the next commit is a
+  miss, also when that commit holds no frame of its index. So a session that grants
+  after each take gets each frame of a commit of any size, and a session pins at most
+  its window plus the frames of one release, those for at most one commit interval
+  (#1170). A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
   costs its length plus the header and at most 64 bytes or a quarter of its length more,
@@ -583,7 +584,8 @@ How to read this record:
   message. It sizes one window per reader from the link's bandwidth-delay product,
   adapts it, and divides it among the indexes the reader reads. Each session with room
   can pass its limit by one frame, so the `hub` counts one largest frame per such
-  session against the window, and a reader pins at most its window. Replaces r11 5.2 (a
+  session against the window, and a reader pins at most its window plus the frames that
+  wait for credit until the next commit. Replaces r11 5.2 (a
   window beyond the acknowledged position): flow control stays apart from durable acks.
   Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
@@ -1201,22 +1203,22 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1068#issuecomment-6032304827).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin: its
-  window plus the frames of one release (CREDIT RULES). A reader
-  that falls behind is served from disk. When the pool is full, a live write records a
-  gap and backfill waits. The current value of B4 pins one block per index that had a
-  live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
-  person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
-  resident. A purge of a block smaller than a page gives no page back, so it frees no
-  budget. When an allocation finds no room, the pool gives back the whole carved range
-  and budget of size classes whose carved blocks are all free, until the allocation
-  fits. Under this pressure, at most two partial pages per class stay resident, and
-  `Config::budget` states that slack. An idle class that no allocation presses keeps
-  its pages until the purge after idle. A class that a reader keeps partly in use
-  keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  window plus the frames of one release, those until the next commit (CREDIT RULES). A
+  reader that falls behind is served from disk. When the pool is full, a live write
+  records a gap and backfill waits. The current value of B4 pins one block per index
+  that had a live frame, with no reader open and no cap. A smaller copy is a 5.3
+  tunable. The person decided on 2026-10-05: "Accept it" (#139). The budget counts what
+  stays resident. A purge of a block smaller than a page gives no page back, so it frees
+  no budget. When an allocation finds no room, the pool gives back the whole carved
+  range and budget of size classes whose carved blocks are all free, until the
+  allocation fits. Under this pressure, at most two partial pages per class stay
+  resident, and `Config::budget` states that slack. An idle class that no allocation
+  presses keeps its pages until the purge after idle. A class that a reader keeps partly
+  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
   wait in a follow-up issue. When the system refuses to commit pages, the pool gives
-  back one idle size at a time, in the order a purge for room in the budget uses,
-  and tries the commit again; after the last idle size the allocation fails with
+  back one idle size at a time, in the order a purge for room in the budget uses, and
+  tries the commit again; after the last idle size the allocation fails with
   `Error::Refused`, a separate error from a full pool (the person on 2026-10-05: "I
   approve the separate error"). The carve counts do not change, the sizes given back
   stay given back, and a later allocation may succeed (#475, #542).

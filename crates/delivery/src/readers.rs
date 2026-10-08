@@ -347,20 +347,14 @@ impl Readers {
     /// Gives each queued frame that ends at or below `durable`, the first live seq not
     /// on disk, to each complete session whose position it ends past, in seq order. A
     /// frame that finds the session's credit spent waits for a grant
-    /// ([`Readers::grant`]), and so does each later frame. A frame that still waits
-    /// when a later call gives a frame is a miss: the session gets no later frame.
+    /// ([`Readers::grant`]), and so does each later frame. A frame that still waits at
+    /// the next call is a miss: the session gets no later frame.
     /// Returns the complete sessions that had no frame to take and now have one, or
     /// that missed a frame now and have none to take, each once: wake them.
     #[must_use]
     pub fn release(&mut self, durable: u64) -> &[complete::Key] {
         self.woken_complete.clear();
-        if self
-            .queue
-            .front()
-            .is_some_and(|(_, seq)| seq.end <= durable)
-        {
-            self.miss_owed();
-        }
+        self.miss_owed();
         while let Some((frame, seq)) =
             self.queue.pop_front_if(|(_, seq)| seq.end <= durable)
         {
@@ -409,11 +403,11 @@ impl Readers {
         }
     }
 
-    /// Whether a queued live frame waits to be on disk. While one does, call
-    /// [`Readers::release`] after each commit.
+    /// Whether a queued live frame waits to be on disk, or a released frame waits for
+    /// credit. While one does, call [`Readers::release`] after each commit.
     #[must_use]
     pub fn pending(&self) -> bool {
-        !self.queue.is_empty()
+        !self.queue.is_empty() || self.flows.iter().any(|flow| !flow.owed.is_empty())
     }
 
     /// Takes the session's next waiting frame. A latest session has at most one; a
@@ -1909,7 +1903,7 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn misses_no_frame_at_a_release_that_gives_none() {
+        fn misses_a_frame_that_waits_for_credit_at_a_release_that_gives_none() {
             let frames = Frames::new(3);
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 1);
@@ -1919,9 +1913,26 @@ pub(super) mod tests {
             assert_eq!(released(&mut readers, 2), [key]);
             assert_eq!(released(&mut readers, 3), []);
             readers.grant(key, 10 * CHARGE);
-            assert_eq!(taken(&mut readers, key), [1, 2]);
-            assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(taken(&mut readers, key), [3]);
+            assert_eq!(missed(&mut readers, key), [1]);
+            assert_eq!(released(&mut readers, 4), []);
+        }
+
+        #[test]
+        fn pends_while_a_frame_waits_for_credit() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let paid = opened(&mut readers, 0, 1);
+            let missed = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), &frames.set, 0..1);
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+            assert_eq!(released(&mut readers, 2), [paid, missed]);
+            assert!(readers.pending(), "a frame waits for credit");
+            readers.grant(paid, 2 * CHARGE);
+            assert!(readers.pending(), "a frame of the other session waits");
+            readers.grant(missed, CHARGE);
+            assert!(readers.pending(), "the grant does not cover the frame");
+            assert_eq!(released(&mut readers, 2), []);
+            assert!(!readers.pending(), "the frame missed");
         }
 
         #[test]
@@ -2991,6 +3002,7 @@ pub(super) mod tests {
             fn pending(&self) -> bool {
                 let mut queued = self.queued.iter();
                 queued.any(|queued| queued.held && !queued.seq.is_empty())
+                    || self.open.values().any(|got| !got.owed.is_empty())
             }
 
             /// The live position of the open session `key`.
@@ -3030,11 +3042,8 @@ pub(super) mod tests {
                     .filter(|(_, got)| got.taken == got.frames.len())
                     .map(|(&key, _)| key)
                     .collect();
-                let gives = self.queued.iter().any(|queued| {
-                    queued.held && !queued.seq.is_empty() && queued.seq.end <= durable
-                });
                 for got in self.open.values_mut() {
-                    got.missed = gives && !got.owed.is_empty();
+                    got.missed = !got.owed.is_empty();
                     if got.missed {
                         got.owed.clear();
                         got.behind = true;
@@ -3117,8 +3126,8 @@ pub(super) mod tests {
 
         /// Checks the live path against a model of the rules: a session gets each
         /// released frame with a sample at or past its position, in seq order, while it
-        /// has credit. A frame with no credit, and each after it, waits for a grant, and
-        /// one that still waits when a later release gives a frame is a miss. A session that
+        /// has credit. A frame with no credit, and each after it, waits for a grant,
+        /// and one that still waits at the next release is a miss. A session that
         /// starts at or below a sample no longer in memory gets none, and nothing is
         /// kept with no session open. A named reader that resumes starts where its
         /// last session stopped. A release wakes each session that had no frame
