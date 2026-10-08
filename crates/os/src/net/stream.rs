@@ -57,7 +57,7 @@ impl Stream {
         socket: &mut Socket<std::net::TcpStream, TcpStream>,
     ) -> Result<Pin<&mut TcpStream>, Error> {
         let stream = socket
-            .live("stream", TcpStream::from_std)
+            .live("TCP stream", TcpStream::from_std)
             .map_err(io_error)?;
         Ok(Pin::new(stream))
     }

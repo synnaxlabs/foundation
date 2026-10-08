@@ -51,7 +51,7 @@ impl<Idle, Live> Socket<Idle, Live> {
                 assert_eq!(
                     *thread,
                     thread::current().id(),
-                    "a TCP {kind} polls only on the thread of its first poll"
+                    "a {kind} polls only on the thread of its first poll"
                 );
                 Ok(socket)
             }

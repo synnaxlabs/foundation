@@ -4,11 +4,12 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use env::net::{Connect, Error, Resolve, tcp, udp};
-use rustix::io::Errno;
-use rustix::net::sockopt;
+use rustix::fs::OFlags;
+use rustix::io::{Errno, FdFlags};
+use rustix::net::{AddressFamily, Protocol, SocketType, sockopt};
 use tokio::net::TcpStream;
 
 use self::listener::Listener;
@@ -107,6 +108,35 @@ fn canonical(address: SocketAddr) -> SocketAddr {
         },
         SocketAddr::V4(_) => address,
     }
+}
+
+/// A non-blocking socket of the family of `address`, closed on exec.
+fn socket(
+    address: SocketAddr,
+    kind: SocketType,
+    protocol: Protocol,
+) -> Result<OwnedFd, Errno> {
+    let family = match address {
+        SocketAddr::V4(_) => AddressFamily::INET,
+        SocketAddr::V6(_) => AddressFamily::INET6,
+    };
+    let fd = rustix::net::socket(family, kind, Some(protocol))?;
+    rustix::io::fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
+    rustix::fs::fcntl_setfl(&fd, OFlags::NONBLOCK)?;
+    Ok(fd)
+}
+
+/// `EADDRINUSE` on `local` is `AddressInUse`.
+fn in_use(local: SocketAddr) -> impl Fn(Errno) -> Error {
+    move |code| match code {
+        Errno::ADDRINUSE => Error::AddressInUse { local },
+        code => io_error(code),
+    }
+}
+
+/// Binds `fd` to `local`.
+fn bind(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
+    rustix::net::bind(fd, &local).map_err(in_use(local))
 }
 
 /// Sets `options` on a TCP socket.
@@ -229,7 +259,7 @@ mod tests {
     mod peer {
         use std::time::Duration;
 
-        use rustix::fs::{Mode, OFlags};
+        use rustix::fs::Mode;
 
         use super::*;
 
