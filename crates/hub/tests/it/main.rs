@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
@@ -124,11 +125,14 @@ impl Test {
                 paused: Rc::clone(&paused),
             }),
         });
-        let channels = CHANNELS.map(|(key, channel, data_type, index)| {
-            let data_type = DataType::Sample(data_type);
-            (name(channel), spec_channel(key, data_type, index))
-        });
-        hub.define(channels.iter().map(|(name, channel)| (name, channel)));
+        let channels: BTreeMap<_, _> = CHANNELS
+            .into_iter()
+            .map(|(key, channel, data_type, index)| {
+                let data_type = DataType::Sample(data_type);
+                (name(channel), spec_channel(key, data_type, index))
+            })
+            .collect();
+        hub.define(&channels);
         Self {
             clock: node.clock(),
             node,
@@ -1016,7 +1020,7 @@ fn spec_channel(key: u128, data_type: DataType, index: u128) -> spec::channel::C
 }
 
 /// Defines `channels`, each `(key, name, index)` and of `I64`, in one call to a new
-/// hub.
+/// hub. A `Vec`, not a map, so that a name may come twice.
 fn define(channels: Vec<(u128, &'static str, u128)>) {
     run(18, move |test| async move {
         let channels: Vec<_> = channels
@@ -1094,11 +1098,13 @@ fn gives_a_writer_the_sample_type_of_each_data_channel() {
             (6, "text", DataType::Sample(Type::String)),
             (7, "quality", DataType::Quality),
         ];
-        let channels = types.map(|(key, channel, data_type)| {
-            (name(channel), spec_channel(key, data_type, 1))
-        });
-        test.hub
-            .define(channels.iter().map(|(name, channel)| (name, channel)));
+        let channels: BTreeMap<_, _> = types
+            .into_iter()
+            .map(|(key, channel, data_type)| {
+                (name(channel), spec_channel(key, data_type, 1))
+            })
+            .collect();
+        test.hub.define(&channels);
         let writer = test.writer("a", &["text", "quality"]).await;
         let entries: Vec<_> = writer
             .set()
