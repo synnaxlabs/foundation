@@ -4,7 +4,7 @@
 use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::thread::{self, ThreadId};
@@ -163,14 +163,15 @@ struct Sender {
 /// OS send buffer is full: Linux wakes each such registration of a socket for each
 /// datagram that any descriptor of the socket sends.
 struct Writer {
+    /// A registration of `fd`. It drops first, so it never outlives `fd`.
+    full: Option<AsyncFd<RawFd>>,
     fd: UdpSocket,
-    full: Option<AsyncFd<UdpSocket>>,
 }
 
 impl Writer {
-    /// A registration of another `dup` of `fd`, for writable.
-    fn register(fd: &UdpSocket) -> io::Result<AsyncFd<UdpSocket>> {
-        AsyncFd::with_interest(fd.try_clone()?, Interest::WRITABLE)
+    /// A registration of `fd`, for writable.
+    fn register(fd: &UdpSocket) -> io::Result<AsyncFd<RawFd>> {
+        AsyncFd::with_interest(fd.as_raw_fd(), Interest::WRITABLE)
     }
 
     /// Runs `send` on the descriptor until it is ready, and waits for writable while
@@ -213,7 +214,7 @@ impl sender::Driver for Sender {
             .live("UDP sender", |()| {
                 let fd = bound.socket.try_clone()?;
                 let full = Some(Writer::register(&fd)?);
-                Ok(Writer { fd, full })
+                Ok(Writer { full, fd })
             })
             .map_err(io_error)?;
         writer.poll_send(cx, |fd| {
@@ -693,7 +694,7 @@ mod tests {
             runtime().block_on(async {
                 let udp = loopback();
                 let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = Writer { fd, full: None };
+                let mut writer = Writer { full: None, fd };
                 let mut cx = Context::from_waker(Waker::noop());
                 let mut sends = 0;
                 let full = writer.poll_send(&mut cx, |_| {
@@ -714,7 +715,7 @@ mod tests {
             runtime().block_on(async {
                 let udp = loopback();
                 let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = Writer { fd, full: None };
+                let mut writer = Writer { full: None, fd };
                 let mut sends = 0;
                 let sent = std::future::poll_fn(|cx| {
                     writer.poll_send(cx, |_| {
@@ -738,7 +739,7 @@ mod tests {
                 let udp = loopback();
                 let fd = udp.bound.socket.try_clone().unwrap();
                 let full = Some(Writer::register(&fd).unwrap());
-                let mut writer = Writer { fd, full };
+                let mut writer = Writer { full, fd };
                 let mut cx = Context::from_waker(Waker::noop());
                 let failed = Err(Error::Io { code: 1 });
                 let sent = writer.poll_send(&mut cx, |_| Poll::Ready(failed.clone()));
