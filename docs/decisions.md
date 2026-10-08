@@ -4255,7 +4255,9 @@ How to read this record:
   applied in #1402. The trees in place of the policies: `laptop.architect`,
   2026-10-08T03:01:36Z
   ([#810](https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927)).
-  The subjects: `laptop.architect`, 2026-10-08T08:10:33Z
+  The subjects: `laptop.architect`, 2026-10-08T06:56:19Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636), by
+  their tree key at 2026-10-08T08:10:33Z
   (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
