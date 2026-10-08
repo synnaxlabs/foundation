@@ -7,7 +7,8 @@ publish.workspace = true
 
 [features]
 open62541 = ["dep:cc"]
-# Exposes `bench` to the `run` bench and the `alloc` test.
+# Exposes `bench` to the `run` bench and the `alloc` test, and `fuzz` to the fuzz
+# target and the `memory` test.
 sim = ["open62541"]
 
 [dependencies]

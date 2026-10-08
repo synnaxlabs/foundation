@@ -11,6 +11,7 @@ pub(crate) struct Status(pub(crate) u32);
 
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
+    pub(crate) const BAD_DECODING_ERROR: Self = Self(0x8007_0000);
     #[cfg(test)]
     pub(crate) const BAD_INTERNAL_ERROR: Self = Self(0x8002_0000);
 
@@ -83,6 +84,24 @@ pub(crate) const TYPES: usize = 388;
 
 /// The index of `ByteString` in `UA_TYPES`.
 pub(crate) const BYTE_STRING: usize = 14;
+
+/// The index of `Variant` in `UA_TYPES`.
+#[cfg(test)]
+pub(crate) const VARIANT: usize = 23;
+
+// `shim.c` asserts the same sizes.
+const _: () = {
+    assert!(size_of::<NodeId>() == 24, "UA_NodeId changed");
+    assert!(size_of::<DataType>() == 96, "UA_DataType changed");
+    assert!(
+        size_of::<DecodeOptions>() == 40,
+        "UA_DecodeBinaryOptions changed"
+    );
+    assert!(
+        offset_of!(DecodeOptions, decoded) == 32,
+        "decodedLength moved"
+    );
+};
 
 /// Gives `UA_TYPES`, the table of built-in types.
 pub(crate) fn types() -> &'static [DataType; TYPES] {

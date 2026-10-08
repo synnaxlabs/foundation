@@ -37,12 +37,19 @@ pub fn decode(data: &[u8]) {
         "{name}: the size is not the encoded size"
     );
     // A `Variant` of N `ExtensionObject` values decodes only when 4N bytes follow its
-    // length (#435).
-    let mut padded = once.clone();
-    padded.resize(once.len() * 2, 0);
-    let (again, read) = Value::decode(data_type, &padded).unwrap_or_else(|e| {
-        panic!("{name}: {once:02x?} does not decode: {}", e.name())
-    });
+    // length (#435), so only an encoding that fails to decode gets zeros after it.
+    let (again, read) = Value::decode(data_type, &once)
+        .or_else(|e| {
+            if e != Status::BAD_DECODING_ERROR {
+                return Err(e);
+            }
+            let mut padded = once.clone();
+            padded.resize(once.len() * 2, 0);
+            Value::decode(data_type, &padded)
+        })
+        .unwrap_or_else(|e| {
+            panic!("{name}: {once:02x?} does not decode: {}", e.name())
+        });
     assert_eq!(
         read,
         once.len(),
@@ -148,6 +155,7 @@ impl Drop for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::VARIANT;
 
     #[test]
     fn the_layout_of_data_type_and_the_count_match_the_copy() {
@@ -178,8 +186,6 @@ mod tests {
         }
         assert!(count > 0, "{root} holds no input");
     }
-
-    const VARIANT: usize = 23;
 
     /// A `Variant` of 7 `ExtensionObject` values, each with a null type and no body.
     fn extension_objects() -> Vec<u8> {
