@@ -103,11 +103,6 @@ impl Index {
         self.order.tail(Path::Live).seq
     }
 
-    /// Where `path` stands.
-    pub(crate) fn tail(&self, path: Path) -> Tail {
-        self.order.tail(path)
-    }
-
     /// Spends the seq of `accepted` and renews the writer's control lease.
     ///
     /// # Panics

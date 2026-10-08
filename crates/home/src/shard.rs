@@ -146,9 +146,6 @@ pub struct Shard {
     indexes: Vec<Index>,
     /// The place in `indexes` of each carried index.
     places: hash::Map<Slot, usize>,
-    /// The live tail of each index that the shard shed and does not carry again yet.
-    /// It is past the buffer's tail by the seqs of lost frames.
-    tails: hash::Map<Slot, order::Tail>,
     /// Each open writer, by its number on the shard.
     writers: hash::Map<u64, Session>,
     next: u64,
@@ -217,8 +214,8 @@ pub enum Outcome {
     },
     /// A live group with samples found no room in the ring or the pool. Its seq is a
     /// gap in the log. The gap is durable only when a later live entry of the index,
-    /// with samples or a handoff, is on disk. A restart before that gives the next
-    /// frame the same seq.
+    /// with samples or a handoff, is on disk. A restart, or a [`Shard::shed`] of the
+    /// index, before that gives the next frame the same seq.
     Lost {
         /// The slot of the group's index.
         slot: Slot,
@@ -296,7 +293,6 @@ impl Shard {
             limits,
             indexes: Vec::new(),
             places: hash::Map::default(),
-            tails: hash::Map::default(),
             writers: hash::Map::default(),
             next: 0,
             scratch: Scratch::default(),
@@ -305,9 +301,7 @@ impl Shard {
     }
 
     /// Carries the index at `slot`, with no writer in control. Each path continues
-    /// from its tail in the buffer. After a [`shed`](Self::shed) of `slot`, the live
-    /// path continues where it stood at the shed, so no seq of a lost frame is given
-    /// again.
+    /// from its tail in the buffer.
     ///
     /// # Panics
     ///
@@ -320,7 +314,7 @@ impl Shard {
                 seq: tail.seq,
             }
         };
-        let live = self.tails.remove(&slot).unwrap_or_else(|| tail(Path::Live));
+        let live = tail(Path::Live);
         let index = Index::new(self.limits, live, tail(Path::Backfill));
         let place = self.indexes.len();
         let carried = self.places.insert(slot, place);
@@ -331,8 +325,8 @@ impl Shard {
 
     /// Stops carrying the index at `slot`: its control gate goes, and with it a handoff
     /// that waits for room. Each named reader of the index stops holding its position.
-    /// Its frames stay in the buffer, and a later [`carry`](Self::carry) of `slot`
-    /// continues each path where it stood.
+    /// Its frames stay in the buffer, so a later [`carry`](Self::carry) of `slot`
+    /// continues each path from its tail in the buffer, as after a restart.
     ///
     /// # Panics
     ///
@@ -346,8 +340,7 @@ impl Shard {
         );
         let last = self.indexes.len() - 1;
         self.places.remove(&slot);
-        let index = self.indexes.swap_remove(place);
-        self.tails.insert(slot, index.tail(Path::Live));
+        self.indexes.swap_remove(place);
         self.readers.shed(place);
         if place != last {
             let moved = self.places.values_mut().find(|at| **at == last);
@@ -3935,9 +3928,10 @@ mod tests {
         }
 
         /// The ring is full, so the handoff of the close waits, and the shed drops it.
-        /// The seqs of the lost frames stay spent.
+        /// No durable entry follows the lost frames, so their gap goes.
         #[test]
-        fn does_not_give_a_lost_seq_again_after_a_shed_and_a_carry() {
+        fn gives_the_first_lost_seq_again_after_a_shed_and_a_carry_as_after_a_restart()
+        {
             run(137, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(1 << 16).await;
@@ -3955,7 +3949,6 @@ mod tests {
                         break range.seq;
                     }
                 };
-                let spent = u64::try_from(n).expect("small") * 400;
                 shard.close_writer(a);
                 assert!(shard.indexes[0].handoff().is_some(), "the handoff waits");
                 shard.shed(Slot::new(0));
@@ -3964,15 +3957,14 @@ mod tests {
                 let stamp = 10 + n * 400;
                 let next = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[3])]);
                 let written = shard.write(b, LIVE, next).expect("written").to_vec();
-                assert!(lost_at < spent);
-                assert_eq!(written, [lost(0, spent, 1)]);
+                assert_eq!(written, [lost(0, lost_at, 1)]);
             });
         }
 
         /// A latest reader got seq 0 at stamp 20 as a lost frame. After a shed and a
-        /// carry, the live path stands after it, as with no shed.
+        /// carry, the live path stands before it.
         #[test]
-        fn does_not_store_a_lost_seq_after_a_shed_and_a_carry() {
+        fn applies_a_frame_at_a_lost_seq_after_a_shed_and_a_carry_as_after_a_restart() {
             run(138, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
@@ -3997,15 +3989,7 @@ mod tests {
                 shard.carry(Slot::new(0));
                 let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
                 let late = frame(&test.pool, &set, &[(0, &[15]), (1, &[3])]);
-                let backwards = order::Error::Backwards {
-                    path: Path::Live,
-                    before: Stamp::from_nanos(20),
-                    stamp: Stamp::from_nanos(15),
-                };
-                assert_eq!(
-                    shard.write(b, LIVE, late),
-                    Ok(&[refused(0, Refusal::Order(backwards))][..])
-                );
+                assert_eq!(shard.write(b, LIVE, late), Ok(&[applied(0, 0, 1)][..]));
                 let next = frame(&test.pool, &set, &[(0, &[25]), (1, &[3])]);
                 assert_eq!(shard.write(b, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
             });
@@ -4183,6 +4167,29 @@ mod tests {
                 });
             }
 
+            /// As `ends_behind_after_an_open_again_below_the_live_frames`, with a shed
+            /// and a carry inside the hold.
+            #[test]
+            fn holds_no_position_after_a_shed_and_a_carry() {
+                run(143, |test| async move {
+                    let set = two_indexes();
+                    let mut shard = test.shard(AREA).await;
+                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    let first = named(&mut shard, "a", "r");
+                    committed(&test, &mut shard, a, &[10, 20, 30, 40]).await;
+                    assert_eq!(taken(&mut shard, first.key.into(), 0).len(), 4);
+                    shard.ack(first.key, live(2)).expect("forward");
+                    close(&mut shard, first.key.into());
+                    shard.close_writer(a);
+                    shard.shed(Slot::new(0));
+                    shard.carry(Slot::new(0));
+                    let second = named(&mut shard, "a", "r");
+                    let b = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    committed(&test, &mut shard, b, &[50]).await;
+                    assert_eq!(taken(&mut shard, second.key.into(), 0), [seq(4, 1)]);
+                });
+            }
+
             #[test]
             fn starts_at_the_live_tail_after_its_hold_ends() {
                 run(125, |test| async move {
@@ -4254,26 +4261,6 @@ mod tests {
                     test.clock.sleep(INSIDE).await;
                     let second = named(&mut shard, "a", "r");
                     assert_eq!(missed(&mut shard, second.key, 0), []);
-                });
-            }
-
-            #[test]
-            fn holds_no_position_after_a_shed_and_a_carry() {
-                run(143, |test| async move {
-                    let set = two_indexes();
-                    let mut shard = test.shard(AREA).await;
-                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
-                    let first = named(&mut shard, "a", "r");
-                    committed(&test, &mut shard, a, &[10, 20]).await;
-                    shard.ack(first.key, live(1)).expect("forward");
-                    close(&mut shard, first.key.into());
-                    shard.close_writer(a);
-                    shard.shed(Slot::new(0));
-                    shard.carry(Slot::new(0));
-                    let second = named(&mut shard, "a", "r");
-                    let b = shard.open_writer(writer("w", 1, &set)).expect("synced");
-                    committed(&test, &mut shard, b, &[30]).await;
-                    assert_eq!(taken(&mut shard, second.key.into(), 0), [seq(2, 1)]);
                 });
             }
 
