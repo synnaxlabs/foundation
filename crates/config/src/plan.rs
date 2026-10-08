@@ -1,17 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
-use document::Document;
 use document::diagnostic::{Code, Diagnostic};
+use document::{Document, Span};
 use spec::channel::{Channel, Problem};
 use spec::definition;
-use spec::placement::{Policy, place};
+use spec::placement::{Placed, Policy, Unplaced, place};
 use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
 use crate::{Definition, Entry, Found, channel, checked, sort, span};
 
+const CONNECTOR_HOME: Code = Code::new("config.connector-home");
+const SPLIT_PLACEMENT: Code = Code::new("config.split-placement");
 const UNKNOWN_NODE: Code = Code::new("config.unknown-node");
 const UNPLACED: Code = Code::new("config.unplaced");
 const WRITER_NODES: Code = Code::new("config.writer-nodes");
@@ -34,8 +36,14 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 /// them. Else:
 ///
 /// - `config.wrong-channel` at each edge to a channel that is not what the edge needs.
-/// - `config.unplaced` at the label of each index that
+/// - `config.unplaced` at the label of each index and each connector that
 ///   [`spec::placement::place`] cannot place.
+/// - `config.connector-home` at the `home` of a placement that wins for a connector and
+///   names a node other than the connector's `node`.
+/// - `config.split-placement` at each index under the name of a connector when the
+///   placement that wins for the index is not the one that wins for the connector: at
+///   the label of the index's placement, or of the connector's when no placement
+///   selects the index.
 /// - `config.writer-nodes` at the `node` of the first connector on a second node that
 ///   writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
@@ -166,7 +174,8 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
 }
 
 /// The home of each index that the stored spec has no index at. Reports each index
-/// that two writer nodes or [`place`] leave with no home.
+/// that two writer nodes or [`place`] leave with no home, and the problems of
+/// [`connectors`].
 fn homes(
     found: &Found<'_>,
     applied: &BTreeMap<Name, definition::Definition>,
@@ -182,35 +191,156 @@ fn homes(
             _ => None,
         })
         .collect();
-    let mut homes = BTreeMap::new();
+    let mut indexes = BTreeMap::new();
     for (index, entry) in &found.entries {
         let Definition::Channel(spec::channel::Kind::Index { .. }) = entry.definition
         else {
             continue;
         };
         let writer = writer(found, index, diagnostics);
-        match place(index, placements.iter().copied(), writer) {
-            Ok(placed) => {
-                let indexed = matches!(
-                    applied.get(index),
-                    Some(definition::Definition::Channel(Channel {
-                        kind: spec::channel::Kind::Index { .. },
-                        ..
-                    }))
-                );
-                if !indexed {
-                    homes.insert(index.clone(), placed.home.clone());
-                }
-            }
-            Err(unplaced) => diagnostics.push(Diagnostic::new(
-                UNPLACED,
-                entry.label_span,
-                unplaced.to_string(),
-                unplaced.fix().into(),
+        let placed = place(index, placements.iter().copied(), writer);
+        if let Err(problem) = &placed {
+            diagnostics.push(unplaced(entry.label_span, problem));
+        }
+        indexes.insert(index, placed);
+    }
+    connectors(found, &placements, &indexes, diagnostics);
+    let stored = |index: &Name| {
+        matches!(
+            applied.get(index),
+            Some(definition::Definition::Channel(Channel {
+                kind: spec::channel::Kind::Index { .. },
+                ..
+            }))
+        )
+    };
+    indexes
+        .into_iter()
+        .filter(|(index, _)| !stored(index))
+        .filter_map(|(index, placed)| Some((index.clone(), placed.ok()?.home.clone())))
+        .collect()
+}
+
+/// Places each connector, with its `node` as the writer. Reports
+/// `config.connector-home` at the `home` of a winner that names another node,
+/// `config.unplaced` at each connector that [`place`] cannot place, and
+/// `config.split-placement` at each index under the name of a connector that another
+/// placement wins for.
+fn connectors<'f>(
+    found: &'f Found<'_>,
+    placements: &[(&'f Name, &'f Policy)],
+    indexes: &BTreeMap<&Name, Result<Placed<'f>, Unplaced>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (name, entry) in &found.entries {
+        let Definition::Spec(definition::Definition::Connector(connector)) =
+            &entry.definition
+        else {
+            continue;
+        };
+        let node = connector.node();
+        let placed = place(name, placements.iter().copied(), Some(node));
+        match &placed {
+            Ok(Placed {
+                placement: Some(placement),
+                home,
+                ..
+            }) if *home != node => diagnostics.push(Diagnostic::new(
+                CONNECTOR_HOME,
+                span(found.blocks[*placement], "home"),
+                format!(
+                    "the placement `{}` names the home `{home}`, but the connector \
+                     `{name}` runs on the node `{node}`",
+                    label(placement)
+                ),
+                format!("Name `{node}` as the `home`, or leave out `home`"),
             )),
+            Ok(_) => {}
+            Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
+        }
+        let Ok(theirs) = winner(&placed) else {
+            continue;
+        };
+        let under = indexes.iter().filter(|(index, _)| index.starts_with(name));
+        for (index, placed) in under {
+            if let Ok(own) = winner(placed) {
+                diagnostics.extend(split(found, index, own, name, theirs));
+            }
         }
     }
-    homes
+}
+
+/// A `config.split-placement` diagnostic when `own`, the placement that wins for
+/// `index`, is not `theirs`, the one that wins for the connector `connector`.
+fn split(
+    found: &Found<'_>,
+    index: &Name,
+    own: Option<&Name>,
+    connector: &Name,
+    theirs: Option<&Name>,
+) -> Option<Diagnostic> {
+    let (at, message) = match (own, theirs) {
+        (Some(own), Some(theirs)) if own != theirs => (
+            own,
+            format!(
+                "the placement `{}` wins for the index `{index}`, but the placement \
+                 `{}` wins for the connector `{connector}`",
+                label(own),
+                label(theirs)
+            ),
+        ),
+        (Some(own), None) => (
+            own,
+            format!(
+                "the placement `{}` wins for the index `{index}`, but no placement \
+                 selects the connector `{connector}`",
+                label(own)
+            ),
+        ),
+        (None, Some(theirs)) => (
+            theirs,
+            format!(
+                "no placement selects the index `{index}`, but the placement `{}` \
+                 wins for the connector `{connector}`",
+                label(theirs)
+            ),
+        ),
+        _ => return None,
+    };
+    Some(Diagnostic::new(
+        SPLIT_PLACEMENT,
+        found.entries[at].label_span,
+        message,
+        format!(
+            "Select the connector `{connector}` and each index under its name with the \
+             same placement"
+        ),
+    ))
+}
+
+/// The tree key of the placement that wins for the name that `placed` places, or
+/// `None` when no placement selects it. Gives the tie when two placements tie.
+fn winner<'p>(
+    placed: &'p Result<Placed<'_>, Unplaced>,
+) -> Result<Option<&'p Name>, &'p Unplaced> {
+    match placed {
+        Ok(placed) => Ok(placed.placement),
+        Err(Unplaced::NoHome { placement }) => Ok(placement.as_ref()),
+        Err(Unplaced::Overlap { placement, .. }) => Ok(Some(placement)),
+        Err(tie @ Unplaced::Tie { .. }) => Err(tie),
+    }
+}
+
+/// A `config.unplaced` diagnostic at `at`, the label of the name that `problem` names.
+fn unplaced(at: Option<Span>, problem: &Unplaced) -> Diagnostic {
+    Diagnostic::new(UNPLACED, at, problem.to_string(), problem.fix().into())
+}
+
+/// The label of the placement at the tree key `key`.
+fn label(key: &Name) -> Name {
+    definition::Kind::Placement
+        .label(key)
+        .expect("invariant: the key of a placement block has its label form")
 }
 
 /// The node of the first connector that writes `index` or a channel on it. Reports

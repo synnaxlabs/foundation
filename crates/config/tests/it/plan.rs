@@ -491,7 +491,7 @@ placement \"e\" {
   select = \"e.*\"
   standby = \"n\"
 }
-connector \"e\" {
+connector \"w\" {
   kind = \"writer\"
   node = \"n\"
   writes = [\"e.time\"]
@@ -516,14 +516,15 @@ connector \"e\" {
         ),
         unplaced(
             "d.time",
-            "the placements `d_1` and `d_2` select the index with the same specificity",
+            "the placements `d_1` and `d_2` select the name with the same specificity",
             "Change the `select` of one of the two placements, so that one selects the \
-             index more specifically",
+             name more specifically",
         ),
         unplaced(
             "e.time",
-            "the node `n` writes the index and has another role in the placement `e`",
-            "Name a `home` in the placement, or remove the node from it",
+            "the node `n` of a connector is the home and has another role in the \
+             placement `e`",
+            "Remove the node from the placement",
         ),
     ];
     assert_eq!(found, expected);
@@ -598,6 +599,258 @@ connector \"w2\" {{
         "Run each connector that writes `a.time` on one node",
     );
     assert_eq!(found, [expected]);
+}
+
+#[test]
+fn refuses_a_placement_that_names_another_home_for_a_connector() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+placement \"a\" {
+  select = \"a.**\"
+  home = \"m\"
+}
+connector \"a\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["m", "n"]));
+    let expected = problem(
+        "config.connector-home",
+        (0, value(text, "home", "\"m\"")),
+        "the placement `a` names the home `m`, but the connector `a` runs on the node \
+         `n`",
+        "Name `n` as the `home`, or leave out `home`",
+    );
+    assert_eq!(found, [expected]);
+}
+
+#[test]
+fn places_a_connector_at_its_node_with_its_placement() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+placement \"a\" {
+  select = \"a.**\"
+  home = \"n\"
+}
+connector \"a\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}
+channel \"b.time\" {
+  kind = \"index\"
+}
+placement \"b\" {
+  select = \"b.**\"
+  standby = \"m\"
+}
+connector \"b\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"b.time\"]
+}
+channel \"c.time\" {
+  kind = \"index\"
+}
+connector \"c\" {
+  kind = \"writer\"
+  node = \"m\"
+  writes = [\"c.time\"]
+}
+";
+    let plan = Spec::create_empty()
+        .plan(&[text], &["m", "n"])
+        .expect("no problems");
+    let homes = [("a.time", "n"), ("b.time", "n"), ("c.time", "m")];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
+}
+
+#[test]
+fn refuses_each_connector_that_cannot_be_placed() {
+    let text = "\
+placement \"c_1\" {
+  select = \"c\"
+  home = \"n\"
+}
+placement \"c_2\" {
+  select = \"c\"
+  standby = \"m\"
+}
+connector \"c\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+placement \"on_d\" {
+  select = \"d\"
+  standby = \"n\"
+}
+connector \"d\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["m", "n"]));
+    let expected = [
+        problem(
+            "config.unplaced",
+            (0, label(text, "c")),
+            "the placements `c_1` and `c_2` select the name with the same specificity",
+            "Change the `select` of one of the two placements, so that one selects the \
+             name more specifically",
+        ),
+        problem(
+            "config.unplaced",
+            (0, label(text, "d")),
+            "the node `n` of a connector is the home and has another role in the \
+             placement `on_d`",
+            "Remove the node from the placement",
+        ),
+    ];
+    assert_eq!(found, expected);
+}
+
+/// A `config.split-placement` problem at the label of `placement` in `text`.
+fn split(text: &str, placement: &str, message: &str, connector: &str) -> Problem {
+    let fix = format!(
+        "Select the connector `{connector}` and each index under its name with the \
+         same placement"
+    );
+    problem(
+        "config.split-placement",
+        (0, label(text, placement)),
+        message,
+        &fix,
+    )
+}
+
+#[test]
+fn refuses_an_index_whose_placement_is_not_its_connectors() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+placement \"a_time\" {
+  select = \"a.time\"
+  home = \"n\"
+}
+placement \"a\" {
+  select = \"a.**\"
+  home = \"n\"
+}
+connector \"a\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}
+channel \"d.e.time\" {
+  kind = \"index\"
+}
+placement \"d\" {
+  select = \"d.**\"
+  home = \"n\"
+}
+placement \"e\" {
+  select = \"d.e.**\"
+  home = \"n\"
+}
+connector \"d\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+connector \"d.e\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"d.e.time\"]
+}
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let expected = [
+        split(
+            text,
+            "a_time",
+            "the placement `a_time` wins for the index `a.time`, but the placement `a` \
+             wins for the connector `a`",
+            "a",
+        ),
+        split(
+            text,
+            "e",
+            "the placement `e` wins for the index `d.e.time`, but the placement `d` \
+             wins for the connector `d`",
+            "d",
+        ),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn refuses_an_index_or_a_connector_that_no_placement_selects_when_the_other_is() {
+    let text = "\
+channel \"b.time\" {
+  kind = \"index\"
+}
+placement \"only_b\" {
+  select = \"b\"
+  home = \"n\"
+}
+connector \"b\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"b.time\"]
+}
+channel \"c.time\" {
+  kind = \"index\"
+}
+placement \"c\" {
+  select = \"c.*\"
+  home = \"n\"
+}
+connector \"c\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"c.time\"]
+}
+channel \"fx.time\" {
+  kind = \"index\"
+}
+placement \"fx\" {
+  select = \"fx.*\"
+  home = \"n\"
+}
+connector \"f\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"fx.time\"]
+}
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let expected = [
+        split(
+            text,
+            "only_b",
+            "no placement selects the index `b.time`, but the placement `only_b` wins \
+             for the connector `b`",
+            "b",
+        ),
+        split(
+            text,
+            "c",
+            "the placement `c` wins for the index `c.time`, but no placement selects \
+             the connector `c`",
+            "c",
+        ),
+    ];
+    assert_eq!(found, expected);
 }
 
 #[test]
