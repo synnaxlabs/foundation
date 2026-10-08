@@ -2696,6 +2696,8 @@ How to read this record:
   for the other. Decided by the coordinator and the advisor on 2026-10-06 (#659). After
   compaction a snapshot carries the configuration in force at its index, so the
   configuration before the last entry stays known (#253).
+  `mesh` keeps the founding voters with the rest of `Config::founding` at the first
+  open of its directory, and refuses another set at a later open (MESH DRIVER, #1209).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory. A log also holds the file `lock`
   of that directory open for writing, from its open until it drops. A file call of a
@@ -3215,6 +3217,37 @@ How to read this record:
   that does not open stops the node with `Error::Blob`. Decided by
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
+  Amended (2026-10-08, PR 2 of #1209): the first open of the mesh directory keeps
+  `Config::founding` in the file `founding` in `Config::dir`, beside `log`, so the
+  `Stray` rule of MESH LOG holds. The file is an 8-byte check of the rest (the first
+  bytes of `types::digest::Digest::of`), the format version (1), and
+  `region::Founding::encode`: the prefix, a count and each member in key order, the
+  voters, and a count and each definition in name order. The open takes the lock of
+  the log, then writes `founding.new`, renames it to `founding`, and syncs the
+  directory, before `raft` writes a record. So a crash leaves `founding` whole or
+  absent, and a log with no record and no `founding` is a first open. Each later open
+  compares `founding` with `Config::founding`, its members in key order, before `raft`
+  starts. Another value gives `Error::Founding { stored, given }`, each a
+  `Box<region::Founding>`. Its text names the first field that differs: the prefix and
+  the voters in the form "the mesh was founded with voters {stored}, not {given}", and
+  for the members and the definitions the first key in key order whose value differs
+  or is in only one of the two. A log with a record and no `founding`, or a `founding`
+  that fails its check, its version, or its decode, gives `Error::Unfounded { path }`.
+  This supersedes `Error::Voters` of the rules of #1209 and the digest form
+  `Error::Founding { stored: Digest, given: Digest }` of
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6056362876, because
+  the whole value is the unit of the check (`laptop.architect`, 2026-10-08T10:34:50Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6057978189).
+  Proposed by `box1.builder-4`
+  (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063177321), and
+  decided by `laptop.architect`, 2026-10-08T15:26:10Z, with the text for the members
+  and the definitions:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600. The
+  lock of the log comes before the write of `founding`, not after it as in the plan, so
+  two opens of one directory never write it at once. Lost: a digest of the whole value
+  in the file, because the operator cannot see which field differs and the region does
+  not read back; one variant per field, four variants for one contract; the root of the
+  definitions alone, because the file is then not the whole value.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
