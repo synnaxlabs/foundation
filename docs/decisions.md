@@ -206,6 +206,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6044826781.
   Supersedes the field shape of
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011.
+  `channel::DataType` reads and writes `quality`, and otherwise the text of
+  `sample::Type`. A text that is neither is `channel::Error::DataType`, which holds the
+  `sample::Error`; its message names `quality` when the text has no form, and its fix is
+  the cause's. Decided by `laptop.architect-2`: the mapping (2026-10-07T11:21:13Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520), and
+  the payload, message, and fix (2026-10-08T00:47:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6049836256).
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
