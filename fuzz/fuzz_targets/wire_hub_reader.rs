@@ -1,8 +1,7 @@
-//! `wire::hub::Reader` never panics, each event encodes to its message and comes in
-//! the order of a session, each refusal is one that the order or the mode gives, the
-//! body starts after the ends run and ends at its last end, and each valid message
-//! that the home writes reads back. A latest and a complete session each read the
-//! input.
+//! `wire::hub::Reader` never panics, each event encodes to its message and comes in the
+//! order of a session, each refusal is one that the order or the mode gives, the body
+//! starts after the ends run and ends at its last end, and each valid message that the
+//! home writes reads back. A latest and a complete session each read the input.
 //!
 //! Input: one byte, the places of the session less 1, then the messages from the home
 //! (`fuzz::messages`).
