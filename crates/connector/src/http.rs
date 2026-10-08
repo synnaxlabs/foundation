@@ -15,6 +15,8 @@ use std::rc::Rc;
 use std::task::Poll;
 
 use bytes::Bytes;
+use document::diagnostic::{Code, Diagnostic};
+use document::value::{self, Value};
 use env::clock::{Clock, Sleep};
 use env::net::{self, Net, Tcp, tcp};
 use env::tasks::Tasks;
@@ -267,6 +269,37 @@ async fn before<T>(
     .await
 }
 
+const BAD_URI: Code = Code::new("connector.bad-uri");
+
+/// Reads `value` as a URI that [`Client::send`] takes, with no I/O.
+///
+/// # Errors
+///
+/// `connector.bad-uri` at the value when it is not a string, not a URI, has a
+/// fragment, or has a scheme, user info, host, or port that `send` refuses.
+pub fn uri(value: &Value) -> Result<Uri, Diagnostic> {
+    let bad = |message: String| {
+        Diagnostic::new(
+            BAD_URI,
+            value.span,
+            message,
+            "Write an `http` URI such as \"http://10.0.0.2:8086\"".into(),
+        )
+    };
+    let value::Kind::String(text) = &value.kind else {
+        return Err(bad(format!("a URI is a string, not {}", value.kind.noun())));
+    };
+    // `Uri` drops a fragment.
+    if text.contains('#') {
+        return Err(bad("the URI has a fragment, which no request sends".into()));
+    }
+    let uri: Uri = text
+        .parse()
+        .map_err(|error| bad(format!("the text is not a URI: {error}")))?;
+    origin(&uri).map_err(|error| bad(error.to_string()))?;
+    Ok(uri)
+}
+
 /// The end of a connect to the first of `left` addresses, as in Go: an equal share of
 /// the time from `now` to `deadline`, but at least [`ATTEMPT_MIN`]. Gives `None` when
 /// the share is all the time left, so that only the request timeout ends the connect.
@@ -293,7 +326,8 @@ struct Connection {
 }
 
 /// The origin of `uri`. It checks the scheme, the user info, the host, and the port,
-/// in that order, so no error holds text from a URI with user info.
+/// in that order. No error holds text from `uri`: a `/` or `?` in a password ends the
+/// authority early, which puts the password in the host or the port.
 fn origin(uri: &Uri) -> Result<Origin, Error> {
     if uri.scheme() != Some(&Scheme::HTTP) {
         return Err(Error::Scheme);
@@ -318,9 +352,7 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
         None => !host.is_empty() && !host.contains('['),
     };
     if !valid {
-        return Err(Error::Host {
-            host: host.to_owned(),
-        });
+        return Err(Error::Host);
     }
     // `u16::from_str` takes a leading `+`.
     let port = match port {
@@ -329,9 +361,7 @@ fn origin(uri: &Uri) -> Result<Origin, Error> {
             .filter(|port| port.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|port| port.parse().ok())
             .filter(|&port| port != 0)
-            .ok_or_else(|| Error::Port {
-                port: port.to_owned(),
-            })?,
+            .ok_or(Error::Port)?,
     };
     Ok(Origin {
         host: host.to_ascii_lowercase(),
@@ -379,16 +409,9 @@ pub enum Error {
     UserInfo,
     /// The URI has no host, a host in brackets that is not an IPv6 address, or a
     /// `[` in a host that is not in brackets.
-    Host {
-        /// The text of the authority before the `:` of the port, or all of it when
-        /// it has no port.
-        host: String,
-    },
+    Host,
     /// The port of the URI is not a number from 1 to 65535.
-    Port {
-        /// The text after the host, with no leading `:`.
-        port: String,
-    },
+    Port,
     /// The name lookup failed, or no address of the host took the connection. It
     /// holds the lookup error, or the error of the first address.
     Connect(net::Error),
@@ -422,11 +445,10 @@ impl fmt::Display for Error {
                 f,
                 "the URI holds user info; give a credential through a secret"
             ),
-            Self::Host { host } => write!(f, "the URI has no valid host: {host:?}"),
-            Self::Port { port } => write!(
-                f,
-                "the port {port:?} of the URI is not a number from 1 to 65535"
-            ),
+            Self::Host => write!(f, "the URI has no valid host"),
+            Self::Port => {
+                write!(f, "the port of the URI is not a number from 1 to 65535")
+            }
             Self::Connect(error) => write!(f, "the connect failed: {error}"),
             Self::TimedOut => write!(f, "the exchange timed out"),
             Self::TooLarge { max } => {
@@ -444,8 +466,8 @@ impl std::error::Error for Error {
             Self::Protocol(failure) => Some(failure),
             Self::Scheme
             | Self::UserInfo
-            | Self::Host { .. }
-            | Self::Port { .. }
+            | Self::Host
+            | Self::Port
             | Self::TimedOut
             | Self::TooLarge { .. } => None,
         }

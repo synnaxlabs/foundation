@@ -67,6 +67,8 @@ pub struct Entry {
 /// whole (a policy's budgets, for example) only when each of its attributes is known
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
+/// A bad `kind` of channel hides the problems of each other attribute that a kind of
+/// channel knows.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found {
         channels: channels(documents),
@@ -1775,7 +1777,20 @@ mod tests {
                 Err(vec![refused(
                     "config.bad-action",
                     at(0, 15),
-                    "`erase` is not an action",
+                    "\"erase\" is not an action",
+                    ACTION_FIX,
+                )])
+            );
+        }
+
+        #[test]
+        fn quotes_a_word_that_is_not_an_action_so_that_it_cannot_name_another() {
+            assert_eq!(
+                check(&access(&attributes(string("x` or `read"), None))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "\"x` or `read\" is not an action",
                     ACTION_FIX,
                 )])
             );
@@ -1784,17 +1799,17 @@ mod tests {
         #[test]
         fn refuses_a_word_that_is_not_an_action() {
             let cases = [
-                (string("erase"), at(0, 15), "`erase` is not an action"),
-                (reference("Read"), at(0, 15), "`Read` is not an action"),
+                (string("erase"), at(0, 15), "\"erase\" is not an action"),
+                (reference("Read"), at(0, 15), "\"Read\" is not an action"),
                 (
                     reference("site_a.read"),
                     at(0, 15),
-                    "`site_a.read` is not an action",
+                    "\"site_a.read\" is not an action",
                 ),
                 (
                     list(vec![string("read"), string("erase")]),
                     at(0, 51),
-                    "`erase` is not an action",
+                    "\"erase\" is not an action",
                 ),
                 (
                     list(vec![Kind::Integer(1), string("erase")]),
@@ -2373,7 +2388,41 @@ mod tests {
         }
 
         #[test]
-        fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
+        fn refuses_an_edge_that_is_not_a_name() {
+            let documents =
+                value(&[("index", Kind::Integer(7)), ("data_type", string("f64"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 111),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_error_edge_of_an_index_that_is_not_a_name() {
+            let time = channel(
+                0,
+                0,
+                "edge.time",
+                &[("kind", string("index")), ("error", Kind::Integer(7))],
+            );
+            assert_eq!(
+                check(&[document(vec![time])]),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 13),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn leaves_the_edges_after_a_bad_kind() {
             let documents = value(&[
                 ("kind", string("stream")),
                 ("other", string("x")),
@@ -2391,23 +2440,32 @@ mod tests {
                         "\"stream\" is not a kind of channel",
                         "Write \"index\" or \"data\"",
                     ),
-                    unknown(
-                        at(0, 115),
-                        "no `channel` block defines the index channel `edge.tim`",
-                    ),
-                    unknown(
-                        at(0, 117),
-                        "no `channel` block defines the quality channel `edge.q`",
-                    ),
-                    unknown(
-                        at(0, 119),
-                        "no `channel` block defines the error channel `edge.e`",
-                    ),
-                    unknown(
-                        at(0, 121),
-                        "no `channel` block defines the control channel `edge.c`",
+                    refused(
+                        "document.unknown-attribute",
+                        at(0, 112),
+                        "`other` is not an attribute of the `channel` block",
+                        "Use `control`, `data_type`, `error`, `index`, `kind`, \
+                         `quality`, or `unit`, or remove it",
                     ),
                 ])
+            );
+        }
+
+        #[test]
+        fn leaves_an_attribute_that_a_kind_knows_after_a_bad_kind() {
+            let documents = value(&[
+                ("kind", string("stream")),
+                ("data_type", string("f65")),
+                ("control", Kind::Integer(7)),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.bad-channel-kind",
+                    at(0, 111),
+                    "\"stream\" is not a kind of channel",
+                    "Write \"index\" or \"data\"",
+                ),])
             );
         }
 

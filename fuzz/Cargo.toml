@@ -255,6 +255,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "wire_blob"
+path = "fuzz_targets/wire_blob.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "wire_header"
 path = "fuzz_targets/wire_header.rs"
 test = false

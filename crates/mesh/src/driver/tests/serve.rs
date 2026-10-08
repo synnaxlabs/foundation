@@ -1,8 +1,8 @@
 //! Tests of `Mesh::serve`. Node 2 writes raw streams to node 1 over two transports,
 //! and node 1 serves each with its mesh.
 
+use transport::Class;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code};
 
 use super::*;
 
