@@ -1413,7 +1413,8 @@ End of search list.
                      file(WRITE ${CMAKE_BINARY_DIR}/other.h \"\")\n\
                      include_directories(include ${CMAKE_BINARY_DIR}/src_generated)\n\
                      add_compile_definitions(NAME=\"a b\")\n\
-                     add_compile_options(-fno-strict-aliasing -Wall -pipe)\n\
+                     add_compile_options(-fno-strict-aliasing -Wall -pipe -flto=auto \
+                     -fno-fat-lto-objects)\n\
                      file(GLOB more src/more/*.c)\n\
                      add_library(open62541-object OBJECT src/util/ua_util.c \
                      src/util/ua_encryptedsecret.c ${more})\n\
@@ -1625,6 +1626,28 @@ End of search list.
             result,
             Err(vec![
                 "plugins/ua_log_stdout.c compiles with other flags".to_owned()
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_refuses_a_flag_in_no_list() {
+        let (root, repo, result) = run_on("unsorted", |repo| {
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap()
+                + "set_source_files_properties(plugins/ua_log_stdout.c PROPERTIES \
+                   COMPILE_OPTIONS -fwrapv)\n";
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "plugins/ua_log_stdout.c: `-fwrapv` is in neither CODE_FLAGS nor \
+                 LEFT_OUT"
+                    .to_owned()
             ])
         );
         assert!(root.join("patches/open62541/kept.c").exists());
