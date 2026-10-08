@@ -1001,7 +1001,7 @@ How to read this record:
   then `Ended::Behind`, then `Ended::Buffer`. Lost: an error from `take`, which every
   caller, latest readers too, then handles; a `behind` list beside the woken keys, a
   second list to drain for an event that happens once per session. A `delivery` model
-  property test and a 32-seed `sim` test stand in for loom and shuttle: the wake never
+  property test and a 32-run `sim` test stand in for loom and shuttle: the wake never
   crosses a thread. Decided by `laptop.architect` (2026-10-07T06:36:57Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6032442901).
   `take` gives `delivery::Next` (`Frame`, `Empty`, or `Behind`), and `Readers::behind`

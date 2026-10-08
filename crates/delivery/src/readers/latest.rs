@@ -150,7 +150,7 @@ mod tests {
 
     use super::*;
     use crate::complete::Charge;
-    use crate::readers::tests::{Frames, behind, dropped, frame, number};
+    use crate::readers::tests::{Frames, behind, dropped, held, number};
     use crate::{Position, Reader, Record, Start, complete};
 
     fn at(nanos: i64) -> Stamp {
@@ -187,7 +187,7 @@ mod tests {
     }
 
     fn taken(readers: &mut Readers, key: Key) -> Option<u64> {
-        frame(readers.take(key.into())).as_ref().map(number)
+        held(readers.take(key.into())).as_ref().map(number)
     }
 
     fn put(readers: &mut Readers, frame: Frame) -> Vec<Key> {
@@ -343,10 +343,7 @@ mod tests {
             assert_eq!(readers.records().count(), 0);
             assert_eq!(readers.release(2), [new]);
             dropped(&mut readers, old.into());
-            assert_eq!(
-                frame(readers.take(new.into())).as_ref().map(number),
-                Some(1)
-            );
+            assert_eq!(held(readers.take(new.into())).as_ref().map(number), Some(1));
             assert!(behind(&mut readers, new));
         }
 
@@ -384,7 +381,7 @@ mod tests {
             assert_eq!(readers.release(3), []);
             for n in [1, 2] {
                 assert_eq!(
-                    frame(readers.take(new.into())).as_ref().map(number),
+                    held(readers.take(new.into())).as_ref().map(number),
                     Some(n)
                 );
             }
@@ -492,7 +489,7 @@ mod tests {
             let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
-            let sending = frame(readers.take(key.into())).expect("frame 1 waits");
+            let sending = held(readers.take(key.into())).expect("frame 1 waits");
             assert_eq!(put(&mut readers, frames.frame(2)), [key]);
             assert!(matches!(
                 frames.make(3),

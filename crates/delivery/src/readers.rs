@@ -716,7 +716,7 @@ pub(super) mod tests {
     }
 
     /// The frame that `next` holds, if any.
-    pub(super) fn frame(next: Next) -> Option<Frame> {
+    pub(super) fn held(next: Next) -> Option<Frame> {
         match next {
             Next::Frame(frame) => Some(frame),
             Next::Empty | Next::Behind => None,
@@ -1139,10 +1139,7 @@ pub(super) mod tests {
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
             assert_eq!(readers.release(1), [new]);
-            assert_eq!(
-                frame(readers.take(new.into())).as_ref().map(number),
-                Some(1)
-            );
+            assert_eq!(held(readers.take(new.into())).as_ref().map(number), Some(1));
             assert_eq!(readers.ack(new, live(1)), Ok(()));
         }
 
@@ -1159,10 +1156,7 @@ pub(super) mod tests {
             drained(&mut readers);
             dropped(&mut readers, old.into());
             assert_eq!(drained(&mut readers), []);
-            assert_eq!(
-                frame(readers.take(new.into())).as_ref().map(number),
-                Some(1)
-            );
+            assert_eq!(held(readers.take(new.into())).as_ref().map(number), Some(1));
         }
 
         /// Queues frame 1 of `frames` at seq 0..2 to a named and an unnamed session,
@@ -1607,7 +1601,7 @@ pub(super) mod tests {
 
         fn taken(readers: &mut Readers, key: impl Into<Key>) -> Vec<u64> {
             let key = key.into();
-            iter::from_fn(|| frame(readers.take(key)))
+            iter::from_fn(|| held(readers.take(key)))
                 .map(|frame| number(&frame))
                 .collect()
         }
@@ -2052,10 +2046,7 @@ pub(super) mod tests {
             let latest = readers.open_latest().key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert!(frames.spare());
-            assert_eq!(
-                frame(readers.take(latest.into())).as_ref().map(number),
-                None
-            );
+            assert_eq!(held(readers.take(latest.into())).as_ref().map(number), None);
         }
 
         #[test]
@@ -2299,7 +2290,7 @@ pub(super) mod tests {
                     readers.queue(frame, set, seq.clone());
                 }
                 assert_eq!(readers.release(seq.end), [key]);
-                let taken = iter::from_fn(|| frame(readers.take(key.into()))).count();
+                let taken = iter::from_fn(|| held(readers.take(key.into()))).count();
                 assert_eq!(taken, frames.len() + usize::from(passes), "credit {limit}");
                 assert_eq!(behind(&mut readers, key), !passes, "credit {limit}");
             }
@@ -2317,10 +2308,7 @@ pub(super) mod tests {
                 readers.queue(&sets.full(), &sets.wide, n..n + 1);
             }
             assert_eq!(readers.release(11), [key]);
-            assert_eq!(
-                iter::from_fn(|| frame(readers.take(key.into()))).count(),
-                10
-            );
+            assert_eq!(iter::from_fn(|| held(readers.take(key.into()))).count(), 10);
             assert!(behind(&mut readers, key));
         }
 

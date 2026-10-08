@@ -215,7 +215,7 @@ fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
         SESSIONS + 3,
         "the warm session takes two frames, and the release wakes each session"
     );
-    let behind = |readers: &mut Readers, key: complete::Key| loop {
+    let drained_behind = |readers: &mut Readers, key: complete::Key| loop {
         match readers.take(key.into()) {
             Next::Frame(_) => {}
             Next::Behind => break true,
@@ -223,7 +223,7 @@ fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
         }
     };
     assert!(
-        keys.iter().all(|&key| behind(&mut readers, key)),
+        keys.iter().all(|&key| drained_behind(&mut readers, key)),
         "each session missed"
     );
 }

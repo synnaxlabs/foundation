@@ -505,12 +505,11 @@ impl Shard {
     /// below its credit: a frame spends what `charge` says. The first such frame
     /// that finds the credit spent is a miss: the reader gets neither it nor a later
     /// frame, no grant changes that, and [`take`](Self::take) then gives
-    /// [`Next::Behind`](reader::Next::Behind).
-    /// [`woken`](Self::woken) names the reader once for a miss with no frame waiting,
-    /// and not for a miss while frames wait. The home does not read a missed frame
-    /// back from disk yet. Close the reader and open a new one. The new one starts at
-    /// the live tail of its open, so the frames from the miss to there reach neither
-    /// reader.
+    /// [`Next::Behind`](reader::Next::Behind). [`woken`](Self::woken) names the
+    /// reader once for a miss with no frame waiting, and not for a miss while frames
+    /// wait. The home does not read a missed frame back from disk yet. Close the
+    /// reader and open a new one. The new one starts at the live tail of its open, so
+    /// the frames from the miss to there reach neither reader.
     ///
     /// # Panics
     ///
@@ -1307,17 +1306,9 @@ mod tests {
 
     /// The seq of the index group `group` of each frame `reader` takes now.
     fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
-        iter::from_fn(|| held(shard.take(reader)))
+        iter::from_fn(|| reader::held(shard.take(reader)))
             .map(|frame| frame.range(group).expect("the index is present"))
             .collect()
-    }
-
-    /// The frame that `next` holds, if any.
-    fn held(next: reader::Next) -> Option<Frame> {
-        match next {
-            reader::Next::Frame(frame) => Some(frame),
-            reader::Next::Empty | reader::Next::Behind => None,
-        }
     }
 
     /// Whether `take` gives `reader` [`reader::Next::Behind`], not
@@ -3070,7 +3061,7 @@ mod tests {
                 write(&test, &mut shard, a, &stamps(0));
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe]);
-                let probed = held(shard.take(probe)).expect("a frame");
+                let probed = reader::held(shard.take(probe)).expect("a frame");
                 let (_, index) = probed.ends().next().expect("the index is present");
                 let index = types::frame::charge(1, index);
                 assert!(probed.charge() > index + 1);
@@ -3084,9 +3075,15 @@ mod tests {
                 }
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [probe, reader, data.into()]);
-                assert_eq!(iter::from_fn(|| held(shard.take(reader))).count(), 2);
+                assert_eq!(
+                    iter::from_fn(|| reader::held(shard.take(reader))).count(),
+                    2
+                );
                 assert!(behind(&mut shard, session));
-                assert_eq!(iter::from_fn(|| held(shard.take(data.into()))).count(), 2);
+                assert_eq!(
+                    iter::from_fn(|| reader::held(shard.take(data.into()))).count(),
+                    2
+                );
                 assert!(behind(&mut shard, data));
             });
         }

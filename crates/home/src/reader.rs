@@ -1,4 +1,4 @@
-//! The keys of the open readers of a shard.
+//! The open readers of a shard: their keys, their charge, and what a take gives.
 
 use std::mem;
 use std::ops::Range;
@@ -217,6 +217,15 @@ impl Set {
     }
 }
 
+/// The frame that `next` holds, if any.
+#[cfg(test)]
+pub(crate) fn held(next: Next) -> Option<Frame> {
+    match next {
+        Next::Frame(frame) => Some(frame),
+        Next::Empty | Next::Behind => None,
+    }
+}
+
 /// Adds the `sessions` of the index at `slot` to `keys`.
 fn wake<K: Copy + Into<delivery::Key>>(
     keys: &mut Vec<Key>,
@@ -301,12 +310,9 @@ mod tests {
         session: impl Into<delivery::Key>,
     ) -> Vec<frame::Range> {
         let session = session.into();
-        iter::from_fn(|| match set.take(place, session) {
-            Next::Frame(frame) => Some(frame),
-            Next::Empty | Next::Behind => None,
-        })
-        .map(|frame| frame.range(0).expect("the index is present"))
-        .collect()
+        iter::from_fn(|| held(set.take(place, session)))
+            .map(|frame| frame.range(0).expect("the index is present"))
+            .collect()
     }
 
     fn reader(place: u32, session: impl Into<delivery::Key>) -> Key {
