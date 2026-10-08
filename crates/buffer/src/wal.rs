@@ -450,9 +450,9 @@ pub(crate) struct Writer {
     /// first: the places a trim can move the tail to. A record of one block is the
     /// smallest, so it holds at most one boundary for each block of the area.
     ends: VecDeque<Position>,
-    /// The offsets that the last wrap skipped. The live part holds at most one
-    /// wrap that is not synced, as it is at most one area long.
-    skipped: Range<u64>,
+    /// The offsets of the last wrap skip, empty before the first. The live part
+    /// holds at most one wrap that is not synced, as it is at most one area long.
+    skip: Range<u64>,
 }
 
 impl Writer {
@@ -476,7 +476,7 @@ impl Writer {
         let wrap = (skipped > 0).then(|| self.layout.place(self.head));
         let start = self.head + skipped;
         if skipped > 0 {
-            self.skipped = self.head..start;
+            self.skip = self.head..start;
         }
         self.head = start + size;
         Ok(Plan {
@@ -561,8 +561,8 @@ impl Writer {
         let window = self.layout.window;
         let synced = self.synced_end();
         let mut queued = self.head - synced;
-        if synced <= self.skipped.start {
-            queued -= self.skipped.end - self.skipped.start;
+        if synced <= self.skip.start {
+            queued -= self.skip.end - self.skip.start;
         }
         let room = queued.max(window).saturating_mul(3);
         let spare = self.layout.area.saturating_sub(room);
@@ -924,7 +924,7 @@ impl Cursor {
             tail: self.tail,
             head: head.offset,
             ends,
-            skipped: 0..0,
+            skip: 0..0,
         };
         writer.release(tail);
         let plan = writer.append(RESTART_LEN)?;
@@ -1817,6 +1817,21 @@ mod tests {
             writer.synced(ends);
             writer.synced(next);
             assert_eq!(writer.trimmed(None), Some(at(17, 16)), "all synced");
+        }
+
+        /// A record not synced before the wrap: the skip of 3 blocks stays out.
+        #[test]
+        fn trimmed_leaves_out_a_wrap_queued_after_a_record_not_synced() {
+            let mut writer = opened(wide(), 0);
+            for chain in 1..=27 {
+                let ends = queue(&mut writer, 8, chain).expect("the ring has room");
+                writer.synced(ends);
+            }
+            writer.release(8 * 4096);
+            queue(&mut writer, 8, 28).expect("the ring has room");
+            let ends = queue(&mut writer, BODY_MAX, 99).expect("the ring has room");
+            assert_eq!(ends.wrap.map(|wrap| wrap.offset), Some(32 * 4096));
+            assert_eq!(writer.trimmed(None), Some(at(19, 18)));
         }
 
         /// The skipped blocks of a wrap are enough for the headroom, so the trim
