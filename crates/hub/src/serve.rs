@@ -155,6 +155,9 @@ async fn serve(
     loop {
         let event = {
             let mut take = pin!(session.take());
+            // `take` polls after `peer` in each poll: a grant wakes no session, so a
+            // frame that waits for credit goes out only at the take after its grant
+            // (CREDIT RULES).
             poll_fn(|cx| match peer.as_mut().poll(cx) {
                 Poll::Ready(finished) => Poll::Ready(Event::Finished(finished)),
                 Poll::Pending => take.as_mut().poll(cx).map(Event::Frame),

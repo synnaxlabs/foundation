@@ -692,6 +692,47 @@ fn sends_a_frame_once_a_credit_raises_the_grant() {
     });
 }
 
+/// A session of one commit of about three windows gets each frame. The peer sends a
+/// credit only when the session has spent the last one, so a frame waits for each.
+#[test]
+#[ignore = "waits on #68"]
+fn sends_each_frame_of_a_commit_past_the_window_as_credits_come() {
+    const LIMIT: u64 = 1 << 14;
+    const FRAMES: i64 = 6;
+    let home = |test: Test, incoming| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            for n in 0..FRAMES {
+                write_wide(&mut writer, now, n);
+            }
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(test.hub.serve(incoming).await, Ok(()));
+    };
+    session(63, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[1, 2], LIMIT).await;
+        let (mut firsts, mut spent, mut credit, mut grants) = (Vec::new(), 0, LIMIT, 0);
+        for _ in 0..FRAMES {
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            firsts.push(decoded(&got, &[STAMP])[0][0]);
+            let series = usize::try_from(got.head.series).expect("fits");
+            spent += types::frame::charge(series, got.body.len());
+            if spent >= credit {
+                credit = spent + LIMIT;
+                grants += 1;
+                peer.credit(credit).await.expect("sends the credit");
+            }
+        }
+        assert!(grants >= 2, "{grants} grants, {spent} bytes");
+        let expected: Vec<_> = (0..FRAMES).map(|n| firsts[0] + n * 1000).collect();
+        assert_eq!(firsts, expected);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
 /// Over many runs, a session that spends its window and sends no credit gets each
 /// frame before the one it missed at the next commit, in order, then `Behind` and the
 /// finish.
