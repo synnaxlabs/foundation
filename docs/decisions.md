@@ -3769,9 +3769,12 @@ How to read this record:
   second round that does not skip `breaker` on Sonnet. The director's audits run on
   Sonnet in the `audit` agent. After the end time, `laptop.monitor` compares the
   groups and reports to the person, and a new decision keeps or removes each trial.
-  The person (2026-10-08T01:13Z): "Let's try all 3 of these and see what we get",
-  recorded in https://github.com/synnaxlabs/foundation/issues/1703. Supersedes
-  FACTORY MODELS for these runs.
+  The trail checks that a script can make move into `cargo xtask review` (#1467,
+  #1211), and the `audit` agent keeps them until then. The person
+  (2026-10-08T01:13Z): "Let's try all 3 of these and see what we get". The person
+  dropped the third change (2026-10-08T01:17Z): "Ok fine". Both are recorded in
+  https://github.com/synnaxlabs/foundation/issues/1703. Supersedes FACTORY MODELS for
+  these runs.
 - **SELF MERGE (2026-10-07)** No person approves a PR to a crate. The builder merges its
   own PR through the queue when the gate, the review rounds, and CI pass; agents may run
   `gh pr merge`. The person owns only `oracles/`, `.github/`, `CLAUDE.md`, and

@@ -37,9 +37,11 @@ Check, with file and line at the merge commit:
    `cargo test -p <crate> <filter>`. Build only with `-p <crate>`, with no lock. Never
    run `--workspace`, Miri, loom, or shuttle. Run `cargo mutants` or a bench only in
    the background, under `lockf -k ~/.cache/foundation-heavy.lock`, because it waits
-   for the lock (`docs/coordination.md`, "Heavy runs on the laptop"). Tests check
-   behavior through public calls, not a private field or the `Debug` string of the
-   type under test, unless a written reason holds. They cover the failure paths, and
+   for the lock (`docs/coordination.md`, "Heavy runs on the laptop"). A bench starts
+   only when `uptime` shows a load under 8, and the verdict names the load. Tests
+   check behavior through public calls, not a private field or the `Debug` string of
+   the type under test, unless a written reason holds and the assertion is not the
+   only kill of a mutant (`docs/claude/testing.md`). They cover the failure paths, and
    each error is asserted by variant and message.
 2. **Review trail.** List each round: its reviewers, its range, and its end time. Each
    round ended before the merge. Each reviewer that `.claude/skills/review/SKILL.md`
@@ -55,14 +57,11 @@ Check, with file and line at the merge commit:
    record. No patch hides a cause, and no second guard covers a bug that one fix
    closes. A deeper option (fewer items, caller steps pulled inside) that serves each
    caller on record is a finding.
-4. **Performance.** A hot path is code that runs once per sample, series, frame, or
-   data message. A control message whose rate does not grow with the data (raft,
-   membership) is not one. When the PR changes one, it answers the six questions of
-   `docs/claude/performance.md` with measured numbers for `main` and the PR on a named
-   machine, and the `performance` reviewer ran. For a stub, the `performance` reviewer
-   states what the surface makes each message cost, with no numbers. Find a hot path
-   that the PR did not declare, and each allocation, copy, lock, or wakeup on it that
-   the rules forbid.
+4. **Performance.** A hot path is what the hot-path row of "Round 1" in
+   `.claude/skills/review/SKILL.md` says. When the PR changes one, it answers the six
+   questions of `docs/claude/performance.md`, and the `performance` reviewer ran and
+   reported what that row requires. Find a hot path that the PR did not declare, and
+   each allocation, copy, lock, or wakeup on it that the rules forbid.
 5. **Defects** that you can show: a concrete input and the wrong result, best as a test
    that fails at the merge commit.
 
