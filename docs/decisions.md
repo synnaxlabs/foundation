@@ -2173,8 +2173,10 @@ How to read this record:
   over every session, also ended ones; a send that gets room at once does not count. It
   shows that a peer's window limits the sends, and the send bench's budget line panics
   in a round where it does not grow. A count, not a span: a wait that ends at the same
-  instant gives a span of 0. Decided by architect-2 (#1958:
-  https://github.com/synnaxlabs/foundation/pull/1952#issuecomment-6066477026). A caller
+  instant gives a span of 0. Decided by `laptop.architect-2` (PR #1952, 2026-10-08
+  18:30 UTC: https://github.com/synnaxlabs/foundation/pull/1952#issuecomment-6066477026;
+  scope approved on #1958, 2026-10-08 18:33 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1958#issuecomment-6066530067). A caller
   ends a wait when it drops the future; it can then call `stop`.
   `datagram::Receiver::recv` gives no such error either: a datagram with no block drops
   and is counted, and the read waits for the next one. `hub` writes no retry for a read.
