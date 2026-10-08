@@ -255,6 +255,21 @@ fn finds_a_channel_at_a_reserved_key_misplaced() {
 }
 
 #[test]
+fn makes_no_child_of_a_region_at_a_reserved_label() {
+    let definitions = create_definitions(&[
+        ("@admin.@region", record()),
+        ("@admin.@subject", subject()),
+    ]);
+    assert_eq!(
+        check(&Prefix::ROOT, &definitions),
+        [Problem::Misplaced {
+            name: name("@admin.@region"),
+            kind: Kind::Region,
+        }]
+    );
+}
+
+#[test]
 fn gives_each_problem_a_message_and_a_fix() {
     let dangling = channel::Problem::Dangling {
         from: name("plant.pressure"),
@@ -302,6 +317,21 @@ proptest! {
         let definitions = BTreeMap::from([(key.clone(), definition)]);
         let problems = check(&prefix("plant"), &definitions);
         prop_assert_eq!(&problems[0], &Problem::Misplaced { name: key, kind });
+    }
+
+    #[test]
+    fn finds_a_definition_at_a_reserved_label_misplaced_unless_it_is_founding(
+        (kind, definition) in kinded(),
+    ) {
+        let key = kind.key("admin").unwrap().as_str().replacen("admin", "@admin", 1);
+        let key = name(&key);
+        let definitions = BTreeMap::from([(key.clone(), definition)]);
+        let problems = check(&Prefix::ROOT, &definitions);
+        let misplaced = match kind {
+            Kind::Subject | Kind::Access => None,
+            _ => Some(&Problem::Misplaced { name: key, kind }),
+        };
+        prop_assert_eq!(problems.first(), misplaced);
     }
 
     #[test]
