@@ -3744,6 +3744,8 @@ mod tests {
             use crate::reader::{Error, Opened, Position, Unsynced, complete};
 
             const HOLD: Span = Span::from_nanos(1_000_000_000);
+            /// One nanosecond less than `HOLD`.
+            const INSIDE: Span = Span::from_nanos(999_999_999);
 
             /// Opens the named complete reader `name` of `subject` on the index at
             /// slot 0, with a hold of `HOLD` and a credit of `CREDIT`.
@@ -3762,6 +3764,18 @@ mod tests {
                         CREDIT,
                         Charge::Whole,
                     )
+                    .expect("synced")
+            }
+
+            /// Opens the named latest reader `name` of `subject` on the index at slot 0.
+            fn latest(
+                shard: &mut Shard,
+                subject: &str,
+                name: &str,
+            ) -> Opened<reader::Key> {
+                let (subject, name) = (create_name(subject), create_name(name));
+                shard
+                    .open_named_latest(Slot::new(0), subject, name)
                     .expect("synced")
             }
 
@@ -3940,6 +3954,74 @@ mod tests {
                     let woken = committed(&test, &mut shard, a, &[40]).await;
                     assert_eq!(woken, []);
                     assert_eq!(missed(&mut shard, second.key, 0), []);
+                });
+            }
+
+            #[test]
+            fn takes_over_a_latest_session_with_a_latest_open() {
+                run(127, |test| async move {
+                    let set = two_indexes();
+                    let mut shard = test.shard(AREA).await;
+                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    let first = latest(&mut shard, "a", "r");
+                    write(&test, &mut shard, a, &[10]);
+                    let second = latest(&mut shard, "a", "r");
+                    assert_eq!(second.replaced, Some(first.key));
+                    assert_eq!(woken(&mut shard), []);
+                    assert_eq!(taken(&mut shard, second.key, 0), [seq(0, 1)]);
+                });
+            }
+
+            #[test]
+            fn holds_until_the_end_of_its_hold_after_a_close() {
+                run(128, |test| async move {
+                    let set = two_indexes();
+                    let mut shard = test.shard(AREA).await;
+                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    let first = named(&mut shard, "a", "r");
+                    committed(&test, &mut shard, a, &[10, 20]).await;
+                    shard.ack(first.key, live(1)).expect("forward");
+                    close(&mut shard, first.key.into());
+                    test.clock.sleep(INSIDE).await;
+                    let second = named(&mut shard, "a", "r");
+                    assert_eq!(missed(&mut shard, second.key, 0), []);
+                });
+            }
+
+            #[test]
+            fn holds_until_the_end_of_its_hold_after_a_latest_open_took_over() {
+                run(129, |test| async move {
+                    let set = two_indexes();
+                    let mut shard = test.shard(AREA).await;
+                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    let first = named(&mut shard, "a", "r");
+                    committed(&test, &mut shard, a, &[10, 20]).await;
+                    shard.ack(first.key, live(1)).expect("forward");
+                    let latest = latest(&mut shard, "a", "r");
+                    close(&mut shard, latest.key);
+                    test.clock.sleep(INSIDE).await;
+                    let second = named(&mut shard, "a", "r");
+                    assert_eq!(missed(&mut shard, second.key, 0), []);
+                });
+            }
+
+            #[test]
+            fn stays_behind_at_each_open_within_its_hold() {
+                run(130, |test| async move {
+                    let set = two_indexes();
+                    let mut shard = test.shard(AREA).await;
+                    let a = shard.open_writer(writer("w", 1, &set)).expect("synced");
+                    let mut last = named(&mut shard, "a", "r").key;
+                    committed(&test, &mut shard, a, &[10, 20]).await;
+                    shard.ack(last, live(1)).expect("forward");
+                    for _ in 0..3 {
+                        close(&mut shard, last.into());
+                        test.clock.sleep(INSIDE).await;
+                        last = named(&mut shard, "a", "r").key;
+                    }
+                    let woken = committed(&test, &mut shard, a, &[30]).await;
+                    assert_eq!(woken, []);
+                    assert_eq!(missed(&mut shard, last, 0), []);
                 });
             }
         }
