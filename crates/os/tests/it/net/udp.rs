@@ -149,6 +149,35 @@ fn a_batch_with_a_short_last_datagram_arrives_whole() {
     });
 }
 
+/// A batch goes out in one call with GSO, and the receiver takes it back with GRO.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_batch_arrives_as_one_batch() {
+    on_thread("udp-gso", || async {
+        let net = net();
+        let (mut sender, _) = loopback(&net);
+        let (_, mut receiver) = loopback(&net);
+        let contents = [5; 300];
+        let to = Transmit {
+            ecn: Some(Ecn::Ce),
+            segment: NonZeroUsize::new(100),
+            ..transmit(receiver.local(), &contents)
+        };
+        assert_eq!(send(&mut sender, &to).await, Ok(()));
+        let mut buffer = vec![0; receiver.batch_max().get() * DATAGRAM_BYTES_MAX];
+        let mut meta = [Meta::default()];
+        let mut buffers = [IoSliceMut::new(&mut buffer)];
+        let batches = timeout(
+            BOUND,
+            poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta)),
+        )
+        .await;
+        assert_eq!(batches.expect("the batch arrives"), Ok(1));
+        let [meta] = meta;
+        assert_eq!((meta.len, meta.stride, meta.ecn), (300, 100, Some(Ecn::Ce)));
+    });
+}
+
 #[test]
 fn a_datagram_of_the_byte_max_arrives() {
     on_thread("udp-max", || async {
