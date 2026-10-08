@@ -78,11 +78,14 @@ state on `main`.
   datagram with a short header for a connection of another shard signs a valid
   reset for it. The router is not built. #77 asks that it hands such a datagram
   only to the shard that the first byte names, and drops one that names no shard.
-- Open: #228 (a length prefix holds a whole block of the shard's pool before a body
-  byte arrives). A connection now holds at most its receive budget (#467), and a
-  size takes the budget of a size with no block in use (#270). A stream on another
-  connection reads while one connection holds its budget (RECV WAITS). Still open:
-  many connections before admission (#563).
+- #228 (a length prefix held a whole block of the shard's pool before a body byte
+  arrived): a prefix now takes no block. A reader keeps the bytes of a message that
+  waits for a block in one heap buffer, outside the shard's pool, and the receive
+  budget counts them (#1456). A connection holds at most its receive budget (#467),
+  and a size takes the budget of a size with no block in use (#270). A stream on
+  another connection reads while one connection holds its budget (RECV WAITS). Still
+  open: many connections before admission (#563), which also bounds the sum of
+  those heap buffers.
 - Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
   reset to each address it spoofs, with no limit), #620 (a stop after the peer's
   reset gives the peer the stream's window twice, so a peer grows the connection's
@@ -327,7 +330,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; each valid message made from the input decodes to itself |
 | `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
-| `mesh_change` | `mesh::region::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
+| `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |

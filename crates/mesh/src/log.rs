@@ -1,11 +1,11 @@
 //! The `raft` state of one region on disk: the hard state and the log entries.
 //!
 //! The log is the files `log-0`, `log-1`, and so on in one directory. A file holds
-//! records back to back, then zeros. One record is one [`Log::write`]: a header, then
-//! the body. The header holds its own check, the format version, the record's number,
-//! the length of the body, and the check of the body. Record numbers count up from 0
-//! through all files. A record that does not fit in the rest of a file starts the
-//! next file, or makes the file again, larger, when it holds no record.
+//! records back to back, then zeros. One record is one write of the log: a header,
+//! then the body. The header holds its own check, the format version, the record's
+//! number, the length of the body, and the check of the body. Record numbers count up
+//! from 0 through all files. A record that does not fit in the rest of a file starts
+//! the next file, or makes the file again, larger, when it holds no record.
 //!
 //! A header never crosses a 512-byte sector: a record whose header would cross one
 //! starts at the next sector. A power cut keeps all or none of a sector, so a header
@@ -34,7 +34,7 @@ use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
 use crate::bytes::{
-    put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
+    block, put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
 
@@ -64,7 +64,7 @@ pub(crate) struct Stored {
 
 /// Why a log call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// A file call failed.
     Files(files::Error),
     /// The pool has no block for a read or a write.
@@ -421,10 +421,9 @@ async fn write_in_blocks(
             .expect("invariant: a block of the log is one sector or more");
         let len = if over == 0 { chunk } else { over }.min(bytes.len());
         let (rest, part) = bytes.split_at(bytes.len().saturating_sub(len));
-        let mut block = pool.alloc(part.len())?;
-        block.copy_from_slice(part);
+        let block = block(pool, part)?;
         let offset = at.saturating_add(wide(rest.len()));
-        file.write_at(offset, &[block.freeze()]).await?;
+        file.write_at(offset, &[block]).await?;
         *bytes = rest;
     }
     Ok(())
@@ -740,9 +739,8 @@ mod tests {
     async fn put(node: &sim::node::Node, file: &str, offset: u64, bytes: &[u8]) {
         let path = Path::new(DIR).join(file);
         let file = node.files().open(&path, Mode::Write).await.unwrap();
-        let mut block = create_pool().alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        file.write_at(offset, &[block.freeze()]).await.unwrap();
+        let block = block(&create_pool(), bytes).unwrap();
+        file.write_at(offset, &[block]).await.unwrap();
         file.sync().await.unwrap();
     }
 
@@ -1687,11 +1685,9 @@ mod tests {
             let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 drop(open(&node).await.unwrap());
-                let mode = Mode::Create { len: 0 };
-                drop(node.files().open(&file(name), mode).await.unwrap());
-                node.files().sync_dir(Path::new(DIR)).await.unwrap();
             })
             .unwrap();
+            create_with_no_bytes(&mut sim, &node, &file(name));
             let error = stored(&mut sim, &node).unwrap_err();
             assert_eq!(error, Error::Stray { path: file(name) }, "{name}");
             assert_eq!(
@@ -1934,17 +1930,23 @@ mod tests {
     }
 
     /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
-    /// and no record, then cuts the power.
+    /// and no record, then cuts the power. With no bytes, the cut is in its create.
     fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
         sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len };
-            drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            if len > 0 {
+                let mode = Mode::Create { len };
+                drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            }
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        if len == 0 {
+            create_with_no_bytes(sim, node, &file("log-1"));
+        } else {
+            sim.crash(node, Crash::Power);
+        }
     }
 
     /// The files of a log after `create_spare`.
@@ -2007,18 +2009,51 @@ mod tests {
         lens
     }
 
-    /// Makes `log-0` with no bytes, as a crash before the allocation of a create
-    /// leaves it, then cuts the power.
+    /// Makes the file at `path` with no bytes through power crashes in its create.
+    /// The directory of `path` must be durable.
+    fn create_with_no_bytes(sim: &mut Sim, node: &sim::node::Node, path: &Path) {
+        for _ in 0..64 {
+            let (own, cut) = (node.clone(), path.to_owned());
+            let handle = node.shards().start(shard("create"), move |_| async move {
+                let mode = Mode::Create { len: SEGMENT };
+                drop(own.files().open(&cut, mode).await);
+                pending::<()>().await;
+            });
+            drop(handle.unwrap());
+            sim.run_for(Span::from_nanos(1_000)).unwrap();
+            sim.crash(node, Crash::Power);
+            let own = path.to_owned();
+            let len = sim
+                .run_on(node, move |node, _| async move {
+                    let opened = node.files().open(&own, Mode::Read).await;
+                    opened.ok().map(|file| file.len())
+                })
+                .unwrap();
+            match len {
+                Some(0) => return,
+                Some(_) => {
+                    let whole = path.to_owned();
+                    sim.run_on(node, move |node, _| async move {
+                        node.files().remove(&whole).await.unwrap();
+                        let dir = whole.parent().expect("a file in a directory");
+                        node.files().sync_dir(dir).await.unwrap();
+                    })
+                    .unwrap();
+                }
+                None => {}
+            }
+        }
+        panic!("64 power crashes in a create left no {}", path.display());
+    }
+
+    /// Makes `log-0` with no bytes through power crashes in its create.
     fn create_first_file_with_no_bytes(sim: &mut Sim, node: &sim::node::Node) {
         sim.run_on(node, |node, _| async move {
             node.files().create_dir(Path::new(DIR)).await.unwrap();
-            let mode = Mode::Create { len: 0 };
-            drop(node.files().open(&file("log-0"), mode).await.unwrap());
-            node.files().sync_dir(Path::new(DIR)).await.unwrap();
             node.files().sync_dir(Path::new("")).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        create_with_no_bytes(sim, node, &file("log-0"));
     }
 
     #[test]
