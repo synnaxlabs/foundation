@@ -1,7 +1,7 @@
 //! A `send_parts` allocates as a `send` of one block of the same bytes, plus one
 //! allocation for the copy of each stretch over 1452 bytes, one when noq-proto first
-//! takes such a copy in part, and one for each growth of the segment queue of
-//! noq-proto.
+//! takes such a copy in part, one for each growth of the segment queue of noq-proto,
+//! and one for each growth of the stretch buffer of the connection.
 
 use std::iter;
 use std::net::SocketAddr;
