@@ -2871,7 +2871,9 @@ mod port {
             assert_eq!(key >> 80, 0, "the millis of the key");
         }
 
-        /// A load makes no key until its clock has mesh time.
+        /// A load makes no key until its clock has mesh time. It calls the load
+        /// directly, because no seam of `Node::start` delays mesh time: the sim's wall
+        /// source syncs at once.
         #[test]
         fn a_load_makes_its_key_once_it_has_mesh_time() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -2898,6 +2900,33 @@ mod port {
             let key = loaded.expect("a key at mesh time").expect("a key");
             let made = read(&mut sim, &host);
             assert_eq!(made[16..32], key.as_u128().to_be_bytes());
+        }
+
+        /// A failed sync of the directory gives `Error::Directory`, so no key is
+        /// proven before its name is durable.
+        #[test]
+        fn a_failed_sync_of_the_directory_fails_the_load() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 1);
+            host.fail_file(Path::new(""), env::files::Operation::SyncDir);
+            let loaded = sim
+                .run_on(&host, |host, tasks| async move {
+                    let (driver, clock) = ::clock::Clock::new(host.clock());
+                    let wall = host.wall();
+                    tasks.spawn(async move { driver.run(wall).await });
+                    identity::load(&host.files(), &clock, &host.entropy())
+                        .await
+                        .map(|identity| identity.key)
+                })
+                .expect("the run ends");
+            assert_eq!(
+                loaded,
+                Err(Error::Directory(env::files::Error::Io {
+                    path: PathBuf::new(),
+                    operation: env::files::Operation::SyncDir,
+                    code: 5,
+                }))
+            );
         }
 
         /// A failed sync of a new key stops the node, and can leave the key in the
