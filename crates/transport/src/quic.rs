@@ -271,6 +271,12 @@ impl Endpoint {
         self.events.extend(closed);
     }
 
+    /// Whether the connection of `key` has not ended. A close ends it at once.
+    pub(crate) fn live(&self, key: connection::Key) -> bool {
+        let connection = self.connections.get(key.handle.0).and_then(Option::as_ref);
+        connection.is_some_and(|connection| connection.key == key && connection.live())
+    }
+
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
     /// with [`Error::Closed`]. Does nothing when the connection already ended: its
     /// [`Event::Closed`] is queued or was given.

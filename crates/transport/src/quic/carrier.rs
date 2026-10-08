@@ -85,13 +85,8 @@ impl Carrier {
         Ok(session)
     }
 
-    /// Waits for the next session that a peer dialed. Each that connects comes once,
-    /// and it may have ended since.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Network`] when the socket broke and each session that connected
-    /// before was given.
+    /// As [`Carrier::poll_accept`].
+    #[cfg(test)]
     pub(crate) async fn accept(&self) -> Result<Session, Error> {
         poll_fn(|cx| self.poll_accept(cx)).await
     }
@@ -107,7 +102,13 @@ impl Carrier {
         Dialer(Rc::clone(&self.0))
     }
 
-    /// As [`Carrier::accept`].
+    /// Ready with the next session that a peer dialed. Each that connects comes
+    /// once, and it may have ended since.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Network`] when the socket broke and each session that connected
+    /// before was given.
     pub(crate) fn poll_accept(
         &self,
         cx: &mut Context<'_>,
@@ -321,8 +322,6 @@ struct Slot {
     connected: u64,
     /// Why the connection ended.
     end: Option<Error>,
-    /// A caller closed the session. Its end comes when the task next polls.
-    closing: bool,
     /// The wakers of the calls that wait for the handshake or the end.
     status: Vec<Waker>,
     /// The wakers of the opens that wait for the peer to allow a stream.
@@ -370,16 +369,12 @@ impl Session {
     /// Closes the session with `code`, which the peer gets as
     /// [`Error::PeerClosed`]. Does nothing when the session ended.
     pub(crate) fn close(&self, code: Code) {
-        let mut state = self.state.borrow_mut();
-        state.slot(self.key).closing = true;
-        state.close(self.key, code);
+        self.state.borrow_mut().close(self.key, code);
     }
 
     /// Whether the session is open: no caller closed it, and it has not ended.
     pub(crate) fn live(&self) -> bool {
-        let mut state = self.state.borrow_mut();
-        let slot = state.slot(self.key);
-        !slot.closing && slot.end.is_none()
+        self.state.borrow().endpoint.live(self.key)
     }
 
     /// Waits until the session ends, and gives why.
