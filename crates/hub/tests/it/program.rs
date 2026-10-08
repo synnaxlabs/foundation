@@ -192,31 +192,32 @@ fn renews_the_hello_before_it_expires() {
 #[test]
 fn takes_requests_from_two_tasks_one_at_a_time() {
     const EACH: usize = 8;
-    let home = with_client(125, |client, _| async move {
-        let replies = |tag: u8, client: Client| async move {
-            for i in 0..EACH {
-                let body = [tag, u8::try_from(i).expect("small")];
-                assert_eq!(client.request(&body).await, Ok(reversed(&body)));
+    let home = serve_session(
+        125,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks.clone(), at, AGENT)
+                .await
+                .expect("connects");
+            let replied = Rc::new(Cell::new(0));
+            for tag in [1, 2] {
+                let (client, replied) = (client.clone(), Rc::clone(&replied));
+                tasks.spawn(async move {
+                    for i in 0..EACH {
+                        let body = [tag, u8::try_from(i).expect("small")];
+                        assert_eq!(client.request(&body).await, Ok(reversed(&body)));
+                        replied.set(replied.get() + 1);
+                    }
+                });
             }
-        };
-        let mut a = pin!(replies(1, client.clone()));
-        let mut b = pin!(replies(2, client));
-        let (a_done, b_done) = (Cell::new(false), Cell::new(false));
-        poll_fn(|cx| {
-            if !a_done.get() {
-                a_done.set(a.as_mut().poll(cx).is_ready());
-            }
-            if !b_done.get() {
-                b_done.set(b.as_mut().poll(cx).is_ready());
-            }
-            if a_done.get() && b_done.get() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-    });
+            node.clock()
+                .sleep(Span::from_nanos(10 * Span::SECOND.nanos()))
+                .await;
+            assert_eq!(replied.get(), 2 * EACH);
+        },
+    );
     let requests = home
         .served
         .iter()
@@ -356,6 +357,43 @@ fn refuses_a_response_whose_body_ends_early() {
                     client.request(b"abcd").await,
                     Err(Error::Message(wire::hub::Error::Unfinished { remain: 2 }))
                 );
+            })
+        },
+    );
+}
+
+/// `request` gives the reply once its body ends, and does not wait for the node to
+/// finish the stream.
+#[test]
+fn gives_the_reply_once_its_body_ends() {
+    by_hand(
+        130,
+        |session, node| async move {
+            let mut incoming = read_request(&session).await;
+            let sender = incoming.sender.as_mut().expect("two-way");
+            let pool = own_pool();
+            let mut response = [0; Response::LEN];
+            Response { length: 2 }.encode(&mut response);
+            for message in [&response[..], b"ba"] {
+                sender
+                    .send(pool.copy(message).expect("room"))
+                    .await
+                    .expect("sends");
+            }
+            node.clock().sleep(QUIET).await;
+            node.clock().sleep(QUIET).await;
+            sender.finish().expect("finishes");
+        },
+        |client, node| {
+            Box::pin(async move {
+                let mut reply = pin!(client.request(b"ab"));
+                let mut quiet = pin!(node.clock().sleep(QUIET));
+                let got = poll_fn(|cx| match reply.as_mut().poll(cx) {
+                    Poll::Ready(got) => Poll::Ready(Some(got)),
+                    Poll::Pending => quiet.as_mut().poll(cx).map(|()| None),
+                })
+                .await;
+                assert_eq!(got, Some(Ok(b"ba".to_vec())));
             })
         },
     );
