@@ -24,7 +24,7 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 use super::region::{OTHER, TIME};
 use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
 use super::{
-    AREA, BODY_MAX, I64, POOL, Test, fill, name, samples, spec_channel, write,
+    AREA, BODY_MAX, I64, POOL, Test, definition, fill, name, samples, write,
     write_series, write_wide,
 };
 
@@ -283,7 +283,7 @@ fn a_reader_of_a_channel_that_the_home_does_not_know_is_refused_with_unknown() {
             hub_home(node, tasks, transport, steps, |_| async {}).await;
         },
         |test, _| async move {
-            let extra = (name("extra"), spec_channel(9, DataType::Sample(I64), 1));
+            let extra = (name("extra"), definition(9, DataType::Sample(I64), 1));
             test.hub.define([(&extra.0, &extra.1)]);
             let names = [name("extra")];
             let error = test
@@ -638,7 +638,7 @@ fn a_reader_stops_the_stream_as_malformed_when_a_body_message_is_longer_than_the
 fn define_many(test: &Test, count: u128) -> Vec<types::name::Name> {
     let channels: Vec<_> = (100..100 + count)
         .map(|key| {
-            let channel = spec_channel(key, DataType::Sample(I64), 1);
+            let channel = definition(key, DataType::Sample(I64), 1);
             (name(&format!("extra-{key}")), channel)
         })
         .collect();
