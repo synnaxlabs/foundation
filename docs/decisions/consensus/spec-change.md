@@ -56,7 +56,7 @@
   problems at a later build follows the rule of a committed spec with problems (#1741).
   No refusal of the founding at open decided by `laptop.architect`, 2026-10-08T15:42:09Z
   (https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498), which
-  supersedes "runs no check of `Config::founding`" in
+  changes "runs no check of `Config::founding`" in
   https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151. Decided by
   `laptop.architect`: chunks through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
