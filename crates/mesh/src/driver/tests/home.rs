@@ -400,23 +400,26 @@ fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
     });
 }
 
-// On a node that leads, the group holds a waker of a call only while the call waits
-// for the outcome of its entry. A waker or a floor that stays only takes memory,
-// which no call shows, so this test reads the group.
+// A floor that stays only takes memory, which no call shows, so this test reads it.
 #[test]
 fn a_dropped_call_that_waits_for_its_entry_leaves_no_waker_and_no_floor() {
     solo(|node, tasks| async move {
         let mesh = create_leader(&node, &tasks).await;
+        let held = Arc::new(Idle);
+        let waker = Waker::from(Arc::clone(&held));
+        let mut cx = Context::from_waker(&waker);
         let mut call = Box::pin(mesh.set_home(INDEX, key(2)));
-        let clock = node.clock();
-        while mesh.group.borrow().calls.is_empty() {
-            assert_eq!(now(call.as_mut()).await, Poll::Pending);
-            clock.sleep(Span::MILLISECOND).await;
-        }
-        assert_eq!(mesh.group.borrow().calls.len(), 1);
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        node.clock().sleep(TICK).await;
+        // The write of the entry ended, and the group woke the call: only `held` and
+        // `waker` are left.
+        assert_eq!(Arc::strong_count(&held), 2);
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        // The group holds a waker while the call waits for the outcome of its entry.
+        assert_eq!(Arc::strong_count(&held), 3);
         assert_ne!(mesh.group.borrow().applied, Applied::default());
         drop(call);
-        assert!(mesh.group.borrow().calls.is_empty());
+        assert_eq!(Arc::strong_count(&held), 2);
         assert_eq!(mesh.group.borrow().applied, Applied::default());
     });
 }
