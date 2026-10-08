@@ -204,7 +204,7 @@ pub enum Peer {
 mod tests {
     use std::future::poll_fn;
     use std::num::NonZeroUsize;
-    use std::pin::pin;
+    use std::pin::{Pin, pin};
     use std::rc::Rc;
 
     use types::time::Span;
@@ -238,6 +238,93 @@ mod tests {
 
     #[test]
     fn a_dropped_recv_gives_its_wait_for_room_to_the_next_stream() {
+        dropped_wait(Read::Recv);
+    }
+
+    #[test]
+    fn a_dropped_recv_into_gives_its_wait_for_room_to_the_next_stream() {
+        dropped_wait(Read::RecvInto);
+    }
+
+    #[test]
+    fn a_too_large_message_keeps_its_room_until_a_read_or_a_reset_takes_it() {
+        // The receive budget is the window plus the largest message: 2^17 bytes. A
+        // message that never arrives holds 65,000 of it, so 50,000 more fit once.
+        const LEN: usize = 50_000;
+        let narrow = |config| Config {
+            window_bytes: 1 << 16,
+            ..config
+        };
+        let (mut sim, ..) = testing::sessions(
+            0,
+            narrow,
+            |side| async move {
+                side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+                let complete = 2;
+                let header = [[complete].as_slice(), &message::prefix(65_000)].concat();
+                side.session.0.raw(&header);
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                let mut senders: Vec<crate::stream::Sender> = Vec::new();
+                for fill in 1..=4 {
+                    if fill > 2 {
+                        side.node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
+                    }
+                    if fill == 4 {
+                        senders.remove(2).reset(Code(16));
+                    }
+                    let opened = side.session.open_sender(Class::Complete).await;
+                    let mut sender = opened.expect("a stream");
+                    let block = side.block(&vec![fill; LEN]);
+                    sender.send(block).await.expect("sent");
+                    senders.push(sender);
+                }
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let (mut short, mut buffer) = ([0; 100], vec![0; LEN]);
+                let over = Error::TooLarge {
+                    bytes: LEN,
+                    bytes_max: 100,
+                };
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                let mut held = side.session.accept().await.expect("a stream").receiver;
+                assert!(poll_once(pin!(held.recv())).await.is_none());
+                let mut first = side.session.accept().await.expect("a stream").receiver;
+                let mut second =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(first.recv_into(&mut short).await, Err(over.clone()));
+                let mut waiting = Box::pin(second.recv_into(&mut buffer));
+                assert!(poll_once(waiting.as_mut()).await.is_none());
+                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                assert!(poll_once(waiting.as_mut()).await.is_none());
+                let read = first.recv_into(&mut vec![0; LEN]).await;
+                assert_eq!(read, Ok(Some(LEN)));
+                assert_eq!(waiting.await, Ok(Some(LEN)));
+                assert_eq!(buffer, vec![2; LEN]);
+                let mut third = side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(third.recv_into(&mut short).await, Err(over.clone()));
+                side.node.clock().sleep(spans(Span::MILLISECOND, 400)).await;
+                let read = third.recv_into(&mut short).await;
+                assert_eq!(read, Err(Error::Reset { code: Code(16) }));
+                let mut fourth =
+                    side.session.accept().await.expect("a stream").receiver;
+                assert_eq!(fourth.recv_into(&mut buffer).await, Ok(Some(LEN)));
+                assert_eq!(buffer, vec![4; LEN]);
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// The read that a test runs.
+    #[derive(Clone, Copy)]
+    enum Read {
+        Recv,
+        RecvInto,
+    }
+
+    fn dropped_wait(read: Read) {
         // The receive budget is the window plus the largest message: 2^17 bytes.
         let narrow = |config| Config {
             window_bytes: 1 << 16,
@@ -259,7 +346,7 @@ mod tests {
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
             },
-            |side| async move {
+            move |side| async move {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 let mut receivers = Vec::new();
                 for _ in 0..4 {
@@ -273,8 +360,16 @@ mod tests {
                 assert!(poll_once(pin!(first.recv())).await.is_none());
                 assert!(poll_once(pin!(second.recv())).await.is_none());
                 // Boxed, so that the drop below ends the future, not only a borrow.
-                let mut waiting = Box::pin(waits.recv());
-                assert!(poll_once(waiting.as_mut()).await.is_none());
+                let mut buffer = vec![0; 1 << 16];
+                let mut waiting: Pin<Box<dyn Future<Output = _>>> = match read {
+                    Read::Recv => {
+                        Box::pin(async { waits.recv().await.map(|m| m.is_some()) })
+                    }
+                    Read::RecvInto => Box::pin(async {
+                        waits.recv_into(&mut buffer).await.map(|len| len.is_some())
+                    }),
+                };
+                assert!(poll_once(Pin::new(&mut waiting)).await.is_none());
                 // The small message fits, but waits behind the one before it.
                 assert!(poll_once(pin!(small.recv())).await.is_none());
                 drop(waiting);

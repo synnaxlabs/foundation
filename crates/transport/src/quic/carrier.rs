@@ -520,6 +520,30 @@ impl Session {
         })
     }
 
+    /// Ready with the length of the next whole message of `receiver`'s stream, which
+    /// it copies to the start of `buffer`, `None` after the last, or with the error.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::read_into`].
+    pub(crate) fn poll_read_into(
+        &self,
+        cx: &mut Context<'_>,
+        receiver: &mut Receiver,
+        buffer: &mut [u8],
+    ) -> Poll<Result<Option<usize>, Error>> {
+        self.with(|endpoint, clock, slot, _| {
+            match endpoint.read_into(clock.now(), receiver, buffer) {
+                Ok(Poll::Pending) => {
+                    register_one(&mut slot.reading, receiver.key().id, cx.waker());
+                    Poll::Pending
+                }
+                Ok(Poll::Ready(len)) => Poll::Ready(Ok(len)),
+                Err(error) => Poll::Ready(Err(error)),
+            }
+        })
+    }
+
     /// Ends a read of `receiver` that waits, as [`Endpoint::end_wait`] does, and its
     /// wait for a block.
     pub(crate) fn end_wait(&self, receiver: &mut Receiver) {

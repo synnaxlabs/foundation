@@ -7,10 +7,10 @@
 //! 64 chunks makes no more allocations than a list that grows 1.5 times or more from
 //! 1 slot to 64, and one of 65 chunks makes one more: the buffer, and no larger list.
 //! A second copy makes none, and a read of a short message after it makes none: the
-//! reader keeps its list.
+//! reader keeps its list. A `recv_into` makes the same allocations as a `recv`.
 
 use std::net::SocketAddr;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -53,6 +53,14 @@ type Read = (Poll<Result<Option<Vec<u8>>, Error>>, u64, u64);
 /// The [`Read`] of the long message and of the short one after it.
 type Out = [Read; 2];
 
+/// How the server reads.
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Recv,
+    /// `recv_into` a buffer made before the count.
+    Into,
+}
+
 pub(crate) fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
     let cases = [
@@ -61,28 +69,50 @@ pub(crate) fn main() {
         (240_000, SECOND, 1),
         (220_000, LAST, 0),
     ];
+    let recv = check(&pattern, &cases, Mode::Recv);
+    let into = check(&pattern, &cases, Mode::Into);
+    assert_eq!(into, recv, "a recv_into makes the allocations of a recv");
+}
+
+/// Runs each case of a message of `len` bytes with the pattern at `at`, whose read
+/// frees `copies` heap buffers, with reads in `mode`. Returns the allocations of
+/// each case's long read.
+fn check(pattern: &[u8], cases: &[(usize, usize, u64)], mode: Mode) -> Vec<u64> {
     let mut allocations = Vec::new();
-    for (len, at, copies) in cases {
+    for &(len, at, copies) in cases {
         let [(read, freed, allocated), (next, _, next_allocated)] =
-            run(&pattern, len, at);
+            run(pattern, len, at, mode);
         allocations.push(allocated);
         let Poll::Ready(Ok(Some(read))) = read else {
-            panic!("{len} bytes: the read gave {read:?}");
+            panic!("{mode:?}, {len} bytes: the read gave {read:?}");
         };
-        assert_eq!(read.len(), len, "{len} bytes: the message's length");
+        assert_eq!(
+            read.len(),
+            len,
+            "{mode:?}, {len} bytes: the message's length"
+        );
         let end = at.saturating_add(PATTERN);
-        assert_eq!(read[at..end], pattern, "{len} bytes: the pattern");
+        assert_eq!(
+            read[at..end],
+            *pattern,
+            "{mode:?}, {len} bytes: the pattern"
+        );
         assert_eq!(
             freed, copies,
-            "{len} bytes: the heap buffers that the read frees with the whole pattern"
+            "{mode:?}, {len} bytes: the buffers with the pattern that the read frees"
         );
         let Poll::Ready(Ok(Some(next))) = next else {
-            panic!("{len} bytes: the read of the short message gave {next:?}");
+            panic!(
+                "{mode:?}, {len} bytes: the read of the short message gave {next:?}"
+            );
         };
-        assert_eq!(next, [0x5a; SHORT], "{len} bytes: the short message");
+        assert_eq!(
+            next, [0x5a; SHORT],
+            "{mode:?}, {len} bytes: the short message"
+        );
         assert_eq!(
             next_allocated, 0,
-            "{len} bytes: the reader keeps its list for the short message"
+            "{mode:?}, {len} bytes: the reader keeps its list for the short message"
         );
     }
     let [full, past, second, _] = allocations[..] else {
@@ -99,17 +129,18 @@ pub(crate) fn main() {
         "the copy of a full list allocates only its buffer"
     );
     assert_eq!(second, past, "a second copy allocates nothing");
+    allocations
 }
 
 /// The [`Out`] of the server's reads of a message of `len` bytes with `pattern` at
-/// `at`, then of a short message, on one stream.
-fn run(pattern: &[u8], len: usize, at: usize) -> Out {
+/// `at`, then of a short message, on one stream, with reads in `mode`.
+fn run(pattern: &[u8], len: usize, at: usize, mode: Mode) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
     let out = Arc::new(Mutex::new([(Poll::Pending, 0, 0), (Poll::Pending, 0, 0)]));
-    serve(&server, pattern.to_vec(), Arc::clone(&out));
+    serve(&server, pattern.to_vec(), mode, Arc::clone(&out));
     let message = pattern.to_vec();
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
@@ -133,8 +164,8 @@ fn run(pattern: &[u8], len: usize, at: usize) -> Out {
 }
 
 /// Starts the server on `node`. Once both messages are in, it reads each in one poll
-/// and puts the [`Out`] of those polls for `pattern` in `out`.
-fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
+/// in `mode` and puts the [`Out`] of those polls for `pattern` in `out`.
+fn serve(node: &Node, pattern: Vec<u8>, mode: Mode, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -146,21 +177,41 @@ fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         own.clock().sleep(READ).await;
+        let mut buffer = vec![0; 240_000];
         for read in out.lock().expect("not poisoned").iter_mut() {
-            let ((poll, freed), allocated) = {
-                let mut recv = pin!(receiver.recv());
-                let mut cx = Context::from_waker(Waker::noop());
-                ALLOCATOR.count(|| {
-                    ALLOCATOR.freed_holding(&pattern, || recv.as_mut().poll(&mut cx))
-                })
+            *read = match mode {
+                Mode::Recv => {
+                    let (poll, freed, allocated) =
+                        once(&pattern, pin!(receiver.recv()));
+                    let message =
+                        poll.map(|poll| poll.map(|block| block.map(|b| b.to_vec())));
+                    (message, freed, allocated)
+                }
+                Mode::Into => {
+                    let (poll, freed, allocated) =
+                        once(&pattern, pin!(receiver.recv_into(&mut buffer)));
+                    let message = poll.map(|poll| {
+                        poll.map(|len| len.map(|len| buffer[..len].to_vec()))
+                    });
+                    (message, freed, allocated)
+                }
             };
-            let message =
-                poll.map(|poll| poll.map(|block| block.map(|block| block.to_vec())));
-            *read = (message, freed, allocated);
         }
         drop(receiver);
     });
     drop(started.expect("a shard"));
+}
+
+/// One poll of `read`, the heap blocks that hold `pattern` that it frees, and the
+/// allocations it makes.
+fn once<T>(
+    pattern: &[u8],
+    read: Pin<&mut impl Future<Output = T>>,
+) -> (Poll<T>, u64, u64) {
+    let mut cx = Context::from_waker(Waker::noop());
+    let ((poll, freed), allocated) =
+        ALLOCATOR.count(|| ALLOCATOR.freed_holding(pattern, || read.poll(&mut cx)));
+    (poll, freed, allocated)
 }
 
 /// A block of `len` bytes from `pool` with `pattern` at `at`.
