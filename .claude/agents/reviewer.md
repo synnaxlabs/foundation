@@ -52,25 +52,26 @@ Check:
   covers? Does a test assert through a field or call that is not public, or compare the
   `Debug` string of the type under test, with no written reason that holds? Name the
   public call that shows the same behavior. When the PR replaces such a compare, or
-  another compare of a whole value, name each part that the old compare checked, and the
-  test that now fails when a call changes it. A part with no test is a finding. When a
-  test asserts through a field or call that is not public, or compares the `Debug`
-  string, with a reason that holds, list the mutants that CI makes in each file that it
-  checks: write `gh pr diff <n>` to `pr.patch` in the worktree, then run `cargo mutants
-  --list --in-diff pr.patch --file <file>`, which builds nothing. Make by hand each one,
-  such as `<` to `<=`, and run the other tests of the crate with `--all-features`, as CI
-  does. A change that only such a test catches is a finding, unless a
-  `.cargo/mutants.toml` entry gives its reason (`testing.md`). When the PR exists to
-  remove work, which test fails if it is reverted? For a bug fix, revert the fix, run
-  its regression test, and name the call chain through which it fails. A test that
-  passes, or whose call chain does not reach the cause that the PR names, is a finding.
-  For a fix of a test that fails only sometimes, also name the line of the regression
-  test that makes the cause happen: a test that needs timing, load, or the state of the
-  runner to fail is a finding. Do both again in each round whose range changes the fix
-  or that test. Does each new `.cargo/mutants.toml` entry meet the rule in `testing.md`?
-  Does an entry skip code that the PR adds or changes, when the entry is wider than one
-  function or its reason ends with the PR (a stub that it fills)? The PR narrows or
-  removes that entry.
+  another compare of a whole value, or changes the input or the expected value of an
+  assertion, name each part or case that the old assertion checked, and the test that
+  now fails when a call changes it. A part or case that no `cargo test` test pins is a
+  finding. When a test asserts through a field or call that is not public, or compares
+  the `Debug` string, with a reason that holds, list the mutants that CI makes in each
+  file that it checks: write `gh pr diff <n>` to `pr.patch` in the worktree, then run
+  `cargo mutants --list --in-diff pr.patch --file <file>`, which builds nothing. Make by
+  hand each one, such as `<` to `<=`, and run the other tests of the crate with
+  `--all-features`, as CI does. A change that only such a test catches is a finding,
+  unless a `.cargo/mutants.toml` entry gives its reason (`testing.md`). When the PR
+  exists to remove work, which test fails if it is reverted? For a bug fix, revert the
+  fix, run its regression test, and name the call chain through which it fails. A test
+  that passes, or whose call chain does not reach the cause that the PR names, is a
+  finding. For a fix of a test that fails only sometimes, also name the line of the
+  regression test that makes the cause happen: a test that needs timing, load, or the
+  state of the runner to fail is a finding. Do both again in each round whose range
+  changes the fix or that test. Does each new `.cargo/mutants.toml` entry meet the rule
+  in `testing.md`? Does an entry skip code that the PR adds or changes, when the entry
+  is wider than one function or its reason ends with the PR (a stub that it fills)? The
+  PR narrows or removes that entry.
 - Oracles: does the PR remove a test or assertion, loosen a threshold, raise a
   baseline, or delete a fuzz input? If so, argue for fixing the code instead.
 - Fuzz: for each decoder of outside input that the PR adds or changes (bytes from a
