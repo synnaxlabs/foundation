@@ -2710,13 +2710,17 @@ mod tests {
     // Bytes too few for a header that are not zeros are not the end of the log.
     #[test]
     fn refuses_a_short_file_that_is_not_zeros() {
-        let mut last = [0_u8; 10];
-        last[9] = 1;
+        // One byte that is not zero, at each place.
+        let shorts = (0..10).map(|at| {
+            let mut short = [0_u8; 10];
+            short[at] = 0xAB;
+            short
+        });
         // `log-0` with no record, then with record 0.
         let cases = [(0, "log-0"), (1, "log-1")];
         for ((records, blamed), short) in cases
             .into_iter()
-            .flat_map(|case| [[0xAB; 10], last].map(|short| (case, short)))
+            .flat_map(|case| shorts.clone().map(move |short| (case, short)))
         {
             let (mut sim, node) = create_node(0);
             let names = sim
