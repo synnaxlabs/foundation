@@ -341,7 +341,9 @@ fn unknown(
     members: &BTreeSet<Name>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (node, at) in &found.nodes {
+    let writers = found.writers.iter().map(|writer| (&writer.node, writer.at));
+    let placed = found.nodes.iter().map(|(node, at)| (node, *at));
+    for (node, at) in writers.chain(placed) {
         if members.contains(node) {
             continue;
         }
@@ -354,7 +356,7 @@ fn unknown(
         };
         diagnostics.push(Diagnostic::new(
             UNKNOWN_NODE,
-            *at,
+            at,
             format!("no node of the mesh is named `{node}`"),
             fix,
         ));

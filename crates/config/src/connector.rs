@@ -37,7 +37,6 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     };
     let node = node.ok()?;
     let at = span(block, "node");
-    found.nodes.push((node.clone(), at));
     found.writers.push(Writer {
         node: node.clone(),
         at,

@@ -187,7 +187,7 @@ struct Found<'a> {
     blocks: BTreeMap<Name, &'a Block>,
     /// Each connector whose kind accepts its config, in the order of the check.
     writers: Vec<Writer>,
-    /// Each node that a checked `connector` or `placement` block names, with its span.
+    /// Each node that a checked `placement` block names, with its span.
     nodes: Vec<(Name, Option<Span>)>,
 }
 
