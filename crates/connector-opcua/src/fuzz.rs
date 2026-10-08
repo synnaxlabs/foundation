@@ -279,6 +279,15 @@ mod tests {
     }
 
     #[test]
+    fn decode_pads_by_the_length_of_the_encoding() {
+        let mut data = vec![u8::try_from(VARIANT).unwrap(), 0, 0x96, 100, 0, 0, 0];
+        data.resize(data.len() + 100 * 3, 0);
+        // 100 zeros: the 4 bytes of each value that #435 needs.
+        data.resize(data.len() + 100, 0);
+        decode(&data);
+    }
+
+    #[test]
     fn two_bytes_pick_each_type_by_the_remainder() {
         let name = |data: &[u8]| pick(data).map(|(t, input)| (t.name(), input.len()));
         assert_eq!(name(&[]), None);

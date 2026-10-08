@@ -8,7 +8,9 @@
   with as many zeros after it as its length, and the decode must read exactly the
   encoding; a unit test fails when the fix lands. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1885#issuecomment-6068183610,
-  2026-10-08 20:12 UTC). The module is behind the feature `sim`, as `bench` is, and
+  2026-10-08 20:12 UTC), and the count of zeros and the exact read in
+  https://github.com/synnaxlabs/foundation/issues/1885#issuecomment-6070410555
+  (2026-10-08 22:34 UTC). The module is behind the feature `sim`, as `bench` is, and
   `fuzz/Cargo.toml` turns `sim` on. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1885#issuecomment-6068286559,
   2026-10-08 20:18 UTC). Two bytes, a little-endian `u16`, pick the type, so each of
