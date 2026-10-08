@@ -52,8 +52,13 @@ Searches skip `patches/` (`.ignore`): to search a copy, give its path or use
 `rg --no-ignore`. No check yet keeps the two `[patch.crates-io]` tables equal (#1867).
 
 CI does not run the tests of a copy and makes no mutants in it. So the PR that changes
-a copy lists the mutants of its diff, made by hand, and the test that kills each. A
-copy is a path package, so `cargo deny` does not check it against advisories (#1867).
+a copy lists each mutant that the `cargo mutants` operators make on each changed line
+of the copy (a function body replaced with a default, each binary and comparison
+operator changed, each `!` deleted), with the test outside the copy that kills it. The
+`breaker` of the PR runs each mutant on the list. Decided by laptop.architect-2,
+2026-10-08T11:16:31Z:
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058668724. A copy is a
+path package, so `cargo deny` does not check it against advisories (#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
