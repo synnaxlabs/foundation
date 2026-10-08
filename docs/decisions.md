@@ -5276,45 +5276,54 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1854#issuecomment-6057726181), one
   decoder for each side that takes the kind of the stream from its first message.
 - **HUB LINK (2026-10-08)** `Hub::link(session)` gives a `hub::Link` for one transport
-  session, and `node` calls `Link::serve` for each hub stream in accept order. `serve`
-  takes the role of the stream at the call: the first stream of a client session is
-  its hello stream, and each later one a request stream. `hub::Config` gets `node`
-  (the `via` that `admit` checks), `time` (`clock::Reader`), and `entropy` (the
-  nonces). The link waits for a hello's expiry with `clock::Reader::reach` (CLOCK
-  REACH), so `hub` knows nothing of how mesh time moves against the monotonic clock,
-  and gets no second clock. A link has one open request: it frees the request when
-  `Reply::send` is called or the `Reply` drops, before the first byte of the response,
-  so a client that sends its next request when a reply ends never gets `MALFORMED`.
-  `Reply::send` panics on a body over `BODY_BYTES_MAX`, a precondition that the maker of
-  the body checks. Each order error names its cause, though both stop with
-  `MALFORMED`: `serve::Error::Unadmitted` (a request stream before an admitted hello)
-  and `Pending` (a request while one waits for its reply). A message of the wrong kind
-  for its stream, such as a hello on a request stream, is `serve::Error::Message` with
-  `wire::hub::Error::Kind` (`laptop.architect`, 2026-10-08T15:38:46Z,
+  session. `node` calls `Link::serve` for each hub stream once it reads its header. On
+  a client link, the first stream given to `serve` is its hello stream, and each later
+  one a request stream; `serve` takes the role at the call (`laptop.architect`,
+  2026-10-08T18:56:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  `hub::Config` gets `node` (the `via` that `admit` checks), `time` (`clock::Reader`),
+  and `entropy` (the nonces). The link waits for a hello's expiry with
+  `clock::Reader::reach` (CLOCK REACH), so `hub` knows nothing of how mesh time moves
+  against the monotonic clock, and gets no second clock. A link has one open request:
+  it frees the request when `Reply::send` is called or the `Reply` drops, before the
+  first byte of the response, so a client that sends its next request when a reply
+  ends never gets `MALFORMED`. `Reply::send` panics on a body over `BODY_BYTES_MAX`, a
+  precondition that the maker of the body checks. Each order error names its cause,
+  though both stop with `MALFORMED`: `serve::Error::Unadmitted` (a request stream
+  before an admitted hello) and `Pending` (a request while one waits for its reply).
+  A message of the wrong kind for its stream, such as a hello on a request stream, is
+  `serve::Error::Message` with `wire::hub::Error::Kind` (`laptop.architect`,
+  2026-10-08T15:38:46Z,
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704), and a
   body that ends early is `Message` with `Unfinished` (`laptop.architect`,
   2026-10-08T16:52:55Z,
   https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697).
   Supersedes item 5 (`serve::Error::Hello`) of
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738.
-  `Link` is not `Clone`. Lost: a `Config::clock` beside `time`, with a loop in `hub`
-  that knows the slew; more than one open request, which no wire needs now. Decided
-  by `laptop.architect` at 2026-10-08T11:24:07Z
+  Lost: a `Config::clock` beside `time`, with a loop in `hub` that knows the slew;
+  more than one open request, which no wire needs now. Decided by `laptop.architect`
+  at 2026-10-08T11:24:07Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
-  `Hub::rules` sets the `access::Rules` that each later hello and request is checked
+  `Link` is `Clone`, and a clone is the same link, so the future of each stream holds
+  one (NODE PORT). This replaces item 6 of that comment, "`Link` needs no `Clone`"
+  (`laptop.architect`, 2026-10-08T18:56:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  `Hub::set_rules` sets the `access::Rules` that each later hello and request is checked
   against, and `node` calls it with the rules of each spec (#1951). Until then, a hub
   has `access::Rules::default()`, which knows no subject, so it refuses each hello
   with `Unknown`. Lost: `hub::Config::rules`, a second way to set one state, because the
   rules change at run time through `Mesh::apply`. Decided by `laptop.architect`
   (2026-10-08T18:05:25Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140).
+  The name `set_rules`: `laptop.architect`, 2026-10-08T18:56:15Z
+  (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
   A rule of the client wire, which each SDK follows: a program sends its first request
-  once the challenge after its hello comes, because the node sends it only after it
-  admits the hello. `Session::accept` gives streams by class, not in open order, so
-  this rule also makes the hello stream the first that the node takes. A program that
-  breaks it gets `Unadmitted` or `Message` with `Kind`. Lost: a node that holds each
-  request stream until it admits a hello, which adds a queue, its bound, and its
-  timeout to `hub` to save one round trip for each session. Decided by
+  once the challenge after its hello comes. The node sends it only after it admits
+  the hello, so this rule also makes the hello stream the first that `Link::serve`
+  gets, in any order of the headers. A program that breaks it gets `Unadmitted` or
+  `Message` with `Kind`. Lost: a node that holds each request stream until it admits
+  a hello, which adds a queue, its bound, and its timeout to `hub` to save one round
+  trip for each session. Decided by
   `laptop.architect` (2026-10-08T18:16:38Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the

@@ -39,8 +39,8 @@ pub mod home {
 }
 
 /// The hub of one shard: it opens writer and reader sessions on the indexes of the
-/// shard's home. It is not `Send`: each call is on the shard's thread. Clones share
-/// it.
+/// shard's home, and serves each hub stream of a transport session through a
+/// [`Link`]. It is not `Send`: each call is on the shard's thread. Clones share it.
 #[derive(Clone, Debug)]
 pub struct Hub(Rc<RefCell<State>>);
 
@@ -81,7 +81,7 @@ struct State {
     node: types::node::Key,
     time: clock::Reader,
     entropy: env::entropy::Entropy,
-    /// Empty, so refusing each hello, until [`Hub::rules`] first runs.
+    /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
 }
 
@@ -188,7 +188,7 @@ impl Hub {
     /// Sets the access rules that each later hello and request is checked against.
     /// Until the first call, the rules know no subject, so they refuse each hello with
     /// `access::proof::Error::Unknown`.
-    pub fn rules(&self, rules: access::Rules) {
+    pub fn set_rules(&self, rules: access::Rules) {
         self.0.borrow_mut().rules = rules;
     }
 

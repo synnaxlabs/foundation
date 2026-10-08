@@ -70,7 +70,8 @@ struct Home {
 }
 
 /// Runs one client session: the home's node makes a [`Test`] hub, with mesh time when
-/// `synced`, and serves each hub stream of the session on one `hub::Link`. It replies
+/// `synced`, and serves each hub stream of the session on one `hub::Link`, once it
+/// reads the stream's header in the stream's own future, as `node` does. It replies
 /// to each request with its body reversed, after [`HOLD`]. The program's node gives
 /// its end to `program`.
 fn session<P>(
@@ -84,8 +85,8 @@ where
     session_with(seed, synced, POOL, Some(rules()), program)
 }
 
-/// As [`session`], with a home pool of `pool` bytes, and `rules` given to `Hub::rules`
-/// unless `None`.
+/// As [`session`], with a home pool of `pool` bytes, and `rules` given to
+/// `Hub::set_rules` unless `None`.
 fn session_with<P>(
     seed: u64,
     synced: bool,
@@ -117,20 +118,20 @@ where
             test.sync().await;
         }
         if let Some(rules) = rules {
-            test.hub.rules(rules);
+            test.hub.set_rules(rules);
         }
         let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let session = transport.accept().await.expect("a session");
         let link = test.hub.link(session.clone());
         while let Ok(mut incoming) = session.accept().await {
-            let header = incoming.receiver.recv().await.expect("a header");
-            let header = header.expect("the header comes before the finish");
-            assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
-            drop(header);
-            let serve = link.serve(incoming);
-            let (kept, clock) = (Arc::clone(&kept), node.clock());
+            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
             tasks.spawn(async move {
-                let got = answer(serve, &clock).await;
+                let header = incoming.receiver.recv().await.expect("a header");
+                let header = header.expect("the header comes before the finish");
+                let decoded = wire::header::decode(&header);
+                assert_eq!(decoded, Ok((Protocol::Hub, &[][..])));
+                drop(header);
+                let got = answer(link.serve(incoming), &clock).await;
                 kept.lock().expect("not poisoned").push(got);
             });
         }
