@@ -4636,8 +4636,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). A tie,
   with no span or with one `Source` in two Documents, has no defined choice (#1886 round
   4, 2026-10-08T14:35:32Z,
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090). The
-  problems come in `Source` order, then in source order, as the problems of `check` do.
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062234090), approved
+  as merged (`laptop.architect`, 2026-10-08T15:21:08Z,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063133042), which
+  changes the text of
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062122870. Trigger:
+  before a path makes Documents with no spans, such as an SDK that builds a spec in
+  code, PLAN SURFACE states the order on a tie (the order of `documents`), with a test
+  for the writer, for the connector of a name, and for the name of a key. The problems
+  come in `Source` order, then in source order, as the problems of `check` do.
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
   `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
   (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
