@@ -149,8 +149,8 @@ impl tcp::Driver for Stream {
             .take_while(|buffer| buffer.is_empty())
             .count();
         let buffers = &buffers[skip..];
-        self.socket.bind("stream");
         if buffers.is_empty() {
+            self.socket.bind("stream");
             return Poll::Ready(Ok(0));
         }
         let peer = self.peer;
