@@ -3072,8 +3072,34 @@ fn an_open_refuses_a_carried_tail_that_is_not_the_tail_of_the_records() {
     }
 }
 
+/// A carried `given` of `u64::MAX`, then a data record with an entry with no
+/// samples at the carried seq. The open refuses the carry record, and does not
+/// count past `u64::MAX`.
+#[test]
+fn an_open_refuses_a_carried_given_that_no_ring_holds() {
+    run(161, Memory::default(), |shard| async move {
+        shard.create_two_records().await;
+        shard.put_carry(3 * BLOCK, &carry_body(&[carried(2, 4, 5, None)]));
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let b = slots.assign(key(2));
+        assert_eq!(buffer.durable(b, Path::Live), tail(4, None));
+        let empty = entry(2, b, Path::Live, 4, 0, None, Parts::default());
+        buffer.append([empty]).expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let kind = to_usize(AREA_START + 5 * BLOCK) + 8;
+        assert_eq!(shard.memory.bytes(RING)[kind], DATA, "the data record");
+        shard.put_carry(3 * BLOCK, &carry_body(&[carried(2, 4, u64::MAX, None)]));
+        shard.seal(4 * BLOCK);
+        shard.open_invalid(ring, 3 * BLOCK).await;
+    });
+}
+
 /// A carry record of the wrong shape: no count, a count over the tails it holds,
-/// bytes after its tails, a wrong path byte, and a wrong presence byte.
+/// bytes after its tails, a wrong path byte, a `given` over the maximum, and a wrong
+/// presence byte.
 #[test]
 fn an_open_refuses_a_carry_record_of_the_wrong_shape() {
     let one = carry_body(&[carried(2, 4, 0, None)]);
@@ -3089,6 +3115,7 @@ fn an_open_refuses_a_carry_record_of_the_wrong_shape() {
         short,
         [one.clone(), vec![0]].concat(),
         with(16, 2),
+        with(32, 0x80),
         with(33, 2),
     ];
     for body in bodies {

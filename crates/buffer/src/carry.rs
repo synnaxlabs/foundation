@@ -31,6 +31,10 @@ const LEN: usize = 16 + 1 + 8 + 8 + 9;
 /// window that a walk reads, so the walk holds it whole.
 pub(crate) const TAILS_MAX: usize = entry::ENTRIES_MAX;
 
+/// The largest carried `given`. A path gets far fewer entries with no samples at
+/// one seq, so its count from here does not overflow.
+pub(crate) const GIVEN_MAX: u64 = (1 << 63) - 1;
+
 /// Where one path of an index stood on disk when a commit carried it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Tail {
@@ -66,6 +70,9 @@ impl Tail {
         let path = fields.path()?;
         let seq = u64::from_le_bytes(fields.take());
         let given = u64::from_le_bytes(fields.take());
+        if given > GIVEN_MAX {
+            return Err(Invalid::Given(given));
+        }
         let stamp = fields.last()?;
         Ok(Self {
             index,
@@ -129,7 +136,7 @@ pub(crate) fn write(tails: &[Tail], into: &mut [u8]) -> usize {
 /// [`Invalid::Truncated`] when the body holds no count or fewer tails than the
 /// count, [`Invalid::Count`] when the count is over [`TAILS_MAX`], and
 /// [`Invalid::Trailing`] when bytes follow the last tail. Each tail checks its path
-/// and presence bytes.
+/// byte, its `given`, and its presence byte.
 pub(crate) fn parse(
     body: &[u8],
 ) -> Result<impl Iterator<Item = Result<Tail, Invalid>>, Invalid> {
@@ -263,12 +270,24 @@ mod tests {
         assert_eq!(tails, [Err(Invalid::Presence(7))]);
     }
 
+    #[test]
+    fn ends_the_tails_at_a_given_over_the_maximum() {
+        let mut body = body(&[tail(GIVEN_MAX, None), tail(2, None)]);
+        body[4 + LEN + 32] = 0x80;
+        let tails: Vec<_> = parse(&body).expect("the count holds").collect();
+        let over = GIVEN_MAX + 1 + 2;
+        assert_eq!(
+            tails,
+            [Ok(tail(GIVEN_MAX, None)), Err(Invalid::Given(over))]
+        );
+    }
+
     fn any_tail() -> impl Strategy<Value = Tail> {
         (
             any::<u128>(),
             prop::bool::ANY,
             any::<u64>(),
-            any::<u64>(),
+            0..=GIVEN_MAX,
             prop::option::of(any::<i64>()),
         )
             .prop_map(|(index, backfill, seq, given, stamp)| Tail {

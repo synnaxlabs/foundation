@@ -317,6 +317,8 @@ pub(crate) enum Invalid {
     Path(u8),
     /// A `last` presence byte that is not 0 or 1.
     Presence(u8),
+    /// A carried `given` over [`crate::carry::GIVEN_MAX`].
+    Given(u64),
     /// This many bytes follow the last entry and no header names them.
     Trailing(usize),
 }

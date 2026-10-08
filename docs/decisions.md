@@ -589,11 +589,12 @@ How to read this record:
   the entries with no samples at `seq`, and `last` is as in an entry header. A body
   holds at most 1023 tails, so the walk holds it whole in the window of its first
   table. A carry record longer than that window, a body that ends early, a count over
-  1023, an unknown path or presence byte, or bytes after the last tail is a wrong
-  shape. The walk gives a path that it has not met the carried tail and end, with no
-  run. A path that it met keeps its end and runs, and takes the carried stamp when it
-  has none (a trim passed the entry with the stamp). A carried end that is not that
-  end, or a carried stamp that is not its stamp, is a wrong shape. The form on disk
+  1023, an unknown path or presence byte, a `given` over 2^63 - 1, or bytes after the
+  last tail is a wrong shape. The walk gives a path that it has not met the carried
+  tail and end, with no run. A path that it met keeps its end and runs, and takes the
+  carried stamp when it has none (a trim passed the entry with the stamp). A carried
+  end that is not that end, or a carried stamp that is not its stamp, is a wrong
+  shape. The form on disk
   for the ruling of #160
   (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113).
   For each path, memory holds one run per data record with an entry of it: the

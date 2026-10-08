@@ -151,7 +151,8 @@ impl Mark {
     /// # Panics
     ///
     /// When `first + len` passes `u64::MAX`: the tail checked the entry. When
-    /// `given` passes `u64::MAX`: a ring holds fewer entries.
+    /// `given` passes `u64::MAX`: it starts at most at `carry::GIVEN_MAX`, and a path
+    /// gets far fewer entries at one seq.
     pub(crate) fn after(self, first: u64, len: u32) -> Self {
         if len != 0 {
             let seq = first
