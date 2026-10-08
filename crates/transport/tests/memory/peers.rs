@@ -15,8 +15,9 @@ use crate::common::{PORT, SERVER, config, part};
 
 /// The peers before the first count of the heap.
 const FIRST: usize = 50;
-/// The peers before the last count of the heap.
-const LAST: usize = 250;
+/// The peers before the last count of the heap. The heap grows once by about 21 KB, at
+/// a peer that depends on the target, so the bound must be well above that.
+const LAST: usize = 2050;
 /// The bytes of a key. A transport that kept anything for each ended peer would hold
 /// at least its key.
 const KEY: usize = 32;
