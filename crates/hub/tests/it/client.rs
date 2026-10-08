@@ -462,38 +462,76 @@ fn gives_the_reply_once_its_body_ends() {
     );
 }
 
+/// A home whose node replies to each request a second after it came.
+async fn slow(node: sim::node::Node, tasks: env::tasks::Tasks) {
+    let (test, session, link) = accept(&node, &tasks, POOL, true, Some(rules())).await;
+    while let Ok(mut incoming) = session.accept().await {
+        let (link, clock) = (link.clone(), node.clock());
+        tasks.spawn(async move {
+            header(&mut incoming).await;
+            if let Ok(hub::Served::Request(request)) = link.serve(incoming).await {
+                clock.sleep(Span::SECOND).await;
+                drop(request.reply.send(&reversed(&request.body)).await);
+            }
+        });
+    }
+    drop((link, test));
+}
+
+/// The output of `future`, or `None` when `span` passes first, which drops it.
+async fn within<T>(
+    clock: &env::clock::Clock,
+    span: Span,
+    future: impl Future<Output = T>,
+) -> Option<T> {
+    let mut future = pin!(future);
+    let mut quiet = pin!(clock.sleep(span));
+    poll_fn(|cx| match future.as_mut().poll(cx) {
+        Poll::Ready(got) => Poll::Ready(Some(got)),
+        Poll::Pending => quiet.as_mut().poll(cx).map(|()| None),
+    })
+    .await
+}
+
 /// A program that gives up on a slow request, then sends its next request, gets the
 /// reply of the next request: the node holds the first open until it replies.
 #[test]
 fn sends_the_next_request_after_a_dropped_one() {
-    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
-        let (test, session, link) =
-            accept(&node, &tasks, POOL, true, Some(rules())).await;
-        while let Ok(mut incoming) = session.accept().await {
-            let (link, clock) = (link.clone(), node.clock());
-            tasks.spawn(async move {
-                header(&mut incoming).await;
-                if let Ok(hub::Served::Request(request)) = link.serve(incoming).await {
-                    clock.sleep(Span::SECOND).await;
-                    drop(request.reply.send(&reversed(&request.body)).await);
-                }
-            });
-        }
-        drop((link, test));
-    };
-    run_program(133, home, |node, tasks, at| async move {
+    run_program(133, slow, |node, tasks, at| async move {
         let client = connect(&node, tasks, at, AGENT).await.expect("connects");
-        {
-            let mut slow = pin!(client.request(b"slow"));
-            let mut quiet = pin!(node.clock().sleep(QUIET));
-            let first = poll_fn(|cx| match slow.as_mut().poll(cx) {
-                Poll::Ready(got) => Poll::Ready(Some(got)),
-                Poll::Pending => quiet.as_mut().poll(cx).map(|()| None),
-            })
-            .await;
-            assert_eq!(first, None, "the first request is dropped while it waits");
-        }
+        let first = within(&node.clock(), QUIET, client.request(b"slow")).await;
+        assert_eq!(first, None, "the first request is dropped while it waits");
         assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+    });
+}
+
+/// A request dropped while it waits for the turn leaves the line, and the request
+/// after it takes the turn.
+#[test]
+fn gives_the_turn_past_a_request_that_left_the_line() {
+    run_program(138, slow, |node, tasks, at| async move {
+        let client = connect(&node, tasks.clone(), at, AGENT)
+            .await
+            .expect("connects");
+        let first = client.clone();
+        tasks.spawn(async move {
+            assert_eq!(first.request(b"a1").await, Ok(b"1a".to_vec()));
+        });
+        node.clock().sleep(QUIET).await;
+        let (second, clock) = (client.clone(), node.clock());
+        tasks.spawn(async move {
+            assert_eq!(within(&clock, QUIET, second.request(b"b2")).await, None);
+        });
+        node.clock()
+            .sleep(Span::from_nanos(QUIET.nanos() / 2))
+            .await;
+        let third = Rc::new(Cell::new(None));
+        let (client, got) = (client.clone(), Rc::clone(&third));
+        tasks.spawn(async move { got.set(Some(client.request(b"c3").await)) });
+        node.clock()
+            .sleep(Span::from_nanos(5 * Span::SECOND.nanos()))
+            .await;
+        assert_eq!(third.take(), Some(Ok(b"3c".to_vec())));
     });
 }
 
