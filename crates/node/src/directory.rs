@@ -1,5 +1,6 @@
 //! The names in the data directory: the lock, the record of the shard count, the
-//! directory of each shard's ring, and the mesh's directory.
+//! directory of each shard's ring, the mesh's directory, and the chunk store's
+//! directory.
 
 use std::path::{Path, PathBuf};
 
@@ -15,10 +16,17 @@ const RECORD: &str = "shards-";
 const SHARD: &str = "shard-";
 /// The name of the mesh's directory.
 const MESH: &str = "mesh";
+/// The name of the chunk store's directory.
+const BLOB: &str = "blob";
 
 /// The directory of the mesh of the node's region.
 pub(crate) fn mesh() -> PathBuf {
     PathBuf::from(MESH)
+}
+
+/// The directory of the node's chunk store.
+pub(crate) fn blob() -> PathBuf {
+    PathBuf::from(BLOB)
 }
 
 /// The directory of the ring of the shard on `core`.

@@ -9,6 +9,7 @@ publish.workspace = true
 sim = []
 
 [dependencies]
+blob = { path = "../blob" }
 block = { path = "../block" }
 clock = { path = "../clock" }
 env = { path = "../env" }

@@ -194,7 +194,9 @@ fn a_bad_status_keeps_its_quality() {
     let qualities = |samples: &[Sample]| -> Vec<Option<Quality>> {
         samples.iter().map(|sample| sample.quality).collect()
     };
-    assert_eq!(qualities(&trace.stored), qualities(&trace.served));
+    let served = qualities(&trace.served);
+    assert_eq!(served[1..], [Some(BAD); TICKS], "{trace:?}");
+    assert_eq!(qualities(&trace.stored), served);
 }
 
 #[test]

@@ -1,5 +1,6 @@
-use types::time::{Monotonic, Span};
+use types::time::{Monotonic, Span, Stamp};
 
+use crate::drift::PER_NANO;
 use crate::{Drift, Measurement};
 
 /// The fastest the served offset moves, in parts per million of local time.
@@ -100,6 +101,38 @@ impl Slew {
         Measurement::between(now, low, high)
     }
 
+    /// The first reading at or after `now` at which the latest edge of mesh time is at
+    /// or after `at`, for a local clock that drifts from mesh time by at most `drift`.
+    /// At each earlier reading from `now`, the edge is before `at`. It is `now` when
+    /// the edge at `now` has reached `at`. Each stamp has one: at the last reading, the
+    /// edge is at the end of a stamp's range.
+    #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "no step passes the last reading, which reaches each stamp"
+    )]
+    pub fn reach(self, now: Monotonic, at: Stamp, drift: Drift) -> Monotonic {
+        // Over `j` ns the edge moves up by at most `j * (1 + rate) + 1` ns, the 1 for
+        // the rounding of the growth and of the ticks, so no reading inside a step
+        // reaches `at`. A downward slew moves the edge back at each tick, so a search
+        // that takes the edge as monotonic can pass the first reading.
+        let per_nano = PER_NANO.unsigned_abs();
+        let rate = u128::from(drift.ppb()).max(u128::from(RATE_PPM) * 1_000);
+        let mut reading = now;
+        loop {
+            let latest = self.at(reading, drift).interval().latest;
+            let gap = i128::from(at.nanos()) - i128::from(latest.nanos());
+            if gap <= 0 {
+                return reading;
+            }
+            let step = ((gap - 1).unsigned_abs() * per_nano).div_ceil(per_nano + rate);
+            let step = u64::try_from(step.max(1)).expect("invariant: a gap fits a u64");
+            let next = reading.0.checked_add(step);
+            reading =
+                Monotonic(next.expect("invariant: the last reading reaches `at`"));
+        }
+    }
+
     /// The lowest and highest offset of the estimate at `now`, in nanoseconds, with
     /// no stop at 36500 days.
     fn bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
@@ -130,7 +163,7 @@ impl Slew {
 
 #[cfg(test)]
 mod tests {
-    use types::time::{Monotonic, Span};
+    use types::time::{Monotonic, Span, Stamp};
 
     use super::STEP_GAP;
     use crate::measurement::MAX_ERROR;
@@ -342,6 +375,66 @@ mod tests {
             assert_eq!(check(slew, SECOND_NS, 0), (7, 999_993));
         }
 
+        /// The first reading where `slew`, with `ppb` of drift, reaches `at` ns, from
+        /// `now`.
+        fn reach(slew: Slew, now: u64, at: i64, ppb: u32) -> u64 {
+            slew.reach(Monotonic(now), Stamp::from_nanos(at), drift(ppb))
+                .0
+        }
+
+        #[test]
+        fn reaches_a_stamp_at_once_when_the_edge_has() {
+            let slew = Slew::new(estimate(0, 0, 0));
+            assert_eq!(reach(slew, SECOND_NS, 1_000, 0), SECOND_NS);
+            assert_eq!(reach(slew, SECOND_NS, 1_000_000_000, 0), SECOND_NS);
+        }
+
+        /// The edge is the reading plus its growth of 1 ppm, rounded up: 1000 ns at one
+        /// second, and also at 1 ns before it.
+        #[test]
+        fn reaches_a_stamp_first_on_a_growing_error() {
+            let slew = Slew::new(estimate(0, 0, 0));
+            assert_eq!(reach(slew, 0, 1_000_001_000, 1_000), SECOND_NS);
+            assert_eq!(reach(slew, 0, 1_000_000_999, 1_000), SECOND_NS - 1);
+        }
+
+        /// The edge of a downward slew is the reading plus the served offset twice,
+        /// less the target's, so it moves 2 ns back at each tick. The first reading
+        /// that reaches `at` is before a tick that moves the edge back below it.
+        #[test]
+        fn reaches_a_stamp_first_before_a_tick_moves_the_edge_back() {
+            let slew = from_zero(-1_000_000);
+            let edge = 1_001_000_000;
+            assert_eq!(reach(slew, SECOND_NS, edge + 1_999, 0), SECOND_NS + 1_999);
+            let after = SECOND_NS + 2_000;
+            assert_eq!(check(slew, after, 0), (-1, 999_999));
+            assert_eq!(reach(slew, after, edge + 1_999, 0), after + 1);
+        }
+
+        /// At the 36500-day cap, the edge is the reading, the served offset, and the
+        /// cap, so an upward slew moves it 500 ppm faster than the reading, also with
+        /// no drift.
+        #[test]
+        fn reaches_a_stamp_first_on_an_unknown_error() {
+            let target = Measurement::unknown(Monotonic(0), Span::SECOND);
+            let slew = Slew {
+                start: Monotonic(0),
+                from: Span::ZERO,
+                target,
+            };
+            assert_eq!(check(slew, 1_999_001, 0), (999, MAX_ERROR.nanos()));
+            let at = MAX_ERROR.nanos() + 2_000_000;
+            assert_eq!(reach(slew, 0, at, 0), 1_999_001);
+        }
+
+        /// The edge at the last reading is at the end of a stamp's range, also for
+        /// the lowest offset.
+        #[test]
+        fn reaches_the_last_stamp_at_the_last_reading() {
+            let slew = Slew::new(estimate(0, i64::MIN, 0));
+            assert_eq!(reach(slew, 0, i64::MAX, 0), u64::MAX);
+        }
+
         #[test]
         fn stops_the_error_at_36500_days() {
             let widest = MAX_ERROR.nanos();
@@ -507,6 +600,33 @@ mod tests {
                 prop_assert!((i128::from(low)..=i128::from(high)).contains(&served));
             }
 
+            /// The edge reaches `at` at the result, and at no reading before it: at
+            /// `now`, at the reading before it, and at readings between. Half the
+            /// stamps are within 4 us of the edge at `now`.
+            #[test]
+            fn reaches_a_stamp_first_at_its_reading(
+                s in slew(),
+                now in 0..TIME_NS,
+                ppb in prop_oneof![Just(200_000_u32), 0..=100_000_000_u32],
+                ahead in prop_oneof![-4_000..4_000_i64, 0..1_i64 << 44],
+                between in proptest::collection::vec(any::<u64>(), 8),
+            ) {
+                let drift = Drift::from_ppb(ppb).expect("valid");
+                let edge = |t: u64| s.at(Monotonic(t), drift).interval().latest;
+                let at = Stamp::from_nanos(edge(now).nanos() + ahead);
+                let first = s.reach(Monotonic(now), at, drift).0;
+                prop_assert!(edge(first) >= at, "{first} misses {at:?}");
+                if first > now {
+                    let span = first - now;
+                    let mut before: Vec<_> =
+                        between.iter().map(|t| now + t % span).collect();
+                    before.extend([now, first - 1]);
+                    for t in before {
+                        prop_assert!(edge(t) < at, "{t} reaches {at:?} before {first}");
+                    }
+                }
+            }
+
             #[test]
             fn never_panics_at_any_input(
                 start in any::<u64>(),
@@ -514,6 +634,7 @@ mod tests {
                 target in (any::<u64>(), any::<i64>(), 0..=MAX_ERROR.nanos()),
                 now in any::<[u64; 2]>(),
                 ppb in 0..=100_000_000_u32,
+                stamp in any::<i64>(),
             ) {
                 let drift = Drift::from_ppb(ppb).expect("valid");
                 let (at, offset, error) = target;
@@ -521,6 +642,8 @@ mod tests {
                 let (start, from) = (Monotonic(start), Span::from_nanos(from));
                 let s = Slew { start, from, target };
                 let next = s.toward(Monotonic(now[0]), drift, target);
+                let first = s.reach(Monotonic(now[1]), Stamp::from_nanos(stamp), drift);
+                prop_assert!(first >= Monotonic(now[1]));
                 for slew in [s, next] {
                     let m = slew.at(Monotonic(now[1]), drift);
                     prop_assert_eq!(m.at(), Monotonic(now[1]));
