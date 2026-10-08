@@ -4,30 +4,35 @@
   A hello expires at the latest mesh time of its challenge, plus the time since the
   challenge came on the monotonic clock, plus `client::LIFE` (10 minutes). A task renews
   the hello at half of `LIFE` after each admission, on the hello stream, until the
-  session ends. A renewal that finds the pool full tries again after a second, and the
-  node closes the session if the hello expires first. A challenge that `wire` refuses
-  ends the renewal and closes the session with `MALFORMED`. Each later request gives the
-  error that ended the renewal. `request(body)` signs the body, sends it on its own
-  stream, and gives the body of the response. Requests of one client go one at a time,
-  in the order they began, by a turn in the client, as a link holds one open request
-  (HUB LINK). A request dropped before its response began keeps the turn until the
-  response begins or the stream ends, because the node holds it open until then.
-  `Config` holds its own `pool`, which a program may share with the transport. The
-  stream holds each block of a request until the node acknowledges it, so a link that
-  reorders or loses packets holds more blocks than the node's window, with no bound in
-  closed form. A message of a request that finds no block tries again after a second,
-  as a renewal does, so a small pool makes a request slower, not fail, and `request`
-  gives no `Error::Pool`. Lost: a stated room of the pool, which ack loss can exceed.
-  `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
-  client closes the session with `Code(0)`. A node's stop and close with a code are one
-  error: `Error::Refused(wire::hub::client::Refusal)`, a closed set in `wire` with
-  `from_code` and `code`, of each code that a node stops a client stream or closes a
-  client session with (`MALFORMED`, `BUSY`, and `REFUSED` to `CHANGED`). Each meaning of
-  a code is stated once, in `wire`, and its `Display` gives the cause. A close with 0 or
-  a code outside the set stays `Error::Transport`. Lost: one dial for each request (a
-  handshake for each request, and `foundation status` needs a session that lives); `&mut
-  self` with the renewal inside `request` (an idle program loses its session at the
-  expiry); a queue in a task that owns the session; a lock of a library
+  session ends. A renewal waits for a block as each message does, and the node closes
+  the session if the hello expires first. A challenge that `wire` refuses ends the
+  renewal and closes the session with `MALFORMED`. Each later request gives the error
+  that ended the renewal. `request(body)` signs the body, sends it on its own stream,
+  and gives the body of the response. Requests of one client go one at a time, in the
+  order they began, by a turn in the client, as a link holds one open request (HUB
+  LINK). A request dropped before its response began keeps the turn until the response
+  begins or the stream ends, because the node holds it open until then. `Config` holds
+  its own `pool`, which a program may share with the transport. Each message that the
+  client sends takes a block from it, which the stream holds until the node acknowledges
+  it. A message that finds the pool full waits for a block, so a small pool makes the
+  client slower, not fail. It tries again every 10 ms, the span of the transport's
+  reads, and the wait ends when the session closes, with the error of the close. Only
+  `Exhausted` and `Refused` wait: `TooLarge` never succeeds, so it gives `Error::Pool`
+  at once, which means that no block of the pool can hold a message that the client
+  sends. Lost: a bound of two windows from the stream credit, which ack loss can exceed;
+  a `Bytes` body with no copy; a wait in `block::Pool` that wakes at each free. Two
+  callers poll the pool now: the transport's reads and this client. Trigger: a third
+  caller that waits for a block, or a measured request latency from the poll, adds the
+  wait to `block`. `Client` is `Clone`, and a clone is the same session. When the last
+  clone drops, the client closes the session with `Code(0)`. A node's stop and close
+  with a code are one error: `Error::Refused(wire::hub::client::Refusal)`, a closed set
+  in `wire` with `from_code` and `code`, of each code that a node stops a client stream
+  or closes a client session with (`MALFORMED`, `BUSY`, and `REFUSED` to `CHANGED`).
+  Each meaning of a code is stated once, in `wire`, and its `Display` gives the cause. A
+  close with 0 or a code outside the set stays `Error::Transport`. Lost: one dial for
+  each request (a handshake for each request, and `foundation status` needs a session
+  that lives); `&mut self` with the renewal inside `request` (an idle program loses its
+  session at the expiry); a queue in a task that owns the session; a lock of a library
   (`tokio::sync::Semaphore` is FIFO, but it is built for many threads, with atomics and
   an `Arc` for an owned permit, where `hub` needs one lock on one thread, and
   `futures::lock::Mutex` wakes the first waiter of its slab, not the oldest, and lets a
@@ -42,16 +47,19 @@
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069514013), and the
   order "in the order they began" and the dropped request at 21:38:44Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
-  approved the retry and the `MALFORMED` close at 22:04:03Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It
-  gave the reason against `tokio::sync::Semaphore` at 22:15:33Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). The
-  wait of a request for a block is owed its approval. Supersedes the sentence "Any
-  pool works" of
+  approved the `MALFORMED` close at 22:04:03Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It gave
+  the reason against `tokio::sync::Semaphore` at 22:15:33Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). It
+  approved the wait for a block at 22:56:10Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070683319).
+  Supersedes the sentence "Any pool works" of
   https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056, and the
   room of the pool approved at 22:04:03Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128), at
   22:34:24Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070406709), and at
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070406709), at
   22:43:35Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522).
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070527522), and at
+  22:46:20Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070562330).

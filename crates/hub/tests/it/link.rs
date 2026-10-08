@@ -254,7 +254,7 @@ pub(super) fn run_program_on<F, H, G, P>(
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         link: wire,
-        steps_max: 100_000_000,
+        ..sim::Config::default()
     });
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
     let at = Address::Udp(SocketAddr::new(nodes[0].addresses()[0], PORT));

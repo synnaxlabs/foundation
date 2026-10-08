@@ -30,8 +30,8 @@ pub const LIFE: Span = Span::from_nanos(10 * Span::MINUTE.nanos());
 
 const HALF: Span = Span::from_nanos(LIFE.nanos() / 2);
 
-/// How long a renewal waits for a block before it tries again.
-const RETRY: Span = Span::SECOND;
+/// How long a message that finds the pool full waits before it tries again.
+const RETRY: Span = Span::from_nanos(10 * Span::MILLISECOND.nanos());
 
 /// What a [`Client`] is given.
 #[derive(Debug)]
@@ -54,9 +54,9 @@ pub struct Config {
     pub tasks: env::tasks::Tasks,
     /// The pool that the client sends from. It can be the pool of the program's
     /// transport. Each message that the client sends takes a block from it, which the
-    /// stream holds until the node acknowledges it. A message of a request that finds
-    /// no block tries again after one second, so a small pool makes a request slower,
-    /// not fail.
+    /// stream holds until the node acknowledges it. A message that finds the pool full
+    /// waits for a block, so a small pool makes the client slower, not fail. The wait
+    /// ends when the session closes.
     pub pool: Rc<block::Pool>,
 }
 
@@ -104,7 +104,8 @@ impl Client {
     /// [`Error::Refused`] for a refused hello, [`Error::Transport`] when the dial or
     /// the session failed, [`Error::Message`] for a challenge that `wire` refuses,
     /// [`Error::Unanswered`] when the node finished the hello stream with no
-    /// challenge, and [`Error::Pool`] when the pool has no block for the hello.
+    /// challenge, and [`Error::Pool`] when no block of the pool can hold the header or
+    /// the hello.
     pub async fn connect(
         transport: &transport::Client,
         config: Config,
@@ -136,9 +137,8 @@ impl Client {
             turn: Rc::default(),
             ended: RefCell::new(None),
         });
-        shared
-            .send(&mut sender, &wire::header::encode(Protocol::Hub))
-            .await?;
+        let header = shared.copy(&wire::header::encode(Protocol::Hub)).await?;
+        sender.send(header).await?;
         let first = shared.challenge(&mut receiver).await?;
         let next = shared.hello(&mut sender, &mut receiver, first).await?;
         tasks.spawn(renew(Rc::clone(&shared), sender, receiver, next));
@@ -157,7 +157,8 @@ impl Client {
     /// when the node stopped the request or closed the session with a refusal,
     /// [`Error::Transport`] when the stream or the session failed;
     /// [`Error::Message`] for a response that `wire` refuses or that ends early;
-    /// [`Error::Unanswered`] when the node finished the stream with no response.
+    /// [`Error::Unanswered`] when the node finished the stream with no response;
+    /// [`Error::Pool`] when no block of the pool can hold the header or the `Request`.
     pub async fn request(&self, body: &[u8]) -> Result<Vec<u8>, Error> {
         let shared = &self.0.0;
         let length = u64::try_from(body.len())
@@ -175,17 +176,17 @@ impl Client {
         }
         let (mut sender, receiver) = shared.session.open(Class::Complete).await?;
         let receiver = open.receiver.insert(receiver);
-        let header = shared.copy(&wire::header::encode(Protocol::Hub)).await;
+        let header = shared.copy(&wire::header::encode(Protocol::Hub)).await?;
         sender.send(header).await?;
         let signature = shared
             .pair
             .sign(&access::proof::request(shared.connection, body));
-        let mut message = shared.alloc(Request::LEN).await;
+        let mut message = shared.alloc(Request::LEN).await?;
         Request { length, signature }.encode(&mut message);
         sender.send(message.freeze()).await?;
         let most = sender.bytes_max().min(shared.pool.largest());
         for chunk in body.chunks(most) {
-            sender.send(shared.copy(chunk).await).await?;
+            sender.send(shared.copy(chunk).await?).await?;
         }
         sender.finish()?;
         let first = receiver.recv().await;
@@ -208,27 +209,39 @@ impl Client {
 }
 
 impl Shared {
-    /// A block of `len` bytes. While the pool has none, tries again after [`RETRY`]:
-    /// the streams give their blocks back as the node acknowledges them.
-    async fn alloc(&self, len: usize) -> block::Unique {
+    /// A block of `len` bytes. While the pool is full, tries again after [`RETRY`]:
+    /// the streams give their blocks back as the node acknowledges them. Gives
+    /// [`Error::Pool`] when no block can hold `len` bytes, and the error of the close
+    /// when the session closes first.
+    async fn alloc(&self, len: usize) -> Result<block::Unique, Error> {
         loop {
-            if let Ok(block) = self.pool.alloc(len) {
-                return block;
+            match self.pool.alloc(len) {
+                Ok(block) => return Ok(block),
+                Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
+                    self.sleep_until(self.clock.now() + RETRY).await?;
+                }
+                Err(error @ block::Error::TooLarge { .. }) => return Err(error.into()),
             }
-            self.clock.sleep(RETRY).await;
         }
     }
 
     /// [`Shared::alloc`], filled with `bytes`.
-    async fn copy(&self, bytes: &[u8]) -> block::Block {
-        let mut block = self.alloc(bytes.len()).await;
+    async fn copy(&self, bytes: &[u8]) -> Result<block::Block, Error> {
+        let mut block = self.alloc(bytes.len()).await?;
         block.copy_from_slice(bytes);
-        block.freeze()
+        Ok(block.freeze())
     }
 
-    async fn send(&self, sender: &mut Sender, bytes: &[u8]) -> Result<(), Error> {
-        sender.send(self.pool.copy(bytes)?).await?;
-        Ok(())
+    /// Sleeps until `at`, or gives the error of the close when the session closes
+    /// first.
+    async fn sleep_until(&self, at: Monotonic) -> Result<(), Error> {
+        let mut closed = pin!(self.session.closed());
+        let mut sleep = pin!(self.clock.sleep_until(at));
+        poll_fn(|cx| match closed.as_mut().poll(cx) {
+            Poll::Ready(error) => Poll::Ready(Err(Error::from(error))),
+            Poll::Pending => sleep.as_mut().poll(cx).map(Ok),
+        })
+        .await
     }
 
     /// The next challenge, and when it came.
@@ -260,7 +273,7 @@ impl Shared {
         };
         let signature = self.pair.sign(&access::proof::hello(&hello));
         let signed = Signed { hello, signature };
-        let mut message = self.pool.alloc(signed.encoded_len())?;
+        let mut message = self.alloc(signed.encoded_len()).await?;
         signed.encode(&mut message);
         sender.send(message.freeze()).await?;
         self.challenge(receiver).await
@@ -268,9 +281,9 @@ impl Shared {
 }
 
 /// Renews the hello at half of [`LIFE`] after each admission, until the session
-/// closes or a renewal fails. A renewal with no block tries again after [`RETRY`],
-/// and the node closes the session if the hello expires first. Keeps the error that
-/// ended it, and closes the session.
+/// closes or a renewal fails. A renewal waits while the pool is full, and the node
+/// closes the session if the hello expires first. Keeps the error that ended it, and
+/// closes the session.
 async fn renew(
     shared: Rc<Shared>,
     mut sender: Sender,
@@ -279,24 +292,14 @@ async fn renew(
 ) {
     let mut at = last.1 + HALF;
     let error = loop {
-        let closed = {
-            let mut closed = pin!(shared.session.closed());
-            let mut half = pin!(shared.clock.sleep_until(at));
-            poll_fn(|cx| match closed.as_mut().poll(cx) {
-                Poll::Ready(error) => Poll::Ready(Some(error)),
-                Poll::Pending => half.as_mut().poll(cx).map(|()| None),
-            })
-            .await
-        };
-        if let Some(error) = closed {
-            break Error::from(error);
+        if let Err(error) = shared.sleep_until(at).await {
+            break error;
         }
         match shared.hello(&mut sender, &mut receiver, last).await {
             Ok(next) => {
                 last = next;
                 at = last.1 + HALF;
             }
-            Err(Error::Pool(_)) => at = shared.clock.now() + RETRY,
             Err(error) => break error,
         }
     };
@@ -352,7 +355,7 @@ pub enum Error {
     /// The node finished a stream with no answer: a request with no response, or the
     /// hello stream with no challenge.
     Unanswered,
-    /// The pool had no block for a message to send.
+    /// No block of the pool can hold a message that the client sends.
     Pool(block::Error),
 }
 
@@ -373,7 +376,7 @@ impl fmt::Display for Error {
                 f.write_str("the node finished a stream with no answer")
             }
             Self::Pool(error) => {
-                write!(f, "the pool had no block for a message: {error}")
+                write!(f, "no block of the pool holds a message: {error}")
             }
         }
     }

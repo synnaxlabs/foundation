@@ -648,13 +648,15 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
     );
 }
 
+/// The most that a renewal comes after the pool has room: two retries of 10 ms, as
+/// the record states it, which hold the time a hello takes to the node.
+const RETRY_MAX: Span = Span::from_nanos(20_000_000);
+
 /// Half of `LIFE`, as the record states it.
 const HALF: Span = Span::from_nanos(5 * Span::MINUTE.nanos());
 
-/// Sends a challenge on `hello` and takes the hello, then admits it with the next
-/// challenge and takes the renewal. Gives the time from the admission to the renewal.
-async fn admit(hello: &mut Incoming, clock: &env::clock::Clock) -> Span {
-    let sender = hello.sender.as_mut().expect("two-way");
+/// Sends a challenge on `hello`.
+async fn challenge(hello: &mut Incoming) {
     let mut challenge = [0; Challenge::LEN];
     Challenge {
         nonce: [7; 16],
@@ -664,17 +666,29 @@ async fn admit(hello: &mut Incoming, clock: &env::clock::Clock) -> Span {
         },
     }
     .encode(&mut challenge);
+    let message = own_pool().copy(&challenge).expect("room");
+    let sender = hello.sender.as_mut().expect("two-way");
+    sender.send(message).await.expect("sends");
+}
+
+/// Takes the next hello on `hello`.
+async fn take(hello: &mut Incoming) {
+    hello
+        .receiver
+        .recv()
+        .await
+        .expect("a hello")
+        .expect("not finished");
+}
+
+/// Sends a challenge on `hello` and takes the hello, then admits it with the next
+/// challenge and takes the renewal. Gives the time from the admission to the renewal.
+async fn admit(hello: &mut Incoming, clock: &env::clock::Clock) -> Span {
     let mut came = [Span::from_nanos(0); 2];
     for slot in &mut came {
         let sent = clock.now();
-        let message = own_pool().copy(&challenge).expect("room");
-        sender.send(message).await.expect("sends");
-        hello
-            .receiver
-            .recv()
-            .await
-            .expect("a hello")
-            .expect("not finished");
+        challenge(hello).await;
+        take(hello).await;
         *slot = clock.now() - sent;
     }
     assert!(
@@ -730,19 +744,19 @@ fn renews_the_hello_once_the_pool_has_room() {
     );
 }
 
-/// A renewal that finds the pool full tries again each second, so it comes a second
-/// after its time when the pool has room a quarter second after it.
+/// A renewal that finds the pool full tries again every 10 ms, so it comes soon after
+/// the pool has room a quarter second after its time.
 #[test]
-fn retries_a_renewal_each_second_while_the_pool_is_full() {
+fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
     raw(
         140,
         |session, mut hello, node| async move {
             let renewal = admit(&mut hello, &node.clock()).await;
             let late = Span::from_nanos(renewal.nanos() - HALF.nanos());
+            let room = Span::from_nanos(Span::SECOND.nanos() / 4);
             assert!(
-                late >= Span::SECOND
-                    && late < Span::from_nanos(Span::SECOND.nanos() + QUIET.nanos()),
-                "the renewal comes a second late: {late:?}"
+                late >= room && late.nanos() < room.nanos() + RETRY_MAX.nanos(),
+                "the renewal comes soon after the pool has room: {late:?}"
             );
             drop(session);
         },
@@ -762,6 +776,64 @@ fn retries_a_renewal_each_second_while_the_pool_is_full() {
             node.clock().sleep(Span::SECOND).await;
             drop(client);
         },
+    );
+}
+
+/// A request that waits for a block of a full pool ends with the error of the close
+/// when the node closes the session.
+#[test]
+fn ends_the_wait_for_a_block_when_the_session_closes() {
+    raw(
+        144,
+        |session, mut hello, node| async move {
+            challenge(&mut hello).await;
+            take(&mut hello).await;
+            challenge(&mut hello).await;
+            node.clock().sleep(QUIET).await;
+            session.close(Code(BUSY));
+            node.clock().sleep(QUIET).await;
+        },
+        |node, tasks, at| async move {
+            let pool = own_pool();
+            let client = connect_with(&node, tasks, at, AGENT, Rc::clone(&pool))
+                .await
+                .expect("connects");
+            let held = fill(&pool);
+            let got = within(&node.clock(), LIFE, client.request(b"ab")).await;
+            assert_eq!(got, Some(Err(Error::Refused(Refusal::Busy))));
+            drop(held);
+        },
+    );
+}
+
+/// A pool whose largest block cannot hold the header fails `connect` at once.
+#[test]
+fn refuses_to_connect_from_a_pool_with_no_block_for_the_header() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    serve_session(
+        145,
+        true,
+        POOL,
+        Some(rules()),
+        |node, tasks, at| async move {
+            let config = block::Config { budget: 0 };
+            let heap = block::Heap::new(config.reservation());
+            let pool = Rc::new(block::Pool::new(config, heap));
+            let refused = connect_with(&node, tasks, at, AGENT, pool).await.map(drop);
+            *kept.lock().expect("not poisoned") = Some(refused);
+        },
+    );
+    let got = got.lock().expect("not poisoned").take().expect("ran");
+    let error = block::Error::TooLarge {
+        requested: wire::header::LEN,
+        largest: 0,
+    };
+    assert_eq!(got, Err(Error::Pool(error)));
+    assert_eq!(
+        got.expect_err("refused").to_string(),
+        "no block of the pool holds a message: block of 3 bytes is above the largest \
+         block of 0 bytes"
     );
 }
 
@@ -916,7 +988,7 @@ fn names_each_error() {
                 requested: 9,
                 available: 0,
             }),
-            "the pool had no block for a message: pool is full: asked for 9 bytes, 0 \
+            "no block of the pool holds a message: pool is full: asked for 9 bytes, 0 \
              bytes free",
         ),
     ];
