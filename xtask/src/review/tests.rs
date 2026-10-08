@@ -1137,6 +1137,12 @@ fn fails_a_round_with_raw_html() {
         ("A `b`\nc <!-- d --> e", "c <!-- d --> e"),
         ("</x>", "</x>"),
         ("<?a ?>", "<?a ?>"),
+        ("<source\n---", "<source"),
+        ("<source\n===", "<source"),
+        ("a\n<source\n---", "<source"),
+        ("<source | b\n--- | ---\nc | d", "<source | b"),
+        ("> 1. <source", "> 1. <source"),
+        ("- ```\n  a\n  ```\n  <source", "<source"),
     ];
     for (html, line) in cases {
         let comment =
@@ -1150,6 +1156,8 @@ fn fails_a_round_with_raw_html() {
     }
     let summary = format!("<b>\n\n{ROUND}");
     assert_eq!(check(&record(vec![bot(&summary)])), vec![raw("<b>")]);
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<source\n---\n");
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<source")]);
     let shown = [
         "<https://github.com>",
         "\\<div>",
@@ -1157,6 +1165,9 @@ fn fails_a_round_with_raw_html() {
         "```\n<div>\n```",
         "    <div>",
         "a < b, <1",
+        "# <source",
+        "a | <source\n--- | ---",
+        "*a*<source",
     ];
     for text in shown {
         let comment =
@@ -1330,4 +1341,6 @@ fn reads_only_a_top_level_round_heading() {
             "{quoted}"
         );
     }
+    let ruled = bot(&format!("a\n\n***\n\n{ROUND}"));
+    assert_eq!(check(&record(vec![ruled])), Vec::<String>::new());
 }

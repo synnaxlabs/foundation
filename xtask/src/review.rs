@@ -454,28 +454,27 @@ impl<'a> Shown<'a> {
         // Each open block, with the index in `text` of a paragraph. A tight list item
         // holds the text of its paragraph with no paragraph event.
         let mut open: Vec<Option<usize>> = Vec::new();
-        let mut fresh = true;
+        let (mut fresh, mut code) = (true, false);
         for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
+            let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
             let paragraph = open.last().copied().flatten().filter(|_| fresh);
             let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
             let raw = match &event {
                 Event::Html(_) | Event::InlineHtml(_) => true,
-                // The text of an escaped `<` starts after its backslash.
                 Event::Text(_) => {
-                    paragraph.is_some()
-                        && !body[..range.start].ends_with('\\')
+                    !code
+                        && marks(&body[start..range.start])
                         && line.strip_prefix('<').is_some_and(|l| l.starts_with(opens))
                 }
                 _ => false,
             };
             if raw && shown.html.is_none() {
-                let start =
-                    body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
                 shown.html = Some(body[start..range.start + line.len()].trim());
             }
             match event {
                 Event::Start(tag) if !inline(tag.to_end()) => {
+                    code = matches!(tag, Tag::CodeBlock(_));
                     let top = open.is_empty();
                     let paragraph = matches!(tag, Tag::Paragraph | Tag::Item);
                     let index = paragraph.then_some(shown.text.len());
@@ -493,6 +492,7 @@ impl<'a> Shown<'a> {
                 }
                 Event::End(tag) if !inline(tag) => {
                     open.pop();
+                    code = false;
                 }
                 Event::Rule => {
                     if open.is_empty() && shown.number.is_some() {
@@ -566,6 +566,28 @@ fn unpadded(text: &str) -> String {
     }
     unpadded.push_str(rest.trim_end_matches([' ', '\t']));
     unpadded
+}
+
+/// Whether `prefix`, the source of a line before some text, holds only the indent and
+/// the marks of quotes and list items, so that the text starts a line of a block. An
+/// escaped `<` has its backslash in `prefix`.
+fn marks(prefix: &str) -> bool {
+    let mut rest = prefix;
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        let number = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        let marked = if number.len() < rest.len() {
+            number.strip_prefix(['.', ')'])
+        } else {
+            rest.strip_prefix(['>', '-', '+', '*'])
+        };
+        match marked {
+            Some(after) if after.is_empty() || after.starts_with([' ', '\t']) => {
+                rest = after;
+            }
+            _ => return rest.is_empty(),
+        }
+    }
 }
 
 /// The offset in `text` of the end of the line that holds offset `start`.
