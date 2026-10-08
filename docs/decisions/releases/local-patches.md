@@ -37,5 +37,8 @@
   https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069607884, and
   `laptop.architect-2` at 2026-10-08 21:24 UTC,
   https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793).
+  The same holds for its branch that sets `UA_FLOAT_LITTLE_ENDIAN` on little-endian
+  64-bit Arm, which Clang needs (`laptop.architect-2`, 2026-10-08 23:26 UTC,
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895).
   Supersedes, for that block, "unchanged, plus the files that its build generates" of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572.

@@ -177,3 +177,11 @@
   2026-10-08 21:42 UTC) and `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793,
   2026-10-08 21:24 UTC).
+  A second change of that file adds a branch that sets `UA_FLOAT_LITTLE_ENDIAN` when
+  the target is 64-bit Arm and `__BYTE_ORDER__` is little-endian. Clang defines no
+  `__FLOAT_WORD_ORDER__`, so without it a Clang build for 64-bit Arm encodes each float
+  on the slow path of `pack754`, which links the `long double` helpers. On 64-bit Arm
+  the float order is the byte order. The test of `connector-opcua` that preprocesses
+  `config.h` for each target is its check. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895,
+  2026-10-08 23:26 UTC).
