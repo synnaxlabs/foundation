@@ -9,7 +9,8 @@ use crate::ffi::{self, BYTE_STRING, Bytes, DataType, DecodeOptions, Status, TYPE
 
 /// Decodes `data[2..]` as the type of `UA_TYPES` that the little-endian `u16` of
 /// `data[..2]` picks, by its remainder by the table length. When the decode gives
-/// `Good`, it encodes the value, decodes those bytes, and encodes again.
+/// `Good`, it encodes the value, decodes those bytes, and encodes again. An input of
+/// fewer than 2 bytes decodes nothing.
 ///
 /// # Panics
 ///

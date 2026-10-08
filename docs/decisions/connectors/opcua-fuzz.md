@@ -8,6 +8,9 @@
   2026-10-08 20:12 UTC). The module is behind the feature `sim`, as `bench` is, and
   `fuzz/Cargo.toml` turns `sim` on. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1885#issuecomment-6068286559).
+  Two bytes, a little-endian `u16`, pick the type, so each of the 388 types is
+  reachable. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1885#issuecomment-6068291471).
   Until #435 fixes the check of a Variant of ExtensionObjects, `decode` pads the
   encoding with zeros before it decodes it again; a unit test fails when the fix
   lands.
