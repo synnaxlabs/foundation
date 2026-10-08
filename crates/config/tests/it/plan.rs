@@ -1717,6 +1717,199 @@ placement \"p\" {{
     }
 }
 
+/// The fix of each diagnostic of `connector` on `node` when its placement to win,
+/// `winner`, names no `home` and an index of `connector` has no writer.
+fn homed(winner: &str, connector: &str, node: &str) -> String {
+    format!(
+        "Name `{node}` as the `home` of `{winner}`, keep `{node}` out of its `standby` \
+         and `copies`, and make `{winner}` win for the connector `{connector}` and its \
+         indexes"
+    )
+}
+
+/// The index `c.time` and the connectors `c` on `n` and `d` on `m`, which write
+/// nothing, then `placements`.
+fn unwritten(placements: &str) -> String {
+    format!(
+        "\
+channel \"c.time\" {{
+  kind = \"index\"
+}}
+connector \"c\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}}
+connector \"d\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = []
+}}
+{placements}"
+    )
+}
+
+#[test]
+fn plans_after_the_split_placement_fix_that_names_a_home_for_an_unwritten_index() {
+    let refused = unwritten(
+        "\
+placement \"t\" {
+  select = [\"c\"]
+  standby = \"k\"
+}
+placement \"r\" {
+  select = [\"c.time\"]
+  home = \"n\"
+}
+",
+    );
+    let fixed = unwritten(
+        "\
+placement \"t\" {
+  select = [\"c\", \"c.time\"]
+  home = \"n\"
+  standby = \"k\"
+}
+",
+    );
+    let expected = [("config.split-placement", homed("t", "c", "n"))];
+    plans_after(&refused, &expected, &fixed);
+}
+
+#[test]
+fn plans_after_the_split_placement_fix_that_names_a_home_with_no_connector_placement() {
+    let refused = unwritten(
+        "\
+placement \"o\" {
+  select = [\"c.time\"]
+  standby = \"k\"
+}
+",
+    );
+    let fixed = unwritten(
+        "\
+placement \"o\" {
+  select = [\"c\", \"c.time\"]
+  home = \"n\"
+  standby = \"k\"
+}
+",
+    );
+    let expected = [
+        (
+            "config.unplaced",
+            "Name a `home` in the placement, or write the index with a connector"
+                .into(),
+        ),
+        ("config.split-placement", homed("o", "c", "n")),
+    ];
+    plans_after(&refused, &expected, &fixed);
+}
+
+#[test]
+fn moves_an_unwritten_index_when_its_placement_wins_on_another_node() {
+    let refused = unwritten(
+        "\
+placement \"t\" {
+  select = [\"c\", \"d\"]
+  standby = \"k\"
+}
+placement \"r\" {
+  select = [\"c.time\"]
+  home = \"n\"
+}
+",
+    );
+    let fixed = unwritten(
+        "\
+placement \"t\" {
+  select = [\"c\", \"d\", \"!c\", \"!c.time\"]
+  standby = \"k\"
+}
+placement \"r\" {
+  select = [\"c.time\", \"!c\", \"!c.time\"]
+  home = \"n\"
+}
+placement \"c\" {
+  select = [\"c\", \"c.time\"]
+  home = \"n\"
+}
+",
+    );
+    let expected = [("config.split-placement", exclude("c", "`t` and `r`", "n"))];
+    plans_after(&refused, &expected, &fixed);
+}
+
+#[test]
+fn moves_an_unwritten_index_when_its_own_placement_wins_on_another_node() {
+    let refused = unwritten(
+        "\
+placement \"o\" {
+  select = [\"c.time\", \"d\"]
+  standby = \"k\"
+}
+",
+    );
+    let fixed = unwritten(
+        "\
+placement \"o\" {
+  select = [\"c.time\", \"d\", \"!c.time\"]
+  standby = \"k\"
+}
+placement \"c\" {
+  select = [\"c\", \"c.time\"]
+  home = \"n\"
+}
+",
+    );
+    let expected = [
+        (
+            "config.unplaced",
+            "Name a `home` in the placement, or write the index with a connector"
+                .into(),
+        ),
+        (
+            "config.split-placement",
+            "Exclude the indexes of the connector `c` from the `select` of `o`, and \
+             select the connector and its indexes with another placement whose `home` \
+             is `n`"
+                .into(),
+        ),
+    ];
+    plans_after(&refused, &expected, &fixed);
+}
+
+#[test]
+fn plans_after_the_split_placement_fix_of_an_index_and_the_one_fix_of_a_connector() {
+    let common = "\
+channel \"b.time\" {
+  kind = \"index\"
+}
+connector \"a\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+}
+connector \"b\" {
+  kind = \"writer\"
+  node = \"m\"
+  writes = [\"b.time\"]
+}
+";
+    let refused = common.to_owned()
+        + &placement("t", "\"a\", \"b.time\"", "m")
+        + &placement("q", "\"b\"", "m");
+    let fixed = common.to_owned()
+        + &placement("t", "\"a\", \"b.time\", \"!a\", \"!b.time\"", "m")
+        + &placement("q", "\"b\", \"b.time\"", "m")
+        + &placement("a", "\"a\"", "n");
+    let expected = [
+        ("config.split-placement", win("q", "b")),
+        ("config.connector-home", exclude("a", "`t`", "n")),
+    ];
+    plans_after(&refused, &expected, &fixed);
+}
+
 #[test]
 fn takes_the_first_writer_in_source_order_in_any_order_of_the_files() {
     let first = format!(
