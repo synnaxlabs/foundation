@@ -411,13 +411,12 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private, not built, not reached from a file, or
-not reached from the corpus:
-`transport::message` (#55), the QUIC hello
+not reached from the corpus: `transport::message` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
 `mesh::log::sequence`, #1746), each connector's protocol parser, the chunk processing
 of open62541 (`ua_securechannel.c`, #1990), and `connector::reader::read`,
-`connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
-reaches only from an input with a `connector` block of kind `influx`, and no input holds
-one yet (#1817).
+`node::identity::decode` (#1994), `connector::http::uri`, and
+`connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
+`connector` block of kind `influx`, and no input holds one yet (#1817).

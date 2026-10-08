@@ -78,3 +78,8 @@
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
   Supersedes item 3 of
   https://github.com/synnaxlabs/foundation/pull/1926#issuecomment-6066382854.
+  Changed by #1969: `Hub::define` takes a spec's definitions and skips each that is not
+  a channel (`laptop.architect`, 2026-10-08T18:49:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1969#issuecomment-6066796714).
+  Supersedes the argument of `Hub::define` in
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349.
