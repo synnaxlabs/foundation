@@ -128,7 +128,7 @@ fn lookup_in_order(bencher: Bencher<'_, '_>, runs: u64) {
 }
 
 /// As `lookup_in_order`, with marks that jump over the runs.
-#[divan::bench(args = [16, 4096, 262_144])]
+#[divan::bench(args = [16, 4096, 262_144], sample_size = 800)]
 fn lookup_scattered(bencher: Bencher<'_, '_>, runs: u64) {
     let mut logs = create_logs(64, 1);
     for record in 1..runs {
@@ -139,7 +139,7 @@ fn lookup_scattered(bencher: Bencher<'_, '_>, runs: u64) {
     let mut seq = 0_u64;
     bencher.bench_local(|| {
         let found = shim::lookup(&logs, Slot::new(0), Path::Live, black_box(Mark::at(seq)));
-        seq = (seq.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407) >> 33) % runs;
+        seq = (seq.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407)) % runs;
         found
     });
 }
