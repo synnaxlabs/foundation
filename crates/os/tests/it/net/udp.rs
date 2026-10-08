@@ -219,22 +219,26 @@ fn a_refused_transmit_leaves_gso_and_ecn_on() {
             ..transmit(receiver.local(), &contents)
         };
         for (source, destination) in cases {
-            let (mut sender, _) = bind(&net, any_v6);
-            let refused = Transmit {
-                source,
-                ..transmit(destination, b"x")
-            };
-            assert_eq!(
-                send(&mut sender, &refused).await,
-                Err(Error::Io { code: 22 }),
-                "source {source:?}, to {destination}"
-            );
-            assert_eq!(send(&mut sender, &batch).await, Ok(()));
-            assert_eq!(
-                receive_batch(&mut receiver).await,
-                (300, 100, Some(Ecn::Ce)),
-                "after source {source:?}, to {destination}"
-            );
+            for segment in [None, NonZeroUsize::new(1)] {
+                let (mut sender, _) = bind(&net, any_v6);
+                let refused = Transmit {
+                    source,
+                    segment,
+                    ..transmit(destination, b"xy")
+                };
+                let case = format!("source {source:?}, to {destination}, {segment:?}");
+                assert_eq!(
+                    send(&mut sender, &refused).await,
+                    Err(Error::Io { code: 22 }),
+                    "{case}"
+                );
+                assert_eq!(send(&mut sender, &batch).await, Ok(()));
+                assert_eq!(
+                    receive_batch(&mut receiver).await,
+                    (300, 100, Some(Ecn::Ce)),
+                    "after {case}"
+                );
+            }
         }
     });
 }
@@ -349,15 +353,18 @@ fn a_datagram_over_the_path_mtu_is_lost() {
 fn an_ecn_mark_arrives() {
     on_thread("udp-ecn", || async {
         let net = net();
-        let (mut sender, _) = loopback(&net);
-        let (_, mut receiver) = loopback(&net);
-        for ecn in [Ecn::Ect0, Ecn::Ect1, Ecn::Ce] {
-            let to = Transmit {
-                ecn: Some(ecn),
-                ..transmit(receiver.local(), b"marked")
-            };
-            assert_eq!(send(&mut sender, &to).await, Ok(()));
-            assert_eq!(receive(&mut receiver, 1).await[0].ecn, Some(ecn));
+        for ip in [IpAddr::from(LOCALHOST), Ipv6Addr::LOCALHOST.into()] {
+            let (mut sender, _) = bind(&net, SocketAddr::new(ip, 0));
+            let (_, mut receiver) = bind(&net, SocketAddr::new(ip, 0));
+            for ecn in [Ecn::Ect0, Ecn::Ect1, Ecn::Ce] {
+                let to = Transmit {
+                    ecn: Some(ecn),
+                    ..transmit(receiver.local(), b"marked")
+                };
+                assert_eq!(send(&mut sender, &to).await, Ok(()));
+                let marked = receive(&mut receiver, 1).await[0].ecn;
+                assert_eq!(marked, Some(ecn), "{ip}");
+            }
         }
     });
 }
