@@ -5930,8 +5930,8 @@ priority. ONE NODE is a milestone: one real node reads an OPC UA server through
 `foundation` binary starts the node from a config, on a real disk and network. Its
 acceptance runs a simulated OPC UA server, the node, and a simulated InfluxDB. A first
 version may run with no OPC UA security, so the open choice of the OPC UA crypto
-plugin (5.1) does not block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
-2026-10-08T01:52:14Z:
+plugin (5.1) does not block it. The person approved it ("Yes"), relayed by
+`laptop.monitor` at 2026-10-08T01:52:14Z:
 https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
 approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order.
 FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
