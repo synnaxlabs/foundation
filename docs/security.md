@@ -335,6 +335,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
+| `spec_data_type` | `spec::channel::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |

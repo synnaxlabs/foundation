@@ -163,6 +163,16 @@ impl FromStr for DataType {
     }
 }
 
+/// The data types that the message of a text with no form shows.
+const EXAMPLES: [&str; 6] = [
+    "f64",
+    "f32[3]",
+    "list<u8, 16>",
+    "string",
+    "bytes",
+    "quality",
+];
+
 /// A data channel that cannot exist, or a `data_type` text that names no data type.
 /// `Display` gives the message: a lower-case clause with no final period.
 /// [`Error::fix`] gives what to do instead.
@@ -196,10 +206,14 @@ impl fmt::Display for Error {
             Self::Unit { .. } => {
                 f.write_str("a unit is on a data type that holds no number")
             }
-            Self::DataType(sample::Error::Syntax) => f.write_str(
-                "expected a data type such as f64, f32[3], list<u8, 16>, string, \
-                 bytes, or quality",
-            ),
+            Self::DataType(sample::Error::Syntax) => {
+                f.write_str("expected a data type such as ")?;
+                let (last, rest) = EXAMPLES.split_last().expect("invariant: examples");
+                for example in rest {
+                    write!(f, "{example}, ")?;
+                }
+                write!(f, "or {last}")
+            }
             Self::DataType(error) => error.fmt(f),
         }
     }
@@ -209,7 +223,6 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
     use types::name::Name;
 
     use super::*;
@@ -328,38 +341,19 @@ mod tests {
         assert_eq!(DataType::Sample(string).sample(), string);
     }
 
-    fn data_types() -> impl Strategy<Value = DataType> {
-        let scalar = prop::sample::select(
-            NUMBERS.iter().chain(&OTHERS).copied().collect::<Vec<_>>(),
+    #[test]
+    fn writes_quality_as_no_sample_type_writes() {
+        assert_eq!(
+            "quality".parse::<sample::Type>(),
+            Err(sample::Error::Syntax)
         );
-        prop_oneof![
-            Just(DataType::Quality),
-            Just(DataType::Sample(sample::Type::String)),
-            Just(DataType::Sample(sample::Type::Bytes)),
-            scalar
-                .clone()
-                .prop_map(|e| DataType::Sample(sample::Type::Scalar(e))),
-            (scalar.clone(), any::<u32>()).prop_map(|(element, len)| {
-                DataType::Sample(sample::Type::Array { element, len })
-            }),
-            (scalar.clone(), any::<u16>(), any::<u16>()).prop_map(
-                |(element, rows, columns)| {
-                    DataType::Sample(sample::Type::Matrix {
-                        element,
-                        sides: sample::Sides { rows, columns },
-                    })
-                }
-            ),
-            (scalar, any::<u32>()).prop_map(|(element, max)| {
-                DataType::Sample(sample::Type::List { element, max })
-            }),
-        ]
     }
 
-    proptest! {
-        #[test]
-        fn reads_the_text_that_it_writes(data_type in data_types()) {
-            prop_assert_eq!(data_type.to_string().parse::<DataType>(), Ok(data_type));
+    #[test]
+    fn shows_examples_that_read() {
+        for example in EXAMPLES {
+            let data_type = example.parse::<DataType>().unwrap();
+            assert_eq!(data_type.to_string(), example);
         }
     }
 
