@@ -3067,7 +3067,10 @@ How to read this record:
   are `channel::Problem::Duplicate`, not a panic, as a committed spec comes from other
   nodes. Lost: an input of the keys of other regions, so that an edge may cross
   regions; a `spec::Region` that cannot hold a problem, as #1741 and BQ11b keep a
-  committed spec with problems; and a module `spec::problem`.
+  committed spec with problems; and a module `spec::problem`. The reach of a policy
+  (X26) is not in it yet: #1846 adds it, and `config` (#679) gives its diagnostic from
+  that problem (`laptop.architect-2`, 2026-10-08T09:11:05Z,
+  https://github.com/synnaxlabs/foundation/issues/1841#issuecomment-6056600033).
   `spec::region::tree(chunks, definitions)` builds the tree of a region's definitions,
   and cannot fail. `mesh` calls it at open and at apply. Lost: the function in
   `spec::tree`, which then points at the model above it; and the encode in the caller.
