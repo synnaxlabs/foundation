@@ -9,16 +9,29 @@ use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::ops::Range;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use connector_influx::sim::Store;
 use env::net::udp;
+use mesh::card::addresses::Addresses;
+use mesh::card::{self, Card};
+use mesh::region::Founding;
+use mesh::status::Status;
+use transport::Address;
+use types::ed25519::PrivateKey;
+use types::node::SealKey;
 use types::time::Span;
 
 /// The port each node binds, on its host's first address.
 const PORT: u16 = 7000;
+
+/// The address of the port of the node on `host`.
+fn listen(host: &sim::node::Node) -> SocketAddr {
+    SocketAddr::new(host.addresses()[0], PORT)
+}
 
 /// A whole mesh on one deterministic simulation.
 #[derive(Debug)]
@@ -57,7 +70,10 @@ pub(crate) struct Written {
 struct Member {
     name: String,
     host: sim::node::Node,
-    node: node::Node,
+    /// The region that [`Lab::mesh`] gave the node.
+    region: Option<Founding>,
+    /// The node, from the first [`Lab::run`] on.
+    node: Option<node::Node>,
 }
 
 /// One node in a [`Lab`]: its index in `members`.
@@ -134,37 +150,59 @@ impl Lab {
         }
     }
 
-    /// Starts a node named `name` on a new simulated host.
+    /// Adds a node named `name` on a new simulated host. It starts at the next
+    /// [`Lab::run`].
     pub(crate) fn start(&mut self, name: &str) -> Node {
+        assert!(self.members.len() < 255, "lab failure: at most 255 nodes");
         let host = self.sim.node(sim::node::Config::default());
-        let key = u8::try_from(self.members.len() + 1).expect("at most 255 nodes");
-        let node = node::Node::start(node::Config {
-            shards: host.shards(),
-            clock: host.clock(),
-            wall: host.wall(),
-            budget: types::byte::Size::MEBIBYTE,
-            memory: Box::new(|len| Ok(block::Heap::new(len))),
-            files: {
-                let host = host.clone();
-                Box::new(move || {
-                    let host = host.clone();
-                    Box::new(move || host.files())
-                })
-            },
-            entropy: host.entropy(),
-            disk: types::byte::Size::GIBIBYTE,
-            net: host.net(),
-            listen: SocketAddr::new(host.addresses()[0], PORT),
-            private_key: types::ed25519::PrivateKey([key; 32]),
-            key: types::node::Key::from_u128(u128::from(key)),
-            region: None,
-        });
         self.members.push(Member {
             name: name.into(),
             host,
-            node,
+            region: None,
+            node: None,
         });
         Node(self.members.len() - 1)
+    }
+
+    /// The key and private key of `node`.
+    fn keys(node: Node) -> (types::node::Key, PrivateKey) {
+        let key =
+            u8::try_from(node.0 + 1).expect("invariant: `start` allows 255 nodes");
+        (
+            types::node::Key::from_u128(u128::from(key)),
+            PrivateKey([key; 32]),
+        )
+    }
+
+    /// Starts each node that has not started.
+    fn boot(&mut self) {
+        let members = self.members.iter_mut().enumerate();
+        for (index, member) in members.filter(|(_, member)| member.node.is_none()) {
+            let (key, private_key) = Self::keys(Node(index));
+            let host = &member.host;
+            let node = node::Node::start(node::Config {
+                shards: host.shards(),
+                clock: host.clock(),
+                wall: host.wall(),
+                budget: types::byte::Size::MEBIBYTE,
+                memory: Box::new(|len| Ok(block::Heap::new(len))),
+                files: {
+                    let host = host.clone();
+                    Box::new(move || {
+                        let host = host.clone();
+                        Box::new(move || host.files())
+                    })
+                },
+                entropy: host.entropy(),
+                disk: types::byte::Size::GIBIBYTE,
+                net: host.net(),
+                listen: listen(host),
+                private_key,
+                key,
+                region: member.region.clone(),
+            });
+            member.node = Some(node);
+        }
     }
 
     /// Sets the disk budget of `node` to `bytes`.
@@ -178,20 +216,67 @@ impl Lab {
         todo!("waits on #1256")
     }
 
-    /// Makes `nodes` the members of one mesh, without a ticket.
-    pub(crate) fn mesh(&mut self, _nodes: &[Node]) {
-        todo!("waits on #585")
+    /// Makes `nodes` the members of one mesh, without a ticket: they found the region
+    /// `lab`, each as a voter, at the first [`Lab::run`].
+    ///
+    /// # Panics
+    ///
+    /// When a node runs already or is in another mesh.
+    pub(crate) fn mesh(&mut self, nodes: &[Node]) {
+        let members: Vec<mesh::Member> = nodes
+            .iter()
+            .map(|&node| {
+                let (key, private_key) = Self::keys(node);
+                let card = Card {
+                    name: format!("lab.{}", self.members[node.0].name)
+                        .parse()
+                        .expect("lab failure: a node name is a card name"),
+                    public_key: private_key.public(),
+                    seal_key: SealKey::new([9; 32]).unwrap(),
+                    addresses: Addresses::new(vec![Address::Udp(listen(
+                        &self.members[node.0].host,
+                    ))])
+                    .unwrap(),
+                    version: 1,
+                };
+                mesh::Member {
+                    card: card::Signed::sign(key, card, &private_key),
+                    admission: [0; 64],
+                    ephemeral: None,
+                    status: Status::new(BTreeMap::new()).unwrap(),
+                }
+            })
+            .collect();
+        let founding = Founding {
+            prefix: "lab".parse().unwrap(),
+            voters: members.iter().map(|member| member.card.key()).collect(),
+            members,
+            definitions: BTreeMap::new(),
+        };
+        for &node in nodes {
+            let member = &mut self.members[node.0];
+            let name = &member.name;
+            assert!(
+                member.node.is_none(),
+                "lab failure: `mesh` of {name}, which runs already"
+            );
+            assert!(
+                member.region.is_none(),
+                "lab failure: {name} is in two meshes"
+            );
+            member.region = Some(founding.clone());
+        }
     }
 
     /// Creates the `f64` channel `channel`, whose home is `home`.
     pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
-        todo!("waits on #462")
+        todo!("waits on #462, #1931, #1957")
     }
 
     /// Opens a live reader on `channel` at `node`. It gets the samples written from
     /// now on.
     pub(crate) fn reader(&mut self, _node: Node, _channel: &str) -> Reader {
-        todo!("waits on #462")
+        todo!("waits on #340, #462, #585")
     }
 
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
@@ -202,7 +287,7 @@ impl Lab {
 
     /// Every sample that `reader` got, in the order it got them.
     pub(crate) fn received(&self, _reader: Reader) -> Vec<Sample> {
-        todo!("waits on #462")
+        todo!("waits on #340, #462, #585")
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -371,12 +456,14 @@ impl Lab {
         self.sim.link(b, a, config);
     }
 
-    /// Runs the simulation for `span` of simulated time.
+    /// Starts each node that has not started, then runs the simulation for `span` of
+    /// simulated time.
     ///
     /// # Panics
     ///
     /// When a task panics or the run takes too many steps.
     pub(crate) fn run(&mut self, span: Duration) {
+        self.boot();
         let nanos = i64::try_from(span.as_nanos()).expect("span fits in a Span");
         if let Err(e) = self.sim.run_for(Span::from_nanos(nanos)) {
             panic!("{e}");
@@ -389,24 +476,111 @@ impl Lab {
         self.sim.digest()
     }
 
-    /// Stops every node and runs the simulation until each has ended.
+    /// Stops every node that started and runs the simulation until each has ended.
     ///
     /// # Panics
     ///
     /// When the run fails, or a node ends with an error.
     pub(crate) fn stop(mut self) {
-        for member in &self.members {
-            member.node.stop();
+        for node in self
+            .members
+            .iter()
+            .filter_map(|member| member.node.as_ref())
+        {
+            node.stop();
         }
         if let Err(e) = self.sim.run() {
             panic!("{e}");
         }
         for member in self.members {
-            if let Err(e) = member.node.join() {
+            if let Some(Err(e)) = member.node.map(node::Node::join) {
                 panic!("{}: {e}", member.name);
             }
         }
     }
+}
+
+/// The names that `dir` of `node`'s data directory holds at 1 s, or the error of the
+/// list. Call it before the first [`Lab::run`].
+fn listed(lab: &Lab, node: Node, dir: &'static str) -> Arc<Mutex<Option<Listed>>> {
+    let host = lab.members[node.0].host.clone();
+    let out = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&out);
+    let config = env::shards::Config {
+        name: "listed".into(),
+        core: None,
+    };
+    let shards = host.shards();
+    let start = shards.start(config, move |_| async move {
+        host.clock().sleep(Span::SECOND).await;
+        *slot.lock().unwrap() = Some(host.files().list(Path::new(dir)).await);
+    });
+    drop(start.unwrap());
+    out
+}
+
+type Listed = Result<Vec<PathBuf>, env::files::Error>;
+
+#[test]
+fn a_mesh_founds_one_region_of_its_nodes_at_the_first_run() {
+    let mut lab = Lab::new(1);
+    let (a, b, c) = (lab.start("a"), lab.start("b"), lab.start("c"));
+    lab.mesh(&[a, b]);
+    let logs = [a, b, c].map(|node| listed(&lab, node, "mesh/log"));
+    lab.run(Duration::from_secs(2));
+    let founding = lab.members[a.0].region.clone().unwrap();
+    assert_eq!(lab.members[b.0].region, Some(founding.clone()));
+    assert_eq!(lab.members[c.0].region, None);
+    let cards: Vec<_> = founding
+        .members
+        .iter()
+        .map(|member| {
+            let card = member.card.card();
+            (
+                member.card.key(),
+                card.name.to_string(),
+                card.addresses.clone(),
+            )
+        })
+        .collect();
+    let address = |node: Node| {
+        Addresses::new(vec![Address::Udp(listen(&lab.members[node.0].host))]).unwrap()
+    };
+    let key = |n| types::node::Key::from_u128(n);
+    assert_eq!(
+        cards,
+        [
+            (key(1), "lab.a".into(), address(a)),
+            (key(2), "lab.b".into(), address(b)),
+        ]
+    );
+    assert_eq!(founding.voters, [key(1), key(2)].into());
+    assert_eq!(founding.prefix.to_string(), "lab");
+    let logs = logs.map(|log| log.lock().unwrap().take().unwrap());
+    let log = Ok(vec![PathBuf::from("lock"), PathBuf::from("log-0")]);
+    let none = Err(env::files::Error::NotFound {
+        path: PathBuf::from("mesh/log"),
+    });
+    assert_eq!(logs, [log.clone(), log, none]);
+    lab.stop();
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `mesh` of a, which runs already")]
+fn a_mesh_after_the_first_run_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.run(Duration::from_millis(1));
+    lab.mesh(&[a, b]);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: b is in two meshes")]
+fn a_node_in_two_meshes_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b, c) = (lab.start("a"), lab.start("b"), lab.start("c"));
+    lab.mesh(&[a, b]);
+    lab.mesh(&[b, c]);
 }
 
 #[test]

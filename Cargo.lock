@@ -9,9 +9,11 @@ dependencies = [
  "block",
  "connector-influx",
  "env",
+ "mesh",
  "node",
  "proptest",
  "sim",
+ "transport",
  "types",
 ]
 
