@@ -11,7 +11,7 @@ use connector::cancel::Token;
 use connector::http::Client;
 use connector_influx::sim::Store;
 use env::net::tcp::{Listen, Options};
-use env::thread::Handle;
+use env::thread::{Handle, Panicked};
 use http::Request;
 use types::quality::Quality;
 use types::time::{Span, Stamp};
@@ -94,14 +94,18 @@ impl Influx {
         address
     }
 
-    /// Stops, so nothing listens on the port. Another process can take the port
-    /// before the next [`Influx::serve`], which then panics.
+    /// Stops, and panics when the server panicked. A process that holds or takes the
+    /// port before the next [`Influx::serve`] makes that serve panic.
     pub(super) fn stop(&mut self) {
-        let (stop, shard) = self.serving.take().expect("it serves");
+        let joined = self.halt().expect("it serves");
+        joined.expect("the simulated InfluxDB serves with no panic");
+    }
+
+    /// Cancels the server and joins its shard, or gives `None` when it does not serve.
+    fn halt(&mut self) -> Option<Result<(), Panicked>> {
+        let (stop, shard) = self.serving.take()?;
         stop.cancel();
-        shard
-            .join()
-            .expect("the simulated InfluxDB serves with no panic");
+        Some(shard.join())
     }
 
     /// Each sample stored, by data channel, in time order.
@@ -112,8 +116,12 @@ impl Influx {
 
 impl Drop for Influx {
     fn drop(&mut self) {
-        if let Some((stop, _)) = &self.serving {
-            stop.cancel();
+        let joined = self.halt();
+        // A second panic aborts the test binary.
+        if !std::thread::panicking() {
+            joined
+                .transpose()
+                .expect("the simulated InfluxDB serves with no panic");
         }
     }
 }
