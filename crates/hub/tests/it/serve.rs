@@ -693,7 +693,8 @@ fn sends_a_frame_once_a_credit_raises_the_grant() {
 }
 
 /// Over many runs, a session that spends its window and sends no credit gets each
-/// frame before the one it missed, in order, then `Behind` and the finish.
+/// frame before the one it missed at the next commit, in order, then `Behind` and the
+/// finish.
 #[test]
 #[ignore = "waits on #68"]
 fn sends_each_frame_before_a_miss_then_behind() {
@@ -706,6 +707,9 @@ fn sends_each_frame_before_a_miss_then_behind() {
                 for n in 0..8 {
                     write_wide(&mut writer, now, n);
                 }
+                clock.sleep(SETTLE).await;
+                // The frames that wait for credit miss at this commit.
+                write_wide(&mut writer, now, 8);
                 clock.sleep(SETTLE).await;
             });
             assert_eq!(test.hub.serve(incoming).await, Ok(()));
@@ -734,7 +738,7 @@ fn sends_each_frame_before_a_miss_then_behind() {
 
 /// A session of `value` and `time` spends the charge of the frame the peer builds,
 /// not of the home's frame, which also holds `value-c`: it gets each frame until those
-/// charges reach its window, then `Behind`.
+/// charges reach its window, then `Behind` at the next commit.
 #[test]
 #[ignore = "waits on #68"]
 fn charges_a_complete_session_by_the_frame_the_peer_builds() {
@@ -749,6 +753,9 @@ fn charges_a_complete_session_by_the_frame_the_peer_builds() {
                 let values = scrambled(&stamps);
                 write_series(&mut writer, &[(1, &stamps), (2, &values), (5, &values)]);
             }
+            clock.sleep(SETTLE).await;
+            // The frames that wait for credit miss at this commit.
+            write_wide(&mut writer, now, 16);
             clock.sleep(SETTLE).await;
         });
         assert_eq!(test.hub.serve(incoming).await, Ok(()));
