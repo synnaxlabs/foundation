@@ -287,6 +287,26 @@ fn a_call_whose_answer_is_cut_off_gives_the_pointer_of_its_own_change() {
     }
 }
 
+#[test]
+fn an_apply_that_finds_a_later_pointer_of_its_own_root_is_stale() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let (a, b) = (
+            create_subjects(&["plant.a"], 1),
+            create_subjects(&["plant.b"], 1),
+        );
+        let first = mesh.apply(base(), a.clone()).await.unwrap();
+        let second = mesh.apply(first, b).await.unwrap();
+        let third = mesh.apply(second, a.clone()).await.unwrap();
+        assert_eq!(third, pointer(3, &a));
+        let stale = Error::Stale {
+            base: base(),
+            pointer: third,
+        };
+        assert_eq!(mesh.apply(base(), a).await, Err(stale));
+    });
+}
+
 // A base past the pointer is stale, also at the last version.
 #[test]
 fn an_apply_on_a_base_at_the_last_version_gives_stale() {
