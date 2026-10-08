@@ -98,7 +98,9 @@ fn gives_the_definitions_that_an_apply_of_the_plan_stores() {
     let edge = EDGE.replace("\"f64\"", "\"f32\"");
     for texts in [&[EDGE, INFLUX, EACH][..], &[EDGE, PLANT], &[&edge, PLANT]] {
         let plan = spec.plan(texts, &MEMBERS).expect("no problems");
-        let found = plan.definitions(&spec.definitions(), keys(spec.made));
+        let found = plan
+            .definitions(&spec.definitions(), keys(spec.made))
+            .expect("a plan of the applied spec");
         spec.apply(&plan);
         assert_eq!(found, spec.definitions());
     }
@@ -109,7 +111,9 @@ fn gives_a_dangling_edge_a_key_that_the_region_check_refuses() {
     let spec = Spec::create_empty();
     let mut plan = spec.plan(&[PLANT], &["n"]).expect("no problems");
     plan.changes.retain(|change| change.name != name("a.time"));
-    let definitions = plan.definitions(&spec.definitions(), keys(0));
+    let definitions = plan
+        .definitions(&spec.definitions(), keys(0))
+        .expect("a plan of the applied spec");
     let problems = region::check(&Prefix::ROOT, &definitions);
     let dangling = Problem::Dangling {
         from: name("a.value"),
@@ -132,7 +136,9 @@ fn gives_an_edge_to_a_channel_that_the_plan_removes_a_new_key() {
         .find(|change| change.name == name("a.time"));
     plan.changes
         .insert(0, removal.expect("the removal of a.time"));
-    let definitions = plan.definitions(&spec.definitions(), keys(spec.made));
+    let definitions = plan
+        .definitions(&spec.definitions(), keys(spec.made))
+        .expect("a plan of the applied spec");
     let problems = region::check(&Prefix::ROOT, &definitions);
     let dangling = Problem::Dangling {
         from: name("a.value"),
@@ -141,6 +147,41 @@ fn gives_an_edge_to_a_channel_that_the_plan_removes_a_new_key() {
     };
     assert_eq!(problems, [region::Problem::Channel(dangling)]);
 }
+
+#[test]
+fn refuses_a_change_that_states_another_stored_definition() {
+    let mut spec = Spec::create_empty();
+    spec.apply(&spec.plan(&[PLANT], &["n"]).expect("no problems"));
+    let plant = PLANT.replace("\"f64\"", "\"f32\"");
+    let plan = spec.plan(&[&plant], &["n"]).expect("no problems");
+    let value = name("a.value");
+    let at = plan.changes.iter().position(|change| change.name == value);
+    let at = at.expect("the change of a.value");
+    let mismatch = Err(Error::Mismatch {
+        name: value.clone(),
+    });
+    for old in [None, Some(Digest::of(b"another definition"))] {
+        let mut stated = plan.clone();
+        stated.changes[at].old = old;
+        let found = stated.definitions(&spec.definitions(), keys(spec.made));
+        assert_eq!(found, mismatch);
+    }
+    let empty = Spec::create_empty();
+    let mut added = empty.plan(&[PLANT], &["n"]).expect("no problems");
+    let at = added.changes.iter().position(|change| change.name == value);
+    added.changes[at.expect("the addition of a.value")].old = Some(Digest::of(b""));
+    let error = added
+        .definitions(&empty.definitions(), keys(0))
+        .expect_err("an old digest of nothing");
+    assert_eq!(error, Error::Mismatch { name: value });
+    assert_eq!(
+        error.to_string(),
+        "the plan does not match the applied spec at a.value: plan again"
+    );
+}
+
+/// The fixture texts that [`plan_then_definitions_never_refuses`] applies and plans.
+const TEXTS: [&str; 4] = [EDGE, INFLUX, EACH, PLANT];
 
 /// The bytes of a plan at version 0 of the empty spec with `changes`, each one
 /// already encoded, and no home.
@@ -351,7 +392,9 @@ fn refuses_a_unit_on_a_data_type_with_no_unit() {
 fn refuses_a_spec_definition_that_is_a_channel() {
     let spec = Spec::create_empty();
     let plan = spec.plan(&[PLANT], &["n"]).expect("no problems");
-    let definitions = plan.definitions(&spec.definitions(), keys(0));
+    let definitions = plan
+        .definitions(&spec.definitions(), keys(0))
+        .expect("a plan of the applied spec");
     let channel = definitions[&name("a.time")].encode();
     let mut change = [text("a.time"), vec![0, 1, 0]].concat();
     change.extend_from_slice(&(channel.len() as u64).to_le_bytes());
@@ -425,6 +468,21 @@ fn changed() -> impl Strategy<Value = Plan> {
 }
 
 proptest! {
+    #[test]
+    fn plan_then_definitions_never_refuses(
+        applied in proptest::sample::subsequence(TEXTS.to_vec(), 0..=TEXTS.len()),
+        planned in proptest::sample::subsequence(TEXTS.to_vec(), 0..=TEXTS.len()),
+    ) {
+        let mut spec = Spec::create_empty();
+        if let Ok(plan) = spec.plan(&applied, &MEMBERS) {
+            spec.apply(&plan);
+        }
+        if let Ok(plan) = spec.plan(&planned, &MEMBERS) {
+            let found = plan.definitions(&spec.definitions(), keys(spec.made));
+            prop_assert!(found.is_ok(), "{found:?}");
+        }
+    }
+
     #[test]
     fn decodes_each_plan_that_it_encodes(plan in changed()) {
         prop_assert_eq!(Plan::decode(&plan.encode()), Ok(plan));

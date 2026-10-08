@@ -21,7 +21,7 @@ const CHANNEL: u8 = 1;
 const INDEX: u8 = 0;
 const DATA: u8 = 1;
 
-/// Why bytes are not a plan.
+/// Why a plan file is not a plan of the applied spec. Each case says to plan again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -36,6 +36,12 @@ pub enum Error {
         /// that the bytes cut.
         at: usize,
     },
+    /// The change at `name` states another stored definition than the applied spec
+    /// holds there.
+    Mismatch {
+        /// The tree key of the change.
+        name: Name,
+    },
 }
 
 impl fmt::Display for Error {
@@ -49,6 +55,10 @@ impl fmt::Display for Error {
             Self::Malformed { at } => {
                 write!(f, "the bytes are not a plan, from byte {at}")
             }
+            Self::Mismatch { name } => write!(
+                f,
+                "the plan does not match the applied spec at {name}: plan again"
+            ),
         }
     }
 }

@@ -105,15 +105,28 @@ impl Plan {
     /// after the plan gets a key from `key` too, which [`spec::region::check`] refuses
     /// as dangling. Each call of `key` must give a key that no channel holds and that
     /// no earlier call gave.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Mismatch`] at the first change whose `old` is not the digest of the
+    /// encoded definition at its name in `applied`: `None` at a stored name, `Some` at
+    /// a name with no stored definition, or another digest. A plan that [`plan`] made
+    /// from `applied` never gives it. A change with no old and no new definition,
+    /// which [`Plan::decode`] refuses, gets it at a stored name and changes nothing at
+    /// another name.
     pub fn definitions(
         &self,
         applied: &BTreeMap<Name, definition::Definition>,
         key: impl FnMut() -> Key,
-    ) -> BTreeMap<Name, definition::Definition> {
+    ) -> Result<BTreeMap<Name, definition::Definition>, Error> {
         let mut definitions = applied.clone();
         for change in &self.changes {
-            definitions.remove(&change.name);
+            let stored = definitions.remove(&change.name);
+            if change.old != stored.map(|stored| Digest::of(&stored.encode())) {
+                return Err(Error::Mismatch {
+                    name: change.name.clone(),
+                });
+            }
         }
         let kept = definitions
             .iter()
@@ -142,7 +155,7 @@ impl Plan {
                 (name, definition::Definition::Channel(channel))
             }),
         );
-        definitions
+        Ok(definitions)
     }
 }
 

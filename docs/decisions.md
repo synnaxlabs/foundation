@@ -5016,7 +5016,14 @@ How to read this record:
   plan refuses the rest. `config::plan::Plan::definitions(applied, key)` gives those
   definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
   from `key`, which the check refuses as dangling. Each call of `key` must give a key
-  that no channel holds and that no earlier call gave. Each item of a plan has one
+  that no channel holds and that no earlier call gave. `definitions` refuses with
+  `plan::Error::Mismatch { name }` at the first change whose `old` is not the digest of
+  the stored definition at its name, so the digest rule stays in `config`; apply still
+  checks `base` first (`laptop.architect-2`, 2026-10-08T19:11:26Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684). The
+  codec copies the channel kind layout of `spec::definition`; #1975 gives `spec` the
+  bytes of `channel::Kind<E>`, at the next change to the channel kind format of
+  `spec` or at a second user of the bytes of `Kind<Name>`. Each item of a plan has one
   path, under `config::plan`. Plan:
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221. Decided
   by `laptop.architect-2`: the three methods and the version byte (2026-10-08T16:00:18Z,
