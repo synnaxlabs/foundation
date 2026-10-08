@@ -6119,6 +6119,7 @@ How to read this record:
   `[patch.crates-io]` table in `.cargo/config.toml` for both workspaces. Cargo reads
   config from the working directory, so a run from outside the repository with
   `--manifest-path` builds the registry release with no error (`laptop.architect-2`,
+  2026-10-08T14:16:19Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714). The PR
   that changes a copy of a Rust crate lists its mutants as `docs/dependencies.md`,
   "Local patches", states (`laptop.architect-2`, 2026-10-08T11:36:09Z,
