@@ -1534,7 +1534,7 @@ How to read this record:
   monotonic clock until the soonest reading at which the slew of that read moves the
   latest edge to `at`, and reads again. Under one slew it is late only by the timer;
   a new slew shows at the next read. (3) Before the first mesh time it reads again
-  each second, the period of the OS source. (4) `estimate::Slew::reach(now, at,
+  each second, the period of the OS source, from its own constant. (4) `estimate::Slew::reach(now, at,
   drift) -> Monotonic` gives that reading. It has no `None`: at the last reading the
   edge is at the end of a stamp's range. The edge is not monotonic (a downward slew
   moves it back at each tick), so it steps by the most the edge can rise: `j * (1 +
