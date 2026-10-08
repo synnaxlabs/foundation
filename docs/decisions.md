@@ -2141,7 +2141,14 @@ How to read this record:
   approved it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
   A voter that does not lead cannot make a node follow it: a leader claim needs a
   quorum of grants (RAFT SURFACE, #750), except a voter that led a term at or above
-  the node's committed one, which can forge a link until #882 (RAFT SURFACE). A
+  the node's committed one, which can forge a link until #882 (RAFT SURFACE). After a
+  restart the committed term is the term at the applied index, since `Hard` holds no
+  commit index, so more past leaders can forge a link. Lost: the commit index in
+  `Hard`, one more durable write each time the commit index moves, for a gap that #882
+  closes; and a bound of the highest term in the stable log, which refuses a real
+  leader whose link has a lower term than an entry of the node that is not committed.
+  Decided by `laptop.architect` (#1682, 2026-10-08T01:03:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758. A
   false `AppendReply` still counts as held (#882). Lost: a lease that drops a
   heartbeat or an `Append` of a higher term from a node that is not the leader. A
   reply of a higher term ends any node's lease, and a leader must step down on one;
