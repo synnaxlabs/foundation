@@ -1,14 +1,17 @@
 //! The cost of UDP over the loopback through `os::net`: one datagram against a plain
 //! Tokio socket, and a batch sent in one call against the same datagrams sent one by
-//! one. Each sample sends and then receives all the bytes.
+//! one. Each sample sends and then receives all the bytes, except in `register`.
 
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::os::fd::AsRawFd;
 
 use divan::Bencher;
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
 
@@ -129,4 +132,23 @@ fn os_batch(bencher: Bencher<'_, '_>) {
 #[divan::bench(sample_count = SAMPLES)]
 fn os_one_by_one(bencher: Bencher<'_, '_>) {
     bench_os(bencher, &[7; SEGMENT], 0, DATAGRAMS);
+}
+
+/// The registration that a sender makes at each `EAGAIN`: a write interest on its
+/// raw descriptor, and the drop at the next send that succeeds.
+#[divan::bench(sample_count = SAMPLES)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`os::net` gives no descriptor, and the bench needs one"
+)]
+fn register(bencher: Bencher<'_, '_>) {
+    let runtime = runtime();
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0));
+    let socket = socket.expect("the loopback has a free port");
+    let fd = socket.as_raw_fd();
+    let _guard = runtime.enter();
+    bencher.bench_local(|| {
+        let registered = AsyncFd::with_interest(fd, Interest::WRITABLE);
+        drop(registered.expect("the I/O driver registers the socket"));
+    });
 }
