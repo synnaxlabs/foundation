@@ -5,7 +5,7 @@ mod access;
 mod channel;
 mod connector;
 mod node_settings;
-mod openssh;
+pub mod openssh;
 mod placement;
 pub mod plan;
 mod private_key;
@@ -2785,6 +2785,8 @@ mod tests {
                 string(bare),
                 string(&format!("  {ALICE}\n")),
                 string(&format!("{bare} a comment with words")),
+                string(&ALICE.replace(' ', "\t")),
+                string(&ALICE.replace(' ', "  ")),
                 list(&[string(ALICE)]),
             ];
             for keys in cases {
@@ -2792,6 +2794,15 @@ mod tests {
                 assert_eq!(check(&documents), Ok(keyed(&[ALICE_KEY])), "{keys:?}");
             }
             assert_eq!(ed25519(ALICE_KEY).split(' ').nth(1), bare.split(' ').nth(1));
+        }
+
+        #[test]
+        fn gives_the_fingerprint_that_ssh_keygen_gives() {
+            let key = PublicKey::new(ALICE_KEY).expect("a key");
+            assert_eq!(
+                crate::openssh::fingerprint(key),
+                "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc"
+            );
         }
 
         #[test]
@@ -3050,6 +3061,20 @@ mod tests {
                 assert_eq!(
                     check(&documents),
                     Err(vec![bad(at(0, 11), message)]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_key_length_longer_than_the_key() {
+            let start = &b"\0\0\0\x0bssh-ed25519\0\0\0"[..];
+            for length in [0x21, 0xff] {
+                let blob = [start, &[length], &ALICE_KEY].concat();
+                let keys = string(&line("ssh-ed25519", &blob));
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![bad(at(0, 11), NOT_ED25519)]),
                     "{keys:?}"
                 );
             }

@@ -1828,6 +1828,7 @@ mod hub {
     use ::hub::writer::{self, Writer};
     use spec::channel::{Channel, Data, Kind};
     use spec::data_type::DataType;
+    use spec::definition::Definition;
     use types::authority::Authority;
     use types::channel::Key;
     use types::frame::key_set::KeySet;
@@ -1866,10 +1867,18 @@ mod hub {
         }
     }
 
-    /// Defines each of `channels`, by its name, in one call.
+    /// Defines each of `channels`, by its name, in one call. It passes them in their
+    /// order: a map would sort them by name, and a test of slots needs the order.
     pub(super) fn define(hub: &Hub, channels: &[(&str, Channel)]) {
-        let channels: Vec<_> = channels.iter().map(|(n, c)| (name(n), c)).collect();
-        hub.define(channels.iter().map(|(name, channel)| (name, *channel)));
+        let definitions: Vec<_> = channels
+            .iter()
+            .map(|(n, c)| (name(n), Definition::Channel(c.clone())))
+            .collect();
+        hub.define(
+            definitions
+                .iter()
+                .map(|(name, definition)| (name, definition)),
+        );
     }
 
     /// A writer on `channels`, opened again each millisecond of `clock` until the node
