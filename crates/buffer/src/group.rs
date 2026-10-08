@@ -228,7 +228,7 @@ impl Closed {
         let (header, table) = tail.split_at_mut(record::HEADER_LEN);
         let parts = group.writes.iter().map(|part| &**part);
         let body = iter::once(&*table).chain(parts);
-        let (sealed, ends) = plan.seal(chain, body);
+        let (sealed, ends) = plan.seal(chain, record::Kind::Data, body);
         header.copy_from_slice(&sealed.record.header);
         group.writes.insert(0, meta.freeze().skip(start));
         let wrap = sealed.wrap.map(|write| {
@@ -521,6 +521,7 @@ mod tests {
                         let start = index(place) + HEADER_LEN;
                         bodies.push(self.bytes[start..start + body.len].to_vec());
                     }
+                    Step::Carry(_) => panic!("the group writes no carry record"),
                     Step::Moved | Step::More => {}
                     Step::End => return bodies,
                 }

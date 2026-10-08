@@ -11,6 +11,7 @@ use types::frame::Path;
 use types::hash;
 use types::time::Stamp;
 
+use crate::carry;
 use crate::entry::Header;
 
 /// Where one path of an index stands.
@@ -39,6 +40,13 @@ pub(crate) enum Invalid {
         first: u64,
         len: u32,
     },
+    /// A carried tail is not the end of the path that its records give, or has
+    /// another stamp than the path's stamp.
+    Carried {
+        carried: carry::Tail,
+        end: Mark,
+        stamp: Option<Stamp>,
+    },
 }
 
 impl fmt::Display for Invalid {
@@ -63,6 +71,23 @@ impl fmt::Display for Invalid {
                 f,
                 "an entry of index {index} on path {path:?} starts at {first} with \
                  {len} samples, past the last seq"
+            ),
+            Self::Carried {
+                carried,
+                end,
+                stamp,
+            } => write!(
+                f,
+                "the carried tail of index {} on path {:?} at seq {} after {} empty \
+                 entries with stamp {:?} is not the end at seq {} after {} with stamp \
+                 {stamp:?}",
+                carried.index,
+                carried.path,
+                carried.end.seq,
+                carried.end.given,
+                carried.stamp,
+                end.seq,
+                end.given
             ),
         }
     }
@@ -314,6 +339,65 @@ impl Logs {
             self.hidden
         );
         self.hidden = tail;
+    }
+
+    /// Gives a path the tail that a carry record holds. The recovery walk feeds it
+    /// each carry record, in ring order. A path that the walk has not met moves to
+    /// the carried tail and end, with no run. A path it met keeps its end and runs,
+    /// and takes the carried stamp when it has none: a trim passed the entry with
+    /// the stamp.
+    ///
+    /// # Errors
+    ///
+    /// [`Invalid::Carried`] when the walk met the path and the carried end is not
+    /// its end, or the path has a stamp and the carried stamp is another. Nothing
+    /// changes.
+    ///
+    /// # Panics
+    ///
+    /// When the log of `slot` on the carried path holds another index, or holds an
+    /// appended entry that is not durable.
+    pub(crate) fn carry(
+        &mut self,
+        slot: Slot,
+        carried: &carry::Tail,
+    ) -> Result<(), Invalid> {
+        let key = (slot, carried.path);
+        let Some(log) = self.paths.get_mut(&key) else {
+            let mut log = Log::new(carried.index);
+            log.durable = Tail {
+                seq: carried.end.seq,
+                stamp: carried.stamp,
+            };
+            log.appended = log.durable;
+            log.empty = carried.end.given;
+            self.paths.insert(key, log);
+            return Ok(());
+        };
+        assert!(
+            log.index == carried.index,
+            "invariant: slot {} holds index {} and index {}",
+            slot.get(),
+            log.index,
+            carried.index,
+        );
+        assert!(
+            log.appended == log.durable,
+            "invariant: a carry comes when every entry of index {} is durable",
+            carried.index
+        );
+        let end = log.end();
+        let stamp = log.durable.stamp;
+        if carried.end != end || stamp.is_some_and(|_| carried.stamp != stamp) {
+            return Err(Invalid::Carried {
+                carried: *carried,
+                end,
+                stamp,
+            });
+        }
+        log.durable.stamp = carried.stamp;
+        log.appended = log.durable;
+        Ok(())
     }
 
     /// Moves the appended tail of the header's path past the entry, as
@@ -988,6 +1072,144 @@ mod tests {
         logs.hide(12288);
         logs.sync(slot(1), &header(1, Path::Live, 3, 1, None), 4096)
             .expect("the invariant panics first");
+    }
+
+    /// The tail of index 1 on the live path that a carry record holds.
+    fn carried(seq: u64, given: u64, stamp: Option<i64>) -> carry::Tail {
+        carry::Tail {
+            index: channel::Key::from_u128(1),
+            path: Path::Live,
+            end: mark(seq, given),
+            stamp: stamp.map(Stamp::from_nanos),
+        }
+    }
+
+    /// Logs that the walk fed one record at 4096 with the entry [0, 3) of index 1
+    /// on the live path, with `last`, and an entry with no samples at 3.
+    fn walked(last: Option<i64>) -> Logs {
+        let mut logs = Logs::default();
+        for header in [
+            header(1, Path::Live, 0, 3, last),
+            header(1, Path::Live, 3, 0, None),
+        ] {
+            logs.append(slot(1), &header).expect("appends");
+            logs.sync(slot(1), &header, 4096).expect("syncs");
+        }
+        logs
+    }
+
+    mod carry_tail {
+        use super::*;
+
+        #[test]
+        fn moves_a_new_path_to_the_carried_tail_with_no_run() {
+            let mut logs = Logs::default();
+            logs.carry(slot(1), &carried(7, 2, Some(70)))
+                .expect("a new path takes any tail");
+            let tail = Tail {
+                seq: 7,
+                stamp: Some(Stamp::from_nanos(70)),
+            };
+            assert_eq!(logs.appended(slot(1), Path::Live), tail);
+            assert_eq!(logs.durable(slot(1), Path::Live), tail);
+            assert_eq!(logs.runs(slot(1), Path::Live).count(), 0);
+            let end = Found::End(mark(7, 2));
+            assert_eq!(logs.find(slot(1), Path::Live, mark(0, 0)), end);
+            assert_eq!(logs.find(slot(1), Path::Live, mark(7, 2)), end);
+            assert_eq!(logs.durable(slot(1), Path::Backfill), Tail::default());
+        }
+
+        #[test]
+        fn keeps_the_tail_and_the_runs_of_a_path_at_its_end() {
+            let mut logs = walked(Some(30));
+            let before = logs.clone();
+            logs.carry(slot(1), &carried(3, 1, Some(30)))
+                .expect("the carried tail is the path's tail");
+            assert_eq!(logs, before);
+            let key = channel::Key::from_u128(1);
+            let found = Found::Run(key, run(0, 0, 4096));
+            assert_eq!(logs.find(slot(1), Path::Live, mark(0, 0)), found);
+            let end = Found::End(mark(3, 1));
+            assert_eq!(logs.find(slot(1), Path::Live, mark(3, 1)), end);
+        }
+
+        #[test]
+        fn gives_a_path_with_no_stamp_the_carried_stamp() {
+            let mut logs = walked(None);
+            logs.carry(slot(1), &carried(3, 1, Some(20)))
+                .expect("a trim passed the stamp");
+            let tail = Tail {
+                seq: 3,
+                stamp: Some(Stamp::from_nanos(20)),
+            };
+            assert_eq!(logs.durable(slot(1), Path::Live), tail);
+            assert_eq!(logs.appended(slot(1), Path::Live), tail);
+            let runs: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
+            assert_eq!(runs, [run(0, 0, 4096)]);
+        }
+
+        #[test]
+        fn refuses_a_carried_tail_that_is_not_the_path_tail_and_changes_nothing() {
+            let refused = [
+                (Some(30), carried(2, 5, Some(30))),
+                (Some(30), carried(3, 0, Some(30))),
+                (Some(30), carried(3, 2, Some(30))),
+                (Some(30), carried(4, 0, Some(30))),
+                (Some(30), carried(3, 1, None)),
+                (Some(30), carried(3, 1, Some(31))),
+                (None, carried(4, 0, Some(30))),
+            ];
+            for (last, tail) in refused {
+                let logs = walked(last);
+                let mut carried_to = logs.clone();
+                let invalid = carried_to
+                    .carry(slot(1), &tail)
+                    .expect_err("the carried tail is not the path's");
+                let carried = Invalid::Carried {
+                    carried: tail,
+                    end: mark(3, 1),
+                    stamp: last.map(Stamp::from_nanos),
+                };
+                assert_eq!(invalid, carried, "carried {tail:?}");
+                assert_eq!(carried_to, logs, "carried {tail:?}");
+            }
+            let invalid = walked(Some(30))
+                .carry(slot(1), &carried(4, 0, None))
+                .expect_err("the carried end is ahead");
+            assert_eq!(
+                invalid.to_string(),
+                "the carried tail of index 00000000-0000-0000-0000-000000000001 on \
+                 path Live at seq 4 after 0 empty entries with stamp None is not the \
+                 end at seq 3 after 1 with stamp Some(Stamp(30))"
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: slot 1 holds index \
+                                   00000000-0000-0000-0000-000000000001 and index \
+                                   00000000-0000-0000-0000-000000000002")]
+        fn a_slot_with_a_second_index_is_a_broken_invariant() {
+            let mut logs = walked(Some(30));
+            let other = carry::Tail {
+                index: channel::Key::from_u128(2),
+                ..carried(3, 1, Some(30))
+            };
+            logs.carry(slot(1), &other)
+                .expect("the invariant panics first");
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "invariant: a carry comes when every entry of index \
+                                   00000000-0000-0000-0000-000000000001 is durable"
+        )]
+        fn an_entry_that_is_not_durable_is_a_broken_invariant() {
+            let mut logs = Logs::default();
+            logs.append(slot(1), &header(1, Path::Live, 0, 3, None))
+                .expect("appends");
+            logs.carry(slot(1), &carried(3, 0, None))
+                .expect("the invariant panics first");
+        }
     }
 
     #[test]

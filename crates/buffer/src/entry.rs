@@ -168,8 +168,7 @@ impl Header {
             &self.first.to_le_bytes(),
             &self.len.to_le_bytes(),
             &self.stored_at.nanos().to_le_bytes(),
-            &[u8::from(self.last.is_some())],
-            &self.last.map_or(0, Stamp::nanos).to_le_bytes(),
+            &last_bytes(self.last),
             &[self.tag],
             &self.bytes.to_le_bytes(),
         ] {
@@ -181,24 +180,13 @@ impl Header {
     }
 
     fn decode(bytes: &[u8; HEADER_LEN]) -> Result<Self, Invalid> {
-        let mut fields = Cursor(bytes);
+        let mut fields = Fields(bytes);
         let index = channel::Key::from_u128(u128::from_le_bytes(fields.take()));
-        let path = match fields.take::<1>() {
-            [0] => Path::Live,
-            [1] => Path::Backfill,
-            [byte] => return Err(Invalid::Path(byte)),
-        };
+        let path = fields.path()?;
         let first = u64::from_le_bytes(fields.take());
         let len = u32::from_le_bytes(fields.take());
         let stored_at = Stamp::from_nanos(i64::from_le_bytes(fields.take()));
-        let last = match fields.take::<1>() {
-            [0] => {
-                fields.take::<8>();
-                None
-            }
-            [1] => Some(Stamp::from_nanos(i64::from_le_bytes(fields.take()))),
-            [byte] => return Err(Invalid::Presence(byte)),
-        };
+        let last = fields.last()?;
         let [tag] = fields.take();
         let bytes = u32::from_le_bytes(fields.take());
         Ok(Self {
@@ -214,25 +202,68 @@ impl Header {
     }
 }
 
-/// Reads fixed-width fields from the front of a header.
-struct Cursor<'a>(&'a [u8]);
+/// Reads fixed-width fields from the front of a slice that holds them all.
+pub(crate) struct Fields<'a>(pub(crate) &'a [u8]);
 
-impl Cursor<'_> {
-    fn take<const N: usize>(&mut self) -> [u8; N] {
+impl Fields<'_> {
+    /// The next `N` bytes.
+    ///
+    /// # Panics
+    ///
+    /// When fewer than `N` bytes are left.
+    pub(crate) fn take<const N: usize>(&mut self) -> [u8; N] {
         let (field, rest) = self
             .0
             .split_first_chunk()
-            .expect("invariant: a header slice holds every field");
+            .expect("invariant: the slice holds every field");
         self.0 = rest;
         *field
     }
+
+    /// The next path byte, as [`path_byte`] writes it.
+    ///
+    /// # Errors
+    ///
+    /// [`Invalid::Path`] for a byte that is not a path.
+    pub(crate) fn path(&mut self) -> Result<Path, Invalid> {
+        match self.take::<1>() {
+            [0] => Ok(Path::Live),
+            [1] => Ok(Path::Backfill),
+            [byte] => Err(Invalid::Path(byte)),
+        }
+    }
+
+    /// The next presence byte and stamp, as [`last_bytes`] writes them.
+    ///
+    /// # Errors
+    ///
+    /// [`Invalid::Presence`] for a presence byte that is not 0 or 1.
+    pub(crate) fn last(&mut self) -> Result<Option<Stamp>, Invalid> {
+        let [presence] = self.take();
+        let stamp = Stamp::from_nanos(i64::from_le_bytes(self.take()));
+        match presence {
+            0 => Ok(None),
+            1 => Ok(Some(stamp)),
+            byte => Err(Invalid::Presence(byte)),
+        }
+    }
 }
 
-const fn path_byte(path: Path) -> u8 {
+/// The byte of `path` on disk.
+pub(crate) const fn path_byte(path: Path) -> u8 {
     match path {
         Path::Live => 0,
         Path::Backfill => 1,
     }
+}
+
+/// A presence byte then the stamp, 0 under presence 0.
+pub(crate) fn last_bytes(last: Option<Stamp>) -> [u8; 9] {
+    let mut bytes = [0; 9];
+    let (presence, stamp) = bytes.split_at_mut(1);
+    presence.copy_from_slice(&[u8::from(last.is_some())]);
+    stamp.copy_from_slice(&last.map_or(0, Stamp::nanos).to_le_bytes());
+    bytes
 }
 
 /// The size of the table that holds `count` headers.

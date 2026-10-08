@@ -56,6 +56,7 @@ const COVER: usize = 512;
 /// next record is the CRC of a data record and the body of a restart record.
 const DATA: u8 = 1;
 const RESTART: u8 = 3;
+const CARRY: u8 = 4;
 
 /// What one test gets on its shard.
 struct Shard {
@@ -146,7 +147,7 @@ impl Shard {
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
-    /// the record before it, a restart record or a data record. The tail offset in
+    /// the record before it, a restart, data, or carry record. The tail offset in
     /// each header block must be 0. The first record follows the tail chain of the
     /// header, so for it the two header blocks must be the same up to the seq.
     fn seal(&self, offset: u64) {
@@ -175,13 +176,22 @@ impl Shard {
                 u32_at(CHAIN_AT)
             }
             Some((before, RESTART)) => u32_at(before + 9),
-            Some((before, DATA)) => u32_at(before + 4),
+            Some((before, DATA | CARRY)) => u32_at(before + 4),
             Some((_, kind)) => panic!("no chain value of kind {kind} before {offset}"),
         };
         let crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
         let end = start + 9 + len_at(start);
         let crc = crc32c::crc32c_append(crc, &file[start + 8..end]);
         self.memory.put(RING, start + 4, &crc.to_le_bytes());
+    }
+
+    /// Puts a carry record with `body` at `offset` of the area and seals it.
+    fn put_carry(&self, offset: u64, body: &[u8]) {
+        let len = u32::try_from(body.len()).expect("a short body");
+        let record = [&len.to_le_bytes()[..], &[0; 4], &[CARRY], body].concat();
+        self.memory
+            .put(RING, to_usize(AREA_START + offset), &record);
+        self.seal(offset);
     }
 
     /// Makes a ring with a data record at `BLOCK` and one at `2 * BLOCK`.
@@ -280,6 +290,28 @@ fn tail(seq: u64, stamp: Option<i64>) -> Tail {
 
 fn mark(seq: u64, given: u64) -> Mark {
     Mark { seq, given }
+}
+
+/// One tail of a carry record of the live path of index `index`, as on disk.
+fn carried(index: u32, seq: u64, given: u64, stamp: Option<i64>) -> Vec<u8> {
+    let last = match stamp {
+        Some(stamp) => [&[1][..], &stamp.to_le_bytes()].concat(),
+        None => vec![0; 9],
+    };
+    let fields = [
+        &u128::from(index).to_le_bytes()[..],
+        &[0],
+        &seq.to_le_bytes(),
+        &given.to_le_bytes(),
+        &last,
+    ];
+    fields.concat()
+}
+
+/// The body of a carry record that holds `tails`.
+fn carry_body(tails: &[Vec<u8>]) -> Vec<u8> {
+    let count = u32::try_from(tails.len()).expect("few tails");
+    [count.to_le_bytes().to_vec(), tails.concat()].concat()
 }
 
 /// What a read gives back for an `entry` with tag 0 and `bytes`.
@@ -2869,7 +2901,7 @@ fn a_record_of_an_unknown_kind_at_the_start_of_the_ring_is_invalid() {
     run(118, Memory::default(), |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        shard.memory.put(RING, to_usize(AREA_START) + 8, &[4]);
+        shard.memory.put(RING, to_usize(AREA_START) + 8, &[5]);
         shard.seal(0);
         shard.open_invalid(layout(AREA, BODY_MAX), 0).await;
     });
@@ -2912,7 +2944,7 @@ fn a_record_of_an_unknown_kind_after_a_long_record_is_invalid() {
         let ring = shard.create_long_record().await;
         let kind = to_usize(AREA_START + 3 * BLOCK) + 8;
         assert_eq!(shard.memory.bytes(RING)[kind - to_usize(BLOCK)], DATA);
-        shard.memory.put(RING, kind, &[4]);
+        shard.memory.put(RING, kind, &[5]);
         shard.seal(3 * BLOCK);
         shard.open_invalid(ring, 3 * BLOCK).await;
     });
@@ -2923,7 +2955,7 @@ fn a_record_of_an_unknown_kind_is_invalid() {
     run(109, Memory::default(), |shard| async move {
         shard.create_two_records().await;
         let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
-        shard.memory.put(RING, kind, &[4]);
+        shard.memory.put(RING, kind, &[5]);
         shard.seal(2 * BLOCK);
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
     });
@@ -2941,6 +2973,131 @@ fn a_block_of_kind_zero_that_follows_the_chain_ends_the_walk() {
         assert_eq!(opened.map(drop), Ok(()));
         assert_eq!(shard.memory.bytes(RING)[kind], RESTART);
     });
+}
+
+/// A trim passed the only record of index 1, and a carry record after the record
+/// of index 2 holds its tail. Each open gives that tail, a read gives the seqs
+/// before it as a gap, and the next entry of index 1 goes on from it.
+#[test]
+fn an_open_gives_the_carried_tail_of_a_path_with_no_record() {
+    run(158, Memory::default(), |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let (a, b) = (slots.assign(key(1)), slots.assign(key(2)));
+        for appended in [
+            entry(1, a, Path::Live, 0, 3, Some(30), Parts::default()),
+            entry(2, b, Path::Live, 0, 2, Some(40), shard.block(20).into()),
+        ] {
+            buffer.append([appended]).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        drop(buffer);
+        shard.put_carry(3 * BLOCK, &carry_body(&[carried(1, 3, 0, Some(30))]));
+        let chain = to_usize(AREA_START + BLOCK) + 4;
+        let chain = shard.memory.bytes(RING)[chain..chain + 4].to_vec();
+        shard.tamper(TAIL_AT, &(2 * BLOCK).to_le_bytes());
+        shard.tamper(CHAIN_AT, &chain);
+        let hidden = Read {
+            gap: Some(0..3),
+            entries: vec![],
+            next: mark(3, 0),
+        };
+        for open in ["the first open", "the second open"] {
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let (a, b) = (slots.assign(key(1)), slots.assign(key(2)));
+            assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)), "{open}");
+            assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)), "{open}");
+            let read = buffer.read(a, Path::Live, mark(0, 0), usize::MAX).await;
+            assert_eq!(read, Ok(hidden.clone()), "{open}");
+            let read = buffer.read(b, Path::Live, mark(0, 0), usize::MAX).await;
+            let entries = vec![stored(0, 2, Some(40), shard.block(20))];
+            assert_eq!(read, Ok(whole(entries, mark(2, 0))), "{open}");
+        }
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let next = entry(1, a, Path::Live, 3, 3, None, shard.block(10).into());
+        buffer.append([next]).expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        assert_eq!(buffer.durable(a, Path::Live), tail(6, Some(30)));
+        let read = buffer.read(a, Path::Live, mark(0, 0), usize::MAX).await;
+        let expected = Read {
+            gap: Some(0..3),
+            entries: vec![stored(3, 3, None, shard.block(10))],
+            next: mark(6, 0),
+        };
+        assert_eq!(read, Ok(expected));
+    });
+}
+
+/// A carry record after the records of a path holds the tail that they give, or
+/// the open refuses the ring. The tail of each case is index 1 on the live path,
+/// whose records give seq 6 with stamp 60.
+#[test]
+fn an_open_refuses_a_carried_tail_that_is_not_the_tail_of_the_records() {
+    let cases = [
+        (carried(1, 3, 0, Some(30)), false),
+        (carried(1, 6, 1, Some(60)), false),
+        (carried(1, 7, 0, Some(60)), false),
+        (carried(1, 6, 0, Some(61)), false),
+        (carried(1, 6, 0, None), false),
+        (carried(1, 6, 0, Some(60)), true),
+    ];
+    for (carried, valid) in cases {
+        run(159, Memory::default(), move |shard| async move {
+            shard.create_two_records().await;
+            shard.put_carry(3 * BLOCK, &carry_body(&[carried]));
+            let ring = layout(AREA, BODY_MAX);
+            if !valid {
+                shard.open_invalid(ring, 3 * BLOCK).await;
+                return;
+            }
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            assert_eq!(buffer.durable(a, Path::Live), tail(6, Some(60)));
+            let read = buffer.read(a, Path::Live, mark(0, 0), usize::MAX).await;
+            let entries = vec![
+                stored(0, 3, Some(30), shard.block(0)),
+                stored(3, 3, Some(60), shard.block(0)),
+            ];
+            assert_eq!(read, Ok(whole(entries, mark(6, 0))));
+        });
+    }
+}
+
+/// A carry record of the wrong shape: no count, a count over the tails it holds,
+/// bytes after its tails, a wrong path byte, and a wrong presence byte.
+#[test]
+fn an_open_refuses_a_carry_record_of_the_wrong_shape() {
+    let one = carry_body(&[carried(2, 4, 0, None)]);
+    let with = |at: usize, byte: u8| {
+        let mut body = one.clone();
+        body[4 + at] = byte;
+        body
+    };
+    let mut short = one.clone();
+    short[0] = 2;
+    let bodies = [
+        vec![1, 0, 0],
+        short,
+        [one.clone(), vec![0]].concat(),
+        with(16, 2),
+        with(33, 2),
+    ];
+    for body in bodies {
+        run(160, Memory::default(), move |shard| async move {
+            shard.create_two_records().await;
+            shard.put_carry(3 * BLOCK, &body);
+            shard.open_invalid(layout(AREA, BODY_MAX), 3 * BLOCK).await;
+        });
+    }
 }
 
 #[test]

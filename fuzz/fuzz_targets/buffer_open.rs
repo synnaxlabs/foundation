@@ -4,7 +4,9 @@
 //! `Buffer::read` gives each path of a ring that opens as its doc says: every entry
 //! up to the tail, a gap only for seqs that no entry holds, each entry that its
 //! budget takes, and the same entries in one read, in reads of a small budget, from
-//! inside an entry or a gap, and after a reopen.
+//! inside an entry or a gap, and after a reopen. A carry record can give a path a
+//! tail past its entries, with a stamp that no entry gives: a read then gives the
+//! seqs up to the tail as a gap with no entry.
 //!
 //! Input: batches that the production path writes, then edits on the file bytes.
 //! Two edits seal a CRC: a header block (at offset 42, over its first 512-byte
@@ -66,6 +68,8 @@ const CHECK_LAST: Stamp = Stamp::from_nanos(9);
 /// entry for another.
 const BUILD_TAG: u8 = 0x01;
 const CHECK_TAG: u8 = 0x81;
+/// The kind byte of a carry record.
+const CARRY: u8 = 4;
 
 /// The time an entry with `tag` is stored.
 fn stored_at(tag: u8) -> Stamp {
@@ -336,13 +340,13 @@ async fn build(
 }
 
 /// Every entry of each path from the start, in slot then path order.
-async fn read_paths(buffer: &Buffer, slots: &[Slot]) -> Vec<Vec<Given>> {
+async fn read_paths(buffer: &Buffer, slots: &[Slot], carried: bool) -> Vec<Vec<Given>> {
     let mut paths = Vec::new();
     for slot in slots {
         for path in PATHS {
-            let whole = read_path(buffer, *slot, path, usize::MAX).await;
+            let whole = read_path(buffer, *slot, path, usize::MAX, carried).await;
             for budget in [1, BUDGET] {
-                let stepped = read_path(buffer, *slot, path, budget).await;
+                let stepped = read_path(buffer, *slot, path, budget, carried).await;
                 assert_eq!(stepped, whole, "reads of {budget} gave other entries");
             }
             let mut at = 0;
@@ -390,6 +394,7 @@ async fn read_path(
     slot: Slot,
     path: frame::Path,
     budget: usize,
+    carried: bool,
 ) -> Vec<Given> {
     let tail = buffer.durable(slot, path);
     let mut given: Vec<Given> = Vec::new();
@@ -402,11 +407,19 @@ async fn read_path(
             .expect("a read of an open ring");
         assert!(read.next.seq <= tail.seq, "a read went past the tail");
         if read.entries.is_empty() {
-            assert_eq!(read.gap, None, "a gap with no entry");
+            if let Some(gap) = read.gap {
+                assert!(carried, "a gap with no entry and no carry record");
+                assert_eq!(gap, from.seq..tail.seq, "a gap with no entry");
+                assert_eq!(read.next.seq, tail.seq, "a gap with no entry");
+                from = read.next;
+                continue;
+            }
             assert_eq!(read.next, from, "an empty read moved the mark");
             assert_eq!(from.seq, tail.seq, "the reads did not end at the tail");
             let stamp = given.iter().rev().find_map(|entry| entry.last);
-            assert_eq!(stamp, tail.stamp, "the reads did not give the tail stamp");
+            if stamp.is_some() || !carried {
+                assert_eq!(stamp, tail.stamp, "the reads did not give the tail stamp");
+            }
             return given;
         }
         assert!(
@@ -449,8 +462,9 @@ fn tails(buffer: &Buffer, slots: &[Slot]) -> Vec<Tail> {
         .collect()
 }
 
-/// Applies the edits to the ring file.
-async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
+/// Applies the edits to the ring file. Returns whether a block of the area then
+/// holds a carry record: each record starts a block.
+async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) -> bool {
     let mut image = Vec::with_capacity(FILE_LEN);
     for block in 0..FILE_LEN / BLOCK {
         let into = pool.alloc(BLOCK).expect("the pool has a block");
@@ -480,12 +494,15 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
         .collect();
     file.write_at(0, &blocks).await.expect("the ring writes");
     file.sync().await.expect("the ring syncs");
+    (2..2 + BLOCKS).any(|block| image[block * BLOCK + 8] == CARRY)
 }
 
 /// Opens the changed ring. With no edits, it must open, give the tails and the
 /// entries the build left, and have room for the commit and the reopen. When it
 /// opens, each path must read, and one commit on it must survive a reopen and read
 /// back the same before and after.
+///
+/// `carried` says whether a block of the ring holds a carry record.
 ///
 /// The commit is one entry of `CHECK_PART` bytes at each tail. A record edit can put a
 /// tail at `u64::MAX`, a precondition of `append`, so such a ring is not checked.
@@ -496,6 +513,7 @@ async fn check(
     input: &Input,
     built: &[Tail],
     written: &[Vec<Given>],
+    carried: bool,
 ) {
     let (buffer, slots) = match open(node, tasks, pool).await {
         Ok(opened) => opened,
@@ -505,7 +523,7 @@ async fn check(
         }
         Err(_) => return,
     };
-    let read = read_paths(&buffer, &slots).await;
+    let read = read_paths(&buffer, &slots, carried).await;
     if input.edits.is_empty() {
         assert_eq!(
             tails(&buffer, &slots),
@@ -564,7 +582,7 @@ async fn check(
     );
     buffer.committed().await.expect("the entries commit");
     let durable = tails(&buffer, &slots);
-    let stored = read_paths(&buffer, &slots).await;
+    let stored = read_paths(&buffer, &slots, carried).await;
     // The paths of the build come first.
     for (given, commit) in stored.iter().zip(&commits) {
         assert_eq!(given.last(), Some(commit), "a read lost the commit");
@@ -582,7 +600,7 @@ async fn check(
         .collect();
     assert_eq!(recovered, durable, "a reopen lost what committed reported");
     assert_eq!(
-        read_paths(&reopened, &slots).await,
+        read_paths(&reopened, &slots, carried).await,
         stored,
         "a reopen changed what a read gives"
     );
@@ -610,9 +628,9 @@ fuzz_target!(|input: Input| {
                 .open(Path::new(RING), Mode::Write)
                 .await
                 .expect("the ring is there");
-            edit(&file, &pool, &input.edits).await;
+            let carried = edit(&file, &pool, &input.edits).await;
             drop(file);
-            check(&node, &tasks, &pool, &input, &built, &written).await;
+            check(&node, &tasks, &pool, &input, &built, &written, carried).await;
         })
         .expect("the shard starts");
     sim.run().expect("the run ends");

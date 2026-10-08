@@ -2,6 +2,7 @@
 //! trimming, floors, `append`) through a per-OS driver.
 
 mod buffer;
+mod carry;
 mod crc32c;
 mod entry;
 mod group;
