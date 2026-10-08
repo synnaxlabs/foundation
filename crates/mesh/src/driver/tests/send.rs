@@ -5,23 +5,24 @@
 use std::future::pending;
 
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code, Session};
+use transport::{Class, Code};
 
 use super::*;
 
 /// The largest message that node 2 takes, when a test sets no other.
-const LIMIT: usize = 1 << 16;
+pub(super) const LIMIT: usize = 1 << 16;
 
-/// The peer of node 1 at the address of node 2, with its transport.
-struct Peer {
-    node: sim::node::Node,
-    transport: Transport,
-    pool: Rc<Pool>,
+/// A peer of node 1, with its transport.
+pub(super) struct Peer {
+    pub(super) node: sim::node::Node,
+    pub(super) tasks: Tasks,
+    pub(super) transport: Transport,
+    pub(super) pool: Rc<Pool>,
 }
 
 impl Peer {
     /// The next session that node 1 opens.
-    async fn session(&self) -> Session {
+    pub(super) async fn session(&self) -> Session {
         let session = self.transport.accept().await.unwrap();
         assert_eq!(session.peer(), transport::Peer::Node(public(1)));
         session
@@ -29,14 +30,18 @@ impl Peer {
 
     /// Whether node 1 opens one more stream of `session`, and whether it opens one
     /// more session, in 3 s.
+    ///
+    /// # Panics
+    ///
+    /// When `session` or the transport fails in that time.
     async fn more(&self, session: &Session) -> [bool; 2] {
         let mut stream = pin!(session.accept());
         let mut other = pin!(self.transport.accept());
         let mut end = self.node.clock().sleep(seconds(3));
         poll_fn(|cx| {
             let opened = [
-                stream.as_mut().poll(cx).is_ready(),
-                other.as_mut().poll(cx).is_ready(),
+                stream.as_mut().poll(cx).map(Result::unwrap).is_ready(),
+                other.as_mut().poll(cx).map(Result::unwrap).is_ready(),
             ];
             if opened != [false; 2] {
                 return Poll::Ready(opened);
@@ -83,10 +88,8 @@ impl Peer {
         sender
     }
 
-    fn block(&self, bytes: &[u8]) -> block::Block {
-        let mut block = self.pool.alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        block.freeze()
+    pub(super) fn block(&self, bytes: &[u8]) -> block::Block {
+        crate::bytes::block(&self.pool, bytes).unwrap()
     }
 }
 
@@ -120,7 +123,11 @@ async fn next(
 }
 
 /// The config of the mesh of node 1, which sends with `pool`.
-fn create_config(node: &sim::node::Node, tasks: &Tasks, pool: Rc<Pool>) -> Config {
+pub(super) fn create_config(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    pool: Rc<Pool>,
+) -> Config {
     Config {
         members: IDS.map(create_voter).into(),
         pool,
@@ -131,7 +138,7 @@ fn create_config(node: &sim::node::Node, tasks: &Tasks, pool: Rc<Pool>) -> Confi
 /// Runs `mesh` on node 1 and `peer` on node 2 for 30 s, and gives what `peer`
 /// returned. Node 2 takes a message of at most `limit` bytes, and node 1 sends at
 /// most `limit` bytes that node 2 did not read.
-fn run<M, P>(
+pub(super) fn run<M, P>(
     limit: usize,
     mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
     peer: impl FnOnce(Peer) -> P + Send + 'static,
@@ -156,16 +163,42 @@ where
 {
     let mut sim = Sim::new(sim::Config::default());
     let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
-    let shard = |name: &str| env::shards::Config {
+    start(&nodes[0], "mesh", mesh);
+    let read = start_peer(&nodes[1], id, limit, peer);
+    sim.run_for(seconds(30)).unwrap();
+    let output = read.lock().unwrap().take();
+    output.expect("the peer did not return in 30 s")
+}
+
+/// Starts `main` on a shard of `node`.
+fn start<M: Future<Output = ()> + 'static>(
+    node: &sim::node::Node,
+    name: &str,
+    main: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
+) {
+    let config = env::shards::Config {
         name: name.into(),
         core: None,
     };
-    let node = nodes[0].clone();
-    let main = move |tasks: Tasks| mesh(node, tasks);
-    drop(nodes[0].shards().start(shard("mesh"), main).unwrap());
+    let inner = node.clone();
+    let main = move |tasks: Tasks| main(inner, tasks);
+    drop(node.shards().start(config, main).unwrap());
+}
+
+/// Starts `peer` on `node` with the keys of node `id`, and gives the place of what it
+/// returns.
+fn start_peer<P>(
+    node: &sim::node::Node,
+    id: u8,
+    limit: usize,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Arc<Mutex<Option<P::Output>>>
+where
+    P: Future<Output: Send + 'static> + 'static,
+{
     let read = Arc::new(Mutex::new(None));
-    let (node, result) = (nodes[1].clone(), Arc::clone(&read));
-    let main = move |tasks: Tasks| async move {
+    let result = Arc::clone(&read);
+    start(node, "peer", move |node, tasks| async move {
         let pool = create_pool();
         let config = transport::Config {
             message_bytes_max: NonZeroUsize::new(limit).unwrap(),
@@ -175,16 +208,14 @@ where
         let transport = bind(&node, PORT, config);
         let side = Peer {
             node,
+            tasks,
             transport,
             pool,
         };
         let output = peer(side).await;
         *result.lock().unwrap() = Some(output);
-    };
-    drop(nodes[1].shards().start(shard("peer"), main).unwrap());
-    sim.run_for(seconds(30)).unwrap();
-    let output = read.lock().unwrap().take();
-    output.expect("the peer did not return in 30 s")
+    });
+    read
 }
 
 /// Holds the mesh of node 1 open.
@@ -247,6 +278,33 @@ fn a_session_that_the_peer_closes_gives_way_to_a_new_session() {
     });
     assert_eq!(sent, [(); 2].map(|()| Ok(Some(pre_vote()))));
     assert_eq!(more, [false; 2]);
+}
+
+// Node 3 has an address here. The send that finds the failed session of node 2 comes
+// before node 3 stops its stream.
+#[test]
+fn a_session_that_fails_leaves_the_session_to_each_other_member() {
+    let mut sim = Sim::new(sim::Config::default());
+    let nodes = IDS.map(|_| sim.node(sim::node::Config::default()));
+    start(&nodes[0], "mesh", hold);
+    drop(start_peer(&nodes[1], 2, LIMIT, |peer| async move {
+        let session = peer.session().await;
+        let mut receiver = stream(&session).await;
+        assert_eq!(next(&mut receiver).await, Ok(Some(pre_vote())));
+        session.close(Code(7));
+        let _session = peer.session().await;
+        pending::<()>().await;
+    }));
+    let more = start_peer(&nodes[2], 3, LIMIT, |peer| async move {
+        let session = peer.session().await;
+        let receiver = stream(&session).await;
+        peer.node.clock().sleep(seconds(10)).await;
+        receiver.stop(Code(7));
+        let _receiver = stream(&session).await;
+        peer.more(&session).await
+    });
+    sim.run_for(seconds(30)).unwrap();
+    assert_eq!(more.lock().unwrap().take(), Some([false; 2]));
 }
 
 #[test]
@@ -403,8 +461,8 @@ fn a_message_for_a_node_with_no_member_record_drops_and_its_task_goes_on() {
 
 /// Whether node 2, which takes a message of at most `limit` bytes, got the entry of
 /// 2000 bytes that node 1 proposed as the leader, and what `Peer::more` gave after 16
-/// messages.
-fn large(limit: usize) -> (bool, [bool; 2]) {
+/// messages, and again after node 2 stopped the stream and got a new one.
+fn large(limit: usize) -> (bool, [[bool; 2]; 2]) {
     let mesh = |node: sim::node::Node, tasks: Tasks| async move {
         let config = create_config(&node, &tasks, create_pool());
         let transport = Rc::clone(&config.transport);
@@ -433,14 +491,17 @@ fn large(limit: usize) -> (bool, [bool; 2]) {
             };
             got |= entries.iter().any(large);
         }
-        (got, peer.more(&session).await)
+        let quiet = peer.more(&session).await;
+        receiver.stop(Code(7));
+        let _receiver = stream(&session).await;
+        (got, [quiet, peer.more(&session).await])
     })
 }
 
 #[test]
 fn a_message_that_is_too_large_for_the_peer_drops_and_its_stream_stays() {
-    assert_eq!(large(LIMIT), (true, [false; 2]));
-    assert_eq!(large(1472), (false, [false; 2]));
+    assert_eq!(large(LIMIT), (true, [[false; 2]; 2]));
+    assert_eq!(large(1472), (false, [[false; 2]; 2]));
 }
 
 /// Asserts that node 2 gets a message, and that its stream and its session then end
@@ -474,11 +535,13 @@ async fn assert_ended(clock: &Clock, transport: Rc<Transport>) {
     pending::<()>().await;
 }
 
-/// Stops the group of `mesh`: the write of the term of a heartbeat fails.
-fn stop(node: &sim::node::Node, mesh: &Mesh) {
-    fail_sync(node);
+/// Stops the group of `mesh`, and gives why: the write of the term of a heartbeat
+/// fails.
+pub(super) fn stop(node: &sim::node::Node, mesh: &Mesh) -> Stopped {
+    let stopped = fail_sync(node);
     let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
     mesh.receive(public(2), heartbeat).unwrap();
+    stopped
 }
 
 #[test]
@@ -501,6 +564,38 @@ fn each_task_that_sends_ends_when_the_group_stops() {
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(3)).await;
         stop(&node, &mesh);
+        assert_ended(&node.clock(), transport).await;
+    });
+}
+
+// The reply to the append is in the queue of node 2 at the stop, so that queue has
+// no waker then.
+#[test]
+fn each_task_that_sends_ends_when_a_committed_entry_stops_the_group() {
+    assert_ends(|node, tasks| async move {
+        let config = create_config(&node, &tasks, create_pool());
+        let transport = Rc::clone(&config.transport);
+        let mesh = Mesh::open(config).await.unwrap();
+        let mut watch = mesh.watch(INDEX);
+        assert_eq!(watch.next().await, Ok(None));
+        node.clock().sleep(seconds(3)).await;
+        let at = Position {
+            term: Term(5),
+            index: 1,
+        };
+        let entry = Entry {
+            at,
+            data: Data::Bytes(vec![9]),
+        };
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: vec![entry],
+            commit: 1,
+        };
+        mesh.receive(public(2), proven(2, 1, append)).unwrap();
+        let cause = Unknown::Kind { kind: 9 };
+        assert_eq!(watch.next().await, Err(Stopped::Change { at, cause }));
+        drop(watch);
         assert_ended(&node.clock(), transport).await;
     });
 }

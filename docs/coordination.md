@@ -95,7 +95,9 @@ coordinator admits them. Any builder takes any crate. One task is in progress pe
   The author fixes each finding or answers it on the PR.
 - **Ready:** the author runs `gh pr ready` when the gate passed, every review finding is
   fixed or answered, and the body is complete: oracle changes, Complexity, Shape
-  decisions, and the six performance answers on a hot path.
+  decisions, and the six performance answers on a hot path. For a red-team PR and the
+  director's rule PR, `laptop.monitor` marks it ready and queues it (`docs/factory.md`,
+  "Merge path").
 - **Merge:** `gh pr merge <n> --auto` puts it in the merge queue (`docs/factory.md`).
 
 ## Interface changes
@@ -123,20 +125,42 @@ Two cases skip the interface issue:
 
 ## Cloud machines
 
-Only the red-team sessions rent machines, within the test budget (`docs/decisions.md`
-5.5): 1000 USD in total and at most 100 USD a day.
+Only `laptop.monitor` rents and ends machines. Test machines stay within the test budget
+(`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day, and at most 15
+USD a day for #1139. The ARM RUNNER hosts stay under AWS CEILING, outside the test
+budget, its limits, and step 3. Step 4 checks each by its instance, because they have no
+`issue` tag. No other session holds AWS credentials. The person decided this
+(https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552,
+2026-10-07T16:48:27Z).
 
-1. A builder that needs one asks a red-team on its issue: instance types, count, and
-   hours.
-2. Before launch, the renting session posts the cap on the spend ledger issue (#15):
-   on-demand price per hour times count times lifetime. The sum of caps stays inside
-   the limit.
+1. A session that needs one asks `laptop.monitor` on its issue, then sends the link:
+   the purpose, instance types, count, and hours. A request outside the budget goes to
+   the person.
+2. Before launch, `laptop.monitor` posts the cap on the spend ledger issue (#15), with
+   the types, the issue, and the session that asked. The cap is the price per hour
+   times count times the lifetime. For an on-demand host the price is the on-demand
+   price. For a spot host the price is its `MaxPrice` plus 0.03 USD an hour for its
+   disk and public address, because AWS never bills a spot host above its `MaxPrice`,
+   and the lifetime gets 10 more minutes (`laptop.monitor`,
+   https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042917805,
+   2026-10-07T17:12:22Z). The sum of caps stays inside each limit: the total, the day,
+   and the #1139 day. At launch, it posts on #15 one line for each instance: the
+   instance, type, issue, session that asked, cap, and end time. It sends the asking
+   session the address of each and how to reach it.
 3. Every instance has the tags `project=foundation-bench` (or `foundation-test`) and
    `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
    termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
    is at most 240 minutes.
-4. The renting session terminates the instances when the run ends, checks that none of
-   its tagged instances still run, and posts the actual hours on the ledger.
+4. When the run ends, the asking session says so on its issue, then sends the link to
+   `laptop.monitor`. `laptop.monitor` then terminates the instances, checks that no
+   instance tagged `issue=<n>` still runs, and posts the actual hours on the ledger.
+5. For #1139, `laptop.monitor` runs the bench script of #1487 itself, and
+   `box2.red-team` keeps the script. Each host ends itself within 120 minutes
+   (https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042420655,
+   2026-10-07T16:40:04Z). The script ends the host and posts its end line, so step 4
+   needs no message. When the script stops with no end line, `laptop.monitor` does
+   step 4 itself.
+6. The spend watch of `laptop.monitor` alerts on each instance that is not on #15.
 
 ## Messages
 

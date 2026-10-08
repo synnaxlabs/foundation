@@ -1,6 +1,7 @@
 //! The channel definition: an index channel, or a data channel on an index.
 
 use std::fmt;
+use std::str::FromStr;
 
 use types::channel;
 use types::sample::{self, Scalar};
@@ -9,7 +10,7 @@ use crate::unit::Unit;
 
 mod check;
 
-pub use check::{Edge, Problem, check};
+pub use check::{Problem, check};
 
 /// A channel. Its name is the tree key, so it is not part of the definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +34,50 @@ pub enum Kind<R = channel::Key> {
     },
     /// A data channel.
     Data(Data<R>),
+}
+
+/// An edge from one channel to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// From a data channel to the index channel that times it.
+    Index,
+    /// From a data channel to the channel that holds its quality.
+    Quality,
+    /// From an index channel to the channel that holds its clock error bound.
+    Error,
+    /// From an index channel to the channel that holds its control handoffs, which is
+    /// on another index.
+    Control,
+}
+
+impl fmt::Display for Edge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Index => "index channel",
+            Self::Quality => "quality channel",
+            Self::Error => "error channel",
+            Self::Control => "control channel",
+        })
+    }
+}
+
+impl<R> Kind<R> {
+    /// Each edge that the channel has, and the channel that it points at, in this
+    /// order: the error then the control channel of an index, or the index then the
+    /// quality channel of a data channel.
+    pub fn edges(&self) -> impl Iterator<Item = (Edge, &R)> {
+        let edges = match self {
+            Self::Index { error, control } => [
+                error.as_ref().map(|to| (Edge::Error, to)),
+                control.as_ref().map(|to| (Edge::Control, to)),
+            ],
+            Self::Data(data) => [
+                Some((Edge::Index, data.index())),
+                data.quality().map(|to| (Edge::Quality, to)),
+            ],
+        };
+        edges.into_iter().flatten()
+    }
 }
 
 /// A data channel: what its values are, their unit, and the channels it points at.
@@ -120,6 +165,7 @@ impl DataType {
             Self::Sample(
                 sample::Type::Scalar(element)
                 | sample::Type::Array { element, .. }
+                | sample::Type::Matrix { element, .. }
                 | sample::Type::List { element, .. },
             ) => *element,
             Self::Sample(sample::Type::String | sample::Type::Bytes)
@@ -134,8 +180,46 @@ impl DataType {
     }
 }
 
-/// A data channel that cannot exist. `Display` gives the message: a lower-case clause
-/// with no final period. [`Error::fix`] gives what to do instead.
+impl fmt::Display for DataType {
+    /// Writes the text that [`DataType::from_str`] reads: `quality`, or the text of the
+    /// sample type.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sample(sample) => sample.fmt(f),
+            Self::Quality => f.write_str("quality"),
+        }
+    }
+}
+
+impl FromStr for DataType {
+    type Err = Error;
+
+    /// Reads `quality`, or the text of a [`sample::Type`] with its exact form.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DataType`] when `text` is neither.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "quality" => Ok(Self::Quality),
+            _ => text.parse().map(Self::Sample).map_err(Error::DataType),
+        }
+    }
+}
+
+/// The data types that the message of a text with no form shows.
+const EXAMPLES: [&str; 6] = [
+    "f64",
+    "f32[3]",
+    "list<u8, 16>",
+    "string",
+    "bytes",
+    "quality",
+];
+
+/// A data channel that cannot exist, or a `data_type` text that names no data type.
+/// `Display` gives the message: a lower-case clause with no final period.
+/// [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A unit is on a data type that holds no number: a bool, a stamp, a span, a UUID,
@@ -144,6 +228,9 @@ pub enum Error {
         /// The data type.
         data_type: DataType,
     },
+    /// A `data_type` text names no data type, for the reason that the sample type
+    /// error gives.
+    DataType(sample::Error),
 }
 
 impl Error {
@@ -152,6 +239,7 @@ impl Error {
     pub const fn fix(&self) -> &'static str {
         match self {
             Self::Unit { .. } => "Remove the unit, or give the channel a numeric type",
+            Self::DataType(error) => error.fix(),
         }
     }
 }
@@ -162,6 +250,15 @@ impl fmt::Display for Error {
             Self::Unit { .. } => {
                 f.write_str("a unit is on a data type that holds no number")
             }
+            Self::DataType(sample::Error::Syntax) => {
+                f.write_str("expected a data type such as ")?;
+                let (last, rest) = EXAMPLES.split_last().expect("invariant: examples");
+                for example in rest {
+                    write!(f, "{example}, ")?;
+                }
+                write!(f, "or {last}")
+            }
+            Self::DataType(error) => error.fmt(f),
         }
     }
 }
@@ -189,10 +286,44 @@ mod tests {
     const OTHERS: [Scalar; 4] =
         [Scalar::Bool, Scalar::Stamp, Scalar::Span, Scalar::Uuid];
 
-    fn shapes(element: Scalar) -> [DataType; 3] {
+    fn data_on_time(quality: Option<&'static str>) -> Kind<&'static str> {
+        let data_type = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+        Kind::Data(Data::new("edge.time", quality, data_type, None).unwrap())
+    }
+
+    #[test]
+    fn gives_each_edge_in_order() {
+        let index = |error, control| Kind::Index { error, control };
+        for (kind, edges) in [
+            (index(None, None), vec![]),
+            (index(Some("e"), None), vec![(Edge::Error, "e")]),
+            (index(None, Some("c")), vec![(Edge::Control, "c")]),
+            (
+                index(Some("e"), Some("c")),
+                vec![(Edge::Error, "e"), (Edge::Control, "c")],
+            ),
+            (data_on_time(None), vec![(Edge::Index, "edge.time")]),
+            (
+                data_on_time(Some("q")),
+                vec![(Edge::Index, "edge.time"), (Edge::Quality, "q")],
+            ),
+        ] {
+            let found: Vec<_> = kind.edges().map(|(edge, &to)| (edge, to)).collect();
+            assert_eq!(found, edges, "{kind:?}");
+        }
+    }
+
+    fn shapes(element: Scalar) -> [DataType; 4] {
         [
             DataType::Sample(sample::Type::Scalar(element)),
             DataType::Sample(sample::Type::Array { element, len: 3 }),
+            DataType::Sample(sample::Type::Matrix {
+                element,
+                sides: sample::Sides {
+                    rows: 2,
+                    columns: 3,
+                },
+            }),
             DataType::Sample(sample::Type::List { element, max: 3 }),
         ]
     }
@@ -279,5 +410,83 @@ mod tests {
         );
         let string = sample::Type::String;
         assert_eq!(DataType::Sample(string).sample(), string);
+    }
+
+    #[test]
+    fn reads_the_text_that_it_writes() {
+        let data_types = NUMBERS.into_iter().chain(OTHERS).flat_map(shapes).chain([
+            DataType::Sample(sample::Type::String),
+            DataType::Sample(sample::Type::Bytes),
+            DataType::Quality,
+        ]);
+        for data_type in data_types {
+            assert_eq!(data_type.to_string().parse(), Ok(data_type));
+        }
+    }
+
+    #[test]
+    fn writes_quality_as_no_sample_type_writes() {
+        assert_eq!(
+            "quality".parse::<sample::Type>(),
+            Err(sample::Error::Syntax)
+        );
+    }
+
+    #[test]
+    fn shows_examples_that_read() {
+        for example in EXAMPLES {
+            let data_type = example.parse::<DataType>().unwrap();
+            assert_eq!(data_type.to_string(), example);
+        }
+    }
+
+    #[test]
+    fn reads_quality_and_each_form_of_sample_type() {
+        let matrix = sample::Type::Matrix {
+            element: Scalar::F32,
+            sides: sample::Sides {
+                rows: 2,
+                columns: 3,
+            },
+        };
+        for (text, data_type) in [
+            ("quality", DataType::Quality),
+            ("f64", DataType::Sample(sample::Type::Scalar(Scalar::F64))),
+            ("f32[2][3]", DataType::Sample(matrix)),
+            ("string", DataType::Sample(sample::Type::String)),
+        ] {
+            assert_eq!(text.parse(), Ok(data_type.clone()));
+            assert_eq!(data_type.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn names_quality_in_the_message_of_text_with_no_form() {
+        for text in ["Quality", "quality ", "F64", "vector", "list<f32,64>", ""] {
+            let error = text.parse::<DataType>().unwrap_err();
+            assert_eq!(error, Error::DataType(sample::Error::Syntax), "{text:?}");
+            assert_eq!(
+                error.to_string(),
+                "expected a data type such as f64, f32[3], list<u8, 16>, string, \
+                 bytes, or quality"
+            );
+            assert_eq!(error.fix(), sample::Error::Syntax.fix());
+        }
+    }
+
+    #[test]
+    fn gives_the_sample_message_and_fix_of_each_other_cause() {
+        for (text, cause) in [
+            ("u8[]", sample::Error::Count),
+            ("u8[4294967296]", sample::Error::Count),
+            ("list<quality, 4>", sample::Error::Element),
+            ("u8[1][1][1]", sample::Error::Lengths),
+            ("f32[70000][3]", sample::Error::Matrix),
+        ] {
+            let error = text.parse::<DataType>().unwrap_err();
+            assert_eq!(error, Error::DataType(cause), "{text:?}");
+            assert_eq!(error.to_string(), cause.to_string());
+            assert_eq!(error.fix(), cause.fix());
+        }
     }
 }

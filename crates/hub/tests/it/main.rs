@@ -70,8 +70,16 @@ struct Test {
     clock: Clock,
     mesh: clock::Reader,
     tasks: Tasks,
+    /// How many tasks of the hub have ended.
+    ended: Rc<Cell<usize>>,
+    /// How many polls the hub's tasks have had.
+    polls: Rc<Cell<usize>>,
+    /// While set, the hub's tasks are not polled.
+    paused: Rc<Pause>,
     /// The node's mesh clock until [`Test::sync`] runs it.
     unsynced: Option<clock::Clock>,
+    /// A commit of the home, taken before the hub had it. It holds the ring open.
+    commit: home::Commit,
     hub: Hub,
 }
 
@@ -101,10 +109,18 @@ impl Test {
             clock: mesh.clone(),
             limits: LIMITS,
         });
+        let commit = home.committed();
+        let (ended, polls) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let paused = Rc::new(Pause::default());
         let hub = Hub::new(hub::Config {
             home,
             interner,
-            tasks: tasks.clone(),
+            tasks: Tasks::new(Counted {
+                tasks: tasks.clone(),
+                ended: Rc::clone(&ended),
+                polls: Rc::clone(&polls),
+                paused: Rc::clone(&paused),
+            }),
         });
         for (key, channel, data_type, index) in CHANNELS {
             hub.define(Channel {
@@ -120,7 +136,11 @@ impl Test {
             pool,
             mesh,
             tasks,
+            ended,
+            polls,
+            paused,
             unsynced: Some(unsynced),
+            commit,
             hub,
         }
     }
@@ -170,6 +190,61 @@ impl Test {
             len -= len.div_ceil(16);
         }
         blocks
+    }
+}
+
+/// Spawns on `tasks`, and counts each poll in `polls` and each task that completes in
+/// `ended`. Polls no task while `paused` is set.
+struct Counted {
+    tasks: Tasks,
+    ended: Rc<Cell<usize>>,
+    polls: Rc<Cell<usize>>,
+    paused: Rc<Pause>,
+}
+
+/// Holds back the polls of the hub's tasks, as an executor that runs other tasks
+/// first does.
+#[derive(Default)]
+struct Pause {
+    /// The waker of each task woken while paused, when paused.
+    held: std::cell::RefCell<Option<Vec<Waker>>>,
+}
+
+impl Pause {
+    fn pause(&self) {
+        *self.held.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Wakes each task woken while paused.
+    fn resume(&self) {
+        let held = self.held.borrow_mut().take().unwrap_or_default();
+        held.into_iter().for_each(Waker::wake);
+    }
+
+    /// Whether the task of `cx` waits, which holds its waker.
+    fn holds(&self, cx: &Context<'_>) -> bool {
+        let mut held = self.held.borrow_mut();
+        held.as_mut()
+            .map(|held| held.push(cx.waker().clone()))
+            .is_some()
+    }
+}
+
+impl env::tasks::Driver for Counted {
+    fn spawn(&self, mut task: env::tasks::Task) {
+        let (ended, polls) = (Rc::clone(&self.ended), Rc::clone(&self.polls));
+        let paused = Rc::clone(&self.paused);
+        self.tasks.spawn(async move {
+            std::future::poll_fn(|cx| {
+                if paused.holds(cx) {
+                    return Poll::Pending;
+                }
+                polls.set(polls.get() + 1);
+                task.as_mut().poll(cx)
+            })
+            .await;
+            ended.set(ended.get() + 1);
+        });
     }
 }
 
@@ -463,6 +538,132 @@ fn gives_control_to_a_waiting_writer_when_a_writer_drops() {
     });
 }
 
+/// The commit task does not hold the home, so the home and its buffer end with the
+/// hub and its sessions, and the task ends.
+#[test]
+fn drops_the_home_once_the_hub_and_each_session_drop() {
+    run(23, |test| async move {
+        let reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        write(&mut writer, &[test.now()], &[1]);
+        let Test {
+            pool,
+            clock,
+            commit,
+            hub,
+            ended,
+            ..
+        } = test;
+        drop(writer);
+        clock.sleep(SETTLE).await;
+        assert_eq!(ended.get(), 0, "the hub holds the home");
+        drop((hub, reader, commit));
+        clock.sleep(SETTLE).await;
+        assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+        assert_eq!(ended.get(), 1, "the commit task ended");
+    });
+}
+
+/// Writes during a commit do not wake the commit task, which the commit wakes.
+#[test]
+fn does_not_wake_the_commit_task_for_the_writes_during_a_commit() {
+    run(23, |test| async move {
+        let _reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        let before = test.polls.get();
+        for value in 0..20 {
+            write(&mut writer, &[test.now()], &[value]);
+            test.clock.sleep(Span::from_nanos(1)).await;
+        }
+        assert_eq!(
+            test.polls.get() - before,
+            1,
+            "one wake, for the first write"
+        );
+    });
+}
+
+/// A commit task that waits for a commit when the hub and its sessions drop ends at
+/// its next poll. The commit it waited for dropped with the state.
+#[test]
+fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
+    run(23, |test| async move {
+        let reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[1]);
+        let Test {
+            pool,
+            clock,
+            commit,
+            hub,
+            ended,
+            ..
+        } = test;
+        clock.sleep(Span::from_nanos(1)).await;
+        drop((hub, reader, writer, commit));
+        clock.sleep(Span::from_nanos(1)).await;
+        assert_eq!(ended.get(), 1, "the commit task ended before the commit");
+        clock.sleep(SETTLE).await;
+        assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
+    });
+}
+
+/// Once the hub and each session drop while the commit task waits for a commit, the
+/// hub holds no commit: a commit of the home that resolves holds the ring open until
+/// it drops.
+#[test]
+fn drops_the_commit_it_waits_for_with_the_hub() {
+    for seed in 0..64 {
+        run(seed, move |test| async move {
+            let reader = test.reader(&["value"], Mode::Complete).await;
+            let mut writer = test.writer("a", &["value"]).await;
+            test.clock.sleep(SETTLE).await;
+            write(&mut writer, &[test.now()], &[1]);
+            test.clock.sleep(Span::from_nanos(1)).await;
+            let Test {
+                node,
+                mut commit,
+                hub,
+                paused,
+                ..
+            } = test;
+            paused.pause();
+            drop((hub, reader, writer));
+            assert_eq!((&mut commit).await, Ok(()));
+            let open = || async {
+                node.files()
+                    .open(FilePath::new(RING), env::files::Mode::Write)
+                    .await
+                    .map(drop)
+            };
+            let busy = env::files::Error::Busy {
+                path: PathBuf::from(RING),
+            };
+            assert_eq!(open().await, Err(busy), "seed {seed}");
+            drop(commit);
+            assert_eq!(open().await, Ok(()), "seed {seed}");
+            paused.resume();
+        });
+    }
+}
+
+/// The commit task that went back to sleep after a commit wakes for the next write.
+#[test]
+fn wakes_the_commit_task_for_a_write_after_a_commit() {
+    run(23, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[1]);
+        assert_eq!(samples(&reader.next().await.expect("a frame"), 2), [1]);
+        test.clock.sleep(SETTLE).await;
+        write(&mut writer, &[test.now()], &[2]);
+        assert_eq!(samples(&reader.next().await.expect("a frame"), 2), [2]);
+    });
+}
+
 #[test]
 fn frees_the_frames_of_a_reader_when_it_drops() {
     run(7, |test| async move {
@@ -513,6 +714,8 @@ fn gives_each_reader_the_error_of_a_failed_sync_on_each_later_call() {
             assert_eq!(complete.next().await.err(), Some(failed.clone()));
             assert_eq!(latest.next().await.err(), Some(failed.clone()));
         }
+        test.clock.sleep(SETTLE).await;
+        assert_eq!(test.ended.get(), 1, "the commit task ended with the buffer");
         assert_eq!(
             failed.to_string(),
             "the buffer of the shard failed: sync of shard-0/ring failed with OS error 5"
@@ -1118,5 +1321,88 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
         );
         let b = reader.next().await.map(|received| charge(&received.view));
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
+    });
+}
+
+/// Polls `reader.next()` once with `waker`, and says whether it gave a frame.
+fn poll_next(reader: &mut Reader, waker: &Waker) -> bool {
+    let mut next = pin!(reader.next());
+    match next.as_mut().poll(&mut Context::from_waker(waker)) {
+        Poll::Ready(received) => {
+            received.expect("a frame");
+            true
+        }
+        Poll::Pending => false,
+    }
+}
+
+#[test]
+fn starts_a_new_streak_after_a_wait() {
+    run(31, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[0]);
+        test.clock.sleep(SETTLE).await;
+        let waker = Waker::noop();
+        assert!(poll_next(&mut reader, waker), "the first frame waits");
+        assert!(!poll_next(&mut reader, waker), "no frame waits");
+        for n in 1..=128 {
+            write(&mut writer, &[now + n], &[n]);
+        }
+        test.clock.sleep(SETTLE).await;
+        let given = (0..129)
+            .take_while(|_| poll_next(&mut reader, waker))
+            .count();
+        assert_eq!(given, 128, "a wait ends the streak");
+    });
+}
+
+#[test]
+fn keeps_no_waker_of_a_dropped_reader() {
+    run(32, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(Arc::clone(&flag));
+        assert!(!poll_next(&mut reader, &waker), "no frame waits");
+        drop(waker);
+        drop(reader);
+        assert_eq!(Arc::strong_count(&flag), 1, "the hub keeps the waker");
+    });
+}
+
+/// A local complete reader spends the whole frame, not only its channels.
+#[test]
+fn charges_a_local_complete_reader_on_some_channels_for_the_whole_frame() {
+    const SAMPLES: i64 = 1000;
+    run(16, |test| async move {
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        let frames = 100;
+        for n in 0..frames {
+            let stamps: Vec<_> = (now + n * SAMPLES..now + (n + 1) * SAMPLES).collect();
+            let values: Vec<_> = stamps
+                .iter()
+                .map(|&s| {
+                    let x = s.wrapping_mul(6_364_136_223_846_793_005);
+                    x ^ (x >> 29)
+                })
+                .collect();
+            write_series(&mut writer, &[(1, &stamps), (2, &values), (5, &values)]);
+            test.clock.sleep(SETTLE).await;
+        }
+        let mut got = 0;
+        loop {
+            match poll_once(reader.next()) {
+                Poll::Ready(Ok(_)) => got += 1,
+                Poll::Ready(Err(ended)) => {
+                    assert_behind(&ended);
+                    assert!(got < frames, "{got} frames before the end");
+                    break;
+                }
+                Poll::Pending => panic!("the reader took all {got} frames and waits"),
+            }
+        }
     });
 }
