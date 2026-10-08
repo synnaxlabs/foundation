@@ -80,8 +80,9 @@ struct Malformed {
 #[derive(Debug)]
 struct Parsed {
     round: Result<Round, Malformed>,
-    /// The problem of an old round, parsed or not, that names a hot path ([`named`])
-    /// and that no `Reviewers:` line names `performance` in ([`performer`]).
+    /// The problem of an old round that names a hot path ([`named`]) and does not
+    /// name `performance`: in its `Reviewers:` field when it parses, else in a
+    /// `Reviewers:` line ([`performer`]).
     performance: Option<String>,
 }
 
@@ -270,13 +271,13 @@ fn approval(record: &Record, head: &str) -> Option<String> {
     })
 }
 
-/// Reports whether a `Reviewers:` line in `paragraphs` names `performance`. The line
-/// starts at the start of its line, as a `Hot path:` line does for [`named`].
+/// Reports whether a `Reviewers:` line in `paragraphs`, [`unindented`], names
+/// `performance`.
 fn performer(paragraphs: &[Vec<&str>]) -> bool {
     paragraphs
         .iter()
         .flatten()
-        .filter_map(|l| l.strip_prefix("Reviewers: "))
+        .filter_map(|l| unindented(l)?.strip_prefix("Reviewers: "))
         .any(|r| listed(r).contains("performance"))
 }
 
@@ -308,17 +309,20 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let findings = field("Findings: ");
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
-    let performance =
-        (old && named(&paragraphs) && !performer(&paragraphs)).then(|| {
+    let performance = |reviewers: Option<&BTreeSet<String>>| {
+        let performer = reviewers
+            .map_or_else(|| performer(&paragraphs), |r| r.contains("performance"));
+        (old && !performer && named(&paragraphs)).then(|| {
             format!(
                 "review round {number} names no performance, which this round requires."
             )
-        });
+        })
+    };
     let Ok(number) = number.parse::<u32>() else {
         let problem = format!("`## Review round {number}` has no round number");
         return Some(Parsed {
             round: Err(Malformed { fixed, problem }),
-            performance,
+            performance: performance(None),
         });
     };
     let missing = |name| {
@@ -356,10 +360,9 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
             hot,
         })
     };
-    Some(Parsed {
-        round: fields().map_err(|problem| Malformed { fixed, problem }),
-        performance,
-    })
+    let round = fields().map_err(|problem| Malformed { fixed, problem });
+    let performance = performance(round.as_ref().ok().map(|r| &r.reviewers));
+    Some(Parsed { round, performance })
 }
 
 /// The lines of `text`, each ended by `\n`, `\r\n`, or a lone `\r`, as on GitHub.
@@ -403,11 +406,7 @@ fn paragraphs<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<&'a str>> {
 /// fence closes the block that a fence of its mark and no greater length opened, when
 /// it has no info.
 fn fence(line: &str) -> Option<(char, usize, &str)> {
-    let indented = line.trim_start_matches(' ');
-    if line.len() - indented.len() > 3 {
-        return None;
-    }
-    let line = indented;
+    let line = unindented(line)?;
     let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let info = line.trim_start_matches(mark);
     let length = line.len() - info.len();
@@ -439,14 +438,26 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
 }
 
 /// Whether a round posted before [`CUTOFF`] names a hot path: a `Hot path:` line in
-/// `paragraphs`, the round's text after its heading, names a function ([`function`]).
+/// `paragraphs`, the round's text after its heading, [`unindented`], names a function
+/// ([`function`]).
 fn named(paragraphs: &[Vec<&str>]) -> bool {
     let start = format!("{}:", END[2]);
     paragraphs.iter().any(|p| {
-        (0..p.len())
-            .filter(|&i| p[i].starts_with(&start))
-            .any(|i| function(&entries(&p[i..]).0[0].1))
+        (0..p.len()).any(|i| {
+            unindented(p[i])
+                .filter(|l| l.starts_with(&start))
+                .is_some_and(|l| {
+                    function(&entries(&[&[l][..], &p[i + 1..]].concat()).0[0].1)
+                })
+        })
     })
+}
+
+/// `line` with its indent removed, or `None` when the indent is more than three
+/// spaces or holds a tab: GitHub shows such a line as code.
+fn unindented(line: &str) -> Option<&str> {
+    let text = line.trim_start_matches(' ');
+    (line.len() - text.len() <= 3 && !text.starts_with('\t')).then_some(text)
 }
 
 /// The [`END`] entries at the start of `lines`, each as its name and value, and the

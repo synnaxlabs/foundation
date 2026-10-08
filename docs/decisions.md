@@ -3920,21 +3920,27 @@ How to read this record:
   hand reader of code fences, with no CommonMark parser, meets that ruling. Decided by
   the director at 2026-10-08T04:01:43Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239). The
-  check ends a line at `\n`, `\r\n`, or a lone `\r`, and reads a code block so: a
-  fence of three or more backticks or tildes, after at most three spaces, opens it, and
-  a like fence closes it, or it runs to the end of the comment. It does not see an HTML
-  block or HTML comment, or a fence after a list marker or a quote mark;
-  https://github.com/synnaxlabs/foundation/issues/1783 reads the comment as GitHub
-  does. A round comment posted before the cutoff `CUTOFF` in `xtask/src/review.rs`
-  (2026-10-08T03:00:00Z) is checked as before: an earlier free-form round passes, and it
-  needs no end lines. A `Hot path:` line anywhere in its text that names a function
-  still needs `performance`. Decided by the director at 2026-10-08T02:44:00Z
+  check ends a line at `\n`, `\r\n`, or a lone `\r`, as that ruling covers (decided by
+  the director at 2026-10-08T04:42:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062), and
+  reads a code block so: a fence of three or more backticks or tildes, after at most
+  three spaces, opens it, and a like fence closes it, or it runs to the end of the
+  comment. It does not see an HTML block or HTML comment, or a fence after a list marker
+  or a quote mark; https://github.com/synnaxlabs/foundation/issues/1783 reads the
+  comment as GitHub does. A round comment posted before the cutoff `CUTOFF` in
+  `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
+  free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
+  text that names a function still needs `performance`. Decided by the director at
+  2026-10-08T02:44:00Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051099968).
   Supersedes the reviewers of a later round in ruling 2 of
   https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6040439732
-  (2026-10-07T06:32:32Z). For this rule only, the check reads a `Hot path:` or
-  `Reviewers:` line anywhere in the text of the old round, parsed or not, and only at
-  the start of its line. The other reviewers of an old round are read as before.
+  (2026-10-07T06:32:32Z). For this rule, an old round that parses names
+  `performance` in its `Reviewers:` field, read as before. One that does not parse
+  names it in any `Reviewers:` line of its text. A `Hot path:` line counts anywhere in
+  its text. Each such line has at most three spaces of indent, because GitHub shows a
+  line with more as code. Decided by the director at 2026-10-08T04:42:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062).
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not

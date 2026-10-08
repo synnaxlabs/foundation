@@ -1029,8 +1029,7 @@ fn a_lone_carriage_return_ends_a_line() {
 }
 
 #[test]
-fn an_indented_reviewers_line_of_a_parsed_old_round_names_no_performance() {
-    // The first paragraph is an indented code block on GitHub.
+fn a_parsed_old_round_reads_its_reviewers_field_at_any_indent() {
     let indented = ROUND
         .replace(
             "\nReviewers: reviewer\n",
@@ -1041,8 +1040,20 @@ fn an_indented_reviewers_line_of_a_parsed_old_round_names_no_performance() {
         .replace("\nFindings:", "\n    Findings:")
         .replace("Hot path: none", "Hot path: `send`");
     assert_ne!(indented, ROUND);
+    assert_eq!(check(&record(vec![old(&indented)])), Vec::<String>::new());
+}
+
+#[test]
+fn a_parsed_old_round_reads_performance_only_from_its_reviewers_field() {
+    let quoted = ROUND
+        .replace(
+            "weakening.\n\n",
+            "weakening.\n\nReviewers: reviewer, performance\n\n",
+        )
+        .replace("Hot path: none", "Hot path: `send`");
+    assert_ne!(quoted, ROUND);
     assert_eq!(
-        check(&record(vec![old(&indented)])),
+        check(&record(vec![old(&quoted)])),
         vec![
             "review round 3 names no performance, which this round requires."
                 .to_string()
@@ -1051,15 +1062,32 @@ fn an_indented_reviewers_line_of_a_parsed_old_round_names_no_performance() {
 }
 
 #[test]
-fn a_parsed_old_round_reads_performance_from_any_reviewers_line() {
-    let named = ROUND
-        .replace(
-            "weakening.\n\n",
-            "weakening.\n\nReviewers: reviewer, performance\n\n",
-        )
-        .replace("Hot path: none", "Hot path: `send`");
-    assert_ne!(named, ROUND);
-    assert_eq!(check(&record(vec![old(&named)])), Vec::<String>::new());
+fn an_old_round_reads_a_line_with_at_most_three_spaces_of_indent() {
+    let malformed = |reviewers: &str, hot: &str| {
+        old(&format!(
+            "## Review round 1\n\nConfirmed findings.\n\n{reviewers}Reviewers: \
+             reviewer, performance\n\n{hot}Hot path: `send`"
+        ))
+    };
+    let unnamed = vec![
+        "review round 1 names no performance, which this round requires.".to_string(),
+    ];
+    let cases = [
+        ("   ", "", Vec::new()),
+        ("    ", "", unnamed.clone()),
+        ("\t", "", unnamed.clone()),
+        ("    ", "   ", unnamed),
+        ("    ", "    ", Vec::new()),
+        ("    ", "\t", Vec::new()),
+    ];
+    for (reviewers, hot, problems) in cases {
+        let comment = malformed(reviewers, hot);
+        assert_eq!(
+            check(&record(vec![comment, bot(ROUND)])),
+            problems,
+            "{reviewers:?} {hot:?}"
+        );
+    }
 }
 
 #[test]
