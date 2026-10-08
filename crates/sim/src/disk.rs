@@ -291,7 +291,6 @@ impl Disk {
         let (dir, name) = self.entry(inode, path)?;
         self.edit(dir, vec![(name.into(), None)]);
         self.file(inode).linked = false;
-        self.collect(inode);
         Ok(())
     }
 

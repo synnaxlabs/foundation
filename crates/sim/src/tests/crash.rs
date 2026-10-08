@@ -269,6 +269,16 @@ fn a_power_cut_keeps_a_prefix_that_holds_a_remove_through_a_handle() {
     assert_eq!(kept, prefixes);
 }
 
+#[test]
+fn a_power_cut_can_keep_or_drop_a_remove_through_a_handle_in_flight() {
+    let outcomes = listed_after_power(0..32, |node| async move {
+        let file = create_synced(&node).await;
+        until_crash(&node).await;
+        hang(file.remove()).await;
+    });
+    assert_eq!(outcomes, BTreeSet::from([names(&[]), names(&["a"])]));
+}
+
 /// The names in the data directory, the free bytes, and the result of an open of
 /// `d/f` after a power cut, when `d` and `d/f` are made and only `d` is synced.
 fn unsynced_parent(seed: u64) -> (Vec<PathBuf>, u64, Result<(), Error>) {
