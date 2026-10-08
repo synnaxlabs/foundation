@@ -93,14 +93,20 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    /// One line for each change, then the counts.
+    /// One line for each change, with a `key` line under it for each fingerprint, then
+    /// the counts.
     pub(crate) fn text(&self) -> String {
         let lines: Vec<String> = self
             .changes
             .iter()
             .map(|change| {
                 let (symbol, kind) = (change.action.symbol(), &change.kind);
-                format!("{symbol} {kind} {}\n", change.name)
+                let lines: String = change
+                    .fingerprints
+                    .iter()
+                    .flat_map(|fingerprint| ["    key ", fingerprint, "\n"])
+                    .collect();
+                format!("{symbol} {kind} {}\n{lines}", change.name)
             })
             .collect();
         format!(
@@ -134,6 +140,10 @@ pub(crate) struct Change {
     /// Where the label is in the files. A removal has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) place: Option<Place>,
+    /// The `SHA256:` fingerprint of each key of a subject, as `ssh-keygen -l` writes
+    /// it: after the apply, or before it for a removal. Empty for each other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) fingerprints: Vec<String>,
 }
 
 /// Adds and changes in file order, then removals in tree key order.
@@ -146,10 +156,12 @@ impl Change {
         applied: &BTreeMap<Name, Definition>,
         paths: &[PathBuf],
     ) -> (Order, Self) {
-        let (action, kind, span) = if let Some(entry) = &change.new {
-            let kind = match &entry.definition {
-                config::Definition::Spec(definition) => definition.kind(),
-                config::Definition::Channel(_) => Kind::Channel,
+        let (action, kind, span, definition) = if let Some(entry) = &change.new {
+            let (kind, definition) = match &entry.definition {
+                config::Definition::Spec(definition) => {
+                    (definition.kind(), Some(definition))
+                }
+                config::Definition::Channel(_) => (Kind::Channel, None),
                 _ => unreachable!("invariant: `ops` knows each kind of definition"),
             };
             let action = if change.old.is_some() {
@@ -157,12 +169,20 @@ impl Change {
             } else {
                 Action::Add
             };
-            (action, kind, entry.label_span)
+            (action, kind, entry.label_span, definition)
         } else {
             let stored = applied
                 .get(name)
                 .expect("invariant: a removal is of an applied definition");
-            (Action::Remove, stored.kind(), None)
+            (Action::Remove, stored.kind(), None, Some(stored))
+        };
+        let fingerprints = match definition {
+            Some(Definition::Subject(subject)) => subject
+                .keys()
+                .iter()
+                .map(|&key| config::openssh::fingerprint(key))
+                .collect(),
+            _ => Vec::new(),
         };
         let label = kind
             .label(name)
@@ -174,6 +194,7 @@ impl Change {
             kind: kind.as_str().to_owned(),
             name: label.to_string(),
             place: span.map(|span| place(span, paths)),
+            fingerprints,
         };
         (order, change)
     }
