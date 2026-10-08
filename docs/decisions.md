@@ -5058,7 +5058,9 @@ How to read this record:
   `MALFORMED`: `serve::Error::Unadmitted` (a request stream before an admitted hello)
   and `Pending` (a request while one waits for its reply). A message of the wrong kind
   for its stream, such as a hello on a request stream, is `serve::Error::Message` with
-  `wire::hub::Error::Kind`, and a body that ends early is `Message` with `Unfinished`.
+  `wire::hub::Error::Kind`, and a body that ends early is `Message` with `Unfinished`
+  (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704).
   A program sends its first request once the challenge after its hello comes, since
   the node sends it only after it admits the hello. `Link` is not `Clone`. Lost: a
   `Config::clock` beside `time`, with a loop in `hub` that knows the slew; more than
