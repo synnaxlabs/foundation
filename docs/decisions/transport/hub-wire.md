@@ -86,9 +86,13 @@
   decode, comes from the wrong side, or breaks a rule above), which every protocol may
   use. The meanings of 18 and 19 were decided by the architect (2026-10-07T23:31:29Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
-  Supersedes the meanings of 18 and 19 in 6047300641 and 6047519084. A reset drops the
-  frames in flight, which is correct for `FAILED`, since the session cannot go on (lost:
-  a `Reply::Failed` that keeps them, a second end message to fuzz). Each reply block
+  Supersedes the meanings of 18 and 19 in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641 ("the
+  home's buffer failed") and
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084 ("the
+  home had no memory for a reply"). A reset drops the frames in flight, which is
+  correct for `FAILED`, since the session cannot go on (lost: a `Reply::Failed` that
+  keeps them, a second end message to fuzz). Each reply block
   holds one message. An ends message holds at most the frame's series, at 8 bytes each,
   the size of their descriptors in the frame's block, so the pool can always hold it
   (the architect, 2026-10-07T22:17:44Z,
