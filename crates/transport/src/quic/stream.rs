@@ -174,6 +174,8 @@ struct Sending {
     woken: VecDeque<StreamId>,
     /// The stretch that a write copies, kept across writes.
     buffer: Vec<u8>,
+    /// The messages whose claim waited for room in `budget`.
+    waited: u64,
 }
 
 /// The message bytes that one direction of a connection counts, and the claims that
@@ -1022,9 +1024,11 @@ impl Sending {
         given: Option<&[Part]>,
     ) -> Poll<()> {
         let order = self.share.order();
+        let idle = matches!(half.claim.state, State::Idle);
         let charged = self
             .budget
             .charge(half.key, half.body, &mut half.claim, order);
+        self.waited += u64::from(idle && !charged);
         if charged && self.turns.allows(half, order) {
             let left = half.left();
             let send = &mut inner.send_stream(half.key.id);
@@ -1087,6 +1091,11 @@ impl Sending {
 }
 
 impl Streams {
+    /// The messages that waited for room in the send budget.
+    pub(super) fn budget_waits(&self) -> u64 {
+        self.sending.waited
+    }
+
     /// The streams of a connection that refuses a message over `bytes_max`, with a
     /// window of `window_bytes`.
     pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
@@ -1106,6 +1115,7 @@ impl Streams {
                 share: Share::default(),
                 woken: VecDeque::new(),
                 buffer: Vec::new(),
+                waited: 0,
             },
             receiving: Budget::new(window_bytes.saturating_add(bytes_max)),
             closed: Closed::default(),
@@ -3208,6 +3218,41 @@ mod tests {
                     read.iter().filter(|&&(at, _)| at == id).cloned().collect();
                 assert_eq!(at, [(id, expected)]);
             }
+        });
+    }
+
+    #[test]
+    fn each_message_that_waits_for_send_budget_room_counts_once() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let waited = pair.client.endpoint.budget_waits();
+            let second = open_sender(&mut pair, Class::Complete);
+            let third = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            // The second takes room at once, and the third waits for it.
+            let messages =
+                [(&second, vec![0xb; 100]), (&third, vec![0xc; MESSAGE_MAX])];
+            for (sender, message) in messages {
+                let message = shard.block(&message);
+                let written = pair::write(
+                    &mut pair.client.endpoint,
+                    now,
+                    sender,
+                    &mut Some(message),
+                );
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 1);
+            let mut senders = [first, second, third];
+            exchange(&mut pair, &mut senders, 10 * RUN);
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 1);
+            let (now, key) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, key, Code(1));
+            pair.run(10 * RUN);
+            assert!(pair.client.endpoint.drained());
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 1);
         });
     }
 

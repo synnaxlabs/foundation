@@ -2398,6 +2398,7 @@ mod tests {
                 let none = crate::Status {
                     waited: Span::ZERO,
                     refusals: 0,
+                    budget_waits: 0,
                 };
                 assert_eq!(side.transport.status(), none);
                 let held = side.pool.alloc(LARGE).expect("room");
@@ -2421,7 +2422,8 @@ mod tests {
                     side.transport.status(),
                     crate::Status {
                         waited,
-                        refusals: 0
+                        refusals: 0,
+                        budget_waits: 0,
                     }
                 );
                 side.session.close(Code(4));

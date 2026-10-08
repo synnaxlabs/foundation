@@ -2166,9 +2166,15 @@ How to read this record:
   with a whole message that holds its room, so it never waits for room in its place.
   `transport` counts the time that reads wait and each refused commit, and `node`
   publishes them on status channels (BQ11b). `Transport::status` gives
-  `Status { waited, refusals }`, pulled, not pushed: `waited` is the time that at least
-  one read waited, not the sum over reads (architect, #68:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032541901). A caller
+  `Status { waited, refusals, budget_waits }`, pulled, not pushed: `waited` is the time
+  that at least one read waited, not the sum over reads (architect, #68:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6032541901).
+  `budget_waits` counts each message whose claim queued for room in the send budget,
+  over every session, also ended ones; a send that gets room at once does not count. It
+  shows that a peer's window limits the sends, and the send bench's budget line panics
+  in a round where it does not grow. A count, not a span: a wait that ends at the same
+  instant gives a span of 0. Decided by architect-2 (#1958:
+  https://github.com/synnaxlabs/foundation/pull/1952#issuecomment-6066477026). A caller
   ends a wait when it drops the future; it can then call `stop`.
   `datagram::Receiver::recv` gives no such error either: a datagram with no block drops
   and is counted, and the read waits for the next one. `hub` writes no retry for a read.
