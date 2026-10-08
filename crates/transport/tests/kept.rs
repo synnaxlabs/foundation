@@ -38,10 +38,11 @@ const KEPT_MAX: usize = 2 << 10;
 const SHORT: usize = 1000;
 /// When the client sends the long message after the short one.
 const GAP: Span = Span::from_nanos(250_000_000);
-/// When the server reads after it accepts the stream, once the message is in.
+/// When the server reads the long message after its read of the short one, once the
+/// long one is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
-/// When the client resets the stream after its send: past the server's read.
-const RESET: Span = Span::from_nanos(1_500_000_000);
+/// When the client ends the stream after its send: past the server's read.
+const END: Span = Span::from_nanos(1_500_000_000);
 /// How long the server waits after its read of a stream that the client resets,
 /// before it drops the receiver: past the reset.
 const DROP: Span = Span::from_nanos(2_000_000_000);
@@ -64,7 +65,8 @@ enum Reading {
 /// How the client ends the stream after its message.
 #[derive(Clone, Copy, Debug)]
 enum End {
-    /// It finishes the stream, and the server reads the end before the drop.
+    /// It finishes the stream after the server's read, and the server reads the end
+    /// before the drop. That read waits for the end, as for the prefix of a message.
     Finish,
     /// It resets the stream after the server's read, and the server drops the
     /// receiver with no more reads. The reset stream needs no stop, so the drop
@@ -152,12 +154,10 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
         sender.send(filled(&pool, SHORT)).await.expect("sent");
         node.clock().sleep(GAP).await;
         sender.send(filled(&pool, len)).await.expect("sent");
+        node.clock().sleep(END).await;
         match end {
             End::Finish => sender.finish().expect("finished"),
-            End::Reset => {
-                node.clock().sleep(RESET).await;
-                drop(sender);
-            }
+            End::Reset => drop(sender),
         }
         node.clock().sleep(LIVE).await;
     })
