@@ -2746,9 +2746,11 @@ mod tests {
         }
 
         /// The milliseconds until the server reads a message after a cut of `secs`
-        /// seconds heals, on a stream that carries one message each 250 ms.
-        fn stream_heal_ms(value: u64, secs: i64, len: usize) -> Option<i64> {
-            let (mut sim, client, server) = testing::nodes(value);
+        /// seconds heals, on a stream that carries one message of 1,000 bytes each
+        /// 250 ms. Such messages fill the congestion window in the cut, so that only
+        /// a probe can send.
+        fn stream_heal_ms(secs: i64) -> Option<i64> {
+            let (mut sim, client, server) = testing::nodes(1);
             let at = [Address::Udp(testing::address(&server))];
             let read = Arc::new(AtomicU32::new(0));
             let counter = Arc::clone(&read);
@@ -2779,7 +2781,7 @@ mod tests {
                 let mut sender = opened.expect("a stream");
                 let clock = node.clock();
                 for n in 0..u32::MAX {
-                    let mut message = vec![0; len];
+                    let mut message = vec![0; 1_000];
                     message[..4].copy_from_slice(&n.to_le_bytes());
                     let block = testing::block(&pool, &message);
                     sender.send(block).await.expect("sent");
@@ -2799,8 +2801,8 @@ mod tests {
 
         /// The milliseconds until a dial that starts in a cut of `secs` seconds
         /// gives its session after the cut heals.
-        fn dial_heal_ms(value: u64, secs: i64) -> Option<i64> {
-            let (mut sim, client, server) = testing::nodes(value);
+        fn dial_heal_ms(secs: i64) -> Option<i64> {
+            let (mut sim, client, server) = testing::nodes(1);
             let at = [Address::Udp(testing::address(&server))];
             let dialed = Arc::new(AtomicU32::new(0));
             let counter = Arc::clone(&dialed);
@@ -2841,7 +2843,7 @@ mod tests {
         #[test]
         fn a_stream_with_a_full_window_moves_within_3_s_after_a_cut_heals() {
             for secs in [8, 15, 46, 59] {
-                let heal = stream_heal_ms(1, secs, 1_000);
+                let heal = stream_heal_ms(secs);
                 assert!(
                     heal.is_some_and(|ms| ms <= HEAL_MS),
                     "cut {secs} s: {heal:?}"
@@ -2852,7 +2854,7 @@ mod tests {
         #[test]
         fn a_dial_in_a_cut_gives_its_session_within_3_s_after_the_cut_heals() {
             for secs in [8, 15, 50] {
-                let heal = dial_heal_ms(1, secs);
+                let heal = dial_heal_ms(secs);
                 assert!(
                     heal.is_some_and(|ms| ms <= HEAL_MS),
                     "cut {secs} s: {heal:?}"
