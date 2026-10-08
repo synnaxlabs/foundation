@@ -123,26 +123,39 @@ fn a_region_opened_with_one_founding_definition_reads_it_from_its_spec() {
     });
 }
 
-// The replay of the log after an open applies each change again.
+// The replay of the log after an open applies each change again. A read of a
+// replayed pointer would create the file of its spec, which fails here.
 #[test]
-fn a_pointer_at_or_below_the_one_in_use_leaves_the_spec_in_use() {
-    solo(|node, tasks| async move {
+fn a_replayed_pointer_at_or_below_the_one_in_use_leaves_the_spec_in_use() {
+    let (a, b) = (
+        create_subjects(&["plant.a"], 1),
+        create_subjects(&["plant.b"], 1),
+    );
+    let (first, second) = (pointer(1, &a), pointer(2, &b));
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let next = b.clone();
+    sim.run_on(&node, move |node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let (a, b) = (
-            create_subjects(&["plant.a"], 1),
-            create_subjects(&["plant.b"], 1),
-        );
-        let first = mesh.apply(base(), a).await.unwrap();
-        let second = mesh.apply(first, b.clone()).await.unwrap();
-        assert_eq!(mesh.spec().await, Ok(in_use(second, &b)));
-        for pointer in [first, second] {
-            let mut group = mesh.group.borrow_mut();
-            group.used.committed(pointer, BTreeSet::new());
-            assert!(group.used.newest.is_none(), "{pointer:?}");
+        assert_eq!(mesh.apply(base(), a).await, Ok(first));
+        assert_eq!(mesh.apply(first, next.clone()).await, Ok(second));
+        assert_eq!(mesh.spec().await, Ok(in_use(second, &next)));
+    })
+    .unwrap();
+    sim.crash(&node, Crash::Power);
+    sim.run_on(&node, move |node, tasks| async move {
+        for _ in 0..5 {
+            node.fail_file(&file(second), Operation::Open);
         }
-    });
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        reach(&mesh, &node.clock(), second).await;
+        node.clock().sleep(seconds(3)).await;
+        assert_eq!(mesh.spec().await, Ok(in_use(second, &b)));
+    })
+    .unwrap();
 }
 
+// No public call shows the slots of `Group::calls`.
 #[test]
 fn a_dropped_call_of_the_spec_frees_its_slot() {
     solo(|node, tasks| async move {
@@ -287,6 +300,207 @@ fn a_retry_gets_only_the_missed_chunk_and_keeps_the_chunks_it_read() {
         node.files().remove(&root).await.unwrap();
         node.clock().sleep(seconds(2)).await;
         assert_eq!(mesh.spec().await, Ok(in_use(moved, &definitions)));
+    });
+}
+
+#[test]
+fn a_failed_get_of_the_store_leaves_the_node_behind_until_a_retry() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let a = create_subjects(&["plant.a"], 1);
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &a);
+        put(&mesh.store, &mesh.pool, &chunks, &update.chunks)
+            .await
+            .unwrap();
+        let path = Path::new(BLOB).join(update.root.to_string());
+        node.fail_file(&path, Operation::Open);
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let moved = settled.await.unwrap();
+        let cause = files::Error::Io {
+            path,
+            operation: Operation::Open,
+            code: 5,
+        };
+        let behind = Spec {
+            behind: Some(Behind {
+                pointer: moved,
+                cause: Cause::Blob(blob::Error::Files(cause)),
+            }),
+            ..in_use(base(), &BTreeMap::new())
+        };
+        assert_eq!(mesh.spec().await, Ok(behind));
+        node.clock().sleep(seconds(2)).await;
+        assert_eq!(mesh.spec().await, Ok(in_use(moved, &a)));
+    });
+}
+
+// The change lists the root of the tree in use, whose get fails.
+#[test]
+fn a_read_gets_no_listed_chunk_that_the_tree_in_use_holds() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let (a, b) = (
+            create_subjects(&["plant.a"], 1),
+            create_subjects(&["plant.b"], 1),
+        );
+        let first = mesh.apply(base(), a).await.unwrap();
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &b);
+        put(&mesh.store, &mesh.pool, &chunks, &update.chunks)
+            .await
+            .unwrap();
+        node.fail_file(
+            &Path::new(BLOB).join(first.root.to_string()),
+            Operation::Open,
+        );
+        let holders = [key(1)].into();
+        let listed = [first.root].into();
+        let settled = mesh.settle_spec(first, update.root, listed, holders);
+        let moved = settled.await.unwrap();
+        assert_eq!(mesh.spec().await, Ok(in_use(moved, &b)));
+    });
+}
+
+// The first read misses one chunk. The next get of it fails, and the one after finds
+// no chunk.
+#[test]
+fn each_get_of_the_missed_chunk_gives_the_cause_of_the_spec_behind() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let definitions = create_large(200);
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &definitions);
+        let lacked = *update.chunks.iter().find(|at| **at != update.root).unwrap();
+        let held = update.chunks.iter().copied().filter(|at| *at != lacked);
+        let held: Vec<Digest> = held.collect();
+        put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        let moved = settled.await.unwrap();
+        let behind = |cause| Spec {
+            behind: Some(Behind {
+                pointer: moved,
+                cause,
+            }),
+            ..in_use(base(), &BTreeMap::new())
+        };
+        let missing =
+            Cause::Read(spec::region::Error::Tree(tree::Error::Missing(lacked)));
+        assert_eq!(mesh.spec().await, Ok(behind(missing.clone())));
+        put(&mesh.store, &mesh.pool, &chunks, &[lacked])
+            .await
+            .unwrap();
+        let path = Path::new(BLOB).join(lacked.to_string());
+        node.files().remove(&path).await.unwrap();
+        node.fail_file(&path, Operation::Open);
+        node.clock().sleep(Span::from_nanos(1_500_000_000)).await;
+        let cause = files::Error::Io {
+            path,
+            operation: Operation::Open,
+            code: 5,
+        };
+        let failed = Cause::Blob(blob::Error::Files(cause));
+        assert_eq!(mesh.spec().await, Ok(behind(failed)));
+        node.clock().sleep(seconds(1)).await;
+        assert_eq!(mesh.spec().await, Ok(behind(missing)));
+    });
+}
+
+// No public call shows the chunks that the task holds for the newest pointer.
+#[test]
+fn a_newer_pointer_drops_the_chunks_got_for_the_one_it_replaces() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut at = base();
+        for count in [200, 300] {
+            let mut chunks = Chunks::default();
+            let update = spec::region::tree(&mut chunks, &create_large(count));
+            let lacked = *update.chunks.iter().find(|at| **at != update.root).unwrap();
+            let held = update.chunks.iter().copied().filter(|at| *at != lacked);
+            let held: Vec<Digest> = held.collect();
+            put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
+            let holders = [key(1)].into();
+            let settled = mesh.settle_spec(at, update.root, BTreeSet::new(), holders);
+            at = settled.await.unwrap();
+            assert_eq!(mesh.spec().await.unwrap().behind.unwrap().pointer, at);
+            let group = mesh.group.borrow();
+            let got = &group.used.newest.as_ref().unwrap().got;
+            assert!(!got.is_empty(), "{count}");
+            for chunk in got {
+                let digest = Digest::of(chunk);
+                assert!(chunks.get(digest).is_some(), "{count}: {digest}");
+            }
+        }
+    });
+}
+
+/// Creates an empty file for each of `names` in the directory of the spec in use.
+async fn create_files(node: &sim::node::Node, names: &[PathBuf]) {
+    let files = node.files();
+    files.create_dir(Path::new(used::SPEC)).await.unwrap();
+    for name in names {
+        let path = Path::new(used::SPEC).join(name);
+        drop(
+            files
+                .open(&path, files::Mode::Create { len: 0 })
+                .await
+                .unwrap(),
+        );
+    }
+}
+
+// The log syncs the directory of the node first, so no fault reaches only the sync of
+// the spec in use there.
+#[test]
+fn an_open_gives_the_error_of_each_failed_file_call_on_the_spec_in_use() {
+    let older = Pointer {
+        version: 1,
+        root: Digest([1; 32]),
+    };
+    let newer = Pointer {
+        version: 2,
+        root: Digest([2; 32]),
+    };
+    let calls = [
+        (PathBuf::from(used::SPEC), Operation::CreateDir),
+        (PathBuf::from(used::SPEC), Operation::List),
+        (file(older), Operation::Remove),
+    ];
+    for (path, operation) in calls {
+        solo(move |node, tasks| async move {
+            create_files(&node, &[name(older), name(newer)]).await;
+            node.fail_file(&path, operation);
+            let cause = files::Error::Io {
+                path,
+                operation,
+                code: 5,
+            };
+            let opened = open(&node, &tasks, 1, &[1], &[1]).await.err();
+            assert_eq!(opened, Some(Error::Files(cause)));
+        });
+    }
+}
+
+// `Files::list` gives names in text order, where `10-` comes before `9-`.
+#[test]
+fn an_open_uses_the_file_of_the_highest_version() {
+    let nine = Pointer {
+        version: 9,
+        root: Digest([9; 32]),
+    };
+    let ten = Pointer {
+        version: 10,
+        root: Digest([10; 32]),
+    };
+    solo(move |node, tasks| async move {
+        create_files(&node, &[name(nine), name(ten)]).await;
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let spec = mesh.spec().await.unwrap();
+        assert_eq!(spec.behind.map(|behind| behind.pointer), Some(ten));
+        let names = node.files().list(Path::new(used::SPEC)).await.unwrap();
+        assert_eq!(names, [name(ten)]);
     });
 }
 
