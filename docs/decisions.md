@@ -5556,6 +5556,11 @@ How to read this record:
   Measured on macOS (#1921): a create of a path with a trailing slash gives `ENOTDIR`
   for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a directory
   gives `EPERM`, not `EISDIR`. No code reads these codes.
+  Amended (2026-10-08T17:20:09Z, #1921): macOS applies `TCP_NOTSENT_LOWAT` only to
+  the write event, not to the write itself. So on macOS, `os` writes at most
+  `unsent_bytes_max` bytes in one call and then waits for the next write event.
+  Decided by `laptop.architect-2` (2026-10-08T17:20:09Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
