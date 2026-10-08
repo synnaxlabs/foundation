@@ -2647,7 +2647,7 @@ mod port {
         type Home = Arc<Mutex<Option<Result<Option<types::node::Key>, Stopped>>>>;
 
         /// The public half of `private_key`, from a transport made with it.
-        fn public_key(private_key: PrivateKey) -> types::node::PublicKey {
+        fn public_key(private_key: PrivateKey) -> types::ed25519::PublicKey {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = sim.node(sim::node::Config::default());
             let key = sim.run_on(&host, move |host, tasks| async move {
