@@ -20,8 +20,8 @@
   such a type reads it only through `Display` and `Debug`. A caller that must match one
   gets the crate in its line through an `interface` issue first. `mesh` does not
   re-export such a type: a re-export makes each change to `raft` a change to the surface
-  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, of an `Ended` is
-  `Ended { .. }`, and of a `Watch` is its index only. The text of `Ended`: decided by
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, of an `Ended` is `Ended { ..
+  }`, and of a `Watch` is its index only. The text of `Ended`: decided by
   `laptop.architect` (2026-10-08T04:42:48Z):
   https://github.com/synnaxlabs/foundation/pull/1791#issuecomment-6052417077. It
   supersedes the `#[derive(Debug)]` of `Ended` in
@@ -31,10 +31,9 @@
   `claim::Error`, and `region::Unfit` are public with them, because `open` and `serve`
   give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the module
   its new name. `Error` adds `raft::Error` and `transport::Error` to the types of other
-  crates. `Config` and `serve` add types that the caller builds:
-  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
-  `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
-  `transport::stream::Incoming`, `types::name::Prefix`, and
+  crates. `Config` and `serve` add types that the caller builds: `env::files::Files`,
+  `env::clock::Clock`, `env::entropy::Entropy`, `env::tasks::Tasks`, `block::Pool`,
+  `transport::Transport`, `transport::stream::Incoming`, `types::name::Prefix`, and
   `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`, and
   `transport` in its line of the crate map. `Config::founding` is a `region::Founding`:
   the prefix, the founding members and voters, the founding definitions, and the home of
@@ -42,38 +41,40 @@
   open. `State::new` takes the homes, so the first state holds them. An index with no
   entry has no home until a spec change gives one (#1931; `laptop.architect`,
   2026-10-08T18:35:16Z:
-  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). At
-  each open, the state starts at the founding, so until the replay a watch can give a
-  founding home that the log moved, as at a follower behind the leader. A home that
-  the mesh names is never the authority to write. Trigger: before a production path
-  moves a home, the home takes a write only while it holds its node lease, so a node
-  whose state is old takes no write as a home that it lost (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). At each
+  open, the state starts at the founding, so until the replay a watch can give a
+  founding home that the log moved, as at a follower behind the leader. A home that the
+  mesh names is never the authority to write. Trigger: before a production path moves a
+  home, the home takes a write only while it holds its node lease, so a node whose state
+  is old takes no write as a home that it lost (`laptop.architect`,
   2026-10-08T19:28:51Z:
   https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6067470813). A
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
   stays its one check, of the members and voters. It refuses no definition or home: a
-  founding spec with problems is not an error of the open, and the node uses no spec
-  (SPEC IN USE). The node that founds the region checks the definitions (SPEC CHANGE).
-  Nothing checks the homes (`laptop.architect`, 2026-10-08T18:35:16Z:
+  founding spec with problems is not an error of the open: when no file names a pointer,
+  the node uses no spec until a valid change takes effect (SPEC IN USE;
+  `laptop.architect`, 2026-10-08T15:42:09Z:
+  https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498). The node
+  that founds the region checks the definitions (SPEC CHANGE). Nothing checks the homes
+  (`laptop.architect`, 2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). `Start`
   lost, because `driver.rs` holds `raft::Start`, which changes at each open
   (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
-  `Founding::definitions` adds
-  `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
-  `spec::Pointer`, whose root is a `types::digest::Digest`. So a crate that opens a
-  region also has `spec` in its line. Decided by `laptop.architect`: the founding
-  definitions, 2026-10-08T06:12:36Z
+  `Founding::definitions` adds `spec::definition::Definition` and `types::name::Name`,
+  and `Mesh::pointer` gives a `spec::Pointer`, whose root is a `types::digest::Digest`.
+  So a crate that opens a region also has `spec` in its line. Decided by
+  `laptop.architect`: the founding definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   pointer, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); this
   text, 2026-10-08T08:41:43Z
-  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
-  `Config` has no `clock::Reader`, and `Error` has no `Unsynced` and no `Status`: no
-  public call reads the one or gives the two. The join answer of #336 decides, with its
-  caller, where a join that no voter stamps goes (MEMBER RECORD).
-  Decided by `laptop.architect` (2026-10-07T22:33:29Z):
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151). `Config`
+  has no `clock::Reader`, and `Error` has no `Unsynced` and no `Status`: no public call
+  reads the one or gives the two. The join answer of #336 decides, with its caller,
+  where a join that no voter stamps goes (MEMBER RECORD). Decided by `laptop.architect`
+  (2026-10-07T22:33:29Z):
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
@@ -93,11 +94,10 @@
   `Debug` text of a `Config` does not show the private key. `Mesh::set_home` is the
   first public call that changes the region (#471), and `Error::NoVote` is public with
   it (MESH DRIVER), approved by the architect, 2026-10-07T20:29:07Z:
-  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552.
-  The line "Private still" of the plan names `set_home` (4c-2) as the first call that
-  changes the region
-  (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
-  the architect approved, 2026-10-07T16:24:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1607#issuecomment-6046249552. The line
+  "Private still" of the plan names `set_home` (4c-2) as the first call that changes the
+  region (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466),
+  which the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
   other calls that change the region and the change records stay private. The surface is
   approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
@@ -114,22 +114,21 @@
   2026-10-07T17:38:37Z:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
-  three types.
-  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir` is the
-  mesh's directory, relative to the data directory. The mesh makes it and syncs its
-  parent, and the log goes in `log` in it. Its parent must be there and durable. `node`
-  gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each task of
-  the mesh has ended: the group's task and each task that sends. It holds no clone, so
-  it does not keep the group running. Once it resolves, the mesh holds no file, and a
-  new open of its directory can take the log. Decided by `laptop.architect`,
+  three types. Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir`
+  is the mesh's directory, relative to the data directory. The mesh makes it and syncs
+  its parent, and the log goes in `log` in it. Its parent must be there and durable.
+  `node` gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each
+  task of the mesh has ended: the group's task and each task that sends. It holds no
+  clone, so it does not keep the group running. Once it resolves, the mesh holds no
+  file, and a new open of its directory can take the log. Decided by `laptop.architect`,
   2026-10-08T04:00:49Z:
-  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after
-  the ruling on PR 3b, 2026-10-08T03:37:20Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after the
+  ruling on PR 3b, 2026-10-08T03:37:20Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475, and the
   field over a `Files` call by `laptop.architect-2`, 2026-10-08T03:54:37Z:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866. Lost: a
   counting `Tasks` driver in `node`, because `node` then watches the tasks of another
-  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end
-  the group; `env::files::Files::within`, because `env` then gives two ways to scope
-  the files of a crate, beside `buffer::Config::dir`. A change that wants it later
-  moves `buffer` and `mesh` together.
+  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end the
+  group; `env::files::Files::within`, because `env` then gives two ways to scope the
+  files of a crate, beside `buffer::Config::dir`. A change that wants it later moves
+  `buffer` and `mesh` together.
