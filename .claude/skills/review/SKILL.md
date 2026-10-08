@@ -57,13 +57,13 @@ command outside that worktree. Remove each worktree when its agent returns
    (`<from>..<head sha>`), and the confirmed findings, most severe first: file and line,
    what goes wrong, and the fix. It ends with three lines. First `Deferred:` and `none`,
    or the issue of each deferred finding, each with the link to the architect's OK in a
-   risk crate. Then `Public surface:` and `none`, or each public item and crate
-   dependency that the PR changes, and each change from a text that the architect
-   approved (Round 1). The `architecture` report names them, and in a round with no
-   `architecture` agent the `reviewer` report names those of its range. Each has the
-   link to the architect's approval once it exists. A later round keeps each
-   item of the round before it. Then `Hot path:` as the `architecture` report gives it,
-   or, in a round with no `architecture` agent, the `reviewer` report.
+   risk crate. Then `Public surface:` and `none`, or each item that
+   `.claude/agents/architecture.md` defines for that line (the `architecture` report
+   names them, and in a round with no `architecture` agent the `reviewer` report names
+   those of its range), each with the link to the architect's approval once it exists.
+   A later round keeps each item of the round before it. Then `Hot path:` as the
+   `architecture` report gives it, or, in a round with no `architecture` agent, the
+   `reviewer` report.
 3. Fix each finding in this PR, or answer it on the PR. A deferral is an issue that
    states the item, linked in the answer, also when the code is already on `main` or
    another crate does the work. A finding whose fix is a small change in a crate or a
