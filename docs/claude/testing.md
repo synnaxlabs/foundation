@@ -6,10 +6,10 @@ names rule N in `docs/research/r16-rust-guides.md`.
 ## Injection
 
 Every component gets clock, network, disk, and randomness as inputs (`env`). Production
-passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
-clock, the network, the disk, or a random source directly. Clippy's
-`disallowed-methods` list in `clippy.toml` enforces this. Only `os` implements the
-`env` seams and calls the OS, sockets included.
+passes the real ones. Tests pass the simulated ones from `sim`, except a process test
+(Process tests). Nothing reads the OS clock, the network, the disk, or a random source
+directly. Clippy's `disallowed-methods` list in `clippy.toml` enforces this. Only `os`
+implements the `env` seams and calls the OS, sockets included.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
@@ -58,6 +58,23 @@ peer can see the mutant, or names the test that kills it in a job that the mutan
 does not see (Miri, loom, another OS). A mutant that a test could kill but none does
 links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
 `rust-toolchain-nightly`, that only those gates use.
+
+## Process tests
+
+A process test runs the `foundation` binary on the seams of `os`: a temporary data
+directory and loopback. It checks the wiring of those seams and what a user sees (exit
+codes, stderr, `foundation status`), not logic that a simulated test can reach.
+
+- It lives in `crates/node/tests/it/`: Cargo sets `CARGO_BIN_EXE_foundation` only for
+  the tests of `node`.
+- Each test makes its own temporary data directory and removes it at the end.
+- Each listener binds port 0 on loopback, and the test reads the port it got. No fixed
+  port, and nothing outside loopback.
+- Each wait polls its condition under a deadline, and a missed deadline fails with the
+  state it saw. Never a fixed sleep.
+- The test ends each process it starts, also when it fails.
+- A defect that a process test finds gets its regression test in simulation when the
+  seams of `sim` can make it happen.
 
 ## Fuzzing
 
