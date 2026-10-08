@@ -1,12 +1,12 @@
-//! TCP streams, listeners, and name lookups on the real network. Each stream and
-//! listener is a non-blocking socket that registers with the I/O driver of the Tokio
-//! runtime of the thread of its first poll.
+//! UDP sockets, TCP streams, listeners, and name lookups on the real network. Each
+//! socket is non-blocking, and registers with the I/O driver of the Tokio runtime of
+//! the thread of its first poll.
 
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-use env::net::{Connect, Error, Resolve, tcp, udp};
+use env::net::{Connect, Error, Resolve, tcp};
 use rustix::fs::OFlags;
 use rustix::io::{Errno, FdFlags};
 use rustix::net::{AddressFamily, Protocol, SocketType, sockopt};
@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 
 use self::listener::Listener;
 use self::stream::Stream;
+use self::udp::Udp;
 
 mod listener;
 #[expect(
@@ -25,13 +26,17 @@ mod lowat;
 mod resolve;
 mod socket;
 mod stream;
+mod udp;
 
 /// The network of this machine.
 pub(crate) struct Driver;
 
 impl env::net::Driver for Driver {
-    fn udp(&self, _: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
-        panic!("os::net has no UDP driver yet")
+    fn udp(
+        &self,
+        config: &env::net::udp::Config,
+    ) -> Result<Box<dyn env::net::udp::Driver>, Error> {
+        Ok(Box::new(Udp::bind(config)?))
     }
 
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {

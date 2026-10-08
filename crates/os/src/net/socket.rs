@@ -48,11 +48,7 @@ impl<Idle, Live> Socket<Idle, Live> {
         }
         match self {
             Self::Live { socket, thread } => {
-                assert_eq!(
-                    *thread,
-                    thread::current().id(),
-                    "a {kind} polls only on the thread of its first poll"
-                );
+                on_thread(kind, *thread);
                 Ok(socket)
             }
             Self::Lost { code } => Err(*code),
@@ -72,6 +68,19 @@ impl<Idle, Live> Socket<Idle, Live> {
             Self::Lost { .. } => None,
         }
     }
+}
+
+/// Checks the thread rule of a socket of `kind` that first polled on `thread`.
+///
+/// # Panics
+///
+/// On a thread other than `thread`.
+pub(super) fn on_thread(kind: &str, thread: ThreadId) {
+    assert_eq!(
+        thread,
+        thread::current().id(),
+        "a {kind} polls only on the thread of its first poll"
+    );
 }
 
 #[cfg(test)]

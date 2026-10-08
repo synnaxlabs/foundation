@@ -1190,7 +1190,7 @@ dependencies = [
  "env",
  "getrandom 0.4.3",
  "libc",
- "os",
+ "noq-udp",
  "proptest",
  "rustix",
  "tokio",

@@ -21,7 +21,7 @@ mod files;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
-#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod net;
 mod shards;
 mod thread;
@@ -109,19 +109,18 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
 }
 
-/// The network of this machine. A stream or listener registers at its first poll
-/// with the I/O driver of the Tokio runtime current on that thread. Each thread that
-/// `os` starts has one.
+/// The network of this machine. A stream, listener, UDP sender, or UDP receiver needs
+/// the I/O driver of the Tokio runtime current on the thread of its first poll. Each
+/// thread that `os` starts has one.
 ///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
 ///
 /// # Panics
 ///
-/// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener,
-///   on a thread with no Tokio runtime or with no I/O driver.
-/// - [`env::net::Net::udp`]: this driver has no UDP yet.
-#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
+/// A poll of [`env::net::Net::connect`], or the first poll of a stream, listener, UDP
+/// sender, or UDP receiver, on a thread with no Tokio runtime or with no I/O driver.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use]
 pub fn net() -> env::net::Net {
     env::net::Net::new(net::Driver)

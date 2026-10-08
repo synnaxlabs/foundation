@@ -11,12 +11,14 @@ use std::sync::mpsc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-use env::net::{Error, Listener, Net, Tcp, tcp, udp};
+use env::net::{Error, Listener, Net, Tcp, tcp};
 use env::shards::Config;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
 use crate::common::assert_joins;
+
+mod udp;
 
 const LOCALHOST: Ipv4Addr = Ipv4Addr::LOCALHOST;
 /// The bound of each wait in these tests.
@@ -835,17 +837,6 @@ fn an_accepted_stream_moves_to_another_thread_before_its_first_poll() {
         read_exact(&mut server, &mut received).await;
         assert_eq!(&received, b"moved");
     });
-}
-
-#[test]
-#[should_panic(expected = "os::net has no UDP driver yet")]
-fn udp_panics() {
-    let config = udp::Config {
-        local: SocketAddr::new(LOCALHOST.into(), 0),
-        send_buffer_bytes: 1 << 16,
-        recv_buffer_bytes: 1 << 16,
-    };
-    drop(net().udp(&config));
 }
 
 fn resolve(host: &str) -> Result<Vec<SocketAddr>, Error> {

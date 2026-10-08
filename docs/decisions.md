@@ -5570,11 +5570,23 @@ How to read this record:
   Rejected: one I/O thread for every socket, as `os::files` uses; each message would
   cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
-  it lacks, from one `libc::setsockopt`. Until #119 lands, `os::net()` is behind the
-  cargo feature `net`, and its `udp` panics ("os::net has no UDP driver yet"); #119
-  removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
-  02:32 UTC, #120,
+  it lacks, from one `libc::setsockopt`. Decided by `laptop.architect-2` (2026-10-08 02:32 UTC, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
+  `os`, a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
+  the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
+  off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
+  `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
+  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO; there is no
+  `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
+  `max_gso_segments`, and from then on each datagram goes out alone; that is the only
+  GSO flag. Each half has its own `dup` of the socket. The receiver registers for
+  readable at its first poll, in a `OnceLock` with its thread, so no lock is on the
+  receive path. A sender registers for writable at its first poll and after each
+  `EAGAIN`, and the next send that succeeds drops the registration: Linux wakes each
+  `EPOLLOUT` registration of a socket for each datagram that the socket sends (1,000
+  wakes for 1,000 sends on box2), so a sender that stays registered on each shard
+  would wake each parked shard. Decided by `laptop.architect-2` (2026-10-08 18:27 UTC,
+  #119, https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). On
   `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
   stream reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of
   the connect, an IPv4-mapped address as plain IPv4, and any other address as given,
