@@ -74,6 +74,19 @@ How to read this record:
 - **Root CLAUDE.md principles** apply to every crate: injected dependencies, no mutable
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
+- **DEVX (2026-10-08)** Design each user surface for the person, agent, or program that
+  uses it. A user surface is any surface that a user reaches. These are the CLI, MCP,
+  the config language, the client protocol and each SDK, and each file that a user reads
+  or writes. Each plan for one compares its options by the steps of each common task,
+  the first use after a new install among them. It also compares them by the error and
+  fix that each wrong step gives (C7). A step that Foundation can do itself is not a
+  step for the user (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when we're
+  designing public APIs like this, we really need to think about devx"
+  (2026-10-08T02:43:43Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981). The
+  plan rule is decided by `laptop.architect-2` and `laptop.architect` from those words
+  (2026-10-08T02:46:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026).
 - **Process** Each data structure and key decision is proposed with a sketch and
   locked only on agreement. RESCOPE: delivery and wire internals are tuned by
   benchmarks, not interviewed.
@@ -2227,8 +2240,16 @@ How to read this record:
   approved it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
   A voter that does not lead cannot make a node follow it: a leader claim needs a
   quorum of grants (RAFT SURFACE, #750), except a voter that led a term at or above
-  the node's committed one, which can forge a link until #882 (RAFT SURFACE). A
-  false `AppendReply` still counts as held (#882). Lost: a lease that drops a
+  the node's committed one, which can forge a link until #882 (RAFT SURFACE). After a
+  restart, the committed term is the term at the applied index, because `Hard` holds no
+  commit index. That term can be lower than the term at the commit index before the
+  restart, so more past leaders can forge a link. Lost: the commit index in `Hard`. It
+  costs one more durable write each time the commit index moves, for a gap that #882
+  closes. Also lost: a bound of the highest term in the stable log. It refuses a real
+  leader whose link has a lower term than an entry of the node that is not committed.
+  Decided by `laptop.architect` (#1682, 2026-10-08T01:03:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1682#issuecomment-6050014758.
+  A false `AppendReply` still counts as held (#882). Lost: a lease that drops a
   heartbeat or an `Append` of a higher term from a node that is not the leader. A
   reply of a higher term ends any node's lease, and a leader must step down on one;
   the lease also changed three etcd oracle tests. The
@@ -2860,11 +2881,16 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6048235563.
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383, the
-  sentence on `Unsynced` and `Status`. `open` panics when `Config.transport` proves a
-  key that is not the public half of `Config.private_key`. `node` builds both from the
-  one key that it loads, so a mismatch is a defect in `node`, not bad outside input.
-  `Error::WrongKey` stays for a key that is not the key of the member record (ruled by
-  the architect, 2026-10-07T19:55:13Z:
+  sentence on `Unsynced` and `Status`. The same ruling supersedes the approval of
+  `Unsynced`, `Status`, and `Config.time` in item 2 of that comment. It also supersedes
+  the approval of `Config.time` (a `clock::Reader`) in
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724 (ruled by
+  `laptop.architect`, 2026-10-08T00:46:02Z:
+  https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6049818540). `open`
+  panics when `Config.transport` proves a key that is not the public half of
+  `Config.private_key`. `node` builds both from the one key that it loads, so a mismatch
+  is a defect in `node`, not bad outside input. `Error::WrongKey` stays for a key that
+  is not the key of the member record (ruled by the architect, 2026-10-07T19:55:13Z:
   https://github.com/synnaxlabs/foundation/issues/1587#issuecomment-6045695196).
   Supersedes the sentence that `open` does not check the key of the transport:
   https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. The
@@ -2877,12 +2903,13 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6041243466), which
   the architect approved, 2026-10-07T16:24:54Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6042136383. The
-  other calls that change the region and the change records stay private. The surface
-  is approved in the same comment. The surface as built, with the types that the caller
-  builds and the sentence that `open` does not check the key of the transport
-  (superseded above), is approved by the architect, 2026-10-07T19:55:12Z:
-  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. `member`
-  is approved by the architect, 2026-10-07T15:17:13Z:
+  other calls that change the region and the change records stay private. The surface is
+  approved in the same comment (`Unsynced`, `Status`, and `Config.time` superseded
+  above). The architect approved the surface as built at 2026-10-07T19:55:12Z:
+  https://github.com/synnaxlabs/foundation/pull/1575#issuecomment-6045694724. It has the
+  types that the caller builds, `Config.time`, and the sentence that `open` does not
+  check the key of the transport. The last two are superseded above. `member` is
+  approved by the architect, 2026-10-07T15:17:13Z:
   https://github.com/synnaxlabs/foundation/issues/562#issuecomment-6040867482. The order
   of the PRs is decided by the architect, 2026-10-07T17:18:52Z:
   https://github.com/synnaxlabs/foundation/issues/1051#issuecomment-6043038615. The
@@ -3950,12 +3977,19 @@ How to read this record:
   an empty list is `config.empty-allow`. A word that is not an action is
   `config.bad-action`. `authority` is optional, an integer from 0 to 255
   (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
-  the least, as default deny gives the least. Such a writer still takes control when no
-  writer holds it (GATE RULES). Lost: an `authority` that `write` makes required, a
-  rule that C8 does not have. The action words are a table in `config` until a second
-  reader needs them, such as the `plan` output of access; then they move to `spec` as
-  `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  the least, as default deny gives the least. Lost: an `authority` that `write` makes
+  required, a rule that C8 does not have. The action words are a table in `config` until
+  a second reader needs them, such as the `plan` output of access; then they move to
+  `spec` as `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
+  The gate: "The gate gives authority 0 no special meaning: such a writer outranks no
+  writer and follows GATE RULES, so it takes control when it opens on an index that no
+  writer holds." `control` and `home` must not read `Authority(0)` as "may not write" or
+  "may not take control". A change to that is a change to GATE RULES, and it goes to
+  `laptop.architect`. The quoted sentence supersedes the sentence on the gate in
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+  `laptop.architect` decided it and approved the default cap (2026-10-08T05:21:56Z,
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6052936198).
   An `authority` with no `write` in an `allow` that reads is
   `config.authority-without-write`, also `authority = 0`: only a write uses an
   authority, so the value is a mistake. `Policy::new` still sets the authority of a
@@ -4016,6 +4050,28 @@ How to read this record:
   `mesh.changes` record, so every node checks its subject signature and the `secret`
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
+- **FIRST ADMIN (2026-10-08)** A node that starts a new mesh has an empty spec, and
+  under BQ12 only a key that the spec names can sign an apply. So the first `foundation
+  start` of that node, on an empty data directory, creates the spec with one admin
+  subject. It writes the admin's private key into the data directory, and only the user
+  who started the node can read the key. The CLI on the same host signs with that key,
+  so the first `apply` needs no key step. A node that joins by ticket (BQ11a) joins a
+  mesh that has a spec, so it creates none. BQ12 holds as written: each node checks each
+  apply, the first one too, against a key in the spec. Lost: the first apply from any
+  local process, because any local user could then take the node. Also lost: an admin
+  public key given before the first start, a step before the first use. Decided by the
+  person ("Yes, I approve."), relayed by `laptop.monitor` at 2026-10-08T02:43:43Z:
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
+  #1744 plan names the subject, its access policy, and the key file, as
+  `laptop.architect-2` and `laptop.architect` decided (2026-10-08T02:46:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026). The
+  question was about a node whose spec is empty. So `laptop.architect` decided the limit
+  to a node that starts a new mesh, and the sentence on a node that joins
+  (2026-10-08T02:57:01Z,
+  https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051238643). It also
+  decided that the #1744 plan names how a first start tells a new mesh from a join
+  (2026-10-08T02:59:40Z,
+  https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051265693).
 
 ### 1.13 Operations, agents, and the factory
 
@@ -5946,6 +6002,25 @@ minimal `hub` (one writer and one reader session). Access, config files, and fai
 wait until its acceptance scenario passes. The plan and owners are on #462. The person
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
+
+Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps priority.
+ONE NODE is a milestone: one real node reads an OPC UA server through `connector-opcua`
+and pushes the samples to InfluxDB through `connector-influx`. The `foundation` binary
+starts the node from a config, on a real disk and network. Its acceptance runs a
+simulated OPC UA server, the node, and a simulated InfluxDB. A first version may run
+with no OPC UA security, so the open choice of the OPC UA crypto plugin (5.1) does not
+block it. The person approved it ("Yes"), relayed by `laptop.monitor` at
+2026-10-08T01:52:14Z:
+https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050540089. That
+approval put ONE NODE after FIRST SLICE, and this amendment supersedes that order. FIRST
+SLICE focuses on the internals, and ONE NODE on the developer APIs and connectors.
+Supersedes, for ONE NODE work only, the order of this entry (the person's decision of
+2026-10-05, which has no link). For ONE NODE work, features, access, and config files do
+not wait until the acceptance scenario of FIRST SLICE passes (#462). The person decided
+("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
+the internals while ONE NODE work should be focused on developer APIs and connectors."),
+relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
 scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
