@@ -11,6 +11,7 @@ mod common;
 
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
@@ -35,41 +36,70 @@ const CLOSED: Error = Error::PeerClosed { code: Code(0) };
 const WARMUP: usize = 8;
 const ROUNDS: usize = 8;
 
-/// The parts of a message: `ranges` ranges of `len` bytes, `stride` bytes apart, and
-/// the allocations of its `send_parts` over those of a `send`, with their cause.
+/// The parts of a message, and the allocations of its `send_parts` over those of a
+/// `send`, with their cause.
 struct Shape {
-    ranges: usize,
-    len: usize,
-    stride: usize,
+    name: &'static str,
+    parts: Vec<Part>,
     over: u64,
     cause: &'static str,
 }
 
-const SHAPES: [Shape; 3] = [
-    Shape {
-        ranges: 3,
-        len: 8 << 10,
-        stride: (8 << 10) + 8,
-        over: 0,
-        cause: "none: the segment queue holds the header and 3 slices",
-    },
-    // noq-proto shrinks its segment queue as the peer acknowledges it, so each
-    // message grows it again.
-    Shape {
-        ranges: 8,
-        len: 8 << 10,
-        stride: (8 << 10) + 8,
-        over: 2,
-        cause: "the segment queue grows to 8, then 16: the header and 8 slices",
-    },
-    Shape {
-        ranges: 1000,
-        len: 8,
-        stride: 16,
-        over: 1,
-        cause: "the copy of the stretch",
-    },
-];
+/// The shapes that [`measure`] sends. The third one is many short ranges.
+fn shapes() -> [Shape; 6] {
+    [
+        Shape {
+            name: "3 ranges of 8 KiB",
+            parts: spaced(3, 8 << 10, (8 << 10) + 8),
+            over: 0,
+            cause: "none: the segment queue holds the header and 3 slices",
+        },
+        // noq-proto shrinks its segment queue as the peer acknowledges it, so each
+        // message grows it again.
+        Shape {
+            name: "8 ranges of 8 KiB",
+            parts: spaced(8, 8 << 10, (8 << 10) + 8),
+            over: 2,
+            cause: "the segment queue grows to 8, then 16: the header and 8 slices",
+        },
+        Shape {
+            name: "1000 ranges of 8 B",
+            parts: spaced(1000, 8, 16),
+            over: 1,
+            cause: "the copy of the stretch",
+        },
+        Shape {
+            name: "a stretch of 1452 bytes with zeros",
+            parts: vec![series(0..1000, 2), series(2000..2450, 0)],
+            over: 0,
+            cause: "none: noq-proto copies it from the buffer of the connection",
+        },
+        Shape {
+            name: "a range of 1452 bytes, then 1 byte and a zero",
+            parts: vec![series(0..1452, 0), series(2000..2001, 1)],
+            over: 1,
+            cause: "the copy of the stretch of 1454 bytes",
+        },
+        Shape {
+            name: "two adjacent ranges of 1000 bytes",
+            parts: vec![series(0..1000, 0), series(1000..2000, 0)],
+            over: 0,
+            cause: "none: one run of 2000 bytes goes as a slice",
+        },
+    ]
+}
+
+/// A part: the series of one channel.
+fn series(range: Range<usize>, zeros: u8) -> Part {
+    Part { range, zeros }
+}
+
+/// `ranges` ranges of `len` bytes, `stride` bytes apart.
+fn spaced(ranges: usize, len: usize, stride: usize) -> Vec<Part> {
+    (0..ranges)
+        .map(|at| series(at * stride..at * stride + len, 0))
+        .collect()
+}
 
 /// The limits of a transport: its largest message and its window.
 #[derive(Clone, Copy)]
@@ -89,18 +119,19 @@ const NARROW: Limits = Limits {
 };
 
 impl Shape {
-    fn parts(&self) -> Vec<Part> {
-        (0..self.ranges)
-            .map(|at| Part {
-                range: at * self.stride..at * self.stride + self.len,
-                zeros: 0,
-            })
-            .collect()
+    /// The bytes of the message.
+    fn bytes(&self) -> usize {
+        let size = |part: &Part| part.range.len() + usize::from(part.zeros);
+        self.parts.iter().map(size).sum()
     }
 
     /// The bytes of the block that the parts are ranges of.
     fn large(&self) -> usize {
-        self.ranges * self.stride
+        self.parts
+            .iter()
+            .map(|part| part.range.end)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -115,15 +146,16 @@ fn main() {
             .open_sender(Class::Complete)
             .await
             .expect("a stream");
-        for shape in &SHAPES {
+        let shapes = shapes();
+        for shape in &shapes {
             measure(&mut sender, &pool, &clock, shape).await;
         }
         sender.finish().expect("finished");
         // A stream that kept a copy of the parts of each message would grow its list
         // at the first message of many parts.
-        let short = &SHAPES[2];
+        let short = &shapes[2];
         let mut first = [0; 2];
-        for (count, parts) in first.iter_mut().zip([&[][..], &short.parts()]) {
+        for (count, parts) in first.iter_mut().zip([&[][..], &short.parts]) {
             let opened = session.open_sender(Class::Complete).await;
             let mut sender = opened.expect("a stream");
             clock.sleep(PAUSE).await;
@@ -186,23 +218,20 @@ fn run(
 ///
 /// When a count is not that of `shape`.
 async fn measure(sender: &mut Sender, pool: &Pool, clock: &Clock, shape: &Shape) {
-    let parts = shape.parts();
-    let bytes = shape.ranges * shape.len;
-    let large = shape.large();
+    let (bytes, large) = (shape.bytes(), shape.large());
     for round in 0..WARMUP + ROUNDS {
         clock.sleep(PAUSE).await;
         let block = filled(pool, bytes);
         let sent = ALLOCATOR.count(|| poll(sender, block, &[])).1;
         clock.sleep(PAUSE).await;
         let block = filled(pool, large);
-        let parted = ALLOCATOR.count(|| poll(sender, block, &parts)).1;
+        let parted = ALLOCATOR.count(|| poll(sender, block, &shape.parts)).1;
         if round >= WARMUP {
             assert_eq!(
                 parted,
                 sent + shape.over,
-                "{} ranges of {} bytes, over send: {}",
-                shape.ranges,
-                shape.len,
+                "{}, over send: {}",
+                shape.name,
                 shape.cause
             );
         }
@@ -221,12 +250,7 @@ async fn measure(sender: &mut Sender, pool: &Pool, clock: &Clock, shape: &Shape)
 /// first takes the buffer in part, or the later writes do not allocate as those of
 /// the block.
 async fn cut(sender: &mut Sender, pool: &Pool, clock: &Clock) {
-    let parts: Vec<Part> = (0..NARROW.message / 8)
-        .map(|at| Part {
-            range: at * 16..at * 16 + 8,
-            zeros: 0,
-        })
-        .collect();
+    let parts = spaced(NARROW.message / 8, 8, 16);
     let half = NARROW.message / 2;
     for round in 0..WARMUP + ROUNDS {
         clock.sleep(PAUSE).await;

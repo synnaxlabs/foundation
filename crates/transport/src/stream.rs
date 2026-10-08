@@ -1373,21 +1373,24 @@ mod tests {
             |side| async move {
                 let opened = side.session.open_sender(Class::Complete).await;
                 let mut sender = opened.expect("a stream");
-                // A short message is copied, so the stream drops its block at once.
-                let block = side.block(&[7; 100]);
-                let at = block.as_ptr();
-                sender.send(block).await.expect("sent");
-                let next = side.pool.alloc(100).expect("room");
-                assert_eq!(next.as_ptr(), at);
-                drop(next);
-                // A long one is a slice of its block until the ACK.
-                let block = side.block(&[7; 2000]);
-                let at = block.as_ptr();
-                sender.send(block).await.expect("sent");
-                side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
-                let next = side.pool.alloc(2000).expect("room");
-                assert_eq!(next.as_ptr(), at);
-                drop(next);
+                // A message of at most 1452 bytes is copied, so the stream drops its
+                // block at once. A longer one is a slice of its block until the ACK.
+                for (len, held) in [(100, false), (1452, false), (1453, true)] {
+                    let block = side.block(&vec![7; len]);
+                    let at = block.as_ptr();
+                    sender.send(block).await.expect("sent");
+                    let next = side.pool.alloc(len).expect("room");
+                    assert_eq!(next.as_ptr() != at, held, "a message of {len} bytes");
+                    if held {
+                        side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                        let after = side.pool.alloc(len).expect("room");
+                        assert_eq!(
+                            after.as_ptr(),
+                            at,
+                            "a message of {len} bytes, acked"
+                        );
+                    }
+                }
                 sender.finish().expect("finished");
                 let closed = Error::PeerClosed { code: Code(0) };
                 assert_eq!(side.session.closed().await, closed);
@@ -1395,8 +1398,9 @@ mod tests {
             |side| async move {
                 let mut receiver =
                     side.session.accept().await.expect("a stream").receiver;
-                assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; 100])));
-                assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; 2000])));
+                for len in [100, 1452, 1453] {
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; len])));
+                }
                 assert_eq!(bytes(receiver.recv().await), Ok(None));
                 side.session.close(Code(0));
             },
