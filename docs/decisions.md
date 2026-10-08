@@ -4884,8 +4884,9 @@ How to read this record:
   extension, so `Place::file` is the exact path. `ops.unknown-extension` writes the
   path as the text of a place does, escaped, so a bidirectional control in a file name
   does not reach the terminal (`laptop.architect-2`, 2026-10-08T18:06:38Z,
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872). Lost: the lossy text, with which two files give one
-  place; and the `Debug` form in `Place::file`, which each JSON reader must decode.
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066070872). Lost:
+  the lossy text, with which two files give one place; and the `Debug` form in
+  `Place::file`, which each JSON reader must decode.
   Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
 
