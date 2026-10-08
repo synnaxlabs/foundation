@@ -325,8 +325,8 @@ fn split(
         found.entries[at].label_span,
         message,
         format!(
-            "Select the connector `{connector}` and each index under its name with the \
-             same placement"
+            "Select the connector `{connector}` and each index under its name with one \
+             placement, such as `select = \"{connector}.**\"`"
         ),
     ))
 }

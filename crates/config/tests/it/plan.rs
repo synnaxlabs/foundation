@@ -721,8 +721,8 @@ connector \"d\" {
 /// A `config.split-placement` problem at the label of `placement` in `text`.
 fn split(text: &str, placement: &str, message: &str, connector: &str) -> Problem {
     let fix = format!(
-        "Select the connector `{connector}` and each index under its name with the \
-         same placement"
+        "Select the connector `{connector}` and each index under its name with one \
+         placement, such as `select = \"{connector}.**\"`"
     );
     problem(
         "config.split-placement",
