@@ -3265,10 +3265,31 @@ mod port {
             .expect("the probe ends")
         }
 
+        /// Starts the peer [`OTHER`] of `members` on `host`, which sets a home in the
+        /// mesh, one after another, until a set waits [`TEN`].
+        fn set_homes(host: &sim::node::Node, members: Vec<Member>) {
+            peer(host, members, |mesh, host| async move {
+                let clock = host.clock();
+                for key in 100.. {
+                    let key = channel::Key::from_u128(key);
+                    let mut set = pin!(mesh.set_home(key, OTHER.0));
+                    let mut late = pin!(clock.sleep(TEN));
+                    let set = poll_fn(|cx| match set.as_mut().poll(cx) {
+                        Poll::Ready(set) => Poll::Ready(set.is_ok()),
+                        Poll::Pending => late.as_mut().poll(cx).map(|()| false),
+                    });
+                    if !set.await {
+                        break;
+                    }
+                }
+            });
+        }
+
         /// A stop at any point of the start and the run of a node whose mesh writes
         /// its log for each home that the peer sets, then a probe that takes the
         /// lock as soon as it is free: the mesh's log is never busy then, and the port
-        /// of a node that ran binds, so the transport drops before the lock. The order
+        /// of a node that held the lock binds once the lock is free. A node stopped
+        /// before its claim holds no lock, so its port can still be bound. The order
         /// of the two closes waits on #1835. The peer ends once a set waits [`TEN`],
         /// so the probe's run ends.
         #[test]
@@ -3283,21 +3304,7 @@ mod port {
                 let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
                 let members = pair(&hosts);
                 let node = start(&hosts[0], (OWN, KEY), region(&members));
-                peer(&hosts[1], members, |mesh, host| async move {
-                    let clock = host.clock();
-                    for key in 100.. {
-                        let key = channel::Key::from_u128(key);
-                        let mut set = pin!(mesh.set_home(key, OTHER.0));
-                        let mut late = pin!(clock.sleep(TEN));
-                        let set = poll_fn(|cx| match set.as_mut().poll(cx) {
-                            Poll::Ready(set) => Poll::Ready(set.is_ok()),
-                            Poll::Pending => late.as_mut().poll(cx).map(|()| false),
-                        });
-                        if !set.await {
-                            break;
-                        }
-                    }
-                });
+                set_homes(&hosts[1], members);
                 let after = Span::from_nanos(after);
                 assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
                 node.stop();
@@ -3312,25 +3319,25 @@ mod port {
                 });
                 let joined = node.join();
                 assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
-                if joined == Ok(()) {
+                if waited {
                     assert_eq!(port, Ok(()), "at {after:?}");
                 }
             }
             assert!(held && logged);
         }
 
-        /// The transport drops before the lock also when the mesh's group stops
-        /// before the node: a probe that takes the lock as soon as it is free binds
-        /// the port.
+        /// When the mesh's group stops the node while a peer holds a session with it,
+        /// the port binds once the lock is free.
         #[test]
         fn the_port_is_free_once_the_lock_is_after_the_group_stops() {
             let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            let node = start_alone(&host);
-            assert_eq!(sim.run_for(OPEN), Ok(()));
-            host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
-            assert_eq!(sim.run_for(Span::from_nanos(WRITE - 1_000_000)), Ok(()));
-            let (waited, port, _) = probe(&mut sim, &host);
+            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let members = pair(&hosts);
+            let node = start(&hosts[0], (OWN, KEY), region(&members));
+            set_homes(&hosts[1], members);
+            assert_eq!(sim.run_for(Span::from_nanos(1_700_000_000)), Ok(()));
+            hosts[0].fail_file(Path::new(LOG), env::files::Operation::WriteAt);
+            let (waited, port, _) = probe(&mut sim, &hosts[0]);
             assert_eq!((waited, port), (true, Ok(())));
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
