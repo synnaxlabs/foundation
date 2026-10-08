@@ -107,7 +107,7 @@ impl fmt::Display for Refusal {
             Self::Unknown => "the home does not know a channel of the open",
             Self::NotHome => "the node is not the home of the index",
             Self::Failed => "the home's buffer failed, or its mesh stopped",
-            Self::Busy => "the side that stopped had no memory for a message",
+            Self::Busy => "the side that stopped had no block for the session",
         })
     }
 }
@@ -1342,7 +1342,7 @@ mod tests {
             (
                 Refusal::Busy,
                 19,
-                "the side that stopped had no memory for a message",
+                "the side that stopped had no block for the session",
             ),
         ];
         for (refusal, code, meaning) in refusals {
