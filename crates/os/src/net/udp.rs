@@ -294,8 +294,10 @@ fn sent(outcome: io::Result<()>, remote: SocketAddr) -> Poll<Result<(), Error>> 
 ///
 /// # Errors
 ///
-/// [`Error::Unreachable`] with the destination as given when the socket's family
-/// cannot reach it.
+/// - [`Error::Unreachable`] with the destination as given when the socket's family
+///   cannot reach it.
+/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket. Linux skips
+///   the `IPV6_PKTINFO` of such a send and sends from an address of its choice.
 fn route(
     local: SocketAddr,
     transmit: &Transmit<'_>,
@@ -311,6 +313,9 @@ fn route(
         return Err(Error::Unreachable { remote });
     }
     if local.is_ipv4() {
+        if transmit.source.is_some_and(|source| source.is_ipv6()) {
+            return Err(io_error(Errno::INVAL));
+        }
         return Ok((remote, transmit.source));
     }
     let mapped = |ip: IpAddr| match ip {
