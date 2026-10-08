@@ -153,16 +153,16 @@ impl Node {
     /// its buffer in directory `shard-<i>` of its files, and makes it there when it is
     /// not there. The shards open their buffers one after another, in order of core.
     /// Once each buffer has opened, shard 0 reads the node's key and private key from
-    /// the file `node.key` in the data directory, and makes the file at the first
-    /// start, then opens the mesh of [`Config::region`] when it has one, then serves
-    /// the port and admits every peer that proves its key, until its transport stops,
-    /// which stops the node. Returns once each shard runs or one has failed to start.
-    /// When the disk budget holds no ring on each shard, no shard starts, and
-    /// [`Node::join`] gives [`Error::Disk`] with the budget, the shard count, and the
-    /// least budget. A failed start, a shard with no memory, a data directory that
-    /// another node holds or that was made for another shard count, a key file that is
-    /// not valid, or a buffer or a mesh that does not open stops the node, and
-    /// [`Node::join`] returns its error.
+    /// the file `node.key` in the data directory, and makes the file at the first start
+    /// once it has mesh time, then opens the mesh of [`Config::region`] when it has
+    /// one, then serves the port and admits every peer that proves its key, until its
+    /// transport stops, which stops the node. Returns once each shard runs or one has
+    /// failed to start. When the disk budget holds no ring on each shard, no shard
+    /// starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the shard
+    /// count, and the least budget. A failed start, a shard with no memory, a data
+    /// directory that another node holds or that was made for another shard count, a
+    /// key file that is not valid, or a buffer or a mesh that does not open stops the
+    /// node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -193,14 +193,15 @@ impl Node {
                 return Self::failed(Error::Port { listen, error });
             }
         };
+        let (mesh, clock) = clock::Clock::new(config.clock.clone());
         let endpoint = Endpoint {
             part: part.expect("invariant: a port splits into the parts asked for"),
             region: config.region.clone(),
-            clock: config.clock.clone(),
-            wall: config.wall.clone(),
+            monotonic: config.clock.clone(),
+            clock,
             entropy: config.entropy.clone(),
         };
-        Self::launch(config, endpoint, parts.into_iter().zip(0..count))
+        Self::launch(config, endpoint, mesh, parts.into_iter().zip(0..count))
     }
 
     /// A node that failed with `error` before any shard started.
@@ -214,10 +215,11 @@ impl Node {
     }
 
     /// Starts the shards of `config`, each with its part and its number in `parts`.
-    /// Shard 0 opens `endpoint`.
+    /// Shard 0 runs `mesh`, the clock that `endpoint` reads, and opens `endpoint`.
     fn launch<M: block::Memory + 'static>(
         config: Config<M>,
         endpoint: Endpoint,
+        mesh: clock::Clock,
         parts: impl Iterator<Item = ((block::Config, buffer::Layout), u32)>,
     ) -> Self {
         let Config {
@@ -233,12 +235,12 @@ impl Node {
         let cores = shards.cores().get();
         let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
+        let clock = endpoint.clock.clone();
         let serve = Serve {
             interner: last,
             inbox,
             endpoint,
         };
-        let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let roles = Role::all(mesh, wall, first, serve, cores);
         let mut started = Vec::new();
         let mut error = None;
@@ -607,8 +609,9 @@ struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
     region: Option<mesh::region::Founding>,
-    clock: env::clock::Clock,
-    wall: env::wall::Wall,
+    monotonic: env::clock::Clock,
+    /// The node's clocks, which time a new key.
+    clock: clock::Reader,
     entropy: env::entropy::Entropy,
 }
 
@@ -624,14 +627,14 @@ impl Endpoint {
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
     ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), Error> {
-        let identity = identity::load(&files, &self.wall, &self.entropy).await?;
+        let identity = identity::load(&files, &self.clock, &self.entropy).await?;
         let config = transport::Config {
             private_key: identity.private_key.clone(),
             message_bytes_max: MESSAGE,
             window_bytes: WINDOW,
             streams_max: STREAMS,
             idle: IDLE,
-            clock: self.clock.clone(),
+            clock: self.monotonic.clone(),
             entropy: self.entropy.clone(),
             tasks: tasks.clone(),
             pool: Rc::clone(&pool),
@@ -655,7 +658,7 @@ impl Endpoint {
             founding: region,
             files,
             dir: directory::mesh(),
-            clock: self.clock,
+            clock: self.monotonic,
             entropy: self.entropy,
             tasks,
             pool,

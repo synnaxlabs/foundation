@@ -6368,16 +6368,16 @@ How to read this record:
   Ed25519 private key, and the CRC32C of those 64 bytes (little-endian). It is one
   sector, which a crash keeps whole or old. At the first start, shard 0 makes the file
   with `Mode::Create`; 68 zero bytes are a key not yet written, so shard 0 makes a key
-  (`types::node::Key::v7` from `Config::wall` and `Config::entropy`, and 32 random
-  bytes), writes it, and syncs the file and the directory before the transport proves
-  it. A node that joins by ticket (#336) makes its key the same way at its first start.
-  A file of another length, tag, or checksum gives `Error::Key`, which `Node::join`
-  ranks above `Error::Blob` and `Error::Mesh`; the node never writes over it, since a
-  new key is a new node to its region. Each other file error on `node.key` gives
-  `Error::Directory`. The form is not a contract: only `node` reads it. The seal key
-  goes into `node.key` with its first caller, as the tag `foundation/key/2` with 32 more
-  bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. `os` makes each file
-  `0600` and each directory `0700` (#1988):
+  (`types::node::Key::v7` at mesh time, once it has one, from `Config::entropy`, and 32
+  random bytes), writes it, and syncs the file and the directory before the transport
+  proves it. A node that joins by ticket (#336) makes its key the same way at its first
+  start. A file of another length, tag, or checksum gives `Error::Key`, which
+  `Node::join` ranks above `Error::Blob` and `Error::Mesh`; the node never writes over
+  it, since a new key is a new node to its region. Each other file error on `node.key`
+  gives `Error::Directory`. The form is not a contract: only `node` reads it. The seal
+  key goes into `node.key` with its first caller, as the tag `foundation/key/2` with 32
+  more bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. `os` makes each
+  file `0600` and each directory `0700` (#1988):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
   plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563.
 - **NODE MESH (#585, 2026-10-08)** The node's key and private key come from the file

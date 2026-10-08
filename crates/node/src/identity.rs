@@ -9,6 +9,7 @@ use std::path::Path;
 
 use env::files::{Files, Mode};
 use types::ed25519::PrivateKey;
+use types::time::Stamp;
 
 use crate::Error;
 
@@ -30,8 +31,9 @@ pub(crate) struct Identity {
 }
 
 /// The identity in `node.key` of `files`. When the file is not there, or holds only
-/// zero bytes, makes a new one from `wall` and `entropy`, and makes it durable before
-/// it returns. Never writes over a file that holds a key.
+/// zero bytes, makes a new one at mesh time from `clock`, once it has mesh time, and
+/// from `entropy`, and makes it durable before it returns. Never writes over a file
+/// that holds a key.
 ///
 /// # Errors
 ///
@@ -39,7 +41,7 @@ pub(crate) struct Identity {
 /// [`Error::Directory`] for a file call that fails.
 pub(crate) async fn load(
     files: &Files,
-    wall: &env::wall::Wall,
+    clock: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> Result<Identity, Error> {
     let file = files
@@ -56,7 +58,8 @@ pub(crate) async fn load(
     if *bytes != [0; LEN] {
         return decode(bytes).ok_or(Error::Key);
     }
-    let identity = create(wall, entropy);
+    clock.reach(Stamp::from_nanos(i64::MIN)).await;
+    let identity = create(clock, entropy);
     let block = pool
         .copy(&encode(&identity))
         .expect("invariant: the pool holds a key");
@@ -69,14 +72,18 @@ pub(crate) async fn load(
     Ok(identity)
 }
 
-/// A new identity: a UUIDv7 key at the wall time, and a random private key.
-fn create(wall: &env::wall::Wall, entropy: &env::entropy::Entropy) -> Identity {
+/// A new identity: a UUIDv7 key at mesh time, and a random private key.
+fn create(clock: &clock::Reader, entropy: &env::entropy::Entropy) -> Identity {
     let mut random = [0; 16];
     entropy.fill(&mut random);
     let mut private_key = [0; 32];
     entropy.fill(&mut private_key);
-    // A wall clock before 1970 still gives a key; its time only orders keys.
-    let time = wall.now().time.max(types::time::Stamp::EPOCH);
+    let now = match clock.status() {
+        clock::Status::Synced(now) | clock::Status::Holdover(now, _) => now.time(),
+        clock::Status::Unsynced(_) => unreachable!("invariant: mesh time has come"),
+    };
+    // A clock before 1970 still gives a key; its time only orders keys.
+    let time = now.max(Stamp::EPOCH);
     Identity {
         key: types::node::Key::v7(time, u128::from_le_bytes(random)),
         private_key: PrivateKey(private_key),
@@ -96,14 +103,15 @@ pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
 
 /// The identity in `bytes`, or `None` for another tag or checksum.
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
-    let (body, crc) = bytes.split_at(64);
-    if &body[..16] != TAG || crc32c::crc32c(body).to_le_bytes() != crc {
+    let (body, crc) = bytes.split_first_chunk::<64>()?;
+    let (tag, rest) = body.split_first_chunk::<16>()?;
+    let (key, private_key) = rest.split_first_chunk::<16>()?;
+    if tag != TAG || crc32c::crc32c(body).to_le_bytes() != *crc {
         return None;
     }
-    let key = u128::from_be_bytes(body[16..32].try_into().expect("16 bytes"));
     Some(Identity {
-        key: types::node::Key::from_u128(key),
-        private_key: PrivateKey(body[32..].try_into().expect("32 bytes")),
+        key: types::node::Key::from_u128(u128::from_be_bytes(*key)),
+        private_key: PrivateKey(private_key.try_into().ok()?),
     })
 }
 

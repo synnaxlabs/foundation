@@ -2703,12 +2703,12 @@ mod port {
         }
 
         /// The key that the node on `host` proves to a peer that pins `key` within a
-        /// second, or the error of the dial.
+        /// second.
         fn proven(
             sim: &mut sim::Sim,
             host: &sim::node::Node,
             key: types::ed25519::PublicKey,
-        ) -> Result<Peer, transport::Error> {
+        ) -> Peer {
             let peer = sim.node(sim::node::Config::default());
             let listen = listen(host);
             let out = Arc::new(Mutex::new(None));
@@ -2726,7 +2726,7 @@ mod port {
             drop(started.expect("the peer starts"));
             assert_eq!(sim.run_for(Span::SECOND), Ok(()));
             let proven = out.lock().unwrap().take();
-            proven.expect("the dial ends")
+            proven.expect("the dial ends").expect("the dial succeeds")
         }
 
         /// Starts a node on `host`, runs `sim` for a second, then stops it and gives
@@ -2742,13 +2742,12 @@ mod port {
             node.join()
         }
 
-        /// The first start makes a UUIDv7 key at the wall time and a private key,
+        /// The first start makes a UUIDv7 key at mesh time and a private key,
         /// and a node started again on the data directory proves the same key.
         #[test]
         fn a_node_started_twice_proves_the_key_of_its_first_start() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
-            let before = host.wall().now().time;
             assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
             let made = read(&mut sim, &host);
             assert_eq!(made.len(), 68);
@@ -2756,11 +2755,11 @@ mod port {
             let key = u128::from_be_bytes(made[16..32].try_into().unwrap());
             assert_eq!(key >> 76 & 0xf, 7, "version 7");
             let millis = i64::try_from(key >> 80).unwrap();
-            let wall = before.nanos() / 1_000_000;
-            assert!((wall..wall + 100).contains(&millis), "{millis} at {wall}");
+            let wall = super::super::hub::WALL / 1_000_000;
+            assert!((wall..wall + 1_000).contains(&millis), "{millis} at {wall}");
             let public = PrivateKey(made[32..64].try_into().unwrap()).public();
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-            assert_eq!(proven(&mut sim, &host, public), Ok(Peer::Node(public)));
+            assert_eq!(proven(&mut sim, &host, public), Peer::Node(public));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
@@ -2787,7 +2786,7 @@ mod port {
             write(&mut sim, &host, own());
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             let public = KEY.public();
-            assert_eq!(proven(&mut sim, &host, public), Ok(Peer::Node(public)));
+            assert_eq!(proven(&mut sim, &host, public), Peer::Node(public));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
@@ -3057,8 +3056,9 @@ mod port {
                 let endpoint = Endpoint {
                     part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
                     region: Some(region(&members)),
-                    clock: own.clock(),
-                    wall: own.wall(),
+                    monotonic: own.clock(),
+                    // With a key file, the open reads no mesh time.
+                    clock: ::clock::Clock::new(own.clock()).1,
                     entropy: own.entropy(),
                 };
                 let pool = block::Config { budget: 1 << 20 };
