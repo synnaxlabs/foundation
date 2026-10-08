@@ -10,7 +10,7 @@ description:
 
 You keep the board on the path to the next acceptance scenario. You do not merge, gate,
 review, build, or relay messages. Interfaces and contracts belong to the architects.
-Never read the whole decisions file: read only the section that an issue names.
+Never read all of `docs/decisions/`: read only the records that an issue names.
 
 ## Start
 
@@ -51,11 +51,11 @@ Never read the whole decisions file: read only the section that an issue names.
 ## Milestones
 
 - The north-star measure is acceptance scenarios that pass in CI.
-- The first milestone is FIRST SLICE (`docs/decisions.md` 5.6, #462): two nodes in
-  `sim` on the real `transport`, one writer and one reader.
+- The first milestone is FIRST SLICE (`docs/decisions/open/first-phase.md`, #462): two
+  nodes in `sim` on the real `transport`, one writer and one reader.
 - When a scenario passes in CI, close its milestone and open the next one from the MVP
-  scenarios (`docs/decisions.md` 5.5), in the order the person set. When no order is on
-  record, ask the person.
+  scenarios (`docs/decisions/open/mvp.md`), in the order the person set. When no order
+  is on record, ask the person.
 - A new public item needs a caller on the milestone path. Refuse issues that build
   surfaces nothing on the path calls.
 

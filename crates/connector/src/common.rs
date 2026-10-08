@@ -1,8 +1,13 @@
 //! Test helpers for the modules of this crate.
 
+use std::sync::Arc;
+
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::tasks::Tasks;
+
+use crate::kind::Table;
+use crate::supervisor;
 
 /// Runs `main` on a shard of one simulated node and returns its output.
 pub(crate) fn run<T, F>(
@@ -12,10 +17,34 @@ where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
 {
+    run_on(|node, tasks| main(node.clock(), tasks, node.entropy()))
+}
+
+/// Runs `main` on a shard of one simulated node, given the node, and returns its
+/// output.
+pub(crate) fn run_on<T, F>(
+    main: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+) -> T
+where
+    T: Send + 'static,
+    F: Future<Output = T> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    sim.run_on(&node, |node, tasks| {
-        main(node.clock(), tasks, node.entropy())
-    })
-    .expect("the run ends")
+    sim.run_on(&node, main).expect("the run ends")
+}
+
+/// The inputs of a supervisor of `kinds` on a shard of `node`.
+pub(crate) fn inputs(
+    node: &sim::node::Node,
+    tasks: Tasks,
+    kinds: Table,
+) -> supervisor::Config {
+    supervisor::Config {
+        kinds: Arc::new(kinds),
+        clock: node.clock(),
+        entropy: node.entropy(),
+        net: node.net(),
+        tasks,
+    }
 }
