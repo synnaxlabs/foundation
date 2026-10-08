@@ -17,7 +17,7 @@ use sim::node::Node;
 use transport::{Address, Class, Code, Error, Transport};
 use types::time::Span;
 
-use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
+use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
 use crate::{ALLOCATOR, fill};
 
 /// A message that the read takes over many polls.
@@ -103,7 +103,7 @@ fn run(end: End, len: usize, first: Span) -> Out {
         let pool = Rc::clone(&config.pool);
         let transport = Transport::new(config, part(&node, 0)).expect("a transport");
         let session = transport
-            .dial(public(&SERVER), &[Address::Udp(at)])
+            .dial(SERVER.public(), &[Address::Udp(at)])
             .await
             .expect("a session");
         let mut sender = session

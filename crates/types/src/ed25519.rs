@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
+
 /// An Ed25519 public key, of a node or of a subject. The value that holds it gives its
 /// role. It is never a point of small order: a signature for such a key passes with
 /// no private key.
@@ -29,6 +31,21 @@ impl PublicKey {
     pub const fn to_bytes(self) -> [u8; 32] {
         self.0
     }
+
+    /// Checks that `signature` is an Ed25519 signature of `message` by this key.
+    ///
+    /// # Errors
+    ///
+    /// [`BadSignature`] when it is not.
+    pub fn verify(
+        &self,
+        message: &[u8],
+        signature: &[u8; 64],
+    ) -> Result<(), BadSignature> {
+        UnparsedPublicKey::new(&ED25519, self.0)
+            .verify(message, signature)
+            .map_err(|_unspecified| BadSignature)
+    }
 }
 
 impl fmt::Display for PublicKey {
@@ -49,6 +66,18 @@ impl fmt::Display for SmallOrder {
 }
 
 impl std::error::Error for SmallOrder {}
+
+/// The refusal of a signature that is not of the message by the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadSignature;
+
+impl fmt::Display for BadSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the signature is not of the message by the key")
+    }
+}
+
+impl std::error::Error for BadSignature {}
 
 /// The y of each Ed25519 point of small order, and p and p + 1, which a decoder that
 /// does not refuse y >= p reads as 0 and 1.
@@ -151,6 +180,67 @@ mod tests {
             prop_assume!(ENCODINGS.iter().all(|&hex| bytes(hex) != key));
             prop_assert_eq!(PublicKey::new(key).map(PublicKey::to_bytes), Ok(key));
         }
+    }
+
+    /// The public key and signature of RFC 8032, section 7.1, test 1, whose message
+    /// is empty.
+    fn rfc_test_1() -> (PublicKey, [u8; 64]) {
+        let key =
+            bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        let signature = signature(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155\
+             5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        );
+        (PublicKey::new(key).unwrap(), signature)
+    }
+
+    /// The 64 bytes that the 128 hex digits `hex` give.
+    fn signature(hex: &str) -> [u8; 64] {
+        let mut signature = [0; 64];
+        signature[..32].copy_from_slice(&bytes(&hex[..64]));
+        signature[32..].copy_from_slice(&bytes(&hex[64..]));
+        signature
+    }
+
+    #[test]
+    fn verifies_the_signature_of_the_rfc_vector() {
+        let (key, signature) = rfc_test_1();
+        assert_eq!(key.verify(b"", &signature), Ok(()));
+    }
+
+    /// RFC 8032, section 7.1, test 2, with each bit of its one-byte message changed.
+    #[test]
+    fn refuses_a_message_with_one_bit_changed() {
+        let key =
+            bytes("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c");
+        let key = PublicKey::new(key).unwrap();
+        let signature = signature(
+            "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da\
+             085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+        );
+        assert_eq!(key.verify(&[0x72], &signature), Ok(()));
+        for bit in 0..8 {
+            let message = [0x72 ^ (1 << bit)];
+            assert_eq!(key.verify(&message, &signature), Err(BadSignature), "{bit}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_signature_with_one_bit_changed() {
+        let (key, signature) = rfc_test_1();
+        for bit in 0..512 {
+            let mut changed = signature;
+            changed[bit / 8] ^= 1 << (bit % 8);
+            assert_eq!(key.verify(b"", &changed), Err(BadSignature), "{bit}");
+        }
+    }
+
+    #[test]
+    fn names_the_refusal_of_a_signature() {
+        assert_eq!(
+            BadSignature.to_string(),
+            "the signature is not of the message by the key"
+        );
     }
 
     #[test]

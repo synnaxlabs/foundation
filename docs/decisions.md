@@ -343,9 +343,13 @@ How to read this record:
   pressure, but at `0s` a reader a few milliseconds behind loses each sample it reads
   from disk, and each read needs `keep` and a clock. Stale commands are the job of
   `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
-  `keep` reads with `document::read::span` (`document.bad-span`), where a negative span
-  reads, and `config` refuses it with `config.negative-span` at the `keep` value. The
-  code names the defect, so a later span bound (a reader `hold`, S10) uses it too.
+  `keep` reads with `document::read::span`, which refuses a negative span with
+  `document.negative-span` at the `keep` value, as it does a reader `hold` (S10,
+  DOCUMENT KEYS; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes the `config.negative-span` code and the clause "A negative span reads, and
+  each caller owns its bound" of the ruling at 2026-10-07T11:44:51Z,
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
@@ -1027,15 +1031,19 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6022924709). Decided
   by the architect, #963
   (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116).
-- **HOME TYPE REFUSAL (#963)** `Shard::open_writer` refuses a key set with a series of
-  a type the home does not write yet, with `writer::Error::Type` (the slot and the type
-  of the first such series). It decides after `Unsynced` and `Lease`, and changes no
-  state. `hub` adds no check of its own; it maps the variant to its own error and names
-  the channel. This is a patch: #1145 makes the home write every `sample::Type` and
-  removes the variant. Lost: a documented precondition on `hub` (a user can break it,
-  and each `hub` caller must keep it); a refusal in `config check` (a second place that
-  must track the home). Decided by the architect, #963
-  (https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785).
+- **HOME EVERY TYPE (#1145)** `Shard::open_writer` takes a key set with series of any
+  `sample::Type`, and the home writes and reads a series of each: `codec` checks and
+  encodes it as S3 says, and STORED BODY stores its type. `codec` does not check that
+  a `String` sample is UTF-8 (#556). Neither `home` nor `hub` has a
+  `writer::Error::Type`. Supersedes HOME TYPE REFUSAL (#963,
+  https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031702785), the
+  patch that refused a series of a type other than a scalar until this change. Lost:
+  an allow list in `home` that grows one type per PR, because it copies the list that
+  `codec` owns; a variant that no path gives, because it misleads each caller that
+  matches on it. Decided by `laptop.architect` (2026-10-08T06:36:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1145#issuecomment-6053997861). The
+  surface was approved by `laptop.architect` (2026-10-08T07:01:09Z:
+  https://github.com/synnaxlabs/foundation/pull/1824#issuecomment-6054411394).
 - **HUB SESSIONS (#1133)** `hub::reader::Reader::next` yields once after 128 frames in a
   row: it wakes its own task and returns `Pending`. So it yields under `sim` as under
   `os`, and `hub` does not depend on Tokio. Lost: the Tokio coop budget, which does
@@ -1084,8 +1092,7 @@ How to read this record:
   frame. The view borrows the reader, which releases the frame at the next call, not at
   its first poll, and grants credit for it there (CREDIT RULES): `next` is a plain `fn`
   that returns a future. A caller that keeps data copies it. A session that ends gives
-  `reader::Ended`. `Hub::define` stands. A writer on a channel of a type the home does
-  not write gets `writer::Error::Type` with the channel's name (HOME TYPE REFUSAL).
+  `reader::Ended`. `Hub::define` stands.
   Decided by `laptop.architect` (2026-10-07T05:53:24Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575;
   2026-10-07T05:57:18Z:
@@ -2045,6 +2052,21 @@ How to read this record:
   Ed25519 public key of a node and of a subject. Decided by `laptop.architect` at
   2026-10-08T04:03:21Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
+  `types::node::PrivateKey::public` is the one place that derives a node's public key
+  from its private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
+  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
+  crate that depends on `types` builds `aws-lc-rs` one time for each target directory.
+  Lost: a `pub fn` in `transport`, a pass-through for a thing that is not transport;
+  and the copies, which grow with each crate that needs the key. Decided by
+  `laptop.architect` (2026-10-07T14:16:15Z):
+  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
+  `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
+  `BadSignature` for a signature that is not of the message by the key. A verify on
+  `PublicKey` uses a key that is not of small order by construction. `mesh` calls it,
+  and `access::admit` will (#1747). Lost: a `bool`, which a caller can invert or drop
+  with no word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the
+  length; and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -2902,6 +2924,11 @@ How to read this record:
   Proposed by box1.builder-3, decided by the architect (#471),
   2026-10-07T04:11:26Z:
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6030753391.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): each task that sends ends
+  at once after the group stops or the last `Mesh` drops. A dial or a send in
+  progress stops, so it never holds `Mesh::ended` for a dial timeout. Decided by
+  `laptop.architect`, 2026-10-08T04:00:49Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
   `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
   the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
@@ -2922,14 +2949,15 @@ How to read this record:
   such a type reads it only through `Display` and `Debug`. A caller that must match one
   gets the crate in its line through an `interface` issue first. `mesh` does not
   re-export such a type: a re-export makes each change to `raft` a change to the surface
-  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, and of a `Watch` is its
-  index only. A crate outside `mesh` opens a region with `Config` and `Mesh::open`, and
-  gives it each stream of a peer with `Mesh::serve`. The three are public since the
-  senders (#1410). `Error`, `claim::Error`, and `region::Unfit` are public with them,
-  because `open` and `serve` give them. `claim::Error` is the `grant::Error` of the
-  rulings: #1460 gave the module its new name. `Error` adds `raft::Error` and
-  `transport::Error` to the types of other crates. `Config` and `serve` add types that
-  the caller builds: `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
+  of `mesh`. The `Debug` text of a `Mesh` is `Mesh { .. }`, of an `Ended` is
+  `Ended { .. }`, and of a `Watch` is its index only. A crate outside `mesh` opens a
+  region with `Config` and `Mesh::open`, and gives it each stream of a peer with
+  `Mesh::serve`. The three are public since the senders (#1410). `Error`,
+  `claim::Error`, and `region::Unfit` are public with them, because `open` and `serve`
+  give them. `claim::Error` is the `grant::Error` of the rulings: #1460 gave the module
+  its new name. `Error` adds `raft::Error` and `transport::Error` to the types of other
+  crates. `Config` and `serve` add types that the caller builds:
+  `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and `types::node::PrivateKey`.
   So a crate that opens a region has `env`, `block`, and `transport` in its line of the
@@ -2978,6 +3006,24 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1508#issuecomment-6043385150. That
   ruling supersedes the list of the export PR in the ruling on the order, for those
   three types.
+  Amended (2026-10-08, the `mesh` PR before PR 3b of #585): `Config::dir` is the
+  mesh's directory, relative to the data directory. The mesh makes it and syncs its
+  parent, and the log goes in `log` in it. Its parent must be there and durable. `node`
+  gives `mesh`. `Mesh::ended` gives `Ended`, a future that resolves once each task of
+  the mesh has ended: the group's task and each task that sends. It holds no clone, so
+  it does not keep the group running. Once it resolves, the mesh holds no file, and a
+  new open of its directory can take the log. Decided by `laptop.architect`,
+  2026-10-08T04:00:49Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643, after
+  the ruling on PR 3b, 2026-10-08T03:37:20Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475, and the
+  field over a `Files` call by `laptop.architect-2`, 2026-10-08T03:54:37Z:
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051833866. Lost: a
+  counting `Tasks` driver in `node`, because `node` then watches the tasks of another
+  crate; `Mesh::close(self)`, because the hub holds a clone, so one clone cannot end
+  the group; `env::files::Files::within`, because `env` then gives two ways to scope
+  the files of a crate, beside `buffer::Config::dir`. A change that wants it later
+  moves `buffer` and `mesh` together.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -3376,10 +3422,16 @@ How to read this record:
   an out connector: the `select` attribute and one `reader` block with `name`, `mode`
   (`hub::reader::Mode`, as a string or a reference), and `hold`. With no block the
   reader is complete, has the connector's name, and holds nothing. A second `reader`
-  block is `config.repeated-block`, and `read` reads only the first, where a label is
-  `config.label-count`. A negative `hold` is `config.negative-span` (READER RULES, #94).
+  block is `document.repeated-block`, and `read` reads only the first, where a label is
+  `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
+  #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes `config.repeated-block` and `config.label-count` of
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967
+  (2026-10-08T03:59:47Z), and `config.negative-span` for a `hold` of
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886.
   A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
-  holds. #1785 moves the three `config.*` checks into `document::read`.
+  holds.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
@@ -3843,6 +3895,10 @@ How to read this record:
   through `document::read::name` (#474). `read::names` reads one name or a list, in
   order with repeats, and `read::label` reads a block label (architect, #1150,
   [ruling](https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151)).
+  `value::Kind::text` gives the text of a string or of a reference, so each place that
+  reads the two as the same text matches them once (`laptop.architect-2`, #1702,
+  2026-10-08T06:05:28Z,
+  https://github.com/synnaxlabs/foundation/issues/1702#issuecomment-6053513102).
   `export` and `discover` write every name as a string (`"site_a.pt_1"`): they need no
   HCL rule, and a generated file reads back as exactly the Document it came from. This
   replaces the #363 ruling that a file writes a reserved name only as a string. The
@@ -3857,30 +3913,47 @@ How to read this record:
   The person decided on 2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant
   for a name after `.`, a public change when the error already names what may come at
   the `.`. #363.
-- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of
-  a body that its reader does not take, with the attribute keys and the block keywords
+- **DOCUMENT KEYS** `document::read::unknown` reports each attribute and each block of a
+  body that its reader does not take, with the attribute keys and the block keywords
   apart, so a key that names an attribute never passes as a block. One function holds
   both checks, so a kind cannot forget one half. When a body takes blocks and no
   attribute, as a file does, the fix of an attribute is to move it into one of those
-  blocks. `read::missing` reports a body with none of some keys, and panics on an
-  empty list, which is a defect of the caller. `read::required` reads one key or gives
-  that diagnostic. `config` uses them, also at the top level of a file, and so does each
-  kind, so one mistake has one code: `document.unknown-attribute`,
+  blocks. `read::missing` reports a body with none of some keys, and panics through
+  `one_of` on an empty list, which is a defect of the caller. `read::required` reads one
+  key or gives that diagnostic. `config` uses them, also at the top level of a file, and
+  so does each kind, so one mistake has one code: `document.unknown-attribute`,
   `document.unknown-block`, and `document.missing-attribute`. Decided by
   `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
   2026-10-08 03:05 UTC) and on #1772
   (https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051559819,
   2026-10-08 03:27 UTC, and
-  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111,
-  2026-10-08 03:29 UTC). Lost: a `Body` value that records each key read and reports the
-  rest at `finish`, which drops the diagnostics when a caller returns early;
+  https://github.com/synnaxlabs/foundation/pull/1772#issuecomment-6051578111, 2026-10-08
+  03:29 UTC). Lost: a `Body` value that records each key read and reports the rest at
+  `finish`, which drops the diagnostics when a caller returns early;
   `unknown_attributes` and `unknown_blocks` as two functions; a public
   `UNKNOWN_ATTRIBUTE` code for a caller to match on. `read::one_of` lists words in
-  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list, as
-  `missing` does. It is public for the `config.bad-action` fix, so no copy goes into
-  `config`. Decided by `laptop.architect-2` at 2026-10-08T03:54:12Z
+  backticks for a fix, such as "`a`, `b`, or `c`", and panics on an empty list. It is
+  public for the `config.bad-action` fix, so no copy goes into `config`. Decided by
+  `laptop.architect-2` at 2026-10-08T03:54:12Z
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051829474).
+  `read::labels::<N>` checks that a block has `N` labels (`document.label-count`),
+  `read::repeated` reports each block of a keyword that takes one after the first
+  (`document.repeated-block`), and `read::span` refuses a span below zero
+  (`document.negative-span`), since each attribute that reads a span needs zero or
+  more. The first attribute that takes a negative span adds its own reader, named for
+  its meaning, such as an offset. `config` and `connector::reader` use them, and the
+  `config.*` codes for these went. Lost: `read::duration` beside `read::span`, since
+  A9 names `Span` of any sign a duration; `unknown` with a count for each block, which
+  changes each caller of `unknown` for one caller of `repeated`. Decided by
+  `laptop.architect-2` at 2026-10-08T07:04:36Z
+  (https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145).
+  Supersedes the clause "A negative span reads, and each caller owns its bound" of
+  https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886, and its
+  fix for `time::Error::Long`, "Use a span from "-106751d" to "106751d"": that fix is
+  now "Use a span from "0s" to "106751d"", since each span it names reads. Decided by
+  `laptop.architect-2` at 2026-10-08T07:36:01Z
+  (https://github.com/synnaxlabs/foundation/pull/1828#issuecomment-6055037900).
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -5308,6 +5381,7 @@ How to read this record:
 | R16-7 "a map keyed by outside input will get a keyed hasher" | R16-7 `BTreeMap` rule (2026-10-07T17:36:18Z) |
 | HUB END: the task drops the commit it waits for at its first poll after the hub drops | HUB END: the commit lives in the state (#1633) |
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
+| HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 
 ---
@@ -6022,7 +6096,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys with the derive and the verify, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |

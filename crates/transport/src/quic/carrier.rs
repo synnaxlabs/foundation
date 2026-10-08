@@ -886,7 +886,6 @@ mod tests {
     use super::{BATCHES, Carrier, Retry, Socket, register};
     use crate::quic::{Endpoint, connection, stream, wait};
     use crate::testing::{self, IDLE, PORT, address, nodes, poll_once, shard, spans};
-    use crate::tls::public;
     use crate::{Class, Code, Error, Peer};
 
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
@@ -907,14 +906,14 @@ mod tests {
         let at = address(&server);
         testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
-            assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
+            assert_eq!(session.peer(), Peer::Node(CLIENT.public()));
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
-            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
@@ -942,7 +941,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(IDLE, 3)).await;
             session.close(Code(5));
@@ -960,7 +959,7 @@ mod tests {
             assert_eq!(session.closed().await, Error::TimedOut);
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             assert_eq!(session.closed().await, Error::TimedOut);
         });
@@ -974,7 +973,7 @@ mod tests {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             assert_eq!(dialed.err(), Some(Error::TimedOut));
         });
         assert_eq!(sim.run(), Ok(()));
@@ -987,12 +986,12 @@ mod tests {
         testing::carrier(&server, SERVER, |carrier, node| async move {
             node.clock().sleep(IDLE).await;
             let session = carrier.accept().await.expect("a session");
-            assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
+            assert_eq!(session.peer(), Peer::Node(CLIENT.public()));
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
@@ -1010,7 +1009,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             drop(dialed.expect("a session"));
             // The shard drops the task, and the close with it, when this ends.
             node.clock().sleep(Span::MILLISECOND).await;
@@ -1028,7 +1027,7 @@ mod tests {
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             {
-                let mut dial = pin!(carrier.connect(public(&SERVER), at));
+                let mut dial = pin!(carrier.connect(SERVER.public(), at));
                 assert!(poll_once(dial.as_mut()).await.is_none());
             }
             node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
@@ -1047,7 +1046,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             drop(dialed.expect("a session"));
             drop(carrier);
             // A shard that ends drops its tasks.
@@ -1088,7 +1087,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             drop(dialed.expect("a session"));
             drop(carrier);
             node.clock().sleep(spans(IDLE, 3)).await;
@@ -1109,14 +1108,14 @@ mod tests {
             node.clock().sleep(spans(IDLE, 3)).await;
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let reason =
                 "aborted by peer: the server refused to accept a new connection";
             let reason = String::from(reason);
@@ -1140,7 +1139,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(IDLE, 3)).await;
             session.close(Code(5));
@@ -1149,7 +1148,7 @@ mod tests {
         testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
             let before = node.clock().now();
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
@@ -1167,7 +1166,7 @@ mod tests {
             assert_eq!(session.closed().await, Error::TimedOut);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             drop(session);
@@ -1279,7 +1278,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&held, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
             session.close(Code(5));
@@ -1287,7 +1286,7 @@ mod tests {
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 2)).await;
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
@@ -1358,7 +1357,7 @@ mod tests {
             node.clock().sleep(Span::MILLISECOND).await;
             let carrier = Carrier::new(config, part);
             let before = node.clock().now();
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             // A lost first datagram goes again only after hundreds of milliseconds.
             assert!(node.clock().now() - before < spans(Span::MILLISECOND, 10));
             let session = dialed.expect("a session");
@@ -1400,7 +1399,7 @@ mod tests {
             drop(session);
         });
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
@@ -1421,7 +1420,7 @@ mod tests {
             let pool = Rc::clone(&config.pool);
             let part = testing::part(&node.net(), address(&node));
             let carrier = Carrier::new(config, part);
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             let open = poll_fn(|cx| session.poll_open(cx, Class::Complete)).await;
             let (sender, mut receiver) = open.expect("a stream");
@@ -1467,7 +1466,7 @@ mod tests {
             node.clock().sleep(spans(IDLE, 3)).await;
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
             session.close(Code(5));
@@ -1476,7 +1475,7 @@ mod tests {
         testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 40)).await;
             junk(&node, at, BATCHES).await;
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let reason =
                 "aborted by peer: the server refused to accept a new connection";
             let reason = String::from(reason);
@@ -1494,14 +1493,14 @@ mod tests {
             assert_eq!(session.closed().await, Error::TimedOut);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             node.fail_udp(address(&node));
             let network = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
             assert_eq!(session.closed().await, network);
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             assert_eq!(dialed.err(), Some(network.clone()));
             assert_eq!(carrier.accept().await.err(), Some(network));
         });
@@ -1533,7 +1532,7 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialed = carrier.connect(public(&SERVER), at).await;
+            let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
             session.close(Code(5));
             let closed = Error::Closed { code: Code(5) };
@@ -1576,8 +1575,8 @@ mod tests {
                 receiver,
             };
             let carrier = Carrier::new(config, part);
-            let first = carrier.connect(public(&SERVER), at).await;
-            let second = carrier.connect(public(&SERVER), at).await;
+            let first = carrier.connect(SERVER.public(), at).await;
+            let second = carrier.connect(SERVER.public(), at).await;
             node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
             // About 150 ms of the link: longer than the drain, shorter than IDLE.
             junk(&node, SocketAddr::new(at.ip(), PORT + 1), 150).await;

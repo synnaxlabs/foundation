@@ -905,7 +905,7 @@ fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
 }
 
 #[test]
-fn opens_no_writer_on_a_channel_of_a_type_the_home_does_not_write() {
+fn writes_and_reads_a_channel_of_a_variable_type() {
     run(19, |test| async move {
         test.hub.define(Channel {
             key: channel::Key::from_u128(6),
@@ -913,19 +913,38 @@ fn opens_no_writer_on_a_channel_of_a_type_the_home_does_not_write() {
             data_type: Type::String,
             index: channel::Key::from_u128(1),
         });
-        let writer = test.hub.writer(config("a", &["value", "text"])).await;
-        let error = writer.expect_err("an error");
-        assert_eq!(
-            error,
-            writer::Error::Type {
-                name: name("text"),
-                data_type: Type::String,
-            }
-        );
-        assert_eq!(
-            error.to_string(),
-            "the home does not write channel text of String yet"
-        );
+        let mut reader = test.reader(&["text"], Mode::Complete).await;
+        let mut writer = test.writer("a", &["text"]).await;
+        let now = test.now();
+        let set = Arc::clone(writer.set());
+        let (index, text) = (entry(&set, 1), entry(&set, 6));
+        let raw = [&2_u32.to_le_bytes()[..], b"hi"].concat();
+        let series = [(index, 8), (text, raw.len())];
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        draft
+            .series_mut(index)
+            .expect("the index")
+            .copy_from_slice(&now.to_le_bytes());
+        draft
+            .series_mut(text)
+            .expect("the text")
+            .copy_from_slice(&raw);
+        draft.set_count(0, 1);
+        let written = writer
+            .write(LIVE, draft)
+            .expect("the home takes it")
+            .to_vec();
+        assert_eq!(written, [applied(0)]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(samples(&received, 1), [now]);
+        let (_, bytes) = received
+            .view
+            .iter()
+            .find(|&(present, _)| present == text)
+            .expect("the view holds the text");
+        let mut out = vec![0; raw.len()];
+        codec::decode(Type::String, 1, bytes, &mut out).expect("decodes");
+        assert_eq!(out, raw);
     });
 }
 

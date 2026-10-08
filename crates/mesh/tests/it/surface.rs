@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
@@ -59,8 +58,7 @@ fn private_key(id: u8) -> PrivateKey {
 }
 
 fn public_key(id: u8) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key(id).0).unwrap();
-    PublicKey::new(pair.public_key().as_ref().try_into().unwrap()).unwrap()
+    private_key(id).public()
 }
 
 /// The record of node `id`, with a card that the node signed and that holds
@@ -144,6 +142,7 @@ fn create_config_on(
         voters: members.iter().map(|member| member.card.key()).collect(),
         members,
         files: node.files(),
+        dir: PathBuf::new(),
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),
