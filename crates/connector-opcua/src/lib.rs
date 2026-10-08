@@ -7,6 +7,12 @@
     expect(dead_code, reason = "part 2 of #435 gives the kind that uses it")
 )]
 mod event;
+#[cfg(feature = "open62541")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "part 2 of #435 gives the kind that uses it")
+)]
+mod ffi;
 #[cfg(test)]
 #[cfg(feature = "open62541")]
 mod link;
