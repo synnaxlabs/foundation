@@ -328,7 +328,10 @@ fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs GNU nm and the glibc symbols"
+)]
 fn the_c_names_only_the_listed_symbols_outside_it() {
     let defined = symbols("--defined-only");
     let undefined = symbols("--undefined-only");
