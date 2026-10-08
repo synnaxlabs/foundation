@@ -1173,7 +1173,7 @@ mod tests {
                 continue;
             };
             let result = mesh.set_home(INDEX, key(home)).await;
-            let home = mesh.group.borrow().state.home(INDEX);
+            let home = mesh.watch(INDEX).next().await.unwrap();
             board.lock().unwrap().set.push((id, home, result));
         }
     }

@@ -148,6 +148,38 @@ fn set_home_refuses_a_home_that_is_not_a_member() {
 }
 
 #[test]
+fn set_home_refuses_a_member_that_the_node_appended_and_did_not_apply() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let changes = [ticket(), join(4)];
+        let entries = changes.iter().zip(1..).map(|(change, index)| Entry {
+            at: Position {
+                term: common::TERM,
+                index,
+            },
+            data: Data::Bytes(encoded(change)),
+        });
+        let append = Body::Append {
+            prev: Position::default(),
+            entries: entries.collect(),
+            commit: 0,
+        };
+        assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
+        let reply = mesh.outgoing(key(2)).await.unwrap();
+        assert_eq!(reply, message(1, 2, Body::AppendReply { last: 2 }));
+        let set = now(pin!(mesh.set_home(INDEX, key(4)))).await;
+        assert_eq!(set, Poll::Ready(Err(Error::NotMember(key(4)))));
+        let commit = proven(2, 1, Body::Heartbeat { commit: 2 });
+        assert_eq!(mesh.receive(public(2), commit), Ok(()));
+        let reply = mesh.outgoing(key(2)).await.unwrap();
+        assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
+        assert!(mesh.member(key(4)).is_some());
+        let set = now(pin!(mesh.set_home(INDEX, key(4)))).await;
+        assert_eq!(set, Poll::Pending);
+    });
+}
+
+#[test]
 fn set_home_refuses_each_home_on_a_node_that_is_not_a_voter() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
@@ -300,7 +332,9 @@ async fn create_leader(node: &sim::node::Node, tasks: &Tasks) -> Mesh {
     mesh
 }
 
-/// Polls `call` until it waits for the outcome of its entry.
+/// Polls `call` until it waits for the outcome of its entry. No call of `Mesh` tells
+/// a call that waits for the outcome from one that still places its entry, so this
+/// reads the group.
 async fn wait_for_outcome<F: Future<Output = Result<(), Error>>>(
     mesh: &Mesh,
     clock: &Clock,
@@ -312,6 +346,8 @@ async fn wait_for_outcome<F: Future<Output = Result<(), Error>>>(
     }
 }
 
+// No call of `Mesh` shows that a call waits for its entry, and a call that stays in
+// the group after the stop only takes memory, so this test reads the group.
 #[test]
 fn a_call_that_waits_for_its_entry_gets_the_cause_when_the_group_stops() {
     solo(|node, tasks| async move {
@@ -665,8 +701,9 @@ fn a_try_ends_when_the_same_leader_leads_a_later_term() {
 }
 
 // The answer comes while nothing polls the call. Node 1 then takes a heartbeat of
-// term 6, which the read of its term shows, so the next poll of the call sees the
-// answer and the new term.
+// term 6, so the next poll of the call sees the answer and the new term. The reply
+// to the heartbeat goes out only after that poll, so the test reads the term of the
+// group.
 #[test]
 fn one_poll_that_sees_the_answer_and_a_later_term_keeps_the_answer() {
     let asked = Arc::new(Mutex::new(false));
