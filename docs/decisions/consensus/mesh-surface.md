@@ -139,7 +139,8 @@
   map by public key lost: it is a second copy that each write of the members must keep
   in step. At most one member holds a key: `region::State::fits` refuses a second with
   `Unfit::Held`, at open and at each join. No change replaces a card yet; the change
-  that first does so checks `Held` against each other member. Decided by `laptop.architect` (2026-10-08T22:29:26Z):
+  that first does so checks `Held` against each other member. Decided by
+  `laptop.architect` (2026-10-08T22:29:26Z):
   https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077. The
   scan makes `region::State::new` O(n²) in the members: 129 µs at 255 members,
   accepted by `laptop.architect` (2026-10-08T23:10:50Z:
