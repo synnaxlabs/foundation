@@ -568,15 +568,15 @@ impl<'a> Left<'a> {
         // where its last range ends in the block.
         let mut run = (0, 0);
         let mut end = None;
-        let mut parts = iter::once(&self.head).chain(self.tail).enumerate();
-        let ended = parts.try_for_each(|(index, part)| {
+        let (mut part, mut index) = (&self.head, 0);
+        let ended = loop {
             let range = part.range.clone();
             if !range.is_empty() {
                 if end != Some(range.start) {
                     run = (buffer.len(), index);
                 }
                 if buffer.len() - run.0 + range.len() > COPIED_MAX {
-                    return ControlFlow::Break(());
+                    break false;
                 }
                 buffer.extend_from_slice(&block[range.clone()]);
                 end = Some(range.end);
@@ -585,9 +585,12 @@ impl<'a> Left<'a> {
                 buffer.extend_from_slice(&ZEROS[..usize::from(part.zeros)]);
                 end = None;
             }
-            ControlFlow::Continue(())
-        });
-        let after = if ended.is_continue() {
+            let Some(next) = self.tail.get(index) else {
+                break true;
+            };
+            (part, index) = (next, index + 1);
+        };
+        let after = if ended {
             Self::new(&[])
         } else {
             let after = match run.1.checked_sub(1) {
