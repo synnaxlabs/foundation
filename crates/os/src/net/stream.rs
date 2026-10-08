@@ -214,18 +214,17 @@ fn send(
     let stream = stream.into_ref().get_ref();
     // A bound of 0 would write nothing, and wait for no event.
     let max = unsent_bytes_max.max(1);
-    let mut len = 0;
-    let whole = buffers
-        .iter()
-        .take_while(|buffer| {
-            len += buffer.len();
-            len <= max
-        })
-        .count();
+    let (mut whole, mut len) = (0, 0);
+    while let Some(buffer) = buffers.get(whole)
+        && len + buffer.len() <= max
+    {
+        (whole, len) = (whole + 1, len + buffer.len());
+    }
     let head;
     let buffers = match buffers.get(whole) {
-        Some(first) if whole == 0 => {
-            head = [IoSlice::new(&first[..max])];
+        // The whole parts hold no bytes, so the write takes the head of the next.
+        Some(next) if len == 0 => {
+            head = [IoSlice::new(&next[..max])];
             &head[..]
         }
         _ => &buffers[..whole],

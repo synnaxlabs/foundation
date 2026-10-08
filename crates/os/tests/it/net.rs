@@ -168,6 +168,20 @@ fn a_vectored_write_reaches_the_peer_in_order() {
     });
 }
 
+/// An empty first part holds the write to no part on macOS, which caps each write.
+#[test]
+fn a_vectored_write_with_an_empty_first_part_takes_bytes() {
+    on_thread("net-write-empty-first", || async {
+        let net = net();
+        let (_listener, mut client, mut server) = create_pair(&net).await;
+        let big = vec![7; 2 * options().unsent_bytes_max];
+        let written = write(&mut client, &[&[], &big]).await;
+        assert!(matches!(written, Ok(1..)), "{written:?}");
+        let mut received = [0; 1];
+        read_exact(&mut server, &mut received).await;
+    });
+}
+
 #[test]
 fn a_round_trip_runs_on_a_shard() {
     on_shard(|| async {
