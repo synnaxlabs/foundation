@@ -173,6 +173,33 @@ fn apply_on_a_stopped_group_gives_problems_and_large_before_the_stop() {
 }
 
 #[test]
+fn apply_on_a_stopped_group_of_a_node_that_is_not_a_voter_gives_stopped() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
+        let stopped = stop(&node, &mesh);
+        node.clock().sleep(Span::MILLISECOND).await;
+        let valid = create_subjects(&["plant.a"], 1);
+        let applied = now(pin!(mesh.apply(base(), valid))).await;
+        assert_eq!(applied, Poll::Ready(Err(Error::Stopped(stopped))));
+    });
+}
+
+// A floor only takes memory, which no call shows, so this test reads the group.
+#[test]
+fn an_apply_opens_no_floor_while_it_puts_its_chunks() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let before = mesh.group.borrow().applied.clone();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let moved = pointer(1, &definitions);
+        let mut call = pin!(mesh.apply(base(), definitions));
+        assert_eq!(now(call.as_mut()).await, Poll::Pending);
+        assert_eq!(mesh.group.borrow().applied, before);
+        assert_eq!(call.await, Ok(moved));
+    });
+}
+
+#[test]
 fn apply_refuses_a_tree_of_more_chunks_than_one_change_lists() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();

@@ -30,7 +30,7 @@ impl Mesh {
     /// # Errors
     ///
     /// `Problems` comes first, then a `Blob` from the read of the tree of `base`, then
-    /// `Large`, `NoVote`, `Stopped`, and a `Quorum` before the first put. None of
+    /// `Large`, `Stopped`, `NoVote`, and a `Quorum` before the first put. None of
     /// these, `Pool`, and `Blob` propose anything.
     ///
     /// - [`Error::Problems`] when the spec has problems.
