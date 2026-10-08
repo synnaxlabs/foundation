@@ -156,6 +156,19 @@ fn a_rig_removes_its_directory_with_its_files() {
 }
 
 #[test]
+fn a_rig_removes_its_directory_when_the_test_fails() {
+    let mut dir = PathBuf::new();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rig = Rig::new();
+        dir.clone_from(&rig.dir);
+        panic!("the test fails");
+    }))
+    .expect_err("the test panics");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
+    assert!(!dir.exists(), "{} is still there", dir.display());
+}
+
+#[test]
 fn a_rig_runs_foundation_and_gives_its_output() {
     let rig = Rig::new();
     let output = rig.run(&["version"]);

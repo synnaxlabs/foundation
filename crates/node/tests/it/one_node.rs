@@ -249,7 +249,9 @@ fn a_wrong_endpoint_shows_in_status_and_heals() {
         let status = rig.status();
         status
             .get("influx")
-            .filter(|connector| connector.restarts >= Some(1))
+            .filter(|connector| {
+                connector.state == "restarting" && connector.restarts >= Some(1)
+            })
             .cloned()
             .ok_or_else(|| format!("{status:#?}"))
     });
