@@ -52,7 +52,8 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
     ),
-    // The seed, which `UA_ENABLE_DETERMINISTIC_RNG` keeps from the clock.
+    // The start value of the random state, which `UA_ENABLE_DETERMINISTIC_RNG` keeps
+    // from the clock.
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
@@ -1820,6 +1821,36 @@ End of search list.
             .unwrap();
         assert_eq!(check(&root), Ok(()));
         remove(&root).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC")]
+    fn each_thread_of_the_committed_copy_draws_from_its_own_random_state() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let (copy, out) = (root.join(DEST), temp("rng"));
+        let read = |name| std::fs::read_to_string(copy.join(name)).unwrap();
+        let (sources, flags) = (read("sources.txt"), read("flags.txt"));
+        let objects = build(&copy, &sources, &flags, &out, Path::new("cc")).unwrap();
+        let library = out.join("libopen62541.a");
+        let mut ar = Command::new("ar");
+        ar.arg("rcs").arg(&library);
+        exec(ar.args(objects.iter().map(|(_, object, _)| object))).unwrap();
+        let driver = out.join("rng");
+        let mut cc = Command::new("cc");
+        cc.current_dir(&copy)
+            .args(flags.lines())
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/open62541/rng.c"))
+            .arg(&library)
+            .arg("-o")
+            .arg(&driver);
+        exec(&mut cc).unwrap();
+        let from_1 = "3795398737 17903413 3545275701 194195274 2326030198 2354257974 \
+                      2697798104 3102124240";
+        assert_eq!(
+            exec(&mut Command::new(&driver)),
+            Ok(format!("after another thread: {from_1}\nalone: {from_1}"))
+        );
+        remove(&out).unwrap();
     }
 
     #[test]

@@ -4024,6 +4024,30 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
   2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260.
+  Our change makes the random state `UA_rng` of `src/util/ua_util.c` one per thread
+  (`UA_THREAD_LOCAL`), so a draw on one thread does not move the state of another.
+  Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
+  2026-10-08 02:24 UTC). A test in `cargo test -p xtask` links the objects of the
+  check with a C driver in `xtask/`: the main thread sets the start value 1, joins a
+  thread that sets 2 and draws, then draws, and its values must equal those of a
+  thread that sets 1 alone. The driver defines each clock function to call `abort()`,
+  and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
+  the production build. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
+  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
+  production, and each thread with none draws the same fixed values. So
+  `connector-opcua` (PR 4 of #435) sets the start value with
+  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
+  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  thread calls open62541, and runs each server and each client on one thread. Its
+  test server sets the start value of the test at start, and its end-to-end check
+  asserts the same run for the same value. A state for each `UA_Server` and
+  `UA_Client` lost: the draw functions and the security policy plugins take no
+  server, so each call site changes, and LOCAL PATCHES does that work again at each
+  release. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
+  2026-10-08 15:49 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
