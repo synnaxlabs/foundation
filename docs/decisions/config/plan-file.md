@@ -52,3 +52,10 @@
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179. Supersedes
   the `changes: Vec<Change>` field and `Change::name` of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688.
+  The `ops` apply decodes the plan, compares its base with the spec pointer, then calls
+  `definitions`, as `definitions` reads the definitions at the base. So a stale plan
+  with a reserved change gives `ops.stale-plan` (OPS OUTPUT). Decided by
+  `laptop.architect-2` (2026-10-08T22:57:59Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432), which
+  replaces
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6060043966.

@@ -26,7 +26,10 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152), and
    `ops` may take `config-hcl`, so its plan tests read a real file
    (`laptop.architect-2`, 2026-10-08T16:00:18Z:
-   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). A crate
+   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745), and
+   `ops` may take `transport`, so its apply tests open a one-voter `mesh::Mesh` under
+   `sim` (#337 PR 2b, approval owed:
+   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070748622). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The

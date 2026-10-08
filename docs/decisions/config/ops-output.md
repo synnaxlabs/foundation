@@ -50,3 +50,12 @@
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681.
   Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
+  The apply gives three codes. Each `config::plan::Error` is `ops.bad-plan`, status 2,
+  with its `Display` as the message and the fix ``Make a plan with `foundation plan`,
+  and apply it with no edits``. A plan whose base is not the spec pointer, before the
+  proposal or after another change applies first, is `ops.stale-plan`, status 1, fix
+  `Plan again`. Each other error of `Mesh::apply` is `ops.apply`, status 1, with its
+  `Display` as the message. There is no `ops.reserved-change`: `Plan::definitions`
+  refuses a change at a reserved label (FIRST ADMIN). Decided by `laptop.architect-2`
+  (2026-10-08T22:57:59Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432).
