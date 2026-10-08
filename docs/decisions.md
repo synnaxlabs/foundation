@@ -5305,9 +5305,10 @@ How to read this record:
   at 2026-10-08T11:24:07Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738).
   `Link` is `Clone`, and a clone is the same link, so the future of each stream holds
-  one (NODE PORT). This replaces item 6 of that comment, "`Link` needs no `Clone`"
-  (`laptop.architect`, 2026-10-08T18:56:15Z,
+  one (NODE PORT) (`laptop.architect`, 2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  Supersedes item 6 (`Link` needs no `Clone`) of
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6058789738.
   `Hub::set_rules` sets the `access::Rules` that each later hello and request is checked
   against, and `node` calls it with the rules of each spec (#1951). Until then, a hub
   has `access::Rules::default()`, which knows no subject, so it refuses each hello
@@ -5317,6 +5318,8 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140).
   The name `set_rules`: `laptop.architect`, 2026-10-08T18:56:15Z
   (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
+  Supersedes the name `Hub::rules` of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066050140.
   A rule of the client wire, which each SDK follows: a program sends its first request
   once the challenge after its hello comes. The node sends it only after it admits
   the hello, so this rule also makes the hello stream the first that `Link::serve`
@@ -5325,7 +5328,10 @@ How to read this record:
   a hello, which adds a queue, its bound, and its timeout to `hub` to save one round
   trip for each session. Decided by
   `laptop.architect` (2026-10-08T18:16:38Z,
-  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520). The
+  sentence on the hello stream is by `laptop.architect` (2026-10-08T18:56:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418),
+  and supersedes the `Session::accept` sentence of that comment.
   `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
   transport and the mesh, and never a zero key. #1660 changes only where `node` gets
   the key. The test waits on #1744, whose client hello is the first that a `node` test
