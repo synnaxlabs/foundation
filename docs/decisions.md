@@ -4641,26 +4641,24 @@ How to read this record:
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
   `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
   (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
-  `n` and names another node. Its fix has three cases: "Name `n` as the `home`, and keep
-  `n` out of `standby` and `copies`" when `p` wins for no connector on another node;
-  "Leave out `home`. The connectors `a` and `b` share one placement and run on two
-  nodes" when `p` wins for a connector `b` on another node, and one of the two names is
-  under the other; else "Select the connector `a` and each index under its name with a
-  more specific placement whose `home` is `n`", which changes no other connector of `p`
-  (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  `n` and names another node. Its fix is "Name `n` as the `home`, and keep `n` out of
+  `standby` and `copies`" when `p` wins for no connector on another node, else "Select
+  the connector `a` and each index under its name with a more specific placement whose
+  `home` is `n`", which changes no other connector of `p` (`laptop.architect`, #1901,
+  2026-10-08T15:12:13Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556, and
-  2026-10-08T15:16:31Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478).
-  `config.split-placement` (BQ10) is at each index under the name of a connector
-  (`Name::starts_with`) when the placement that wins for the index is not the one that
-  wins for the connector: at the label of the index's placement, or of the connector's
-  when no placement selects the index. Its fix is "Make the placement `p` win for the
-  connector `c` and each name under it", where `p` wins for the connector, or for the
-  index when no placement selects the connector (same comment of 15:16:31Z). A tie for
-  the index or the connector gives no `config.split-placement`. An index under the
-  names of two connectors is checked against each, so it needs the placement of the
-  outer connector too, as BQ10 says (`laptop.architect`, same comment of 15:16:31Z).
-  So two nested connectors on two nodes share a placement with no `home`. The
+  2026-10-08T15:21:54Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126).
+  `config.split-placement` (BQ10) is at each index when the placement that wins for it
+  is not the one that wins for its nearest connector, the connector with the longest
+  name above the index (`Name::starts_with`): at the label of the index's placement, or
+  of the connector's when no placement selects the index. So the index `d.e.time`
+  follows the connector `d.e`, not `d`: the indexes of BQ10 are the connector's own, the
+  unit of failover (`laptop.director`, #1901, 2026-10-08T15:20:28Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459). Its fix
+  is "Make the placement `p` win for the connector `c` and the index `i`", where `p`
+  wins for `c`, or for `i` when no placement selects `c` (same comment of 15:21:54Z). A
+  tie for the index or the connector gives no `config.split-placement`. The
   region check and the region of each key (REGION CHECK) come with #1029. Lost: a
   `Planned` with keys (A4), a home on each change, a `config::Error` for a lazy fetch of
   chunks, a provisional tree and `tree::diff`, which writes chunks that the plan drops,
@@ -4668,12 +4666,16 @@ How to read this record:
   second time and a missing chunk panics in `config`, though #1741 names that case
   (`Cause::Tree`), and, for checks 2 and 3, a `spec::placement::check` over the whole
   spec, a second text in `config`, no report for the `Unplaced` of a connector, a
-  check against only the nearest connector, which lets the indexes of a connector under
-  the name of another have their own placement (a change of BQ10, which goes to the
-  person), and one `config.connector-home` fix:
-  "leave out `home`" leaves an empty placement, and "Name `n` as the `home`" moves the
-  problem between two connectors of one placement. Supersedes the `chunks` input and its
-  panic of
+  check against each connector above the index, with which two nested connectors on
+  two nodes share one placement, the `config.connector-home` fixes "Leave out `home`",
+  which can leave an empty placement or an index with no home, and "Name `n` as the
+  `home`" in each case, which moves the problem between two connectors of one
+  placement, and the `config.split-placement` fix "and each name under it", which also
+  moves the indexes of a nested connector. Supersedes the fix texts of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, the
+  `chunks` input and its panic of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187, and the
   provisional tree of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688 and its

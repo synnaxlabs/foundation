@@ -237,8 +237,8 @@ fn homes(
 /// Places each connector, with its `node` as the writer. Reports
 /// `config.connector-home` at the `home` of a winner that names another node,
 /// `config.unplaced` at each connector that [`place`] cannot place, and
-/// `config.split-placement` at each index under the name of a connector that another
-/// placement wins for.
+/// `config.split-placement` at each index whose nearest connector above its name has
+/// another winner.
 fn connectors<'f>(
     found: &'f Found<'_>,
     placements: &[(&'f Name, &'f Policy)],
@@ -257,10 +257,10 @@ fn connectors<'f>(
             _ => None,
         })
         .collect();
-    let mut wins = BTreeMap::<_, Vec<_>>::new();
-    for (name, _, node, placed) in &connectors {
+    let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
+    for (_, _, node, placed) in &connectors {
         if let Ok(Some(placement)) = winner(placed) {
-            wins.entry(placement).or_default().push((*name, *node));
+            nodes.entry(placement).or_default().insert(*node);
         }
     }
     for (name, entry, node, placed) in &connectors {
@@ -270,50 +270,40 @@ fn connectors<'f>(
                 home,
                 ..
             }) if home != node => {
-                let wins = &wins[placement];
+                let shared = nodes[placement].iter().any(|other| other != node);
                 diagnostics
-                    .push(connector_home(found, placement, home, name, node, wins));
+                    .push(connector_home(found, placement, home, name, node, shared));
             }
             Ok(_) => {}
             Err(problem) => diagnostics.push(unplaced(entry.label_span, problem)),
         }
-        let Ok(theirs) = winner(placed) else {
+    }
+    for (index, own) in indexes {
+        let nearest = connectors
+            .iter()
+            .filter(|(name, ..)| index.starts_with(name))
+            .max_by_key(|(name, ..)| name.segments().count());
+        let Some((connector, _, _, theirs)) = nearest else {
             continue;
         };
-        let under = indexes.iter().filter(|(index, _)| index.starts_with(name));
-        for (index, placed) in under {
-            if let Ok(own) = winner(placed) {
-                diagnostics.extend(split(found, index, own, name, theirs));
-            }
+        if let (Ok(own), Ok(theirs)) = (winner(own), winner(theirs)) {
+            diagnostics.extend(split(found, index, own, connector, theirs));
         }
     }
 }
 
 /// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
-/// `placement` names `home`. `wins` holds each connector that `placement` wins for,
-/// with its node. A new `home` moves the problem to a connector on another node, and a
-/// more specific placement splits two nested connectors, so the fix depends on them.
+/// `placement` names `home`. `shared` is true when `placement` also wins for a
+/// connector on another node, which a new `home` would move the problem to.
 fn connector_home(
     found: &Found<'_>,
     placement: &Name,
     home: &Name,
     connector: &Name,
     node: &Name,
-    wins: &[(&Name, &Name)],
+    shared: bool,
 ) -> Diagnostic {
-    let mut apart = wins
-        .iter()
-        .filter(|(_, other)| *other != node)
-        .map(|(other, _)| *other);
-    let nested = apart
-        .clone()
-        .find(|other| other.starts_with(connector) || connector.starts_with(other));
-    let fix = if let Some(other) = nested {
-        format!(
-            "Leave out `home`. The connectors `{connector}` and `{other}` share one \
-             placement and run on two nodes"
-        )
-    } else if apart.next().is_some() {
+    let fix = if shared {
         format!(
             "Select the connector `{connector}` and each index under its name with a \
              more specific placement whose `home` is `{node}`"
@@ -378,8 +368,8 @@ fn split(
         found.entries[at].label_span,
         message,
         format!(
-            "Make the placement `{}` win for the connector `{connector}` and each name \
-             under it",
+            "Make the placement `{}` win for the connector `{connector}` and the index \
+             `{index}`",
             label(theirs.unwrap_or(at))
         ),
     ))

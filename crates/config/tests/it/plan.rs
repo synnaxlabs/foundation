@@ -734,42 +734,6 @@ placement \"c\" {
 }
 
 #[test]
-fn plans_nested_connectors_on_two_nodes_after_the_connector_home_fix() {
-    let text = |home: &str| {
-        format!(
-            "\
-channel \"d.e.time\" {{
-  kind = \"index\"
-}}
-connector \"d\" {{
-  kind = \"writer\"
-  node = \"n\"
-  writes = []
-}}
-connector \"d.e\" {{
-  kind = \"writer\"
-  node = \"m\"
-  writes = [\"d.e.time\"]
-}}
-placement \"d\" {{
-  select = \"d.**\"
-{home}  standby = \"k\"
-}}
-"
-        )
-    };
-    let fix = |a: &str, b: &str| {
-        format!(
-            "Leave out `home`. The connectors `{a}` and `{b}` share one placement and \
-             run on two nodes"
-        )
-    };
-    let fixed = text("");
-    plans_after_connector_home(&text("  home = \"n\"\n"), &[fix("d.e", "d")], &fixed);
-    plans_after_connector_home(&text("  home = \"m\"\n"), &[fix("d", "d.e")], &fixed);
-}
-
-#[test]
 fn places_a_connector_at_its_node_with_its_placement() {
     let text = "\
 channel \"a.time\" {
@@ -859,17 +823,19 @@ connector \"d\" {
     assert_eq!(found, expected);
 }
 
-/// A `config.split-placement` problem at the label of `placement` in `text`.
+/// A `config.split-placement` problem at the label of `at` in `text`, whose fix
+/// names `winner`, `connector`, and `index`.
 fn split(
     text: &str,
     at: &str,
     message: &str,
     winner: &str,
     connector: &str,
+    index: &str,
 ) -> Problem {
     let fix = format!(
-        "Make the placement `{winner}` win for the connector `{connector}` and each \
-         name under it"
+        "Make the placement `{winner}` win for the connector `{connector}` and the \
+         index `{index}`"
     );
     problem(
         "config.split-placement",
@@ -898,48 +864,66 @@ connector \"a\" {
   node = \"n\"
   writes = [\"a.time\"]
 }
-channel \"d.e.time\" {
-  kind = \"index\"
+";
+    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let expected = split(
+        text,
+        "a_time",
+        "the placement `a_time` wins for the index `a.time`, but the placement `a` wins \
+         for the connector `a`",
+        "a",
+        "a",
+        "a.time",
+    );
+    assert_eq!(found, [expected]);
 }
-placement \"d\" {
+
+#[test]
+fn checks_an_index_only_against_the_nearest_connector_above_it() {
+    let text = |e: &str| {
+        format!(
+            "\
+placement \"d\" {{
   select = \"d.**\"
   home = \"n\"
-}
-placement \"e\" {
-  select = \"d.e.**\"
-  home = \"n\"
-}
-connector \"d\" {
+}}
+placement \"e\" {{
+  select = \"{e}\"
+  home = \"m\"
+}}
+channel \"d.e.time\" {{
+  kind = \"index\"
+}}
+connector \"d\" {{
   kind = \"writer\"
   node = \"n\"
   writes = []
-}
-connector \"d.e\" {
+}}
+connector \"d.e\" {{
   kind = \"writer\"
-  node = \"n\"
+  node = \"m\"
   writes = [\"d.e.time\"]
-}
-";
-    let found = problems(Spec::create_empty().plan(&[text], &["n"]));
-    let expected = [
-        split(
-            text,
-            "a_time",
-            "the placement `a_time` wins for the index `a.time`, but the placement `a` \
-             wins for the connector `a`",
-            "a",
-            "a",
-        ),
-        split(
-            text,
-            "e",
-            "the placement `e` wins for the index `d.e.time`, but the placement `d` \
-             wins for the connector `d`",
-            "d",
-            "d",
-        ),
-    ];
-    assert_eq!(found, expected);
+}}
+"
+        )
+    };
+    let nodes = ["m", "n"];
+    let plan = Spec::create_empty()
+        .plan(&[&text("d.e.**")], &nodes)
+        .expect("no problems");
+    assert_eq!(plan.homes, BTreeMap::from([(name("d.e.time"), name("m"))]));
+    let text = text("d.e");
+    let found = problems(Spec::create_empty().plan(&[&text], &nodes));
+    let expected = split(
+        &text,
+        "d",
+        "the placement `d` wins for the index `d.e.time`, but the placement `e` wins \
+         for the connector `d.e`",
+        "e",
+        "d.e",
+        "d.e.time",
+    );
+    assert_eq!(found, [expected]);
 }
 
 #[test]
@@ -991,6 +975,7 @@ connector \"f\" {
              for the connector `b`",
             "only_b",
             "b",
+            "b.time",
         ),
         split(
             text,
@@ -999,6 +984,7 @@ connector \"f\" {
              the connector `c`",
             "c",
             "c",
+            "c.time",
         ),
     ];
     assert_eq!(found, expected);
@@ -1019,26 +1005,31 @@ fn plans_after_the_split_placement_fix() {
     let a = index("a.time") + &connector("a", "\"a.time\"");
     let d = index("d.e.time") + &connector("d", "") + &connector("d.e", "\"d.e.time\"");
     let fixed_a = a.clone() + &placement("a", "a.**");
+    let a_fix =
+        "Make the placement `a` win for the connector `a` and the index `a.time`";
     let cases = [
         (
             a.clone() + &placement("a_time", "a.time") + &placement("a", "a.**"),
+            a_fix,
             &fixed_a,
         ),
         (
             a.clone() + &placement("a_time", "a.time") + &placement("a", "a"),
+            a_fix,
             &fixed_a,
         ),
-        (a.clone() + &placement("a", "a.*"), &fixed_a),
-        (a.clone() + &placement("a", "a"), &fixed_a),
+        (a.clone() + &placement("a", "a.*"), a_fix, &fixed_a),
+        (a.clone() + &placement("a", "a"), a_fix, &fixed_a),
         (
-            d.clone() + &placement("d", "d.**") + &placement("e", "d.e.**"),
-            &(d.clone() + &placement("d", "d.**")),
+            d.clone() + &placement("d", "d.**") + &placement("e", "d.e"),
+            "Make the placement `e` win for the connector `d.e` and the index `d.e.time`",
+            &(d.clone() + &placement("d", "d.**") + &placement("e", "d.e.**")),
         ),
     ];
-    for (refused, fixed) in cases {
+    for (refused, fix, fixed) in cases {
         let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
-        let codes = found.iter().map(|p| p.0).collect::<Vec<_>>();
-        assert_eq!(codes, ["config.split-placement"], "{refused}");
+        let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+        assert_eq!(found, [("config.split-placement", fix.into())], "{refused}");
         let plan = Spec::create_empty().plan(&[fixed], &["n"]);
         assert!(plan.is_ok(), "{fixed}: {plan:?}");
     }
@@ -1153,6 +1144,7 @@ connector \"e\" {
              wins for the connector `c`",
             "c",
             "c",
+            "c.time",
         ),
         problem(
             "config.unplaced",
@@ -1168,6 +1160,7 @@ connector \"e\" {
              the connector `e`",
             "e",
             "e",
+            "e.time",
         ),
     ];
     assert_eq!(found, expected);
