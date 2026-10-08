@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,8 +17,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected, Stored,
-    Tail, Unfit,
+    Buffer, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected,
+    Stored, Tail, Unfit,
 };
 use env::clock::Clock;
 use env::entropy::Entropy;
@@ -3545,6 +3545,41 @@ fn a_dropped_end_keeps_no_waker_while_the_buffer_is_held() {
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// Each `End` keeps only the waker of its last poll, and the end of the task wakes
+/// the last waker of each.
+#[test]
+fn the_end_of_the_task_wakes_the_last_waker_of_each_end() {
+    let (mut sim, node) = create_node(131);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let flags: Vec<Arc<Flag>> = (0..3)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        let poll = |end: &mut Pin<&mut End>, flag: &Arc<Flag>| {
+            let waker = Waker::from(Arc::clone(flag));
+            end.as_mut().poll(&mut Context::from_waker(&waker))
+        };
+        let mut first = pin!(buffer.ended());
+        let mut second = pin!(buffer.ended());
+        assert_eq!(poll(&mut first, &flags[0]), Poll::Pending);
+        assert_eq!(poll(&mut first, &flags[1]), Poll::Pending);
+        assert_eq!(Arc::strong_count(&flags[0]), 1, "a later poll takes it out");
+        assert_eq!(poll(&mut second, &flags[2]), Poll::Pending);
+        drop(buffer);
+        node.clock().sleep(commits(20)).await;
+        let woken: Vec<bool> = flags
+            .iter()
+            .map(|flag| flag.0.load(Ordering::Relaxed))
+            .collect();
+        assert_eq!(woken, [false, true, true]);
+        assert_eq!(first.await, Ok(()));
+        assert_eq!(second.await, Ok(()));
     })
     .expect("the buffer ends");
 }
