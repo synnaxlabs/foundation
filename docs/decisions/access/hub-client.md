@@ -3,13 +3,15 @@
   gives the client once the node admits it, so a refused hello is an error of `connect`.
   A hello expires at the latest mesh time of its challenge, plus the time since the
   challenge came on the monotonic clock, plus `client::LIFE` (10 minutes), or at the
-  end of mesh time when the sum passes it, as mesh time is the node's. A task renews
-  the hello at half of `LIFE` after each admission, on the hello stream, until the
-  session ends. A renewal waits for a block as each message does, and the node closes
-  the session if the hello expires first. A challenge that `wire` refuses ends the
-  renewal and closes the session with `MALFORMED`. Each later request gives the error
-  that ended the renewal. `request(body)` signs the body, sends it on its own stream,
-  and gives the body of the response. Requests of one client go one at a time, in the
+  end of mesh time when the sum passes it, as mesh time is the node's. Lost: an error
+  of `connect` for a challenge near the end of mesh time, a second guard for a hello
+  that the node refuses as `EXPIRED`. A task renews the hello at half of `LIFE` after
+  each admission, on the hello stream, until the session ends. A renewal waits for a
+  block as each message does, and the node closes the session if the hello expires
+  first. A challenge that `wire` refuses ends the renewal and closes the session with
+  `MALFORMED`. Each later request gives the error that ended the renewal.
+  `request(body)` signs the body, sends it on its own stream, and gives the body of the
+  response. Requests of one client go one at a time, in the
   order they began, by a turn in the client, as a link holds one open request (HUB
   LINK). A request dropped before its response began keeps the turn until the response
   begins or the stream ends, because the node holds it open until then. `Config` holds
