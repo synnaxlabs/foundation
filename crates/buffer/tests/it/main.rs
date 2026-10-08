@@ -3480,6 +3480,85 @@ fn an_end_gives_the_error_of_a_write_before_the_drop() {
     .expect("the buffer ends");
 }
 
+/// An `End` polled while the buffer is held stays pending across a commit that
+/// syncs, and gives `Ok` after the drop.
+#[test]
+fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
+    let (mut sim, node) = create_node(118);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let mut end = pin!(buffer.ended());
+        let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
+        assert_eq!(polled, Poll::Pending);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        assert_eq!(buffer.committed().await, Ok(()));
+        let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
+        assert_eq!(polled, Poll::Pending);
+        drop(buffer);
+        assert_eq!(end.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// An `End` taken at a drop during a sync that then fails gives its error.
+#[test]
+fn an_end_taken_at_a_drop_during_a_failing_sync_gives_its_error() {
+    run(120, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(shard.memory.syncs(), 3, "the sync runs");
+        let end = buffer.ended();
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(end.await, Err(failed));
+    });
+}
+
+/// An `End` taken after a failed commit gives its error at its first poll.
+#[test]
+fn an_end_taken_after_a_failed_commit_gives_its_error_at_once() {
+    let (mut sim, node) = create_node(119);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        let mut end = pin!(buffer.ended());
+        let polled = poll_fn(|cx| Poll::Ready(end.as_mut().poll(cx))).await;
+        assert_eq!(polled, Poll::Ready(Err(failed)));
+    })
+    .expect("the buffer ends");
+}
+
 /// An `End` held past the drop holds the ring after the task ended, so an open fails
 /// with `Busy` until the `End` drops.
 #[test]
