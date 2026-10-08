@@ -1,60 +1,9 @@
 use proptest::prelude::*;
 use types::channel::Key;
-use types::ed25519::PublicKey;
-use types::sample::{self, Scalar};
 
 use super::*;
-use crate::channel::{Channel, Data, Edge, Kind as Channel_};
-use crate::data_type::DataType;
-use crate::region::Delegation;
-use crate::subject::Subject;
-
-fn name(text: &str) -> Name {
-    text.parse().unwrap()
-}
-
-fn prefix(text: &str) -> Prefix {
-    text.parse().unwrap()
-}
-
-fn subject() -> Definition {
-    Definition::Subject(Subject::new(vec![PublicKey::new([3; 32]).unwrap()]).unwrap())
-}
-
-fn record() -> Definition {
-    Definition::Region(Delegation::new(1, [name("n1")]).unwrap())
-}
-
-fn index(key: u128) -> Definition {
-    Definition::Channel(Channel {
-        key: Key::from_u128(key),
-        kind: Channel_::Index {
-            error: None,
-            control: None,
-        },
-    })
-}
-
-fn data(key: u128, index: u128) -> Definition {
-    let data = Data::new(
-        Key::from_u128(index),
-        None,
-        DataType::Sample(sample::Type::Scalar(Scalar::F64)),
-        None,
-    )
-    .unwrap();
-    Definition::Channel(Channel {
-        key: Key::from_u128(key),
-        kind: Channel_::Data(data),
-    })
-}
-
-fn map(definitions: &[(&str, Definition)]) -> BTreeMap<Name, Definition> {
-    definitions
-        .iter()
-        .map(|(key, definition)| (name(key), definition.clone()))
-        .collect()
-}
+use crate::channel::Edge;
+use crate::region::common::{data, index, map, name, prefix, record, subject};
 
 fn ungoverned(key: &str, region: &str) -> Problem {
     Problem::Ungoverned {
