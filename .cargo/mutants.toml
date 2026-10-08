@@ -19,6 +19,9 @@ exclude_re = [
   'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
+  # `lay` gives the same series on either side of the `SPARSE` test; only its time
+  # differs, which the `whole_lay`, `reversed_lay`, and `scattered_lay` benches show.
+  'crates/types/src/frame/places\.rs:.*replace >= with < in lay$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
