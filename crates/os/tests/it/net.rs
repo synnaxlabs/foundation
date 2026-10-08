@@ -350,6 +350,22 @@ fn a_write_of_no_parts_waits_at_the_unsent_bound() {
     });
 }
 
+/// A write of more parts than the kernel takes is not a full send buffer: below the
+/// unsent bound, the next write goes at once.
+#[test]
+fn a_write_of_many_parts_below_the_bound_waits_for_no_event() {
+    on_thread("net-many", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
+        let one = [7; 1];
+        let parts: Vec<_> = (0..2048).map(|_| IoSlice::new(&one)).collect();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(client.poll_write(&mut cx, &parts), Poll::Ready(Ok(1024)));
+        assert_eq!(write_once(&mut client, &[7; 64]), Poll::Ready(64));
+    });
+}
+
 /// A write of no parts reports a reset that no poll has reported, as a write of
 /// bytes does.
 #[test]
@@ -362,31 +378,6 @@ fn a_write_of_no_parts_after_an_unseen_reset_is_reset() {
         assert_eq!(close(&mut server).await, Err(Error::Reset { remote }));
         let read = read(&mut server, &mut [0; 8]).await;
         assert_eq!(read, Err(Error::Reset { remote }));
-    });
-}
-
-/// After a short write, a write of no parts waits, as the next write of bytes does.
-#[test]
-#[cfg(target_os = "macos")]
-fn a_write_of_no_parts_waits_after_a_short_write() {
-    on_thread("net-none-short", || async {
-        let net = net();
-        let mut listener = listen(&net);
-        let mut config = connect_config(listener.local());
-        config.options.send_buffer_bytes = 1 << 14;
-        config.options.unsent_bytes_max = 1 << 20;
-        let mut client = net.connect(&config).await.expect("the listener accepts");
-        let _server = accept(&mut listener).await;
-        write(&mut client, &[&[7]]).await.expect("one byte");
-        let bytes = vec![7; 1 << 16];
-        let mut cx = Context::from_waker(Waker::noop());
-        loop {
-            let none = client.poll_write(&mut cx, &[]);
-            if write_once(&mut client, &bytes).is_pending() {
-                assert_eq!(none, Poll::Pending);
-                break;
-            }
-        }
     });
 }
 

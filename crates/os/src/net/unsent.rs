@@ -29,11 +29,11 @@ impl Bound {
     }
 
     /// Writes from `buffers` to `stream`, at most the bound less the bytes written
-    /// since the last wait. When those reach the bound, or the kernel takes fewer bytes
-    /// than given, it clears the write readiness, so the next write waits for the write
-    /// event, which honors the bound. The unsent bytes so stay at most twice the bound.
-    /// With `delayed`, XNU also posts the event under one segment, so they stay at most
-    /// the bound plus the larger of the bound and one segment.
+    /// since the last wait. When those reach the bound, it clears the write
+    /// readiness, so the next write waits for the write event, which honors the
+    /// bound. The unsent bytes so stay at most twice the bound. With `delayed`, XNU
+    /// also posts the event under one segment, so they stay at most the bound plus
+    /// the larger of the bound and one segment.
     pub(super) fn send(
         &mut self,
         stream: &TcpStream,
@@ -56,17 +56,15 @@ impl Bound {
             }
             _ => &buffers[..whole],
         };
-        let asked: usize = buffers.iter().map(|buffer| buffer.len()).sum();
         loop {
             ready!(stream.poll_write_ready(cx)).map_err(|e| errno(&e))?;
             let mut sent = Err(Errno::AGAIN);
             // `WouldBlock` from the closure clears the readiness, unless an event
-            // came during the write. A short write means a full send buffer, as
-            // Tokio takes it on Linux.
+            // came during the write.
             let _cleared = stream.try_io(Interest::WRITABLE, || {
                 sent = rustix::io::writev(stream, buffers);
                 match sent {
-                    Ok(n) if n == asked && self.written + n < self.max => Ok(()),
+                    Ok(n) if self.written + n < self.max => Ok(()),
                     _ => Err(io::ErrorKind::WouldBlock.into()),
                 }
             });

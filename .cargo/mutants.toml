@@ -75,8 +75,7 @@ exclude_re = [
   # `whole_parts_that_fill_the_unsent_bound_go_in_one_write`,
   # `small_writes_below_the_unsent_bound_wait_for_no_event`,
   # `a_write_waits_at_the_unsent_bound_not_the_send_buffer`,
-  # `a_write_of_no_parts_waits_at_the_unsent_bound`,
-  # `a_write_of_no_parts_waits_after_a_short_write`, and
+  # `a_write_of_no_parts_waits_at_the_unsent_bound`, and
   # `a_full_send_buffer_below_the_bound_makes_a_write_wait`.
   'crates/os/src/net/unsent\.rs:.*Bound::send',
   # Only a pool whose largest block is 1472 bytes tells `<` from `<=`. Block sizes are
