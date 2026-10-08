@@ -94,9 +94,10 @@ state on `main`.
   50 resets a second sent to each victim host, each smaller than the datagram that
   caused it. A sender that can use a peer's IP (it spoofs it, or it is behind the
   same NAT) takes that peer's resets, and the peer then ends at its idle timeout;
-  peers behind one NAT share 50 resets a second. Not confirmed: the server's first
-  1-RTT packet may carry 4 `NEW_CONNECTION_ID` frames, so a stranger gets 5 IDs or
-  more for each dial.
+  peers behind one NAT share 50 resets a second. A stranger gets up to 12 IDs for
+  each dial: noq-proto 1.3.0 issues the IDs when it reads the client's Initial,
+  before it reads the dialer's key, up to the smaller of 12 and the client's
+  `active_connection_id_limit`.
 - Open: #620 (a stop after the peer's reset gives the peer the stream's window twice,
   so a peer grows the connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
