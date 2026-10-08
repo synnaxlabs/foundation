@@ -4732,18 +4732,20 @@ How to read this record:
   mesh to the hub, makes the region required, unless #1660 and #1744 have already taken
   it out of `Config`. The long-term path takes it out of `Config`: the node keeps its
   membership in its data directory when it founds or joins, and reads it at each start.
-  With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last
-  shard has opened its buffer and before it takes the first session. A mesh that does
-  not open stops the node, and `Node::join` gives `Error::Mesh`, ranked with
-  `Error::Buffer` and below `Error::Transport`. Each `wire::Protocol::Mesh` stream of a
-  peer that proved a node key goes to `Mesh::serve`, which checks each message against
-  the region; the error of `serve` ends only its stream. A mesh stream of a client, or
-  of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
-  4 of #585). A mesh that stops does not stop the node until #1780, before PR 4 gives
-  the mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second
-  open path and a node that runs with no region before it; the key in `Region`, because
-  a node's identity is not region data, and PR 4 needs it with no region. Decided by
-  `laptop.architect-2` (2026-10-08 03:37 UTC):
+  With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last shard
+  has opened its buffer and before it takes the first session. Its directory is `mesh`
+  in the data directory (`mesh::Config::dir`), and shard 0 waits for `Mesh::ended`
+  before it drops `lock` (DATA DIRECTORY LOCK). A mesh that does not open stops the
+  node, and `Node::join` gives `Error::Mesh`, ranked with `Error::Buffer` and below
+  `Error::Transport`. Each `wire::Protocol::Mesh` stream of a peer that proved a node
+  key goes to `Mesh::serve`, which checks each message against the region; the error of
+  `serve` ends only its stream. A mesh stream of a client, or of a node with no region,
+  is rejected as NODE PORT says. Shard 0 sets no home yet (PR 4 of #585). A mesh that
+  stops does not stop the node until #1780, before PR 4 gives the mesh to the hub. Lost:
+  `Node::found(region)` at run time, which needs a second open path and a node that runs
+  with no region before it; the key in `Region`, because a node's identity is not region
+  data, and PR 4 needs it with no region. Decided by `laptop.architect-2` (2026-10-08
+  03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
