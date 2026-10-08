@@ -504,10 +504,12 @@ fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
     assert_eq!(removed(&nodes[&key(2)]), [false, true, false]);
 }
 
-// Node 2 leads {1, 2, 3}, adds node 4, then removes it. No `Start.voters` holds node
-// 4, so only the committed join holds it. From node 2's disk, a start at a commit
-// below the join holds nothing about node 4, a start at the join holds it as a
-// voter, and a start at the second leave holds it as removed.
+// Node 2 leads {1, 2, 3}, adds node 4, removes it, then adds it back. No
+// `Start.voters` holds node 4, so only the committed join holds it. From node 2's
+// disk, a start at a commit below the join holds nothing about node 4, a start at the
+// join holds it as a voter, a start at the second leave holds it as removed while the
+// entries past the commit make it a voter in force, and a start at the last leave
+// holds it as a voter again.
 #[test]
 fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
     let mut nodes: BTreeMap<node::Key, Raft> =
@@ -535,6 +537,10 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
     for id in 1..=4 {
         assert_eq!(removed(&nodes[&key(id)]), [false, true], "node {id}");
     }
+    propose(&mut nodes, &[1, 2, 3, 4]);
+    for id in 1..=4 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, false], "node {id}");
+    }
 
     let disk = committed.remove(&key(2)).unwrap();
     let at: Vec<u64> = disk
@@ -542,12 +548,13 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
         .filter(|entry| matches!(entry.data, Data::Voters(_)))
         .map(|entry| entry.at.index)
         .collect();
-    assert_eq!(at.len(), 4);
+    assert_eq!(at.len(), 6);
     let cases = [
         (0, false),
         (at[0] - 1, false),
         (at[1], false),
         (at[3], true),
+        (at[5], false),
     ];
     for (applied, want) in cases {
         let start = Start {
@@ -565,6 +572,7 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
             heartbeat_ticks: 1,
         };
         let raft = Raft::new(config, start).unwrap();
+        assert!(raft.voters().contains(key(4)), "applied {applied}");
         assert_eq!(removed(&raft), [false, want], "applied {applied}");
     }
 }
