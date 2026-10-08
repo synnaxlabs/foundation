@@ -1,6 +1,7 @@
 //! After a read that gives a whole long message, in one poll or over many, the
-//! receiver keeps a list of at most 64 chunks, not one sized by the message. The
-//! count covers each thread, so this binary has no test harness. The sim runs on one
+//! receiver keeps a list of at most 64 chunks, not one sized by the message, both
+//! before and after it reads the end of the stream. The count covers each thread, so
+//! this binary has no test harness. The sim runs on one
 //! thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -29,8 +30,9 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 const CLIENT: PrivateKey = PrivateKey([1; 32]);
 const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
-/// The most heap that the drop of the receiver gives back after the stream ends: a list
-/// of 64 chunks, since each slot is 32 bytes.
+/// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
+/// each slot is 32 bytes. After the end of the stream the drop gives back exactly
+/// this; before it, the drop also stops the stream, which allocates a few bytes.
 const KEPT_MAX: usize = 2 << 10;
 /// When the server reads after it accepts the stream, once the message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
@@ -53,7 +55,7 @@ struct Out {
     len: Option<usize>,
     /// The polls of the read that give `Pending`.
     pending: usize,
-    /// Whether the next read gives the end of the stream.
+    /// Whether the server read the end of the stream after the message.
     ended: bool,
     /// The net heap bytes that the drop of the receiver then gives back.
     kept: usize,
@@ -61,8 +63,11 @@ struct Out {
 
 fn main() {
     for reading in [Reading::Whole, Reading::Parts] {
-        for len in [100_000, 240_000, 1 << 18] {
-            let out = run(reading, len);
+        for (len, end) in [100_000, 240_000, 1 << 18]
+            .into_iter()
+            .flat_map(|len| [(len, false), (len, true)])
+        {
+            let out = run(reading, len, end);
             assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
             assert_eq!(
                 out.pending > 0,
@@ -70,14 +75,14 @@ fn main() {
                 "{reading:?}, {len} bytes: the read gives `Pending` {} times",
                 out.pending
             );
-            assert!(
-                out.ended,
-                "{reading:?}, {len} bytes: the stream ends after the message"
+            assert_eq!(
+                out.ended, end,
+                "{reading:?}, {len} bytes, end read {end}: the stream ends after the message"
             );
             assert!(
                 out.kept <= KEPT_MAX,
-                "{reading:?}, {len} bytes: the receiver keeps {} bytes after a whole \
-                 message",
+                "{reading:?}, {len} bytes, end read {end}: the receiver keeps {} bytes \
+                 after a whole message",
                 out.kept
             );
         }
@@ -85,14 +90,14 @@ fn main() {
 }
 
 /// The [`Out`] of the server's read of a message of `len` bytes in the way of
-/// `reading`.
-fn run(reading: Reading, len: usize) -> Out {
+/// `reading`, and of the end of the stream if `end`.
+fn run(reading: Reading, len: usize, end: bool) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
     let out = Arc::new(Mutex::new(Out::default()));
-    serve(&server, reading, Arc::clone(&out));
+    serve(&server, reading, end, Arc::clone(&out));
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
         let pool = Rc::clone(&config.pool);
@@ -114,8 +119,8 @@ fn run(reading: Reading, len: usize) -> Out {
 }
 
 /// Starts the server on `node`. It reads the message in the way of `reading`, then
-/// the end once it comes, drops the receiver, and puts the [`Out`] in `out`.
-fn serve(node: &Node, reading: Reading, out: Arc<Mutex<Out>>) {
+/// the end once it comes if `end`, drops the receiver, and puts the [`Out`] in `out`.
+fn serve(node: &Node, reading: Reading, end: bool, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -132,7 +137,7 @@ fn serve(node: &Node, reading: Reading, out: Arc<Mutex<Out>>) {
         }
         let (read, pending) = next(&mut receiver, &clock).await;
         let len = read.ok().flatten().map(|block| block.len());
-        let ended = matches!(next(&mut receiver, &clock).await.0, Ok(None));
+        let ended = end && matches!(next(&mut receiver, &clock).await.0, Ok(None));
         let before = ALLOCATOR.held();
         drop(receiver);
         let kept = before.saturating_sub(ALLOCATOR.held());
