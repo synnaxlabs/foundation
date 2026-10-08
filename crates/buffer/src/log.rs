@@ -949,7 +949,7 @@ mod tests {
     /// No call of `Logs` shows the drop, which only bounds memory, so the test
     /// reads the runs.
     #[test]
-    fn a_sync_of_a_path_drops_the_runs_that_a_trim_hid() {
+    fn a_record_that_adds_a_run_drops_the_runs_that_a_trim_hid() {
         let mut logs = three_records();
         logs.hide(8192);
         let all: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
@@ -970,7 +970,7 @@ mod tests {
         assert_eq!(
             other,
             [run(0, 0, 4096)],
-            "a path with no sync keeps its runs"
+            "a path with no later record keeps its runs"
         );
         logs.hide(20480);
         logs.sync(slot(1), &header(1, Path::Live, 11, 1, None), 20480)
