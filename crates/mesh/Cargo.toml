@@ -9,7 +9,6 @@ publish.workspace = true
 sim = []
 
 [dependencies]
-aws-lc-rs.workspace = true
 block = { path = "../block" }
 clock = { path = "../clock" }
 env = { path = "../env" }
