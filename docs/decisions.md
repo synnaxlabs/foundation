@@ -4081,10 +4081,10 @@ How to read this record:
   closes. The removal is not durable until `sync_dir` on its directory ends. A
   poisoned handle gives `Poisoned` and closes: a dropped rename can still move the
   file, so the path of the handle may be stale. A read handle panics. The caller is
-  `mesh::log`, which removes a sealed file and makes one at its path. Lost: a spare
-  name in `mesh` only, which adds a second kind of file to the directory of a log, a
-  sweep of it in `Log::open`, and a change to the `Stray` rule of MESH LOG.
-  Supersedes the "Lost: `File::remove`" sentence of
+  `mesh::log` (#1314), which removes a file with no record and later makes one at its
+  path (MESH LOG). Lost: a spare name in `mesh` only, which adds a second kind of
+  file to the directory of a log, a sweep of it in `Log::open`, and a change to the
+  `Stray` rule of MESH LOG. Supersedes the "Lost: `File::remove`" sentence of
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245.
   Decided by `laptop.architect-2`, #1604, 2026-10-07T20:24:12Z
   (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932).
