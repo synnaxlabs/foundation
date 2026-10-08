@@ -92,7 +92,7 @@ fn each_posix_constructor_prints_its_name_and_aborts() {
     }
 }
 
-/// Checks `shim.c` with `line` added after the line `after`, with the build of the
+/// Compiles `shim.c` with `line` added after the line `after`, with the build of the
 /// shim. Gives the compiler's errors, which are empty when it compiles. A warning is an
 /// error in the shim.
 fn check_shim(after: &str, line: &str) -> String {
@@ -121,7 +121,7 @@ fn check_shim(after: &str, line: &str) -> String {
     let source = format!("{}\n{line}{}", &text[..at], &text[at..]);
     let mut child = tool
         .to_command()
-        .args(["-fsyntax-only", "-x", "c", "-"])
+        .args(["-c", "-o", "/dev/null", "-x", "c", "-"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -140,6 +140,16 @@ fn check_shim(after: &str, line: &str) -> String {
 
 #[test]
 fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
+    let text = include_str!("shim.c");
+    let pragmas: Vec<_> = text.lines().filter(|l| l.starts_with("#pragma")).collect();
+    assert_eq!(
+        pragmas,
+        [
+            "#pragma GCC diagnostic push",
+            "#pragma GCC diagnostic ignored \"-Wunused-parameter\"",
+            "#pragma GCC diagnostic pop",
+        ]
+    );
     let headers = "#include <open62541/types.h>";
     assert_eq!(check_shim(headers, ""), "");
     let parameter = "int in_the_headers(int unused) { return 0; }";
@@ -149,6 +159,9 @@ fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
         "int in_the_headers(void) { int unused; return 0; }",
     );
     assert!(variable.contains("unused variable 'unused'"), "{variable}");
+    // GCC gives this one only when it compiles, not with `-fsyntax-only`.
+    let function = check_shim(headers, "static int in_the_headers(void) { return 0; }");
+    assert!(function.contains("unused-function"), "{function}");
     let body = check_shim(
         "#include <stdlib.h>",
         "int in_the_body(int unused) { return 0; }",
