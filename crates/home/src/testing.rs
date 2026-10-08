@@ -31,8 +31,8 @@ pub struct Env {
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
 /// earlier commit runs. A commit takes whole 4 KiB blocks (one for a frame, three for
-/// 64), and nothing frees the ring until #160, so a run fills it at 1023 one-frame
-/// commits.
+/// 64 frames), and nothing frees the ring until #160, so a run fills it at 1023
+/// one-frame commits.
 ///
 /// # Panics
 ///
@@ -166,6 +166,32 @@ mod tests {
         draft.set_count(0, 1);
         let outcomes = shard.write(writer, Label::Path(Route::Live), draft);
         outcomes.expect("the home takes it").to_vec()
+    }
+
+    #[test]
+    fn fills_the_ring_at_1023_one_frame_commits() {
+        let applied = run(
+            sim::node::Config::default(),
+            |_, mut shard, mut interner, now| async move {
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let mut stamp = now.nanos();
+                loop {
+                    let outcomes =
+                        write(&mut shard, writer, &set, Stamp::from_nanos(stamp));
+                    if !matches!(outcomes[..], [Outcome::Applied { .. }]) {
+                        assert!(
+                            matches!(outcomes[..], [Outcome::Lost { .. }]),
+                            "{outcomes:?}"
+                        );
+                        return stamp - now.nanos();
+                    }
+                    shard.committed().await.expect("commits");
+                    stamp += 1;
+                }
+            },
+        );
+
+        assert_eq!(applied, 1023);
     }
 
     #[test]
