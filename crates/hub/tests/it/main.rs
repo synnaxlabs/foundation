@@ -31,8 +31,11 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
+mod client;
 mod serve;
 
+/// The node key of the hub under test.
+const NODE: types::node::Key = types::node::Key::from_u128(1);
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
@@ -89,9 +92,15 @@ struct Test {
 }
 
 impl Test {
-    /// A hub on a new ring of `node` with `layout`, whose mesh clock does not run yet.
-    async fn new(node: sim::node::Node, tasks: Tasks, layout: buffer::Layout) -> Self {
-        let config = block::Config { budget: POOL };
+    /// A hub on a new ring of `node` with `layout` and a pool of `pool` bytes, whose
+    /// mesh clock does not run yet.
+    async fn new(
+        node: sim::node::Node,
+        tasks: Tasks,
+        layout: buffer::Layout,
+        pool: usize,
+    ) -> Self {
+        let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         let (unsynced, mesh) = clock::Clock::new(node.clock());
         let mut interner = Interner::new();
@@ -126,6 +135,9 @@ impl Test {
                 polls: Rc::clone(&polls),
                 paused: Rc::clone(&paused),
             }),
+            node: NODE,
+            time: mesh.clone(),
+            entropy: node.entropy(),
         });
         let channels: BTreeMap<_, _> = CHANNELS
             .into_iter()
@@ -299,7 +311,7 @@ fn unsynced_on<F>(
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let layout = buffer::Layout::new(area, body_max).expect("a ring");
-        main(Test::new(node, tasks, layout).await).await;
+        main(Test::new(node, tasks, layout, POOL).await).await;
     })
     .expect("the run ends");
 }
