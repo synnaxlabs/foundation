@@ -171,7 +171,7 @@
   block, "never edited by hand. Our change (PR 3, `UA_rng`) edits only release files"
   of https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. This
   text approved by `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069205640,
-  2026-10-08 21:16 UTC) and `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069607884,
+  2026-10-08 21:42 UTC) and `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793,
   2026-10-08 21:24 UTC).
