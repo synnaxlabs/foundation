@@ -354,9 +354,9 @@ async fn create_leader(node: &sim::node::Node, tasks: &Tasks) -> Mesh {
     mesh
 }
 
-// On a node that leads, the group holds a waker of a call only while the call waits
-// for the outcome of its entry. No call of `Mesh` shows that, so this test reads the
-// group.
+// This mesh has no session, so the group holds a waker of a call only while the call
+// waits for the outcome of its entry. No call of `Mesh` shows that, so this test
+// reads the group.
 #[test]
 fn a_call_that_waits_for_its_entry_gets_the_cause_when_the_group_stops() {
     solo(|node, tasks| async move {
@@ -963,6 +963,21 @@ async fn wait_for_session(mesh: &Mesh, clock: &Clock) {
     while !mesh.group.borrow().sessions.contains_key(&key(2)) {
         clock.sleep(Span::MILLISECOND).await;
     }
+}
+
+// Node 1 has a session to its leader, which does not check the home of a proposal.
+#[test]
+fn no_proposal_goes_to_the_leader_for_a_home_that_is_not_a_member() {
+    let call = |node: sim::node::Node, mesh: Mesh| async move {
+        wait_for_session(&mesh, &node.clock()).await;
+        mesh.set_home(INDEX, key(9)).await
+    };
+    let (set, early) = run(call, |mut leader| async move {
+        let early = leader.proposal_within(seconds(2)).await;
+        early.map(|(change, _)| change)
+    });
+    assert_eq!(early, None);
+    assert_eq!(set, Err(Error::NotMember(key(9))));
 }
 
 #[test]
