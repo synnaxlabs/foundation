@@ -7,6 +7,7 @@ mod connector;
 mod node_settings;
 mod openssh;
 mod placement;
+mod plan;
 mod private_key;
 mod retention;
 mod subject;
@@ -20,6 +21,8 @@ use document::{Block, Document, Label, Span, read};
 use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
+
+pub use plan::{Change, Plan, plan};
 
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
@@ -87,6 +90,15 @@ pub fn check(
     documents: &[Document],
     kinds: &Table,
 ) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+    checked(documents, kinds).map(|found| found.entries)
+}
+
+/// What [`check`] finds in `documents`, with the block of each entry and the writes of
+/// each connector, or the problems that `check` gives.
+fn checked<'a>(
+    documents: &'a [Document],
+    kinds: &'a Table,
+) -> Result<Found<'a>, Vec<Diagnostic>> {
     let alarms = private_key::alarms(documents);
     if !alarms.is_empty() {
         return Err(alarms);
@@ -100,6 +112,9 @@ pub fn check(
             .collect(),
         connectors: BTreeMap::new(),
         kinds,
+        blocks: BTreeMap::new(),
+        writers: Vec::new(),
+        nodes: Vec::new(),
     };
     for (name, label) in names(documents, Kind::Connector) {
         let lower = name.as_str().to_ascii_lowercase().into();
@@ -126,6 +141,7 @@ pub fn check(
                     definition,
                     label_span,
                 };
+                found.blocks.insert(key.clone(), block);
                 found.entries.insert(key, entry);
             }
         }
@@ -133,7 +149,7 @@ pub fn check(
             .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
     if found.diagnostics.is_empty() {
-        Ok(found.entries)
+        Ok(found)
     } else {
         Err(found.diagnostics)
     }
@@ -167,6 +183,23 @@ struct Found<'a> {
     connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
+    /// The block of each entry, by tree key.
+    blocks: BTreeMap<Name, &'a Block>,
+    /// Each connector whose kind accepts its config, in the order of the check.
+    writers: Vec<Writer>,
+    /// Each node that a checked `connector` or `placement` block names, with its span.
+    nodes: Vec<(Name, Option<Span>)>,
+}
+
+/// A connector, as the kind of its block checks it.
+#[derive(Debug)]
+struct Writer {
+    /// The node that runs it.
+    node: Name,
+    /// Where the block names the node.
+    at: Option<Span>,
+    /// The channels that it writes to the mesh.
+    writes: Vec<Name>,
 }
 
 /// A problem that is already in the diagnostics.
@@ -319,6 +352,11 @@ impl<'a> Found<'a> {
 /// The name of `block` in a message: "the `retention` block".
 fn of(block: &Block) -> String {
     format!("the `{}` block", block.keyword)
+}
+
+/// The span of the value of `key` in `block`.
+fn span(block: &Block, key: &str) -> Option<Span> {
+    block.body.attributes.get(key)?.value.span
 }
 
 #[cfg(test)]

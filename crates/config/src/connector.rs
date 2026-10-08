@@ -4,7 +4,7 @@ use document::{Block, Document, Map, read};
 use spec::connector::Connector;
 use spec::definition;
 
-use crate::{Definition, Found};
+use crate::{Definition, Found, Writer, span};
 
 /// The keys that `check` reads. The kind reads each other key and block.
 const KEYS: [&str; 2] = ["kind", "node"];
@@ -26,12 +26,24 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         }
     };
     let kind = kind.ok()?;
-    let at = block.body.attributes.get("kind").and_then(|a| a.value.span);
-    if let Err(diagnostics) = found.kinds.check(kind.as_str(), at, config.document()) {
-        found.diagnostics.extend(diagnostics);
-        return None;
-    }
-    let connector = Connector::new(kind, node.ok()?, config);
+    let at = span(block, "kind");
+    let checked = found.kinds.check(kind.as_str(), at, config.document());
+    let channels = match checked {
+        Ok(channels) => channels,
+        Err(diagnostics) => {
+            found.diagnostics.extend(diagnostics);
+            return None;
+        }
+    };
+    let node = node.ok()?;
+    let at = span(block, "node");
+    found.nodes.push((node.clone(), at));
+    found.writers.push(Writer {
+        node: node.clone(),
+        at,
+        writes: channels.writes,
+    });
+    let connector = Connector::new(kind, node, config);
     Some(Definition::Spec(definition::Definition::Connector(
         connector,
     )))

@@ -4469,10 +4469,10 @@ How to read this record:
   whose edges are names until `plan` gives each channel its key. `Definition::Spec`
   holds each other definition. Each edge must name a channel that a `channel` block of
   the Documents defines, or `check` gives `config.unknown-channel`, at the span of the
-  edge, in source order. An edge to a channel that only the stored spec has (X28) gives
-  it too, until #1082. Lost: `spec::definition::Definition<C = Channel>`, because `plan`
-  would then wrap each of the eight variants again to change one. Decided by
-  `laptop.architect-2` (#1152, 2026-10-07T11:17:44Z,
+  edge, in source order. An edge to a channel that only the stored spec has gives it
+  too, until open folders (X28) land. Lost: `spec::definition::Definition<C =
+  Channel>`, because `plan` would then wrap each of the eight variants again to change
+  one. Decided by `laptop.architect-2` (#1152, 2026-10-07T11:17:44Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
   2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
@@ -4524,6 +4524,36 @@ How to read this record:
   not have is `connector.unknown-kind` there. Decided by `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC).
+- **PLAN SURFACE (#1082, 2026-10-08)** `config::plan(documents, applied, chunks,
+  members, kinds)` gives a `config::Plan { base, changes, homes }`, or diagnostics.
+  `base` is the `spec::Pointer { version, root }` of the applied spec. `version` is 0
+  before the first apply, and one more at each apply. Each `config::Change { name,
+  old, new }` holds the tree key, the digest of the stored bytes, and the `Entry` of
+  the files. The plan holds no channel key (A4). `homes` gives the home of each index
+  that the stored spec has no index at. A missing or bad chunk is a panic, so `ops`
+  gets the whole tree first. A channel keeps the stored key at its name, and a new
+  name gets `Key::from_u128(n)`, which no stored v7 key can be. A definition changes
+  when its encoded bytes differ from the stored bytes: the result of a diff against a
+  provisional tree, with no tree built. A stored definition that no file holds is
+  removed (A2), except one whose label is reserved (FIRST ADMIN). An edge that `check`
+  cannot resolve stays `config.unknown-channel`. An edge to a channel of the wrong
+  kind is `config.wrong-channel`. `place` runs for each index, with the node of its
+  first writer: a connector whose `writes` holds the index or a channel on it. Its
+  `Unplaced` is `config.unplaced` at the label of the index, with each placement by
+  its label. `config.unknown-node` is at each node that a connector or a placement
+  names and that `members` does not hold, and the fix names a member that is equal to
+  it without case. `config.writer-nodes` is at the `node` of the first connector on a
+  second node that writes one index. The problems come in `Source` order, then in
+  source order. `config.connector-home` (X22) and `config.split-placement` (BQ10)
+  follow in a second PR of #1082. The region check and the region of each key (REGION
+  CHECK) come with #1029. Lost: a `Planned` with keys (A4), a home on each change, and
+  a `config::Error` for a lazy fetch of chunks. Decided by `laptop.architect-2`
+  (2026-10-07T15:17:11Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688, and
+  2026-10-08T06:24:09Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053787187). The
+  `version` doc and the `Hash` derive: `laptop.architect` (2026-10-08T06:35:18Z,
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6053976538).
 
 ### 1.12 Access, identity, and secrets
 
