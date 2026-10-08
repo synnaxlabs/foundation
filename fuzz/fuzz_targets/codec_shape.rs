@@ -4,7 +4,7 @@
 //! of a `Bytes` series, or `Error::Utf8` at the first sample that `str::from_utf8`
 //! refuses. A valid series decodes to samples that encode and decode unchanged.
 //!
-//! Input: the type that `fuzz::data_type` reads, then a little-endian `u16` sample
+//! Input: the type that `fuzz::codec::data_type` reads, then a little-endian `u16` sample
 //! count, then a little-endian `u16` length of `out` for a series that is not valid,
 //! then the encoded series.
 
@@ -15,7 +15,7 @@ use libfuzzer_sys::fuzz_target;
 use types::sample::{Sides, Type};
 
 fuzz_target!(|bytes: &[u8]| {
-    let Some((data_type, rest)) = fuzz::data_type(bytes) else {
+    let Some((data_type, rest)) = fuzz::codec::data_type(bytes) else {
         return;
     };
     let [a, b, c, d, series @ ..] = rest else {

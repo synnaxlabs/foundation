@@ -3,7 +3,7 @@
 //! unchanged, with zeros for the padding. An array or a matrix series encodes as the
 //! series of its elements.
 //!
-//! Input: the type that `fuzz::data_type` reads, then a little-endian `u16` count.
+//! Input: the type that `fuzz::codec::data_type` reads, then a little-endian `u16` count.
 //! For an array or a matrix, the rest, cut to whole samples, is the samples, and the
 //! count is used only when a sample has no bytes. For a list, `String`, or `Bytes`,
 //! one signed byte for each sample changes its end from the last, and the rest gives
@@ -19,7 +19,7 @@ use types::sample::{Scalar, Sides, Type};
 const PAD: u8 = 0xa5;
 
 fuzz_target!(|bytes: &[u8]| {
-    let Some((data_type, rest)) = fuzz::data_type(bytes) else {
+    let Some((data_type, rest)) = fuzz::codec::data_type(bytes) else {
         return;
     };
     let [low, high, rest @ ..] = rest else {
@@ -47,7 +47,7 @@ fuzz_target!(|bytes: &[u8]| {
         Type::String | Type::Bytes => {
             variable(data_type, Scalar::U8, u32::MAX, count, rest);
         }
-        Type::Scalar(_) => unreachable!("fuzz::data_type gives no scalar"),
+        Type::Scalar(_) => unreachable!("fuzz::codec::data_type gives no scalar"),
     }
 });
 

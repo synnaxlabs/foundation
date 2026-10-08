@@ -13,7 +13,7 @@ fuzz_target!(|bytes: &[u8]| {
     let [scalar, rest @ ..] = bytes else {
         return;
     };
-    let scalar = fuzz::scalar(*scalar);
+    let scalar = fuzz::codec::scalar(*scalar);
     let samples = &rest[..rest.len() - rest.len() % scalar.width()];
     let count = samples.len() / scalar.width();
     let data_type = Type::Scalar(scalar);
