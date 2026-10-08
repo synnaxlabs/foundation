@@ -23,7 +23,7 @@ config-hcl = { path = "../crates/config-hcl" }
 connector = { path = "../crates/connector" }
 connector-influx = { path = "../crates/connector-influx" }
 connector-modbus = { path = "../crates/connector-modbus" }
-connector-opcua = { path = "../crates/connector-opcua", features = ["open62541"] }
+connector-opcua = { path = "../crates/connector-opcua", features = ["sim"] }
 crc32c = "0.6.8"
 document = { path = "../crates/document" }
 env = { path = "../crates/env" }

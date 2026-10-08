@@ -2,12 +2,18 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
-use crate::ffi::{self, Bytes, Status};
+use env::rng::Rng;
+
+use crate::event::Loop;
+use crate::ffi::Bytes;
+use crate::ffi::Status;
+use crate::ffi::test as ffi;
 
 #[test]
 fn the_copy_names_a_status_code() {
     assert_eq!(Status(0).name(), "Good");
     assert_eq!(Status(0x8034_0000).name(), "BadNodeIdUnknown");
+    assert_eq!(format!("{:?}", Status(0x8034_0000)), "BadNodeIdUnknown");
 }
 
 #[test]
@@ -21,25 +27,29 @@ fn the_global_clocks_give_a_fixed_time() {
     assert_eq!((now, monotonic, offset), (0, 0, 0));
 }
 
-/// The constructors that abort.
-const REFUSED: [&str; 5] = [
+/// The constructors and the members of the event loop that abort.
+const REFUSED: [&str; 9] = [
     "UA_EventLoop_new_POSIX",
     "UA_ConnectionManager_new_POSIX_TCP",
     "UA_ConnectionManager_new_POSIX_UDP",
     "UA_ConnectionManager_new_POSIX_Ethernet",
     "UA_InterruptManager_new_POSIX",
+    "UA_EventLoop.stop",
+    "UA_EventLoop.free",
+    "UA_EventLoop.registerEventSource",
+    "UA_EventLoop.deregisterEventSource",
 ];
 
-/// The variable that names the constructor `call_refused` calls.
+/// The variable that names the call that `call_refused` makes.
 const CHILD: &str = "CONNECTOR_OPCUA_REFUSED";
 
-/// Calls the constructor that `CHILD` names, and does nothing when it is not set.
-/// `each_posix_constructor_prints_its_name_and_aborts` sets it in a child process.
+/// Makes the call that `CHILD` names, and does nothing when it is not set.
+/// `each_refused_call_prints_its_name_and_aborts` sets it in a child process.
 #[test]
 fn call_refused() {
     #[expect(
         clippy::disallowed_methods,
-        reason = "the parent test picks the constructor that its child process calls"
+        reason = "the parent test picks the call that its child process makes"
     )]
     let Ok(name) = std::env::var(CHILD) else {
         return;
@@ -69,13 +79,40 @@ fn call_refused() {
         "UA_InterruptManager_new_POSIX" => unsafe {
             ffi::UA_InterruptManager_new_POSIX(empty())
         },
-        _ => panic!("no POSIX constructor is named {name}"),
+        _ => call_member(&name),
     };
+}
+
+/// Calls the member of the event loop that `name` names.
+fn call_member(name: &str) -> ! {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let clock = sim.node(sim::node::Config::default()).clock();
+    let events = Loop::new(clock, &mut Rng::from_seed(0));
+    let (members, raw, none) = (events.members(), events.raw(), std::ptr::null_mut());
+    let status = match name {
+        "UA_EventLoop.stop" => {
+            // SAFETY: each member takes its own loop, and aborts before it reads more.
+            unsafe { (members.stop)(raw) };
+            Status::GOOD
+        }
+        // SAFETY: as above.
+        "UA_EventLoop.free" => Status(unsafe { (members.free)(raw) }),
+        "UA_EventLoop.registerEventSource" => {
+            // SAFETY: as above.
+            Status(unsafe { (members.register)(raw, none) })
+        }
+        "UA_EventLoop.deregisterEventSource" => {
+            // SAFETY: as above.
+            Status(unsafe { (members.deregister)(raw, none) })
+        }
+        _ => panic!("no refused call is named {name}"),
+    };
+    panic!("{name} gave {status:?}")
 }
 
 #[test]
 #[cfg(unix)]
-fn each_posix_constructor_prints_its_name_and_aborts() {
+fn each_refused_call_prints_its_name_and_aborts() {
     use std::os::unix::process::ExitStatusExt;
     const SIGABRT: i32 = 6;
     for name in REFUSED {

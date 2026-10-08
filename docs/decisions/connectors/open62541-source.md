@@ -148,3 +148,14 @@
   2026-10-08 19:13 UTC; the header:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
   2026-10-08 19:46 UTC).
+  The event loop of `connector-opcua` is a `UA_EventLoop` that `shim.c` fills and
+  `event::Loop` owns, on one thread. Its monotonic time is the clock of `env`.
+  `dateTime_now` gives that time counted from the Unix epoch, and the UTC offset is 0,
+  until #1992 gives it the wall time of the node through `hub`, in the PR of the first
+  connection with a security policy other than `None`. No connection that checks a
+  certificate runs before. Its drop runs the queued delayed callbacks in at most 64
+  passes, then aborts: a callback that queues itself at each pass is a defect. The
+  hidden module `bench`, behind the feature `sim`, gives the benchmark and the
+  allocation test a client on the loop. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
+  2026-10-08 19:05 UTC).
