@@ -4074,7 +4074,11 @@ How to read this record:
   2026-10-08 13:57 UTC) and `laptop.director`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
   2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260.
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260 and of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849
+  (`laptop.director`,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6064080980,
+  2026-10-08 16:10 UTC).
   Our change makes the random state `UA_rng` of `src/util/ua_util.c` one per thread
   (`UA_THREAD_LOCAL`), so a draw on one thread does not move the state of another.
   Decided by `laptop.architect-2`
