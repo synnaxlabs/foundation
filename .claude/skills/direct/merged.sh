@@ -20,6 +20,6 @@ while :; do
   now=$(list 2>/dev/null) || continue
   [ -n "$now" ] || continue
   # Compare only the first field: a title can name a PR that merged before.
-  echo "$now" | awk 'NR==FNR { s[$1]; next } !($1 in s)' "$seen" -
-  echo "$now" | cut -d' ' -f1 >> "$seen"
+  printf '%s\n' "$now" | awk 'NR==FNR { s[$1]; next } !($1 in s)' "$seen" -
+  printf '%s\n' "$now" | cut -d' ' -f1 >> "$seen"
 done
