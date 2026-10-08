@@ -1349,7 +1349,7 @@ mod tests {
             Type::List { element, max } => variable(state, count, element, max.min(5)),
             fixed => {
                 let width = fixed.width().expect("a fixed width");
-                elements(state, count * width, width.max(1))
+                elements(state, count * width, width)
             }
         }
     }

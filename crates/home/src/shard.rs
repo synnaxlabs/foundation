@@ -3954,9 +3954,8 @@ mod tests {
         );
     }
 
-    /// The raw values of 3 samples of each type at the slot after the index at slot
-    /// 2: a variable series is its ends, zeros to the start of the elements, then the
-    /// elements.
+    /// An index type, then each kind of type, with the raw values of 3 samples. A
+    /// variable series is its ends, zeros to the start of its elements, then them.
     fn every_type() -> [(Type, Vec<u8>); 7] {
         let le = |values: &[u32]| -> Vec<u8> {
             values
