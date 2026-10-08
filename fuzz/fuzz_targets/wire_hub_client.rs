@@ -81,8 +81,9 @@ fn response(response: &Response) -> Vec<u8> {
     out
 }
 
-/// The body of the first message, when it is a request or a response.
-fn first(message: &[u8]) -> Option<(Body, u64)> {
+/// Checks each decoder on `message`, and gives its body when it is a request or a
+/// response.
+fn fixed(message: &[u8]) -> Option<(Body, u64)> {
     if message.is_empty() {
         assert_eq!(Challenge::decode(message), Err(Error::Empty));
         assert_eq!(Signed::decode(message), Err(Error::Empty));
@@ -104,16 +105,20 @@ fn first(message: &[u8]) -> Option<(Body, u64)> {
     Some((body, length))
 }
 
-/// Each message after the first must be taken or refused as the rest of the body
-/// gives.
+/// Each decoder must read each message, and each message after the first must be
+/// taken or refused as the rest of the body of the first gives.
 fn read(bytes: &[u8]) {
     let mut messages = fuzz::messages(bytes);
-    let Some((mut body, length)) = messages.next().and_then(first) else {
+    let Some((mut body, length)) = messages.next().and_then(fixed) else {
+        for message in messages {
+            fixed(message);
+        }
         return;
     };
     let mut remain = usize::try_from(length).expect("the body fits");
     assert_eq!(body.remain(), remain, "the body has another length");
     for message in messages {
+        fixed(message);
         let len = message.len();
         let expected = if remain == 0 {
             Err(Error::Trailing)
