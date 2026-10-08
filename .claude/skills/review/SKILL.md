@@ -203,7 +203,7 @@ nothing checked again. So when round 1 led to fix commits:
    line `Text fixes:`. Each item gives the exact new text: an item that asks the author
    to write text is a finding. The author applies each with the `reviewer`'s words as
    given, in the PR title or body, or by an edit of the round comment that holds the
-   line, and needs no further round.
+   line and in the same line of the `Text fixes:` round, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge needs no round: its
