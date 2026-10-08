@@ -5921,22 +5921,32 @@ How to read this record:
   Measured on macOS (#1921): a create of a path with a trailing slash gives `ENOTDIR`
   for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a directory
   gives `EPERM`, not `EISDIR`. No code reads these codes.
-  Amended (2026-10-08T17:46:08Z, #1921): macOS applies `TCP_NOTSENT_LOWAT` only to
-  the write event, not to the write itself. So on macOS, `os` counts the bytes
-  written since its last wait. When the count reaches `unsent_bytes_max`, the next
-  write waits for the write event, which honors the bound. So the unsent bytes stay
-  at most twice the bound, with one wait per `unsent_bytes_max` bytes. On macOS with
-  `delayed`, XNU also posts the write event under one segment, so the unsent bytes
-  stay at most the bound plus the larger of the bound and one segment. Decided by
+  Amended (2026-10-08T17:46:08Z, #1921): macOS applies `TCP_NOTSENT_LOWAT` only to the
+  write event, not to the write itself. So on macOS, `os` counts the bytes written since
+  the count last reached the bound. When the count reaches `unsent_bytes_max`, the next
+  write waits for the write event, which honors the bound. So the unsent bytes stay at
+  most twice the bound, with one wait per `unsent_bytes_max` bytes. On macOS with
+  `delayed`, XNU also posts the write event under one segment, so the unsent bytes stay
+  at most the bound plus the larger of the bound and one segment. Decided by
   `laptop.architect-2` (2026-10-08T17:46:08Z:
-  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469; the
-  last two sentences, 2026-10-08T18:12:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469; the last
+  two sentences, 2026-10-08T18:12:38Z:
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
   Supersedes the second item of
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346
   (2026-10-08T17:20:09Z), and the last sentence of the record text of
   https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469
   (2026-10-08T17:46:08Z).
+  Amended (2026-10-08T19:21:24Z, #1977): a write of no bytes gives `Ok(0)` at once, with
+  no wait and no error, also after a reset or `poll_close`. It writes nothing, so it has
+  nothing to report; the next write of bytes, read, or close reports a reset or a close.
+  `os` and `sim` each return before any other step, so the two agree with no shared
+  logic. Lost: `Ok(0)` or the error that ended the stream, which needs a read of
+  `SO_ERROR` in `os` and the close and reset states in both drivers, for a call that no
+  caller makes; and a wait as for a write of bytes, which needs the kernel's unsent
+  count on each such call and is not exact on macOS. Decided by `laptop.architect-2`
+  (2026-10-08T19:21:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1977#issuecomment-6067346540).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
