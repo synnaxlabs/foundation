@@ -557,7 +557,9 @@ impl<'a> Left<'a> {
         buffer: &'b mut Vec<u8>,
     ) -> (Piece<'b>, Self) {
         if self.tail.is_empty() && self.head.zeros == 0 {
-            let (range, after) = self.run();
+            let range = self.head.range.clone();
+            let mut after = self.clone();
+            after.head.range.start = range.end;
             if range.len() > COPIED_MAX {
                 return (Piece::Slice(block.slice(range)), after);
             }
@@ -615,6 +617,11 @@ impl<'a> Left<'a> {
 ///
 /// When a range starts after its end or ends past the block.
 pub(super) fn size(parts: &[Part], bytes: usize) -> usize {
+    if let [Part { range, zeros: 0 }] = parts
+        && *range == (0..bytes)
+    {
+        return bytes;
+    }
     // When no sum can overflow, one pass with no branch per part. A range in the
     // block that starts after its end wraps its length past `bytes`.
     let bound = bytes.checked_add(usize::from(u8::MAX));
