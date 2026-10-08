@@ -1,8 +1,8 @@
 use std::slice;
 
+use document::Block;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::{Kind, Value};
-use document::{Block, Span};
 use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
@@ -12,13 +12,9 @@ use crate::{Definition, Found};
 
 const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
 const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
-const PRIVATE_KEY: Code = Code::new("config.private-key");
 const NO_PUBLIC_KEYS: Code = Code::new("config.no-public-keys");
 const DUPLICATE_PUBLIC_KEY: Code = Code::new("config.duplicate-public-key");
 const SUBJECT_IS_CONNECTOR: Code = Code::new("config.subject-is-connector");
-/// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, and a
-/// `.ppk` file of `PuTTYgen`.
-const PRIVATE_MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
 const KEYS: [&str; 1] = ["keys"];
 
 /// Checks a `subject` block and gives its subject.
@@ -63,7 +59,6 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
         Kind::List(items) => items.as_slice(),
         _ => slice::from_ref(value),
     };
-    no_private_key(value)?;
     let keys = items.iter().map(key).collect::<Result<_, _>>()?;
     Subject::new(keys).map_err(|error| {
         let (message, fix) = (error.to_string(), error.fix().into());
@@ -81,38 +76,6 @@ fn subject(value: &Value) -> Result<Subject, Diagnostic> {
             }
         }
     })
-}
-
-/// Refuses a value that holds a private key at any depth, in a string or a map key.
-/// The whole value is checked before any key is read, so a bad item before a private
-/// key does not hide the alarm.
-fn no_private_key(value: &Value) -> Result<(), Diagnostic> {
-    match &value.kind {
-        Kind::String(text) => no_private_text(text, value.span),
-        Kind::List(items) => items.iter().try_for_each(no_private_key),
-        Kind::Map(map) => map.iter().try_for_each(|item| {
-            no_private_text(&item.key, item.key_span)?;
-            no_private_key(&item.value)
-        }),
-        Kind::Call(call) => call.arguments.iter().try_for_each(no_private_key),
-        Kind::Bool(_) | Kind::Integer(_) | Kind::Float(_) | Kind::Reference(_) => {
-            Ok(())
-        }
-    }
-}
-
-fn no_private_text(text: &str, span: Option<Span>) -> Result<(), Diagnostic> {
-    if !PRIVATE_MARKS.iter().any(|mark| text.contains(mark)) {
-        return Ok(());
-    }
-    Err(Diagnostic::new(
-        PRIVATE_KEY,
-        span,
-        "the value is a private key, which must never be in a file".into(),
-        "Remove the private key from this file now, and use the one line of its \
-         `.pub` file"
-            .into(),
-    ))
 }
 
 /// Reads a public key, which is the line of an OpenSSH `.pub` file of an Ed25519 key.

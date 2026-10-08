@@ -7,6 +7,7 @@ mod connector;
 mod node_settings;
 mod openssh;
 mod placement;
+mod private_key;
 mod retention;
 mod subject;
 
@@ -68,7 +69,10 @@ pub struct Entry {
 ///
 /// # Errors
 ///
-/// Every problem in the Documents, in the order of `documents`, then in source order.
+/// A private key anywhere in the Documents gives only `config.private-key`, once for
+/// each string that holds one.
+/// Each other problem in the Documents, in the order of `documents`, then in source
+/// order.
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
@@ -83,6 +87,10 @@ pub fn check(
     documents: &[Document],
     kinds: &Table,
 ) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+    let alarms = private_key::alarms(documents);
+    if !alarms.is_empty() {
+        return Err(alarms);
+    }
     let mut found = Found {
         entries: BTreeMap::new(),
         diagnostics: Vec::new(),
