@@ -1877,15 +1877,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
   `send_parts` gives the carrier one slice of the block for each run of adjacent parts
   over 1452 bytes. It copies each stretch of shorter runs and zeros between them into
-  the connection's buffer, in one walk of its parts. A stretch of at most 1452 bytes goes
-  to noq from that buffer, and noq copies it in the same `write`. A longer one is copied
-  into a new buffer of its length, which noq keeps until the ACK. A partial write of it
-  keeps the rest and copies nothing again. The block's count changes once for each run
-  over 1452 bytes. A short run changes no count. The write reads the
-  caller's parts, and the stream keeps only the parts that the carrier did not take, the
-  first one cut at the first byte not taken, in a list that keeps its capacity. Lost: a
-  list of slices and stretches built for each message, because it costs each part on
-  each send. Decided by `laptop.architect-2` (#68, 2026-10-07 19:01 UTC:
+  the connection's buffer, in one walk of its parts. A stretch of at most 1452 bytes
+  goes to noq from that buffer, and noq copies it in the same `write`. A longer one is
+  copied into a new buffer of its length, which noq keeps until the ACK. A partial write
+  of it keeps the rest and copies nothing again. The block's count changes once for each
+  run over 1452 bytes. A short run changes no count. The write reads the caller's parts,
+  and the stream keeps only the parts that the carrier did not take, the first one cut
+  at the first byte not taken, in a list that keeps its capacity. Lost: a list of slices
+  and stretches built for each message, because it costs each part on each send. Decided
+  by `laptop.architect-2` (#68, 2026-10-07 19:01 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
   2026-10-07 20:44 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911). Lost for
@@ -1896,14 +1896,14 @@ How to read this record:
   source gives the 16 KiB; a walk that sizes the stretch, then a walk that copies it
   into a new buffer of its length, because the second walk costs more than the second
   copy (2.31x copy-then-send for 1000 ranges of 8 B); a copy into a new `Vec` as the
-  walk goes, because the `Vec` grows, or takes the rest of the message and noq holds
-  the extra capacity until the ACK; and a last long run that takes the block, because
-  it gave no time gain on box2 and adds a case. Decided by `laptop.architect-2` (#68,
+  walk goes, because the `Vec` grows, or takes the rest of the message and noq holds the
+  extra capacity until the ACK; and a last long run that takes the block, because it
+  gave no time gain on box2 and adds a case. Decided by `laptop.architect-2` (#68,
   2026-10-08 07:29 UTC, the count for each long run:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6054932643; 07:46
-  UTC, the long stretch:
-  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055243052; and
-  08:13 UTC, one walk:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6054932643; 07:46 UTC,
+  the long stretch:
+  https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055243052; and 08:13
+  UTC, one walk:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6055676016).
   `send` and `try_send` write one part, the whole block, through the same write. One
   whole part with no zeros skips the sum and the walk of the parts, and keeps the same
