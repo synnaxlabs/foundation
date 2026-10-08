@@ -3800,9 +3800,14 @@ How to read this record:
   each apply, the first one too, is checked against a key in the spec. Lost: the first
   apply from any local process (any local user could then take the node), and an
   admin public key given before the first start (a step before the first use). The
-  #1744 plan names the subject, its access policy, and the key file. Decided by the
-  person ("Yes, I approve."), relayed by `laptop.monitor` at 2026-10-08T02:43:43Z:
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981.
+  #1744 plan names the subject, its access policy, the key file, and how a first start
+  tells a new mesh from a join. Decided by the person ("Yes, I approve."), relayed by
+  `laptop.monitor` at 2026-10-08T02:43:43Z:
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
+  question was about a node whose spec is empty, so the scope to a node that starts a
+  new mesh, and the sentence on a node that joins, are decided by `laptop.architect`
+  (2026-10-08T02:57:01Z,
+  https://github.com/synnaxlabs/foundation/pull/1760#issuecomment-6051238643).
 
 ### 1.13 Operations, agents, and the factory
 
