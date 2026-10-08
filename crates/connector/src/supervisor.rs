@@ -76,9 +76,12 @@ impl Supervisor {
         } = &self.0;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while !cancel.cancelled() {
-            let ctx = Context::new(name.clone(), (), cancel.child(), &self.0);
+            let token = Ended(cancel.child());
+            let ctx = Context::new(name.clone(), (), token.0.clone(), &self.0);
             let start = clock.now();
-            match kinds.run(kind, config, ctx).map_err(Error::Config)?.await {
+            let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
+            drop(token);
+            match end {
                 Ok(()) => return Ok(()),
                 Err(error @ Error::Config(_)) => return Err(error),
                 // These reach the connector's status in #420.
@@ -93,12 +96,22 @@ impl Supervisor {
     }
 }
 
+/// A run's token, cancelled when the run returned or its future dropped.
+struct Ended(cancel::Token);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::future::poll_fn;
     use std::io::IoSlice;
     use std::net::SocketAddr;
+    use std::pin::pin;
     use std::sync::Mutex;
 
     use env::net::tcp;
@@ -523,5 +536,104 @@ mod tests {
             .expect("the run ends");
         result.expect("ok after the cancel");
         assert_eq!(*read.lock().expect("no panic under the lock"), b"hello");
+    }
+
+    /// A kind whose run spawns one task through its context. The task holds the
+    /// device until the run's cancel. The first run fails with a device error; each
+    /// run records how many tasks of earlier runs still hold the device at its start.
+    #[derive(Default)]
+    struct Spawner {
+        live: Arc<Mutex<u32>>,
+        seen: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl Kind for Spawner {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels::default())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let n = *self.live.lock().expect("no panic");
+            let first = {
+                let mut seen = self.seen.lock().expect("no panic");
+                seen.push(n);
+                seen.len() == 1
+            };
+            *self.live.lock().expect("no panic") += 1;
+            let live = Arc::clone(&self.live);
+            let token = ctx.cancel().clone();
+            ctx.tasks().spawn(async move {
+                token.wait().await;
+                *live.lock().expect("no panic") -= 1;
+            });
+            if first {
+                return Err(Error::Device("no reply".into()));
+            }
+            ctx.cancel().wait().await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stops_the_tasks_of_a_run_before_the_next_run() {
+        let seen = run_on(|node, tasks| async move {
+            let kind = Spawner::default();
+            let seen = Arc::clone(&kind.seen);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let token = Token::new();
+            let canceller = token.clone();
+            let clock = node.clock();
+            tasks.spawn(async move {
+                clock.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let name = "plant.spawner".parse().expect("a valid name");
+            supervisor
+                .run("spawner", name, &config(), &token)
+                .await
+                .expect("ok after the cancel");
+            seen.lock().expect("no panic").clone()
+        });
+        assert_eq!(seen, vec![0, 0], "the first run's task still runs");
+    }
+
+    #[test]
+    fn stops_the_tasks_of_a_run_when_its_future_drops() {
+        let live = run_on(|node, tasks| async move {
+            let kind = Spawner::default();
+            let live = Arc::clone(&kind.live);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let token = Token::new();
+            let name = "plant.spawner".parse().expect("a valid name");
+            let config = config();
+            let mut run = Box::pin(supervisor.run("spawner", name, &config, &token));
+            let clock = node.clock();
+            let mut later = pin!(clock.sleep(ms(5_000)));
+            poll_fn(|cx| {
+                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
+                later.as_mut().poll(cx)
+            })
+            .await;
+            let before = *live.lock().expect("no panic");
+            drop(run);
+            clock.sleep(ms(1)).await;
+            (before, *live.lock().expect("no panic"))
+        });
+        assert_eq!(live, (1, 0), "the second run's task outlives the drop");
     }
 }
