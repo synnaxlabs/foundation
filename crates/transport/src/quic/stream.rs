@@ -264,15 +264,24 @@ struct Share {
 /// compete for the send budget.
 const LATEST_COST: isize = 3;
 
-/// How the other class of the share competes while noq-proto takes bytes of a class.
+/// How a class of the share competes for the send budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Rival {
+enum Competition {
     /// It does not compete.
     Absent,
     /// It competes only because it was offered within one peer window.
     Recent,
     /// A claim of it holds room its stream took, or waits for room.
     Waiting,
+}
+
+/// The other class of the share, if `class` is in it.
+fn other(class: Class) -> Option<Class> {
+    match class {
+        Class::Latest => Some(Class::Complete),
+        Class::Complete => Some(Class::Latest),
+        Class::Command | Class::CatchUp => None,
+    }
 }
 
 impl Sender {
@@ -1011,28 +1020,25 @@ impl Share {
         class: Class,
         sending: &Budget,
     ) -> impl Iterator<Item = Class> + use<> {
-        let kept = match (class, self.rationed(sending)) {
-            (Class::Latest, Some(rationed @ Class::Complete))
-            | (Class::Complete, Some(rationed @ Class::Latest)) => {
-                sending.holds(rationed)
-            }
-            _ => false,
-        };
+        let rationed = self.rationed(sending);
+        let kept = rationed.is_some_and(|rationed| {
+            other(class) == Some(rationed) && sending.holds(rationed)
+        });
         let last = if kept { class } else { Class::CatchUp };
         self.order().through(last)
     }
 
     /// Counts `bytes` of a message of `class` that noq-proto took while the other
-    /// class of the share is `rival`. With no rival, the bytes move `owed` toward 0
-    /// and never past it, so a class alone makes no debt or credit.
-    fn took(&mut self, class: Class, bytes: usize, rival: Rival) {
-        if bytes == 0 {
+    /// class of the share competes as `rival`. With no rival, the bytes move `owed`
+    /// toward 0 and never past it, so a class alone makes no debt or credit.
+    fn took(&mut self, class: Class, bytes: usize, rival: Competition) {
+        let Some(other) = other(class).filter(|_| bytes > 0) else {
             return;
-        }
-        let (change, other) = match class {
-            Class::Latest => (LATEST_COST, Class::Complete),
-            Class::Complete => (-1, Class::Latest),
-            Class::Command | Class::CatchUp => return,
+        };
+        let change = if class == Class::Latest {
+            LATEST_COST
+        } else {
+            -1
         };
         self.offered(class);
         let recent = &mut self.recent[other.rank()];
@@ -1040,34 +1046,25 @@ impl Share {
         let bytes = isize::try_from(bytes).expect("invariant: a write fits in memory");
         let owed = self.owed + change * bytes;
         let owed = match rival {
-            Rival::Absent => owed.clamp(self.owed.min(0), self.owed.max(0)),
-            Rival::Recent | Rival::Waiting => owed,
+            Competition::Absent => owed.clamp(self.owed.min(0), self.owed.max(0)),
+            Competition::Recent | Competition::Waiting => owed,
         };
         let window = isize::try_from(self.window).unwrap_or(isize::MAX);
         let latest = LATEST_COST.saturating_mul(window);
         // `owed` rises only while `Complete` is the rival. One window of its own
         // bytes is `latest` for `Latest`, whether it waits or not.
         let ceiling = match rival {
-            Rival::Waiting => latest,
-            Rival::Absent | Rival::Recent => window.max(self.owed),
+            Competition::Waiting => latest,
+            Competition::Absent | Competition::Recent => window.max(self.owed),
         };
         self.owed = owed.clamp(-latest, ceiling);
     }
 
     /// How the other class of the share than `class` competes in `sending`.
-    fn rival(&self, class: Class, sending: &Budget) -> Rival {
-        let other = match class {
-            Class::Latest => Class::Complete,
-            Class::Complete => Class::Latest,
-            Class::Command | Class::CatchUp => return Rival::Absent,
-        };
-        if sending.competes(other) {
-            Rival::Waiting
-        } else if self.recent[other.rank()] > 0 {
-            Rival::Recent
-        } else {
-            Rival::Absent
-        }
+    fn rival(&self, class: Class, sending: &Budget) -> Competition {
+        other(class).map_or(Competition::Absent, |other| {
+            self.competition(other, sending)
+        })
     }
 
     /// Counts `class` as competing until noq-proto takes one peer window of the
@@ -1078,10 +1075,21 @@ impl Share {
         }
     }
 
+    /// How `class` competes in `sending`.
+    fn competition(&self, class: Class, sending: &Budget) -> Competition {
+        if sending.competes(class) {
+            Competition::Waiting
+        } else if self.recent[class.rank()] > 0 {
+            Competition::Recent
+        } else {
+            Competition::Absent
+        }
+    }
+
     /// Whether `class` competes: a claim of it holds room or waits in `sending`, or
     /// it was offered within one peer window.
     fn competes(&self, class: Class, sending: &Budget) -> bool {
-        sending.competes(class) || self.recent[class.rank()] > 0
+        self.competition(class, sending) != Competition::Absent
     }
 }
 
@@ -3373,22 +3381,22 @@ mod tests {
         #[test]
         fn complete_alone_pays_what_it_is_owed_and_gains_no_credit() {
             let mut share = Share::new(1 << 20);
-            share.took(Class::Latest, 100, Rival::Waiting);
-            share.took(Class::Complete, 299, Rival::Absent);
+            share.took(Class::Latest, 100, Competition::Waiting);
+            share.took(Class::Complete, 299, Competition::Absent);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
-            share.took(Class::Complete, 1, Rival::Absent);
+            share.took(Class::Complete, 1, Competition::Absent);
             assert_eq!(share.order(), Order::RANK);
-            share.took(Class::Complete, 50, Rival::Absent);
+            share.took(Class::Complete, 50, Competition::Absent);
             assert_eq!(share.owed, 0);
         }
 
         #[test]
         fn latest_alone_spends_its_credit_and_makes_no_debt() {
             let mut share = Share::new(1 << 20);
-            share.took(Class::Complete, 300, Rival::Waiting);
-            share.took(Class::Latest, 99, Rival::Absent);
+            share.took(Class::Complete, 300, Competition::Waiting);
+            share.took(Class::Latest, 99, Competition::Absent);
             assert_eq!(share.owed, -3);
-            share.took(Class::Latest, 50, Rival::Absent);
+            share.took(Class::Latest, 50, Competition::Absent);
             assert_eq!(share.owed, 0);
             assert_eq!(share.order(), Order::RANK);
         }
@@ -3397,20 +3405,20 @@ mod tests {
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
                 let mut share = Share::new(100);
-                share.took(Class::Latest, latest, Rival::Waiting);
-                share.took(Class::Complete, owed - 1, Rival::Waiting);
+                share.took(Class::Latest, latest, Competition::Waiting);
+                share.took(Class::Complete, owed - 1, Competition::Waiting);
                 assert_eq!(share.order(), Order::COMPLETE_FIRST, "{latest}");
-                share.took(Class::Complete, 1, Rival::Waiting);
+                share.took(Class::Complete, 1, Competition::Waiting);
                 assert_eq!(share.order(), Order::RANK, "{latest}");
             }
             let budget = Budget::new(10);
             for complete in [299, 300, 301] {
                 let mut share = Share::new(100);
-                share.took(Class::Complete, complete, Rival::Waiting);
-                share.took(Class::Latest, 99, Rival::Waiting);
+                share.took(Class::Complete, complete, Competition::Waiting);
+                share.took(Class::Latest, 99, Competition::Waiting);
                 let rationed = share.admission(&budget).rationed;
                 assert_eq!(rationed, Some(Class::Complete), "{complete}");
-                share.took(Class::Latest, 1, Rival::Waiting);
+                share.took(Class::Latest, 1, Competition::Waiting);
                 let rationed = share.admission(&budget).rationed;
                 assert_ne!(rationed, Some(Class::Complete), "{complete}");
             }
@@ -3419,16 +3427,16 @@ mod tests {
         #[test]
         fn a_class_that_does_not_wait_gains_no_credit_past_one_window_of_its_own() {
             let mut share = Share::new(99);
-            share.took(Class::Latest, 32, Rival::Recent);
+            share.took(Class::Latest, 32, Competition::Recent);
             assert_eq!(share.owed, 96);
-            share.took(Class::Latest, 2, Rival::Recent);
+            share.took(Class::Latest, 2, Competition::Recent);
             assert_eq!(share.owed, 99);
-            share.took(Class::Latest, 50, Rival::Waiting);
-            share.took(Class::Latest, 1, Rival::Recent);
+            share.took(Class::Latest, 50, Competition::Waiting);
+            share.took(Class::Latest, 1, Competition::Recent);
             assert_eq!(share.owed, 249);
-            share.took(Class::Complete, 1, Rival::Recent);
+            share.took(Class::Complete, 1, Competition::Recent);
             assert_eq!(share.owed, 248);
-            share.took(Class::Complete, 600, Rival::Recent);
+            share.took(Class::Complete, 600, Competition::Recent);
             assert_eq!(share.owed, -297);
         }
 
@@ -3436,28 +3444,28 @@ mod tests {
         fn the_rival_is_how_the_other_class_competes() {
             let mut budget = Budget::new(10);
             let mut share = Share::new(100);
-            assert_eq!(share.rival(Class::Latest, &budget), Rival::Absent);
+            assert_eq!(share.rival(Class::Latest, &budget), Competition::Absent);
             share.offered(Class::Complete);
-            assert_eq!(share.rival(Class::Latest, &budget), Rival::Recent);
-            assert_eq!(share.rival(Class::Complete, &budget), Rival::Absent);
+            assert_eq!(share.rival(Class::Latest, &budget), Competition::Recent);
+            assert_eq!(share.rival(Class::Complete, &budget), Competition::Absent);
             let [mut complete] = claims(Class::Complete);
             assert!(budget.charge(stream(0), 5, &mut complete, Order::RANK.into()));
-            assert_eq!(share.rival(Class::Latest, &budget), Rival::Waiting);
+            assert_eq!(share.rival(Class::Latest, &budget), Competition::Waiting);
             share.offered(Class::Latest);
-            assert_eq!(share.rival(Class::Command, &budget), Rival::Absent);
-            assert_eq!(share.rival(Class::CatchUp, &budget), Rival::Absent);
+            assert_eq!(share.rival(Class::Command, &budget), Competition::Absent);
+            assert_eq!(share.rival(Class::CatchUp, &budget), Competition::Absent);
         }
 
         #[test]
         fn a_class_competes_until_the_other_sends_one_peer_window() {
             let mut share = Share::new(100);
             let budget = Budget::new(10);
-            share.took(Class::Latest, 0, Rival::Absent);
+            share.took(Class::Latest, 0, Competition::Absent);
             assert!(!share.competes(Class::Latest, &budget));
             share.offered(Class::Latest);
-            share.took(Class::Complete, 99, Rival::Absent);
+            share.took(Class::Complete, 99, Competition::Absent);
             assert!(share.competes(Class::Latest, &budget));
-            share.took(Class::Complete, 1, Rival::Absent);
+            share.took(Class::Complete, 1, Competition::Absent);
             assert!(!share.competes(Class::Latest, &budget));
             assert!(share.competes(Class::Complete, &budget));
             share.offered(Class::Command);
@@ -3485,11 +3493,11 @@ mod tests {
         #[test]
         fn latest_owes_three_bytes_of_complete_for_each_of_its_own() {
             let mut share = Share::new(1 << 20);
-            share.took(Class::Latest, 10, Rival::Waiting);
+            share.took(Class::Latest, 10, Competition::Waiting);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
-            share.took(Class::Complete, 29, Rival::Waiting);
+            share.took(Class::Complete, 29, Competition::Waiting);
             assert_eq!(share.order(), Order::COMPLETE_FIRST);
-            share.took(Class::Complete, 1, Rival::Waiting);
+            share.took(Class::Complete, 1, Competition::Waiting);
             assert_eq!(share.order(), Order::RANK);
         }
 
@@ -3527,8 +3535,8 @@ mod tests {
         #[test]
         fn other_classes_owe_nothing() {
             let mut share = Share::new(1 << 20);
-            share.took(Class::Command, 10, Rival::Waiting);
-            share.took(Class::CatchUp, 10, Rival::Waiting);
+            share.took(Class::Command, 10, Competition::Waiting);
+            share.took(Class::CatchUp, 10, Competition::Waiting);
             assert_eq!(share.owed, 0);
         }
 
@@ -3542,16 +3550,16 @@ mod tests {
                 let max = isize::try_from(WRITE_MAX).expect("fits");
                 for (writer, bytes) in history {
                     match writer {
-                        0 => share.took(Class::Latest, bytes, Rival::Absent),
-                        1 => share.took(Class::Complete, bytes, Rival::Absent),
-                        _ => share.took(first(&share), bytes, Rival::Waiting),
+                        0 => share.took(Class::Latest, bytes, Competition::Absent),
+                        1 => share.took(Class::Complete, bytes, Competition::Absent),
+                        _ => share.took(first(&share), bytes, Competition::Waiting),
                     }
                     prop_assert!(-max < share.owed && share.owed <= 3 * max);
                 }
                 let mut took = [0; 4];
                 for bytes in run {
                     let class = first(&share);
-                    share.took(class, bytes, Rival::Waiting);
+                    share.took(class, bytes, Competition::Waiting);
                     took[class.rank()] += bytes;
                 }
                 let [_, latest, complete, _] = took;
