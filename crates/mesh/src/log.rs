@@ -2694,6 +2694,19 @@ mod tests {
     }
 
     #[test]
+    fn opens_an_empty_log_0_before_an_empty_last_file() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            drop(open(&node).await.unwrap());
+            let mode = Mode::Create { len: SEGMENT };
+            drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
+    }
+
+    #[test]
     fn gives_the_version_error_for_a_record_of_another_version_past_next() {
         let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
