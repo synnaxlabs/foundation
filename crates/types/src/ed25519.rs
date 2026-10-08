@@ -95,6 +95,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::common::bytes;
 
     /// Each encoding of a point of small order: each y of the list, with either sign
     /// of x.
@@ -114,15 +115,6 @@ mod tests {
         "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
         "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
     ];
-
-    fn bytes(hex: &str) -> [u8; 32] {
-        let mut bytes = [0; 32];
-        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
-            let pair = std::str::from_utf8(pair).unwrap();
-            *byte = u8::from_str_radix(pair, 16).unwrap();
-        }
-        bytes
-    }
 
     #[test]
     fn refuses_each_encoding_of_a_point_of_small_order() {

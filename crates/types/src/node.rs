@@ -112,15 +112,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-
-    fn bytes(hex: &str) -> [u8; 32] {
-        let mut bytes = [0; 32];
-        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
-            let pair = std::str::from_utf8(pair).unwrap();
-            *byte = u8::from_str_radix(pair, 16).unwrap();
-        }
-        bytes
-    }
+    use crate::common::bytes;
 
     /// p - 1, little-endian.
     fn p_minus_one() -> [u8; 32] {

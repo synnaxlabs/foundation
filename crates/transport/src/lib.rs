@@ -67,7 +67,6 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
 use types::ed25519::PublicKey;
-
 use types::node::PrivateKey;
 use types::time::Span;
 
