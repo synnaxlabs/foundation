@@ -134,9 +134,6 @@ impl Table {
             }
             Err(error) => entry.session.open().ok_or(error),
         };
-        if result.is_err() {
-            self.nodes.remove(&node);
-        }
         attempt.end(result);
     }
 
@@ -516,10 +513,16 @@ mod tests {
             for _ in 1..20 {
                 drop(transport.accept().await.expect("a session"));
             }
+            // Only the count shows a prune that keeps the ended entries.
             assert_eq!(transport.table.borrow().nodes.len(), 7);
+            let Peer::Node(peer) = held.peer() else {
+                panic!("a node dialed the held session");
+            };
+            let again = transport.dial(peer, &[]).await;
+            again.expect("the held session").close(Code(1));
             let dialed = transport.dial(other, &[]).await;
             assert_eq!(dialed.err(), Some(failed));
-            held.close(Code(1));
+            assert_eq!(held.closed().await, Error::Closed { code: Code(1) });
             linger(&node).await;
         });
         testing::shard(&client, CLIENT, move |config, node| async move {

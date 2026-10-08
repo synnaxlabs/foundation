@@ -5559,7 +5559,8 @@ mod tests {
         });
     }
 
-    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
+    /// The drop of the last mesh stops each wait for a dial, and `ended` does not wait
+    /// for the dial.
     #[test]
     fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
         for seed in 0..32 {

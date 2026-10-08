@@ -1,4 +1,4 @@
-- **ONE SESSION PER PEER (#1363, 2026-10-08)** Each `Transport` keeps one session to
+- **ONE SESSION PER PEER (#1363, 2026-10-07)** Each `Transport` keeps one session to
   each node, shared by every caller. `Transport::dial` gives the open one, from a dial
   or from the peer, and dials only when it has none. `accept` also gives each session
   that a dial made. No public item is new.
@@ -14,17 +14,18 @@
   3. `accept` gives every session to a node. STREAM DISPATCH runs one dispatcher per
      session, and the peer opens streams on a dialed session too, so `node` must get
      it. The node admits a dialed session as it admits an accepted one.
-  4. Two sessions to one peer. When one node dialed both, the newer wins. When each node
-     dialed one, the one that the lower key dialed wins. The higher node takes the lower
-     peer's session at once, and stops or closes its own. The lower node holds the
-     higher peer's session (not in the table, not given to `accept`) while its own dial
-     runs, or until the peer acknowledges a ping sent after the higher session arrived.
-     Its own completes or answers: it closes the held one. Its own fails or ends: the
-     held one wins, and goes to the waiters and to `accept`. The loser closes with
-     `Code(0)`. A restarted peer answers a ping on an old session with a stateless
-     reset (`cid::Issuer`), so the old session ends within one round trip. The second
-     PR of #1363 builds this rule. Until then, a newer session does not replace the
-     open one in the table.
+  4. Two sessions to one peer. A node dials only when it has no open session to the
+     peer. When one node dialed both, the newer wins. When each node dialed one, the
+     one that the lower key dialed wins. The higher node takes the lower peer's session
+     at once, and stops or closes its own. The lower node holds the higher peer's
+     session (not in the table, not given to `accept`; its streams wait) while its own
+     dial runs, or until the peer acknowledges a ping sent after the higher session
+     arrived. Its own completes or answers: it closes the held one. Its own fails or
+     ends: the held one wins, and goes to the waiters and to `accept`. The loser closes
+     with `Code(0)`. A restarted peer answers a ping on an old session with a
+     stateless reset (`cid::Issuer`), so the old session ends within one round trip.
+     The second PR of #1363 builds this rule. Until then, a newer session does not
+     replace the open one in the table.
   5. Clients. A client session never enters the table, and `dial` never gives one. Two
      sessions from one client both stay open.
   6. Shards. The table is per `Transport`, so per shard. Until #77, a node runs one
@@ -37,5 +38,5 @@
   wins (the two nodes can see the two sessions complete in different orders and close
   both, again and again), keep both (the cost that PROTOCOL HEADER rejected), and a
   start number in the hello (a wire change, and the ping gives the same result within
-  one round trip). Decided by architect-2 (#1363):
+  one round trip). Decided by `laptop.architect-2` at 2026-10-07T12:00:38Z:
   https://github.com/synnaxlabs/foundation/issues/1363#issuecomment-6037453233.

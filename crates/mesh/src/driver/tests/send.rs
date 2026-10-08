@@ -527,7 +527,7 @@ fn assert_ends<M: Future<Output = ()> + 'static>(
 }
 
 /// Asserts that each task that sends ended, also the task of node 3, which waits in
-/// a dial: only the test holds `transport`, so only those tasks can end the session.
+/// a dial: only the test holds `transport`.
 async fn assert_ended(clock: &Clock, transport: Rc<Transport>) {
     clock.sleep(Span::MILLISECOND).await;
     assert_eq!(Rc::strong_count(&transport), 1, "a task that sends runs");
