@@ -44,6 +44,23 @@ impl Listener {
             options: config.options,
         })
     }
+
+    /// A stream the kernel accepted from `peer`, with the options of the listener.
+    fn accepted(
+        &self,
+        stream: std::net::TcpStream,
+        peer: SocketAddr,
+    ) -> Result<Stream, Error> {
+        let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
+        Stream::new(
+            stream,
+            canonical(local),
+            canonical(peer),
+            &self.options,
+            None,
+        )
+        .map_err(io_error)
+    }
 }
 
 /// `EADDRINUSE` on `local` is `AddressInUse`.
@@ -83,17 +100,6 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
-/// A stream the kernel accepted from `peer`, with `options` set.
-fn accepted(
-    stream: std::net::TcpStream,
-    peer: SocketAddr,
-    options: &tcp::Options,
-) -> Result<Stream, Error> {
-    let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    Stream::new(stream, canonical(local), canonical(peer), options, None)
-        .map_err(io_error)
-}
-
 impl listener::Driver for Listener {
     fn local(&self) -> SocketAddr {
         self.local
@@ -110,7 +116,7 @@ impl listener::Driver for Listener {
         let (stream, peer) =
             ready!(listener.poll_accept(cx)).map_err(|e| io_error(errno(&e)))?;
         let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
-        let stream = accepted(stream, peer, &self.options)?;
+        let stream = self.accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
 }
@@ -179,8 +185,8 @@ mod tests {
         let listener = Listener::listen(&config).unwrap();
         let _client =
             std::net::TcpStream::connect(listener::Driver::local(&listener)).unwrap();
-        // The test accepts on the descriptor, to read the options of the socket
-        // before `accepted` sets them.
+        // The test accepts on the descriptor, so a copy of it reads the options that
+        // `accepted` sets.
         let fd = listener.socket.fd().unwrap();
         // macOS can queue the connection after `connect` returns.
         rustix::fs::fcntl_setfl(fd, OFlags::empty()).unwrap();
@@ -189,7 +195,7 @@ mod tests {
         // A copy of the descriptor sees the options of the socket.
         let accepted = rustix::io::dup(&fd).unwrap();
         let peer = peer.try_into().unwrap();
-        let _stream = super::accepted(fd.into(), peer, &options()).unwrap();
+        let _stream = listener.accepted(fd.into(), peer).unwrap();
         let kept = super::super::tests::kept;
         let sent = sockopt::socket_send_buffer_size(&accepted).unwrap();
         if cfg!(target_os = "macos") {
