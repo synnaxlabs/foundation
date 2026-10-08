@@ -155,7 +155,9 @@ state on `main`.
   answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
-  placement. Not built (`spec`).
+  placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature, and
+  the leader proposes one that any voter forwards with the holders it names. So any
+  voter can move the spec pointer to any root, with chunks that no voter holds.
 - `raft` does not check the sender of a request, by decision: the caller authenticates
   the sender and decides which nodes may send (RAFT SURFACE). `Mesh::receive` refuses a
   message whose sender is not the peer that holds the stream (`Error::Spoofed`). `node`
@@ -302,7 +304,7 @@ state on `main`.
 
 - `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
   and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
-  Fuzzed: `codec_series`, `codec_encoder`.
+  Fuzzed: `codec_series`, `codec_encoder`, `codec_string`.
 
 ## Secrets
 
@@ -370,6 +372,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
+| `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
 | `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |

@@ -51,6 +51,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "codec_string"
+path = "fuzz_targets/codec_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "codec_series"
 path = "fuzz_targets/codec_series.rs"
 test = false
