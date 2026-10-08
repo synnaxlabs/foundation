@@ -3330,11 +3330,11 @@ How to read this record:
   key it holds, in a `Vec` sorted by key, so many sparse keys cost more: 255 keys, each
   set by every 255th point, take about 24 bytes a point, and about 29 when writes split
   each chunk into two halves near half full, as each half keeps a copy of each column.
-  `tests/memory.rs` bounds 22 a point for one field, for 63 sparse keys, for appends
-  newest first, for writes that split chunks, also with 63 and 65 sparse keys, and for
-  one point of 255 fields among points of one field, and 32 for 255 sparse keys, for
-  257 and 255 sparse keys with writes that split chunks, and for 1000 series of 200
-  points.
+  `tests/memory.rs` bounds 19 a point for one field in time order or newest first, 22
+  for 8 and 63 sparse keys, for writes that split chunks, also with 63 and 65 sparse
+  keys, and for one point of 255 fields among points of one field, and 32 for 255
+  sparse keys, for 257 and 255 sparse keys with writes that split chunks, and for 1000
+  series of 200 points (#1577).
   `connector_influx::sim::serve(listener, tasks, store, database)` is its HTTP front, on
   `connector::http::sim::serve` (HTTP SIM SERVER). `POST /write?db=` (InfluxDB 1) and
   `POST /api/v2/write?bucket=` (InfluxDB 2 and 3) give 204 when the store takes each
