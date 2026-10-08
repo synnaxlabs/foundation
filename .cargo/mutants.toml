@@ -71,4 +71,8 @@ exclude_re = [
   # A pair or a refusal at or below the lowest floor only takes memory: no outcome
   # reads it.
   'crates/mesh/src/applied\.rs:.*replace Applied::trim with \(\)',
+  # `take` is 0 only for a placed series of 0 bytes, so of 0 samples, and the home
+  # makes no frame of a group with no samples. `sends_no_message_for_empty_series`
+  # pins the case. The other `>` of `Cut::next` stays mutated.
+  'crates/hub/src/serve\.rs:406:21: replace > with >= in Cut::next',
 ]
