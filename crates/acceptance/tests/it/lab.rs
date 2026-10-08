@@ -156,16 +156,29 @@ impl Lab {
         }
     }
 
-    /// Adds a node named `name` on a new simulated host. It starts at the next
-    /// [`Lab::run`].
+    /// Adds a node named `name` on a new simulated host, and writes its key there. It
+    /// starts at the next [`Lab::run`].
     pub(crate) fn start(&mut self, name: &str) -> Node {
         let byte = u8::try_from(self.members.len() + 1)
             .expect("lab failure: at most 255 nodes");
         let host = self.sim.node(sim::node::Config::default());
+        let (key, private_key) = (
+            types::node::Key::from_u128(u128::from(byte)),
+            PrivateKey([byte; 32]),
+        );
+        let created = self.sim.run_on(&host, {
+            let private_key = private_key.clone();
+            move |host, _| async move {
+                node::create_key(&host.files(), key, private_key).await
+            }
+        });
+        created
+            .expect("lab failure: the run ends")
+            .expect("lab failure: the key of a new host");
         self.members.push(Member {
             name: name.into(),
-            key: types::node::Key::from_u128(u128::from(byte)),
-            private_key: PrivateKey([byte; 32]),
+            key,
+            private_key,
             host,
             region: None,
             node: None,
@@ -196,8 +209,6 @@ impl Lab {
                 disk: types::byte::Size::GIBIBYTE,
                 net: host.net(),
                 listen: listen(host),
-                private_key: member.private_key.clone(),
-                key: member.key,
                 region: member.region.clone(),
             });
             member.node = Some(node);
