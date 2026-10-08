@@ -141,8 +141,8 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// - [`Error::Member`] when the region cannot hold one of `config.founding.members`,
-    ///   or two name one node.
+    /// - [`Error::Member`] when the region cannot hold one of
+    ///   `config.founding.members`, or two name one node.
     /// - [`Error::NotMember`] when `config.founding.members` lacks this node or a
     ///   voter.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
