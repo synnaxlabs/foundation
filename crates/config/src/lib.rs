@@ -1777,7 +1777,20 @@ mod tests {
                 Err(vec![refused(
                     "config.bad-action",
                     at(0, 15),
-                    "`erase` is not an action",
+                    "\"erase\" is not an action",
+                    ACTION_FIX,
+                )])
+            );
+        }
+
+        #[test]
+        fn quotes_a_word_that_is_not_an_action_so_that_it_cannot_name_another() {
+            assert_eq!(
+                check(&access(&attributes(string("x` or `read"), None))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "\"x` or `read\" is not an action",
                     ACTION_FIX,
                 )])
             );
@@ -1786,17 +1799,17 @@ mod tests {
         #[test]
         fn refuses_a_word_that_is_not_an_action() {
             let cases = [
-                (string("erase"), at(0, 15), "`erase` is not an action"),
-                (reference("Read"), at(0, 15), "`Read` is not an action"),
+                (string("erase"), at(0, 15), "\"erase\" is not an action"),
+                (reference("Read"), at(0, 15), "\"Read\" is not an action"),
                 (
                     reference("site_a.read"),
                     at(0, 15),
-                    "`site_a.read` is not an action",
+                    "\"site_a.read\" is not an action",
                 ),
                 (
                     list(vec![string("read"), string("erase")]),
                     at(0, 51),
-                    "`erase` is not an action",
+                    "\"erase\" is not an action",
                 ),
                 (
                     list(vec![Kind::Integer(1), string("erase")]),
