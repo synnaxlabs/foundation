@@ -2145,11 +2145,18 @@ How to read this record:
   `spec::region::tree`, and the change lists each chunk of the new tree. A tree of more
   than `CHUNKS_MAX` chunks gives `Error::Large { chunks, most }` and proposes nothing;
   #1741 decides how a change of more new chunks applies. A change that the state
-  refuses gives `Error::Stale { base, pointer }`. A call learns the refusal of its own
-  entry from `Applied`, which keeps the refusal of each applied entry above the lowest
-  open floor of a try. `Mesh::open` builds the root of `Config::founding` with
-  `spec::region::tree` too. Decided by `laptop.architect`, 2026-10-08T08:22:08Z
+  refuses gives `Error::Stale { base, pointer }`, except when `pointer` is the one the
+  call makes: a retry after a lost answer then gives that pointer. A call learns the
+  refusal of its own entry from `Applied`, which keeps the refusal of each applied
+  entry above the lowest open floor of a try. Decided by `laptop.architect`,
+  2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836).
+  The build with `spec::region::tree`, and the build of the root of
+  `Config::founding` with it in `Mesh::open`, decided by `laptop.architect`,
+  2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
+  Supersedes the build with `spec::tree::apply` from `tree::empty()`
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771).
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
   on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
