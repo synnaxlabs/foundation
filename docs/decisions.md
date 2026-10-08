@@ -2402,7 +2402,11 @@ How to read this record:
   by `laptop.architect`, 2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
   equal change of another call, 2026-10-08T11:46:44Z
-  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). The
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). Such a
+  call returns the pointer only when each home that it lists is the home of its index
+  in this node's state, and else gives `Stale`; after `Stale`, the caller reads the
+  homes from the state. Decided by `laptop.architect`, 2026-10-08T17:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958). The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
@@ -3135,11 +3139,15 @@ How to read this record:
   an entry, and a newer build can. An entry with no change (the first entry of a leader)
   is not a change of 0 bytes. A committed entry of a known kind whose body does not
   decode is `Refused::Body` on every node, and the group goes on, so one voter that
-  proposes bad bytes cannot halt the region. So a change to the body or to a cap of a
-  known kind (the 64 status entries of a `Join`) takes a new kind, which writers use
-  only after the format flag (C9d) allows it; a node of an older build stops at it and
-  never applies it differently. Decided by `laptop.architect` (2026-10-07T10:55:00Z):
-  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. Each later
+  proposes bad bytes cannot halt the region. From the first stable release (C9d), a
+  change to the body or to a cap of a known kind (the 64 status entries of a `Join`)
+  takes a new kind, which writers use only after the format flag (C9d) allows it; a
+  node of an older build stops at it and never applies it differently. Decided by
+  `laptop.architect` (2026-10-07T10:55:00Z):
+  https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036422521. The
+  start of the rule was changed by `laptop.architect` at 2026-10-08T17:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958): before
+  it, a format keeps version 1, so the homes of a spec change go in kind 4. Each later
   call gives `Error::Stopped` with the first cause. A watch gives the `Stopped` itself,
   also after each `Mesh` drops (MESH SURFACE). `member` has no error (#562): it gives
   the record that the node holds, also after a stop (approved by the architect,
