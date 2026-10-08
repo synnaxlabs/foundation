@@ -1672,7 +1672,18 @@ mod tests {
     fn solo<F: Future<Output = ()> + 'static>(
         body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
     ) {
-        let mut sim = Sim::new(sim::Config::default());
+        solo_at(0, body);
+    }
+
+    /// As [`solo`], with the run at `seed`.
+    fn solo_at<F: Future<Output = ()> + 'static>(
+        seed: u64,
+        body: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+    ) {
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
         let node = sim.node(sim::node::Config::default());
         sim.run_on(&node, body).unwrap();
     }
@@ -1754,33 +1765,31 @@ mod tests {
         }
     }
 
+    // Both proposals enter before the group's write, which then waits for a block.
+    // The group refuses a proposal that comes while it waits.
     #[test]
     fn each_proposal_returns_after_the_write_of_its_entry() {
-        solo(|node, tasks| async move {
-            let pool = small_pool();
-            let config = Config {
-                pool: Rc::clone(&pool),
-                ..config(&node, &tasks, 1, &[1], &[1])
-            };
-            let mesh = Mesh::start(config).await.unwrap();
-            let first = lead(&mesh, &node.clock(), home(1)).await;
-            let held = fill(&pool);
-            let results = Rc::new(RefCell::new(Vec::new()));
-            for id in [2, 3] {
-                let (other, results) = (mesh.clone(), Rc::clone(&results));
-                tasks.spawn(async move {
-                    let proposed = other.propose(home(id)).await;
-                    results.borrow_mut().push(proposed.unwrap());
-                });
-            }
-            node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-            assert_eq!(*results.borrow(), []);
-            drop(held);
-            node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
-            let mut positions = results.take();
-            positions.sort_by_key(|at| at.index);
-            assert_eq!(positions, [after(first, 1), after(first, 2)]);
-        });
+        for seed in 0..16 {
+            solo_at(seed, |node, tasks| async move {
+                let pool = small_pool();
+                let config = Config {
+                    pool: Rc::clone(&pool),
+                    ..config(&node, &tasks, 1, &[1], &[1])
+                };
+                let mesh = Mesh::start(config).await.unwrap();
+                let first = lead(&mesh, &node.clock(), home(1)).await;
+                let held = fill(&pool);
+                let mut calls = [2, 3].map(|id| Box::pin(mesh.propose(home(id))));
+                assert_eq!(poll_each(&mut calls).await, [Poll::Pending, Poll::Pending]);
+                node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
+                assert_eq!(poll_each(&mut calls).await, [Poll::Pending, Poll::Pending]);
+                drop(held);
+                node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
+                let positions =
+                    [after(first, 1), after(first, 2)].map(Ok).map(Poll::Ready);
+                assert_eq!(poll_each(&mut calls).await, positions);
+            });
+        }
     }
 
     // The second proposal comes while the write of the first one is in a disk call.
@@ -3522,16 +3531,25 @@ mod tests {
 
     #[test]
     fn a_lone_voter_leads_after_one_election_timeout() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-            let clock = node.clock();
-            let opened = clock.now();
-            lead(&mesh, &clock, home(1)).await;
-            let waited = clock.now() - opened;
-            // The timeout is 10 to 19 ticks, and `lead` proposes once per tick.
-            let timeout = seconds(1)..=seconds(2);
-            assert!(timeout.contains(&waited), "it led after {waited}");
-        });
+        for seed in 0..16 {
+            solo_at(seed, |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let clock = node.clock();
+                let opened = clock.now();
+                let follower = Error::Raft(raft::Error::NotLeader { leader: None });
+                let asked = loop {
+                    let asked = clock.now() - opened;
+                    match mesh.propose(home(1)).await {
+                        Ok(_) => break asked,
+                        Err(error) => assert_eq!(error, follower),
+                    }
+                    clock.sleep(TICK).await;
+                };
+                // The timeout is 10 to 19 ticks, and the loop asks once per tick.
+                let timeout = seconds(1)..=seconds(2);
+                assert!(timeout.contains(&asked), "it led at {asked}");
+            });
+        }
     }
 
     #[test]
