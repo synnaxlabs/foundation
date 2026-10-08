@@ -4826,19 +4826,19 @@ How to read this record:
   diagnostics. `base` is the `spec::Pointer { version, root }` of the applied spec.
   `version` is 0 before the first apply, and one more at each apply. `applied` is the
   definitions of the spec at `base`, by tree key, with no problem from
-  `spec::region::check`: the spec that a node uses (#1741). Each `config::plan::Change {
-  name, old, new }` holds the tree key, the digest of the stored bytes, and the `Entry`
-  of the files. The stored bytes are the `encode` of each applied definition: `decode`
-  takes only canonical bytes, so they are the bytes of the tree. The plan holds no
-  channel key (A4). `homes` gives the home of each index that the stored spec has no
-  index at. A channel keeps the stored key at its name, and a new name gets
-  `Key::from_u128(n)`, a key that no stored channel holds. A definition changes when its
-  encoded bytes differ from the stored bytes. A stored definition that no file holds is
-  removed (A2), except one whose label is reserved (FIRST ADMIN), or whose kind no block
-  of a file defines, such as `Time` and `Compression` until their blocks come: the files
-  cannot state such a kind, so they ask for no removal. Lost: remove it, and refuse the
-  plan, which stops each apply with no fix in the files (`laptop.architect`, #1886,
-  2026-10-08T15:22:47Z,
+  `spec::region::check`: the spec that a node uses (#1741).
+  `config::plan::Plan::changes` maps each tree key to a `config::plan::Change { old, new
+  }`, which holds the digest of the stored bytes and the `Entry` of the files. The
+  stored bytes are the `encode` of each applied definition: `decode` takes only
+  canonical bytes, so they are the bytes of the tree. The plan holds no channel key
+  (A4). `homes` gives the home of each index that the stored spec has no index at. A
+  channel keeps the stored key at its name, and a new name gets `Key::from_u128(n)`, a
+  key that no stored channel holds. A definition changes when its encoded bytes differ
+  from the stored bytes. A stored definition that no file holds is removed (A2), except
+  one whose label is reserved (FIRST ADMIN), or whose kind no block of a file defines,
+  such as `Time` and `Compression` until their blocks come: the files cannot state such
+  a kind, so they ask for no removal. Lost: remove it, and refuse the plan, which stops
+  each apply with no fix in the files (`laptop.architect`, #1886, 2026-10-08T15:22:47Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6063170391). An
   edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
   edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
@@ -5055,7 +5055,9 @@ How to read this record:
   Supersedes the `Mismatch` Display text and case list of
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684. Supersedes
   the rule "a change that `plan` cannot make from `applied`" of
-  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179.
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179. Supersedes
+  the `changes: Vec<Change>` field and `Change::name` of
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688.
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
