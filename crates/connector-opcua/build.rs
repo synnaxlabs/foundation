@@ -21,8 +21,7 @@ fn main() {
     if let Err(e) = compiler::check(&build.get_compiler()) {
         panic!("{e}");
     }
-    // The shim is our code, so its warnings are errors. It reads the headers of the
-    // copy as system headers, which keeps their warnings out.
+    // The shim is our code, so its warnings are errors.
     let mut shim = cc::Build::new();
     shim.warnings(true)
         .extra_warnings(true)
@@ -32,7 +31,7 @@ fn main() {
         if let Some(dir) = flag.strip_prefix("-I") {
             let dir = copy.join(dir);
             build.include(&dir);
-            shim.flag("-isystem").flag(dir);
+            shim.include(dir);
         } else {
             build.flag(flag);
             shim.flag(flag);
