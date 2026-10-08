@@ -20,7 +20,9 @@ only for tests and benchmarks, such as a counting `GlobalAlloc`, needs only rule
 
 1. **No heap allocation on the hot path.** Frames come from the shard's pool (alloc and
    free 1.1 ns, against 4.2 ns for mimalloc and 9.2 ns for macOS malloc). A counting
-   allocator in tests fails any hot-path allocation.
+   allocator in tests fails any hot-path allocation. One exception: STREAM WIRE
+   (`docs/decisions/transport/stream-wire.md`) copies a stretch of parts over 1452 bytes
+   into a new buffer, which noq keeps until the ACK.
 2. **One reference count per frame, never per series.** Fan-out is 18-26x cheaper. One
    shared `Arc` under 8 threads costs about 430 ns: no shared reference-count hot
    spots.
@@ -47,7 +49,8 @@ only for tests and benchmarks, such as a counting `GlobalAlloc`, needs only rule
 11. **Per-frame cost scales with interested readers, not with channel count.**
 12. **Claims are measured, never inferred.** Name the machine.
 13. **Memory is bounded everywhere.** A hard per-node pool budget. Pools commit pages
-    lazily and purge after idle time. Credits cap the blocks a reader can pin. A
+    lazily and purge after idle time. Credits cap the blocks a reader can pin, with the
+    exception that MEMORY BOUNDS (`docs/decisions/memory/memory-bounds.md`) states. A
     reader that falls behind is served from disk, never from pinned memory. A live
     write that finds the pool full records a gap instead of waiting.
 14. **Facts known per writer session (types, keys) are interned once** in the key set,
