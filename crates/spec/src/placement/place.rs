@@ -125,8 +125,8 @@ impl Unplaced {
                  with a connector"
             }
             Self::Overlap { .. } => {
-                "Move the node to `home` when it is the one node of the placement, else \
-                 remove it from the placement"
+                "Move the node to `home` when it is the one node of the placement, \
+                 else remove it from the placement"
             }
         }
     }
