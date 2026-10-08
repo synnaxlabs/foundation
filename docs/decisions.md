@@ -218,13 +218,20 @@ How to read this record:
   Supersedes, in
   https://github.com/synnaxlabs/foundation/issues/1341#issuecomment-6043244011, its
   `Count` for a side that is not a count, and the `Matrix` message and fix.
-  `channel::DataType` reads and writes `quality`, and otherwise the text of
-  `sample::Type`. A text that is neither is `channel::Error::DataType`, which holds the
+  `spec::data_type::DataType` reads and writes `quality`, and otherwise the text of
+  `sample::Type`. A text that is neither is `data_type::Error`, which holds the
   `sample::Error`; its message names `quality` when the text has no form, and its fix is
-  the cause's. Decided by `laptop.architect-2`: the mapping (2026-10-07T11:21:13Z,
-  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520), and
-  the payload, message, and fix (2026-10-08T00:47:39Z,
-  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6049836256).
+  the cause's. `channel::Error` holds only `Unit`, so each call gives only the errors it
+  can make. Decided by `laptop.architect-2`: the mapping (2026-10-07T11:21:13Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520), the
+  payload, message, and fix (2026-10-08T00:47:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6049836256), and the
+  module and error split (2026-10-08T01:32:46Z,
+  https://github.com/synnaxlabs/foundation/pull/1675#issuecomment-6050335363).
+  Supersedes change 2 of
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and the
+  `channel::Error::DataType` target of the mapping in
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036847520.
 - **S6** An index carries no placement, retention, or rate. Timestamps strictly
   increase per path. The clock error bound is a channel that the index points at with
   `error`.
@@ -4088,9 +4095,7 @@ How to read this record:
   Amended (2026-10-07, #1310): a call of `Files` whose future drops can still run. A
   remove left so removes what the path names when it ends. Count the room of a
   removed file as used until `sync_dir` on its directory ends, and while a handle holds
-  the file (#1301). Lost: `File::remove`, a remove through the write handle, which the
-  handle rule would cover with `Busy`; after #1441 it had no caller. Decided by
-  `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
+  the file (#1301). Decided by `laptop.architect-2`, #1310, 2026-10-07T14:55:45Z
   (https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245).
   Supersedes
   https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6035200491. The
@@ -4106,6 +4111,30 @@ How to read this record:
   sweep, and a caller already learns from its own header whether a file holds data.
   Decided by `laptop.architect-2` (2026-10-07T18:31:29Z):
   https://github.com/synnaxlabs/foundation/issues/1264#issuecomment-6044288692.
+  Amended (2026-10-07, #1604): `File::remove(self)` removes the file of a write handle,
+  then closes the handle as `File::close`. It removes the file of the handle, by device
+  and inode with no follow of a link, as FILE RENAME does: `NotFound { path }` when the
+  path no longer names it, and nothing is removed. Until the remove ends, also after a
+  drop of its future, a write open of the path gives `Busy`; on `os` the descriptor
+  closes after the unlink, so the lock holds across processes until then. The race
+  sentence of FILE RENAME holds for it too. A drop of the future can stop the remove
+  before it starts, as for `Files::remove`; the file then stays, and the handle closes.
+  The removal is not durable until `sync_dir` on its directory ends. A poisoned handle
+  gives `Poisoned` and closes: a dropped rename can still move the file, so the path of
+  the handle may be stale. A read handle panics. The caller is `mesh::log` (#1314),
+  which removes a file with no record and later makes one at its path (MESH LOG). Lost:
+  a spare name in `mesh` only, which adds a second kind of file to the directory of a
+  log, a sweep of it in `Log::open`, and a change to the `Stray` rule of MESH LOG.
+  Supersedes the "Lost: `File::remove`" sentence of
+  https://github.com/synnaxlabs/foundation/issues/1310#issuecomment-6040635245. Decided
+  by `laptop.architect-2`, #1604, 2026-10-07T20:24:12Z
+  (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932). The
+  caller sentence: `laptop.architect`, 2026-10-08T02:36:07Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051016964). The
+  sentence that a drop can stop the remove: `laptop.architect-2`, 2026-10-08T02:32:41Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
+  `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
+  (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
@@ -4755,7 +4784,7 @@ Storage classes used in the table:
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
-| Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
+| Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (`spec::data_type`, meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |
 | Struct template | Files. `config` expands it into one channel per field. Stored form is open (5.1) | People, `discover` | `config` (expand, plan), SDK code generation, `export` | `spec`, `config` |
 | Unit | Files, on a primitive channel or a struct field; Spec on the data channel. The unit table and standard codes are in the binary | People, `discover` | Unit checks at plan, sinks, reduction checks | `spec` (`spec::unit`) |

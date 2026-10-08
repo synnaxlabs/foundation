@@ -1,7 +1,8 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::value::{self, Value};
 use document::{Block, Span, read};
-use spec::channel::{Data, DataType, Edge, Error, Kind};
+use spec::channel::{Data, Edge, Error, Kind};
+use spec::data_type::DataType;
 use spec::unit::Unit;
 use types::name::Name;
 
@@ -108,7 +109,6 @@ fn data(found: &mut Found<'_>, block: &Block) -> Option<Kind<Name>> {
             ));
             None
         }
-        Err(Error::DataType(_)) => unreachable!("`Data::new` reads no data type"),
     }
 }
 
