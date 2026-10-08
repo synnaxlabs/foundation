@@ -237,12 +237,13 @@ impl Node {
         let cores = shards.cores().get();
         let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
+        let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let serve = Serve {
             interner: last,
             inbox,
             endpoint,
+            time: clock.clone(),
         };
-        let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let roles = Role::all(mesh, wall, first, serve, cores);
         let mut started = Vec::new();
         let mut error = None;
@@ -598,11 +599,13 @@ impl Open {
 }
 
 /// What shard 0 serves the node's tasks and port with: the interner, once the last
-/// shard has opened its buffer, the tasks given to the node, and its endpoint.
+/// shard has opened its buffer, the tasks given to the node, its endpoint, and the
+/// node's mesh time.
 struct Serve {
     interner: Take<Interner>,
     inbox: task::Inbox<task::Task>,
     endpoint: Endpoint,
+    time: clock::Reader,
 }
 
 /// What shard 0 opens the node's transport and mesh from, but its files, pool, and
@@ -700,6 +703,9 @@ impl Serve {
             home,
             interner,
             tasks: tasks.clone(),
+            node: self.endpoint.key,
+            time: self.time,
+            entropy: self.endpoint.entropy.clone(),
         });
         if let Some(region) = &self.endpoint.region {
             hub.define(region.definitions.iter().filter_map(|(name, definition)| {
