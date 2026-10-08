@@ -28,7 +28,8 @@ ones you cannot confirm. Post its verdict as one comment on the PR: your name li
 its rating and summary as given, then each problem you confirmed and each check that
 passed. Then act on each problem:
 
-- A defect: an issue with its `crate:` label.
+- A defect: an item of an open issue in its crate when its fix is a small change, else
+  an issue with its `crate:` label (`docs/coordination.md`, "Small changes").
 - A contract question: send it to the crate's architect.
 - A gap in the process that let it through: fix the rule at its cause (The bar).
 
@@ -76,6 +77,6 @@ approval.
   `/review` round finds nothing, at most once every two hours (12 a day). The monitor
   gets the person's approval, then marks it ready and queues it.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
-  merged PR, performance findings after merge, acceptance scenarios passing, and review
-  rounds per PR.
+  merged PR, performance findings after merge, acceptance scenarios passing, review
+  rounds per PR, and PRs of under 50 lines.
 - Never weaken an oracle or a review rule to gain speed.

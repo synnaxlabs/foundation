@@ -79,11 +79,13 @@ the commit you checked:
 
 - Label `model:fable` only an issue where a subtle mistake is expensive and hard to find
   later: consensus, crash recovery, lock-free code, wake protocols. Never a whole crate.
-- Post each ruling as a comment on its issue at once. The builder acts on it and adds
-  it to the crate's section of `docs/decisions.md` in the code PR, with who decided and
-  the comment link. Open a record PR of your own only for a ruling with no code PR, such
-  as a new milestone, and run `/review` on it before `gh pr merge --auto`: the required
-  check `review` needs a round on each PR. Only the person's own words lock a decision.
+- Post each ruling as a comment on its issue at once. The builder acts on it and adds it
+  to the crate's section of `docs/decisions.md` in the code PR, with who decided and the
+  comment link. Keep one record PR of your own open, only for rulings with no code PR,
+  such as a new milestone, and add each such record to it. Run `/review` on it at most
+  once a day, or at once when other work waits on a record, before `gh pr merge --auto`:
+  the required check `review` needs a round on each PR. Only the person's own words lock
+  a decision.
 - Answer "why did we decide this" from `docs/decisions.md`, `docs/research/`, and
   `docs/history/interview-log.md`, with the citation.
 
@@ -92,7 +94,8 @@ the commit you checked:
 1. `git fetch origin` and note the `origin/main` commit.
 2. Launch `code-quality` and `drift` in parallel against that commit.
 3. Drop duplicates and findings already filed (`gh issue list --search "<path>"`).
-4. File each finding as an issue with its `crate:` label, one per finding, and send the
-   links to `laptop.coordinator`.
+4. File each small finding as an item of an open issue in its crate
+   (`docs/coordination.md`, "Small changes"), and each other one as an issue with its
+   `crate:` label, one per finding. Send the links to `laptop.coordinator`.
 5. When an agent finds a gap in its own rulebook (`.claude/agents/`), propose the rule
    to the person. People own the rulebooks.

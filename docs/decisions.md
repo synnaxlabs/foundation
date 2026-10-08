@@ -3942,6 +3942,21 @@ How to read this record:
   an issue that the person or the architect labels `model:fable`. Sonnet for
   `code-quality` and `drift`, Haiku for search. Decided by the advisor under the
   delegation. Supersedes: MODELS.
+- **SMALL CHANGES (2026-10-08)** A change of under about 50 lines (a fix, a test pin, a
+  doc fix, a rename, or a record) goes into a larger PR that is open in its crate, as
+  its own commit, never a PR of its own. A review finding with such a fix is fixed in
+  its PR. A small change found elsewhere is an item of an open issue in its crate, by
+  preference one whose PR has had no review round. It goes alone only when no open issue
+  in its crate fits, when it fixes a broken `main`, or when other work waits on it
+  (`docs/coordination.md`, "Small changes"). Of the 252 PRs that merged in the 24 h to
+  2026-10-08T03:05Z, 65 changed 50 lines or fewer, and each paid the full fixed cost of
+  CI, review rounds, an audit, and a queue slot (#1705: 8 lines, two review rounds, and
+  an audit). The person, relayed by `laptop.monitor` (about 03:02Z and 03:08Z,
+  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6051321753): "We
+  should batch small optimizations/fixes into single pull requests. One set of test
+  runs, one set of reviews. Less context and less infrastructure cost", and, on a
+  proposed batch branch, "these batch branches could hold up progress on the next piece.
+  Instead they should preferrably be folded into current or existing larger PRs".
 - **COST TRIALS (2026-10-08)** Until 2026-10-09T04:00Z, `box1.builder-1`,
   `box1.builder-2`, `box1.builder-4`, and `box2.builder-7` run the `reviewer` of a
   second round that does not skip `breaker` on Sonnet. After the end time,
