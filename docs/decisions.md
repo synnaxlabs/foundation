@@ -708,7 +708,11 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6032697113), and
   laptop.architect approved kind 4 at version 1
   (https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6051990962,
-  2026-10-08T04:07:38Z).
+  2026-10-08T04:07:38Z). laptop.architect approved the bound of 1023 tails in place
+  of `(body_max - 4) / 42`, and the rule for a met path until 3c, which brings the
+  rule for a carried `given` above the walked one
+  (https://github.com/synnaxlabs/foundation/pull/1793#issuecomment-6052776794,
+  2026-10-08T05:10:57Z).
   For each path, memory holds one run per data record with an entry of it: the
   mark before the path's first entry in the record and the record's offset, oldest
   first, 24 bytes per record and path in a deque that doubles, so at most 48/51
