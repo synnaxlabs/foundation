@@ -14,8 +14,6 @@ use types::channel;
 use types::frame::key_set::{Group, KeySet};
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
-use wire::header::MALFORMED;
-use wire::hub::{BUSY, FAILED, NOT_HOME, UNKNOWN};
 
 use crate::{Away, State};
 use remote::Remote;
@@ -61,7 +59,7 @@ pub enum Ended {
     /// The stream to the home of another node broke.
     Stream(transport::Error),
     /// The home of another node stopped or reset the stream with this HUB WIRE code.
-    Refused(transport::Code),
+    Refused(wire::hub::Refusal),
     /// A message from the home of another node broke HUB WIRE. The reader stopped the
     /// stream with `MALFORMED`.
     Message(wire::hub::Error),
@@ -81,13 +79,11 @@ impl fmt::Display for Ended {
                 "the reader missed a frame and gets no later one: open a new reader",
             ),
             Self::Stream(error) => write!(f, "the stream to the home broke: {error}"),
-            Self::Refused(code) => {
-                write!(f, "the home ended the session with code {}", code.0)?;
-                match refusal(*code) {
-                    Some(meaning) => write!(f, ": {meaning}"),
-                    None => Ok(()),
-                }
-            }
+            Self::Refused(refusal) => write!(
+                f,
+                "the home ended the session with code {}: {refusal}",
+                refusal.code()
+            ),
             Self::Message(error) => {
                 write!(f, "a message from the home broke the hub protocol: {error}")
             }
@@ -99,24 +95,6 @@ impl fmt::Display for Ended {
             }
         }
     }
-}
-
-/// Each HUB WIRE code that refuses or ends a session, and what the home meant by it.
-const REFUSALS: [(u32, &str); 5] = [
-    (MALFORMED, "a message of this node broke the hub protocol"),
-    (UNKNOWN, "the home does not know a channel of the reader"),
-    (NOT_HOME, "the node is not the home of the index"),
-    (FAILED, "the home's buffer failed, or its mesh stopped"),
-    (BUSY, "the home had no memory for a reply"),
-];
-
-/// What the home of another node meant by `code`, or `None` for a code that refuses
-/// no session.
-fn refusal(code: transport::Code) -> Option<&'static str> {
-    REFUSALS
-        .iter()
-        .find(|&&(refusal, _)| refusal == code.0)
-        .map(|&(_, meaning)| meaning)
 }
 
 impl std::error::Error for Ended {}
@@ -135,7 +113,7 @@ pub enum Error {
     /// The session or the stream to the home of another node failed.
     Transport(transport::Error),
     /// The home of another node stopped or reset the stream with this HUB WIRE code.
-    Refused(transport::Code),
+    Refused(wire::hub::Refusal),
     /// The reply of the home of another node broke HUB WIRE. The reader stopped the
     /// stream with `MALFORMED`.
     Message(wire::hub::Error),
@@ -156,13 +134,11 @@ impl fmt::Display for Error {
             Self::Transport(error) => {
                 write!(f, "the transport to the home failed: {error}")
             }
-            Self::Refused(code) => {
-                write!(f, "the home refused the reader with code {}", code.0)?;
-                match refusal(*code) {
-                    Some(meaning) => write!(f, ": {meaning}"),
-                    None => Ok(()),
-                }
-            }
+            Self::Refused(refusal) => write!(
+                f,
+                "the home refused the reader with code {}: {refusal}",
+                refusal.code()
+            ),
             Self::Message(error) => {
                 write!(f, "the reply of the home broke the hub protocol: {error}")
             }
@@ -474,40 +450,21 @@ impl Drop for Session {
 
 #[cfg(test)]
 mod tests {
-    use transport::Code;
+    use wire::hub::Refusal;
 
     use super::*;
 
     #[test]
-    fn names_what_the_home_meant_by_each_code_that_ends_a_session() {
-        let meanings = [
-            (MALFORMED, "a message of this node broke the hub protocol"),
-            (UNKNOWN, "the home does not know a channel of the reader"),
-            (NOT_HOME, "the node is not the home of the index"),
-            (FAILED, "the home's buffer failed, or its mesh stopped"),
-            (BUSY, "the home had no memory for a reply"),
-        ];
-        for (code, meaning) in meanings {
-            assert_eq!(
-                Error::Refused(Code(code)).to_string(),
-                format!("the home refused the reader with code {code}: {meaning}")
-            );
-            assert_eq!(
-                Ended::Refused(Code(code)).to_string(),
-                format!("the home ended the session with code {code}: {meaning}")
-            );
-        }
-    }
-
-    #[test]
-    fn names_only_the_number_of_a_code_outside_hub_wire() {
+    fn names_the_code_of_a_refusal_and_what_the_home_meant() {
         assert_eq!(
-            Error::Refused(Code(7)).to_string(),
-            "the home refused the reader with code 7"
+            Error::Refused(Refusal::NotHome).to_string(),
+            "the home refused the reader with code 17: the node is not the home of \
+             the index"
         );
         assert_eq!(
-            Ended::Refused(Code(7)).to_string(),
-            "the home ended the session with code 7"
+            Ended::Refused(Refusal::Failed).to_string(),
+            "the home ended the session with code 18: the home's buffer failed, or \
+             its mesh stopped"
         );
     }
 }

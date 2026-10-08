@@ -13,10 +13,9 @@ use transport::{Class, Code};
 use types::frame::key_set::KeySet;
 use types::frame::{Draft, Form, Frame, Layout, Mask};
 use wire::Protocol;
-use wire::header::MALFORMED;
-use wire::hub::{BUSY, Credit, FromHome, Head, Open, keys};
+use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 
-use super::{Ended, Error, Mode, STREAK, WINDOW, refusal};
+use super::{Ended, Error, Mode, STREAK, WINDOW};
 use crate::State;
 use crate::region::Homes;
 
@@ -81,14 +80,14 @@ impl Remote {
         )
         .await;
         if let Err(error) = opened {
-            let code = match error {
-                Error::Message(_) => Some(MALFORMED),
-                Error::Pool(_) => Some(BUSY),
+            let refusal = match error {
+                Error::Message(_) => Some(Refusal::Malformed),
+                Error::Pool(_) => Some(Refusal::Busy),
                 _ => None,
             };
-            if let Some(code) = code {
-                receiver.stop(Code(code));
-                sender.reset(Code(code));
+            if let Some(refusal) = refusal {
+                receiver.stop(Code(refusal.code()));
+                sender.reset(Code(refusal.code()));
             }
             return Err(error);
         }
@@ -153,10 +152,10 @@ impl Remote {
             Ok(frame) => Ok((frame, &self.set, &self.mask)),
             Err(ended) => {
                 if let Some((sender, receiver)) = self.stream.take()
-                    && let Some(code) = code(&ended)
+                    && let Some(refusal) = refusal(&ended)
                 {
-                    receiver.stop(code);
-                    sender.reset(code);
+                    receiver.stop(Code(refusal.code()));
+                    sender.reset(Code(refusal.code()));
                 }
                 Err(self.ended.insert(ended).clone())
             }
@@ -178,9 +177,9 @@ impl Remote {
                 let body = &mut draft.body_mut()[start..];
                 let last = match receiver.recv_into(body).await {
                     Ok(Some(len)) => last(self.decoder.decode(&body[..len]))?,
-                    Ok(None) => return Err(unfinished(body.len())),
+                    Ok(None) => return Err(finished(&self.decoder)),
                     Err(transport::Error::TooLarge { .. }) => {
-                        let message = recv(receiver).await?;
+                        let message = recv(receiver, &self.decoder).await?;
                         last(self.decoder.decode(&message))?
                     }
                     Err(error) => return Err(ended(error)),
@@ -190,7 +189,7 @@ impl Remote {
                 }
                 continue;
             }
-            let message = recv(receiver).await?;
+            let message = recv(receiver, &self.decoder).await?;
             match self.decoder.decode(&message).map_err(Ended::Message)? {
                 FromHome::Head(head) => {
                     self.head = Some(head);
@@ -290,7 +289,11 @@ async fn handshake(
             Ok(_) => unreachable!("invariant: the decoder gives opened first"),
             Err(error) => Err(Error::Message(error)),
         },
-        Ok(None) => Err(Error::Message(wire::hub::Error::Unfinished { remain: 0 })),
+        Ok(None) => {
+            Err(Error::Message(decoder.end().expect_err(
+                "invariant: a stream before opened may not end",
+            )))
+        }
         Err(error) => Err(refused(error).map_or_else(Error::Transport, Error::Refused)),
     }
 }
@@ -318,21 +321,22 @@ fn last(message: Result<FromHome<'_>, wire::hub::Error>) -> Result<bool, Ended> 
     }
 }
 
-async fn recv(receiver: &mut Receiver) -> Result<Block, Ended> {
+async fn recv(
+    receiver: &mut Receiver,
+    decoder: &wire::hub::Reader,
+) -> Result<Block, Ended> {
     match receiver.recv().await {
         Ok(Some(message)) => Ok(message),
-        Ok(None) => Err(unfinished(0)),
+        Ok(None) => Err(finished(decoder)),
         Err(error) => Err(ended(error)),
     }
 }
 
-/// The code of HUB WIRE that `error` carries, or `error` when it carries none.
-fn refused(error: transport::Error) -> Result<Code, transport::Error> {
+/// The refusal of HUB WIRE that `error` carries, or `error` when it carries none.
+fn refused(error: transport::Error) -> Result<Refusal, transport::Error> {
     match error {
-        transport::Error::Reset { code } | transport::Error::Stopped { code }
-            if refusal(code).is_some() =>
-        {
-            Ok(code)
+        transport::Error::Reset { code } | transport::Error::Stopped { code } => {
+            Refusal::from_code(code.0).ok_or(error)
         }
         error => Err(error),
     }
@@ -342,17 +346,21 @@ fn ended(error: transport::Error) -> Ended {
     refused(error).map_or_else(Ended::Stream, Ended::Refused)
 }
 
-/// The home finished the stream with `remain` bytes of a body to come.
-fn unfinished(remain: usize) -> Ended {
-    Ended::Message(wire::hub::Error::Unfinished { remain })
+/// The home finished the stream where `decoder` is.
+fn finished(decoder: &wire::hub::Reader) -> Ended {
+    Ended::Message(
+        decoder
+            .end()
+            .expect_err("invariant: a session reads no message after Behind"),
+    )
 }
 
-/// The code that stops the stream when `ended` ends the session, if it is this node's
-/// to send.
-fn code(ended: &Ended) -> Option<Code> {
+/// The refusal that stops the stream when `ended` ends the session, if it is this
+/// node's to send.
+fn refusal(ended: &Ended) -> Option<Refusal> {
     match ended {
-        Ended::Message(_) | Ended::Frame(_) => Some(Code(MALFORMED)),
-        Ended::Pool(_) => Some(Code(BUSY)),
+        Ended::Message(_) | Ended::Frame(_) => Some(Refusal::Malformed),
+        Ended::Pool(_) => Some(Refusal::Busy),
         Ended::Buffer(_) | Ended::Behind | Ended::Stream(_) | Ended::Refused(_) => None,
     }
 }

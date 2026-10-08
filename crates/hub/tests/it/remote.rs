@@ -19,7 +19,7 @@ use types::frame::{self, Path, Range};
 use types::time::Span;
 use wire::Protocol;
 use wire::header::MALFORMED;
-use wire::hub::{Credit, Head, Reply, UNKNOWN, ends};
+use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::{OTHER, TIME};
 use super::serve::{HOME, PEER, PORT, own_pool, transport};
@@ -286,11 +286,11 @@ fn a_reader_of_a_channel_that_the_home_does_not_know_is_refused_with_unknown() {
                 .reader(&names, Mode::Latest)
                 .await
                 .expect_err("the home refuses");
-            assert_eq!(error, reader::Error::Refused(Code(UNKNOWN)));
+            assert_eq!(error, reader::Error::Refused(Refusal::Unknown));
             assert_eq!(
                 error.to_string(),
                 "the home refused the reader with code 16: the home does not know a \
-                 channel of the reader"
+                 channel of the open"
             );
         },
     );
