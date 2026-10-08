@@ -4486,13 +4486,18 @@ How to read this record:
   `@admin.@subject`, which holds the admin's public key, and the access policy `@admin`
   at `@admin.@access`, which allows the subjects `@admin` every action on `**` with no
   authority, so its writes cap at `Authority(0)` (ACCESS BLOCK). A policy in a file can
-  give the admin more. Their labels are reserved, so no file holds them:
-  `spec::key::reserved` gives `true` for a tree key that `Kind::key` gives for no label
-  that a file can use, and `plan` leaves out each definition at such a key. Lost:
-  `Kind::key` takes a reserved label behind a flag, so `node` writes the definitions
-  and `config` can make a reserved key by mistake. Decided by `laptop.architect-2`
+  give the admin more. Their labels are reserved, so no file holds them: `Kind::key`
+  refuses a reserved label, and `Kind::label` gives one only for a subject or an access
+  policy. A definition whose label (`definition.kind().label(key)`) is reserved is
+  Foundation's: `plan` leaves it out, and `access::Rules` finds a subject by its label,
+  so it admits `@admin`. Lost: `Kind::key` takes a reserved label behind a flag, so
+  `node` writes the definitions and `config` can make a reserved key by mistake;
+  `spec::key::reserved(key)`, which needs a list of every kind that a new kind can miss,
+  and gives `plan` no label or kind to print. Decided by `laptop.architect-2`
   (2026-10-08T06:01:36Z,
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053458318); no
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053458318), with
+  the rule and its lost option at 2026-10-08T10:56:38Z
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6058336549); no
   authority decided by `laptop.architect` (2026-10-08T06:11:30Z,
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
 
