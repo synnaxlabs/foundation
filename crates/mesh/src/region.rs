@@ -10,6 +10,7 @@ use types::name::{Name, Prefix};
 use types::node;
 
 use raft::Voters;
+use spec::definition::Definition;
 
 use crate::card;
 use crate::change::{Change, Join, Malformed};
@@ -17,6 +18,24 @@ use crate::member::Member;
 use crate::pointer::Pointer;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
+
+/// The region before the first entry of its log: its prefix, its founding members and
+/// voters, and its spec before the first change. It is the same at each member and at
+/// each open. A founding node builds it from its config. A node that joins takes it
+/// whole from its join answer, and is not one of its members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Founding {
+    /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
+    pub prefix: Prefix,
+    /// Each founding member of the region, one record for each node. A member's peer
+    /// proves the public key of its card, and that key signs the member's claims.
+    pub members: Vec<Member>,
+    /// The voters before the first entry of the log. Each is a member. A node with no
+    /// voter takes no request.
+    pub voters: BTreeSet<node::Key>,
+    /// The definitions of the region before the first change of its spec, by tree key.
+    pub definitions: BTreeMap<Name, Definition>,
+}
 
 /// The region state that this node holds: its members, its tickets, the homes that it
 /// applied, and its spec pointer.

@@ -2616,17 +2616,21 @@ mod port {
 
         use ::mesh::card::addresses::Addresses;
         use ::mesh::card::{self, Card};
+        use ::mesh::region::Founding;
         use ::mesh::status::Status;
         use std::future::poll_fn;
         use std::pin::pin;
         use std::task::Poll;
 
-        use ::mesh::Member;
+        use ::mesh::{Member, Pointer};
+        use spec::definition::{Definition, Kind};
+        use spec::subject::Subject;
+        use spec::tree::Chunks;
         use types::channel;
         use types::node::SealKey;
 
         use super::*;
-        use crate::{Endpoint, Region, route};
+        use crate::{Endpoint, route};
 
         /// The key and private key of a second node.
         const OTHER: (types::node::Key, PrivateKey) =
@@ -2665,11 +2669,12 @@ mod port {
         }
 
         /// The region `plant`, where each of `members` is a voter.
-        fn region(members: &[Member]) -> Region {
-            Region {
+        fn region(members: &[Member]) -> Founding {
+            Founding {
                 prefix: "plant".parse().unwrap(),
                 members: members.to_vec(),
                 voters: members.iter().map(|member| member.card.key()).collect(),
+                definitions: BTreeMap::new(),
             }
         }
 
@@ -2677,7 +2682,7 @@ mod port {
         fn start(
             host: &sim::node::Node,
             (key, private_key): (types::node::Key, PrivateKey),
-            region: Region,
+            region: Founding,
         ) -> Node {
             Node::start(Config {
                 key,
@@ -2999,6 +3004,72 @@ mod port {
                 assert!(joined == Ok(()) || joined == Err(refused), "at {after:?}");
             }
             assert!(held && logged);
+        }
+
+        /// The mesh of a region with founding definitions opens at version 0 of their
+        /// tree, and a second open with the same region opens the same mesh: the
+        /// home set after the first open is there.
+        #[test]
+        fn the_mesh_opens_at_the_founding_definitions_of_its_region() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let mut region = region(&[member(OWN, &KEY, &host)]);
+            let subject = Subject::new([KEY.public()].into()).unwrap();
+            let label = Kind::Subject.key("plant.operator").unwrap();
+            region.definitions = [(label, Definition::Subject(subject))].into();
+            let founding = Pointer {
+                version: 0,
+                root: spec::region::tree(&mut Chunks::default(), &region.definitions)
+                    .root,
+            };
+            let shard = env::shards::Config {
+                name: "endpoint".into(),
+                core: None,
+            };
+            let own = host.clone();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&seen);
+            let started = host.shards().start(shard, move |tasks| async move {
+                for open in 0..2 {
+                    // The port of the first transport can be held after its drop.
+                    let listen = SocketAddr::new(own.addresses()[0], PORT + open);
+                    let bound =
+                        transport::Port::bind(&own.net(), listen).expect("a port");
+                    let endpoint = Endpoint {
+                        part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
+                        private_key: KEY,
+                        key: OWN,
+                        region: Some(region.clone()),
+                        clock: own.clock(),
+                        entropy: own.entropy(),
+                    };
+                    let pool = block::Config { budget: 1 << 20 };
+                    let memory = block::Heap::new(pool.reservation());
+                    let pool = Rc::new(block::Pool::new(pool, memory));
+                    let (_transport, mesh) = endpoint
+                        .open(own.files(), pool, tasks.clone())
+                        .await
+                        .expect("the mesh opens");
+                    let mesh = mesh.expect("the endpoint has a region");
+                    let mut watch = mesh.watch(INDEX);
+                    let mut home = watch.next().await;
+                    if open == 0 {
+                        mesh.set_home(INDEX, OWN).await.expect("the home commits");
+                    } else {
+                        // The mesh applies its log again once it leads.
+                        home = watch.next().await;
+                    }
+                    out.lock().unwrap().push((mesh.pointer(), home));
+                    drop(watch);
+                    let ended = mesh.ended();
+                    drop(mesh);
+                    ended.await;
+                }
+            });
+            drop(started.expect("the endpoint starts"));
+            assert_eq!(sim.run(), Ok(()));
+            let opened = [(founding, Ok(None)), (founding, Ok(Some(OWN)))];
+            assert_eq!(*seen.lock().unwrap(), opened);
         }
 
         /// A node that starts again with its region, at once after a stop or a power

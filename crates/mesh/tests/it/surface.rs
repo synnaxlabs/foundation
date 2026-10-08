@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
+use mesh::region::Founding;
 use mesh::status::Status;
 use mesh::{
     Config, Error, Member, Mesh, Pointer, Stopped, Watch, change, claim, log, region,
@@ -153,10 +154,12 @@ async fn create_config_on(
     Config {
         key: key(id),
         private_key: private_key(id),
-        region: "plant".parse::<Prefix>().unwrap(),
-        voters: members.iter().map(|member| member.card.key()).collect(),
-        members,
-        founding: BTreeMap::new(),
+        founding: Founding {
+            prefix: "plant".parse::<Prefix>().unwrap(),
+            voters: members.iter().map(|member| member.card.key()).collect(),
+            members,
+            definitions: BTreeMap::new(),
+        },
         files: node.files(),
         dir: PathBuf::new(),
         clock: node.clock(),
@@ -235,10 +238,9 @@ fn key_gives_the_key_of_the_config() {
             let voters = voters.clone();
             solo(move |node, tasks| async move {
                 let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
-                let config = Config {
-                    voters: voters.map(key).collect(),
-                    ..create_voter_config(&node, &tasks, place, members.into()).await
-                };
+                let mut config =
+                    create_voter_config(&node, &tasks, place, members.into()).await;
+                config.founding.voters = voters.map(key).collect();
                 let mesh = Mesh::open(config).await.unwrap();
                 assert_eq!(mesh.key(), key(place));
             });
@@ -362,7 +364,7 @@ fn each_voter_of_a_region_gets_the_home_that_each_voter_sets() {
 fn a_region_with_two_records_of_one_node_does_not_open() {
     solo(|node, tasks| async move {
         let mut config = create_config(&node, &tasks).await;
-        config.members.push(create_member(1, Vec::new()));
+        config.founding.members.push(create_member(1, Vec::new()));
         let unfit = region::Unfit::Duplicate { key: KEY };
         assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
     });
