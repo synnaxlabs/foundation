@@ -94,6 +94,10 @@ fn each_function_writes_the_size_into_the_header() {
     // SAFETY: `block` is live and from the allocator.
     let block = unsafe { connector_opcua_realloc(block, 20) };
     assert_eq!(held(), 20 + HEADER, "realloc down");
+    // SAFETY: `block` is live and from the allocator.
+    let block = unsafe { connector_opcua_realloc(block, 0) };
+    assert!(!block.is_null(), "realloc to 0 gave a block");
+    assert_eq!(held(), HEADER, "realloc to 0 freed the old block");
     // SAFETY: `block` is live and from the allocator, and freed once.
     unsafe { connector_opcua_free(block) };
     assert_eq!(ALLOCATOR.held(), before, "free gave back what realloc held");
