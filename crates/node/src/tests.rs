@@ -2914,6 +2914,40 @@ mod port {
             );
         }
 
+        /// A power cut after `create_key` keeps the key.
+        #[test]
+        fn a_created_key_survives_a_power_cut() {
+            for seed in 0..16 {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                assert_eq!(create(&mut sim, &host, KEY), Ok(()));
+                sim.crash(&host, sim::Crash::Power);
+                assert_eq!(read(&mut sim, &host), own(), "seed {seed}");
+            }
+        }
+
+        /// A failed file call of `create_key` gives its error.
+        #[test]
+        fn a_failed_file_call_of_create_key_gives_its_error() {
+            use env::files::Operation::{Open, ReadAt, Sync, SyncDir, WriteAt};
+            let calls = [Open, ReadAt, WriteAt, Sync].map(|call| (FILE, call));
+            for (path, operation) in calls.into_iter().chain([("", SyncDir)]) {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                host.fail_file(Path::new(path), operation);
+                let error = env::files::Error::Io {
+                    path: PathBuf::from(path),
+                    operation,
+                    code: 5,
+                };
+                let created = create(&mut sim, &host, KEY);
+                assert_eq!(created, Err(Error::Directory(error)), "{operation:?}");
+            }
+        }
+
         /// A failed file call on a new key stops the node, and the next start makes
         /// one.
         #[test]
