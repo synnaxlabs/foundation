@@ -48,11 +48,11 @@
   `flags.txt` (`-D`, `-I`, `-std`, and `CODE_FLAGS`, the flags that change the code)
   or in `LEFT_OUT`, a closed list with the reason of each, and fails on any other
   flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
-  compiled with the flags of the connector, other than the `UA_ARCH_HEADER` of the
-  allocator below. Decided by `laptop.architect-2`
+  compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
-  2026-10-08 13:31 UTC). A `-W` flag with no `,` is a warning, which changes no code,
-  so `collect` leaves it out by that pattern, not by name. Decided by
+  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below is the one flag
+  of `build.rs` outside `flags.txt`. A `-W` flag with no `,` is a warning, which
+  changes no code, so `collect` leaves it out by that pattern, not by name. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
   2026-10-08 13:57 UTC) and `laptop.director`
@@ -147,7 +147,11 @@
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067206932,
   2026-10-08 19:13 UTC; the header:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
-  2026-10-08 19:46 UTC).
+  2026-10-08 19:46 UTC). The exception for `UA_ARCH_HEADER` in the flags passage
+  above, the copy check without `alloc.h`, and the test of the archives: approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
+  2026-10-08 20:04 UTC).
   The copy builds with `UA_MULTITHREADING` 0, so it takes no `UA_LOCK` and links no
   `pthread_mutex_*` symbol: each server and each client runs on one thread. Level 0
   alone makes `UA_THREAD_LOCAL` empty, so two threads would share `UA_rng` and the
