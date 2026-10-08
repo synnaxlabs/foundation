@@ -26,10 +26,11 @@
   holds a message, and for one peer window of the other class's bytes after QUIC took a
   byte of it or after a `try_send` of it was given back. A class that competes alone
   makes no debt and no credit, and pays off what it owes or is owed. A class is owed at
-  most one peer window of `Latest` bytes. A class that holds less than its share when
-  QUIC gives room sends what it holds first, and the core holds no QUIC room for its
-  later messages. So one `Latest` stream on `try_send` sends at most one message for
-  each step of credit. Room that a stream got and its caller has not taken counts for
+  most one peer window of its own bytes, so neither class goes ahead of the other by
+  more than about one window. A class that holds less than its share when QUIC gives
+  room sends what it holds first, and the core holds no QUIC room for its later
+  messages. So one `Latest` stream on `try_send` sends at most one message for each step
+  of credit. Room that a stream got and its caller has not taken counts for
   neither class, and a message that `try_send` gave back is not held. The caller of
   `send` writes the rest of its message; the stream writes the rest of a message from
   `try_send` or of a finished stream. A rest that the stream held for a waiting caller
@@ -42,9 +43,13 @@
   by architect-2 (#977, 2026-10-07 17:15 UTC):
   https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. The
   competition memory and the cap: architect-2 (#1311, 2026-10-07 11:14 UTC and 12:09
-  UTC): https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6036747607
-  and https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6037588359. Who
-  writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
+  UTC): https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6036747607 and
+  https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6037588359.
+  Supersedes, for `Complete`, the cap of rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6037588359:
+  architect-2 (#1998, 2026-10-08 21:28 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069398776. Who writes
+  the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
   admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC, and #1998,
   2026-10-08 21:12 UTC):

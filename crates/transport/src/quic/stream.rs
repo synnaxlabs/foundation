@@ -249,8 +249,8 @@ struct Turns {
 #[derive(Debug, Default)]
 struct Share {
     /// [`LATEST_COST`] for each byte of `Latest` that noq-proto took, less each byte
-    /// of `Complete`, within one peer window either way. `Complete` goes ahead of
-    /// `Latest` while it is positive.
+    /// of `Complete`. Each class is owed at most one peer window of its own bytes.
+    /// `Complete` goes ahead of `Latest` while it is positive.
     owed: isize,
     /// The peer's window.
     window: usize,
@@ -1032,9 +1032,9 @@ impl Share {
         } else {
             owed.clamp(self.owed.min(0), self.owed.max(0))
         };
-        let window = isize::try_from(self.window)
-            .map_or(isize::MAX, |window| LATEST_COST.saturating_mul(window));
-        self.owed = owed.clamp(-window, window);
+        let window = isize::try_from(self.window).unwrap_or(isize::MAX);
+        let latest = LATEST_COST.saturating_mul(window);
+        self.owed = owed.clamp(-latest, window);
     }
 
     /// Counts `class` as competing until noq-proto takes one peer window of the
@@ -3368,9 +3368,9 @@ mod tests {
         }
 
         #[test]
-        fn a_class_is_owed_at_most_one_peer_window_of_latest() {
-            for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
-                let mut share = Share::new(100);
+        fn a_class_is_owed_at_most_one_peer_window_of_its_own_bytes() {
+            for (latest, owed) in [(32, 96), (33, 99), (34, 99)] {
+                let mut share = Share::new(99);
                 share.took(Class::Latest, latest, true);
                 share.took(Class::Complete, owed - 1, true);
                 assert_eq!(share.order(), Order::COMPLETE_FIRST, "{latest}");
@@ -3378,10 +3378,10 @@ mod tests {
                 assert_eq!(share.order(), Order::RANK, "{latest}");
             }
             let budget = Budget::new(10);
-            for complete in [299, 300, 301] {
-                let mut share = Share::new(100);
+            for complete in [296, 297, 298] {
+                let mut share = Share::new(99);
                 share.took(Class::Complete, complete, true);
-                share.took(Class::Latest, 99, true);
+                share.took(Class::Latest, 98, true);
                 let rationed = share.admission(&budget).rationed;
                 assert_eq!(rationed, Some(Class::Complete), "{complete}");
                 share.took(Class::Latest, 1, true);
@@ -7274,6 +7274,49 @@ mod tests {
                     pair::write(&mut pair.client.endpoint, now, sender, &mut None);
                 assert!(flushed.is_ok(), "{flushed:?}");
             }
+        }
+
+        #[test]
+        fn complete_after_a_pause_goes_at_most_one_window_ahead_of_a_held_latest() {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+                let message = shard.block(&vec![1; MESSAGE_MAX / 4]);
+                let mut complete = open_sender(&mut pair, Class::Complete);
+                let mut pending = Some(message.clone());
+                while read[Class::Complete.rank()] < message.len() {
+                    send(&mut pair, &mut complete, &mut pending);
+                    pair.run(STEP);
+                    take(&mut pair, &mut receivers, &mut read);
+                }
+                let mut latest = open_sender(&mut pair, Class::Latest);
+                while read[Class::Latest.rank()] < NARROW {
+                    if pending.is_none() {
+                        pending = Some(message.clone());
+                    }
+                    send(&mut pair, &mut latest, &mut pending);
+                    pair.run(STEP);
+                    take(&mut pair, &mut receivers, &mut read);
+                }
+                pair.run(RUN);
+                let sample = shard.block(&[2; 1000]);
+                let mut pending = Some(sample.clone());
+                let mut ahead = refill(&mut pair, &mut complete, &message);
+                ahead -= held(&mut pair, complete.key());
+                loop {
+                    send(&mut pair, &mut latest, &mut pending);
+                    pair.run(STEP);
+                    take(&mut pair, &mut receivers, &mut read);
+                    if pending.is_none() && held(&mut pair, latest.key()) < sample.len()
+                    {
+                        break;
+                    }
+                    let before = held(&mut pair, complete.key());
+                    let taken = refill(&mut pair, &mut complete, &message);
+                    ahead += before + taken - held(&mut pair, complete.key());
+                }
+                assert!(ahead <= NARROW, "{ahead} of {NARROW}");
+            });
         }
 
         #[test]
