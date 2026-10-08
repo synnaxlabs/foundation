@@ -5545,6 +5545,16 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
   `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
+  Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
+  the receive buffer of its listener, so `os` sets the options of the listener again
+  on each accepted socket, on every OS. The listener still sets them before `listen`:
+  the window scale of the SYN-ACK comes from its receive buffer. On macOS, a socket
+  option on a socket that a reset ended gives `EINVAL`. On `EINVAL`, `os` reads the
+  pending error: a pending error ends the stream, and with none the call gives `Io`
+  with `EINVAL`. Also on macOS, a create of a path with a trailing slash gives
+  `ENOTDIR` for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a
+  directory gives `EPERM`. Decided by `laptop.architect-2` (2026-10-08T17:19:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065277473).
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
   node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
