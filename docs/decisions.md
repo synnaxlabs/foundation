@@ -2422,6 +2422,9 @@ How to read this record:
   Supersedes, in
   https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107, the `Ok`
   of an equal change of another call that leaves a listed index with no home. The
+  `Stale` item of `Mesh::apply` names that case, approved by `laptop.architect` at
+  2026-10-08T17:52:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065835401). The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).

@@ -51,8 +51,8 @@ impl Mesh {
     ///   when a call of the store fails.
     /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
     ///   each half of the voters, before the proposal or at the apply.
-    /// - [`Error::Stale`] when the pointer is not `base`, or the pointer this call
-    ///   makes, at the apply.
+    /// - [`Error::Stale`] when the pointer at the apply is not `base`, and is not the
+    ///   pointer this call makes with a home for each index of `homes`.
     ///
     /// # Panics
     ///
