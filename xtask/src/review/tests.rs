@@ -1158,6 +1158,10 @@ fn fails_a_round_with_raw_html() {
     assert_eq!(check(&record(vec![bot(&summary)])), vec![raw("<b>")]);
     let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<source\n---\n");
     assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<source")]);
+    let unranged = ROUND
+        .replace("Range: `38cba24f..c77c67d7`\n", "")
+        .replace("weakening.\n\n", "weakening.\n\n<div>\n\n");
+    assert_eq!(check(&record(vec![bot(&unranged)])), vec![raw("<div>")]);
     let shown = [
         "<https://github.com>",
         "\\<div>",

@@ -294,7 +294,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = unpadded(body);
     let shown = Shown::read(&body);
     let (number, text) = (shown.number?, &shown.text);
-    let lines = shown.paragraph(shown.blocks.first()).iter().copied();
+    let lines = shown.fields().iter().copied();
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
     let findings = field("Findings: ");
@@ -320,6 +320,12 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
+        if let Some(line) = shown.html.filter(|_| !old) {
+            return Err(format!(
+                "review round {number} has raw HTML, which can hide text on GitHub, in \
+                 the line `{line}`. Put code in a code span, {FORMAT}"
+            ));
+        }
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
         let (from, end) = range.split_once("..").ok_or_else(|| {
             format!(
@@ -335,17 +341,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
                 )
             })?,
         };
-        let hot = if old {
-            false
-        } else if let Some(line) = shown.html {
-            return Err(format!(
-                "review round {number} has raw HTML, which can hide text on GitHub, in \
-                 the line `{line}`. Put code in a code span, {FORMAT}"
-            ));
-        } else {
-            let end = shown.blocks.get(1..).and_then(<[_]>::last);
-            hot(shown.paragraph(end), number)?
-        };
+        let hot = !old && hot(shown.end(), number)?;
         Ok(Round {
             number,
             reviewers: listed(reviewers.ok_or_else(|| missing("Reviewers"))?),
@@ -511,6 +507,18 @@ impl<'a> Shown<'a> {
             }
         }
         shown
+    }
+
+    /// The lines of the fields: the first block after the round heading, or none when
+    /// it is not a paragraph.
+    fn fields(&self) -> &[&'a str] {
+        self.paragraph(self.blocks.first())
+    }
+
+    /// The end lines: the last block after the fields, or none when it is not a
+    /// paragraph or the fields are the only block.
+    fn end(&self) -> &[&'a str] {
+        self.paragraph(self.blocks.get(1..).and_then(<[_]>::last))
     }
 
     /// The lines of `block`, one of [`Shown::blocks`], or none when it is not a
