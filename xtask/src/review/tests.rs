@@ -139,6 +139,15 @@ fn an_earlier_round_that_names_a_hot_path_needs_performance() {
     );
 }
 
+/// The problem of a round 3 with raw HTML in `line`.
+fn raw(line: &str) -> String {
+    format!(
+        "review round 3 has raw HTML, which can hide text on GitHub, in the line \
+         `{line}`. Put code in a code span, in the format of \
+         .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
 /// The problem of a round 3 that does not end with its `name:` line.
 fn unended(name: &str) -> String {
     format!(
@@ -1120,13 +1129,6 @@ fn a_lone_carriage_return_ends_a_line_of_an_approval() {
 
 #[test]
 fn fails_a_round_with_raw_html() {
-    let raw = |line: &str| {
-        format!(
-            "review round 3 has raw HTML, which can hide text on GitHub, in the line \
-             `{line}`. Put code in a code span, in the format of \
-             .claude/skills/review/SKILL.md, \"Round comment\"."
-        )
-    };
     let cases = [
         ("<div>\n```\n</div>", "<div>"),
         ("<!--\nHot path: none\n-->", "<!--"),
@@ -1143,6 +1145,9 @@ fn fails_a_round_with_raw_html() {
         ("<source | b\n--- | ---\nc | d", "<source | b"),
         ("> 1. <source", "> 1. <source"),
         ("- ```\n  a\n  ```\n  <source", "<source"),
+        ("| a |\n| - |\n<source", "<source"),
+        ("</source", "</source"),
+        ("<! a", "<! a"),
     ];
     for (html, line) in cases {
         let comment =
@@ -1158,10 +1163,22 @@ fn fails_a_round_with_raw_html() {
     assert_eq!(check(&record(vec![bot(&summary)])), vec![raw("<b>")]);
     let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<source\n---\n");
     assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<source")]);
+}
+
+#[test]
+fn fails_raw_html_before_the_fields_or_the_heading() {
     let unranged = ROUND
         .replace("Range: `38cba24f..c77c67d7`\n", "")
         .replace("weakening.\n\n", "weakening.\n\n<div>\n\n");
     assert_eq!(check(&record(vec![bot(&unranged)])), vec![raw("<div>")]);
+    let hidden = ROUND.replace("\nReviewers:", "\n<details>\n\nReviewers:");
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<details>")]);
+    let headless = ROUND.replace("## Review round 3", "<search\n## Review round 3");
+    assert_eq!(check(&record(vec![bot(&headless)])), vec![raw("<search")]);
+}
+
+#[test]
+fn passes_a_round_whose_text_github_shows_as_text() {
     let shown = [
         "<https://github.com>",
         "\\<div>",
@@ -1172,6 +1189,9 @@ fn fails_a_round_with_raw_html() {
         "# <source",
         "a | <source\n--- | ---",
         "*a*<source",
+        "*<source",
+        "1.<source",
+        "a <b",
     ];
     for text in shown {
         let comment =
@@ -1347,4 +1367,26 @@ fn reads_only_a_top_level_round_heading() {
     }
     let ruled = bot(&format!("a\n\n***\n\n{ROUND}"));
     assert_eq!(check(&record(vec![ruled])), Vec::<String>::new());
+    let before = old("Hot path: `send`\n\n## Review round 1\n\nNo fields.");
+    assert_eq!(
+        check(&record(vec![before, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn fails_end_lines_in_a_quote_or_a_list() {
+    let end = "Deferred: none\nPublic surface: none\nHot path: none";
+    for nested in [
+        "> Deferred: none\n> Public surface: none\n> Hot path: none",
+        "- Deferred: none\n  Public surface: none\n  Hot path: none",
+    ] {
+        let comment = ROUND.replace(end, nested);
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![unended("Deferred")],
+            "{nested}"
+        );
+    }
 }

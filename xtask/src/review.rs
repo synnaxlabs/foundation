@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use pulldown_cmark::{Event, HeadingLevel::H2, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use serde_json::Value;
 
 use crate::field;
@@ -287,13 +287,19 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 }
 
 /// Parses `body` as a round comment. `None` when it has no `## Review round <n>`
-/// heading. The fields are the first block after the heading, so the findings text
-/// cannot set them. The last block is the end lines ([`END`]), unless the comment is
-/// `old`, posted before [`CUTOFF`].
+/// heading, also in its source when it is not `old` and has raw HTML. The fields are
+/// the first block after the heading, so the findings text cannot set them. The last
+/// block is the end lines ([`END`]), unless the comment is `old`, posted before
+/// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = unpadded(body);
     let shown = Shown::read(&body);
-    let (number, text) = (shown.number?, &shown.text);
+    let number = match shown.number {
+        // Raw HTML can hide from the parser a heading that GitHub shows.
+        None if !old && shown.html.is_some() => heading(&body)?,
+        number => number?,
+    };
+    let text = &shown.text;
     let lines = shown.fields().iter().copied();
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
@@ -476,7 +482,7 @@ impl<'a> Shown<'a> {
                     let index = paragraph.then_some(shown.text.len());
                     if top && shown.number.is_some() {
                         shown.blocks.push(index);
-                    } else if top && matches!(tag, Tag::Heading { level: H2, .. }) {
+                    } else if top && matches!(tag, Tag::Heading { .. }) {
                         shown.number = line.strip_prefix("## Review round ");
                         shown.text.clear();
                     }
@@ -576,6 +582,18 @@ fn unpadded(text: &str) -> String {
     unpadded
 }
 
+/// The text after `## Review round ` in the first line of `body` that starts with it
+/// after at most three spaces.
+fn heading(body: &str) -> Option<&str> {
+    body.split(['\n', '\r']).find_map(|line| {
+        let heading = line.trim_start_matches(' ');
+        let indent = line.len() - heading.len();
+        (indent < 4)
+            .then_some(heading)?
+            .strip_prefix("## Review round ")
+    })
+}
+
 /// Whether `prefix`, the source of a line before some text, holds only the indent and
 /// the marks of quotes and list items, so that the text starts a line of a block. An
 /// escaped `<` has its backslash in `prefix`.
@@ -584,16 +602,15 @@ fn marks(prefix: &str) -> bool {
     loop {
         rest = rest.trim_start_matches([' ', '\t']);
         let number = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-        let marked = if number.len() < rest.len() {
+        let item = if number.len() < rest.len() {
             number.strip_prefix(['.', ')'])
         } else {
-            rest.strip_prefix(['>', '-', '+', '*'])
+            rest.strip_prefix(['-', '+', '*'])
         };
-        match marked {
-            Some(after) if after.is_empty() || after.starts_with([' ', '\t']) => {
-                rest = after;
-            }
-            _ => return rest.is_empty(),
+        let item = item.filter(|after| after.starts_with([' ', '\t']));
+        match item.or_else(|| rest.strip_prefix('>')) {
+            Some(after) => rest = after,
+            None => return rest.is_empty(),
         }
     }
 }
