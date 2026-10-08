@@ -589,11 +589,12 @@ fn a_remove_of_a_path_that_is_a_link_to_the_file_gives_not_found() {
         let found = file.remove().await.unwrap_err();
         assert_eq!(found, Error::NotFound { path: "a".into() });
         assert!(data.join("t").is_file() && data.join("a").is_symlink());
+        files.open(Path::new("t"), Mode::Write).await.unwrap();
     });
 }
 
 #[test]
-fn a_remove_through_the_handle_closes_the_file_after_the_unlink() {
+fn a_remove_through_the_handle_releases_the_lock_of_the_file() {
     run(|files, data| async move {
         let file = create(&files, "a", 4 * KIB).await;
         std::fs::hard_link(data.join("a"), data.join("b")).unwrap();

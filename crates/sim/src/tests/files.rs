@@ -1481,6 +1481,7 @@ fn a_remove_of_a_removed_path_gives_not_found() {
         let found = file.remove().await;
         assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
+        assert_eq!(files.free().await.unwrap(), MIB, "the handle closed");
     });
 }
 
