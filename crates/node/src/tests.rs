@@ -3464,18 +3464,16 @@ mod port {
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;
-                for _ in 0..1 {
-                    let mut yielded = false;
-                    poll_fn(|cx| {
-                        if yielded {
-                            return Poll::Ready(());
-                        }
-                        yielded = true;
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    })
-                    .await;
-                }
+                let mut yielded = false;
+                poll_fn(|cx| {
+                    if yielded {
+                        return Poll::Ready(());
+                    }
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                })
+                .await;
                 panic!("a task panics");
             });
             assert_eq!(sim.run_for(OPEN), Ok(()));
