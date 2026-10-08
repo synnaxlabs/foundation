@@ -12,6 +12,7 @@ use crate::{Definition, Found, one_of, written};
 const BAD_ACTION: Code = Code::new("config.bad-action");
 const EMPTY_ALLOW: Code = Code::new("config.empty-allow");
 const BAD_AUTHORITY: Code = Code::new("config.bad-authority");
+const AUTHORITY_WITHOUT_WRITE: Code = Code::new("config.authority-without-write");
 const KEYS: [&str; 4] = ["subjects", "select", "allow", "authority"];
 
 /// The word of each action in a Document.
@@ -25,7 +26,7 @@ const ACTIONS: [(&str, Action); 6] = [
 ];
 
 /// Checks an `access` block and gives its policy. With no `authority`, a write is
-/// capped at the least authority.
+/// capped at the least authority. An `authority` with no `write` is refused.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
     let unknown = found.unknown_attributes(block, &KEYS);
     found.unknown_blocks(block);
@@ -42,6 +43,18 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     else {
         return None;
     };
+    if authority.is_some() && !allow.contains(Action::Write) {
+        let at = block.body.attributes.get("authority");
+        found.diagnostics.push(Diagnostic::new(
+            AUTHORITY_WITHOUT_WRITE,
+            at.and_then(|authority| authority.value.span),
+            "the policy has an `authority` and no `write` in `allow`, and only a \
+             write uses an authority"
+                .into(),
+            "Add `write` to `allow`, or remove `authority`".into(),
+        ));
+        return None;
+    }
     let authority = authority.unwrap_or(Authority(0));
     let policy = Policy::new(subjects, select, allow, authority);
     Some(Definition::Spec(definition::Definition::Access(policy)))

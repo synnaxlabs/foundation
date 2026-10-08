@@ -3799,10 +3799,16 @@ How to read this record:
   `config.bad-action`. `authority` is optional, an integer from 0 to 255
   (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
   the least, as default deny gives the least. Such a writer still takes control when no
-  writer holds it (GATE RULES). An `authority` with no `write` is silent:
-  `Policy::new` sets it to zero. Lost: an `authority` that `write` makes required, a
-  rule that C8 does not have. The action words are a table in `config` until a second
-  reader needs them; then `spec::access::Action` gets `FromStr` and `Display`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  writer holds it (GATE RULES). An `authority` with no `write` in an `allow` that
+  reads is `config.authority-without-write`, also `authority = 0`: only a write uses
+  an authority, so the value is a mistake. Lost: no diagnostic, which hides the
+  mistake. Decided by `laptop.architect-2` at 2026-10-08T04:00:34Z
+  (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6051909712).
+  `Policy::new` still sets the authority of a policy with no `write` to zero. Lost: an
+  `authority` that `write` makes required, a rule that C8 does not have. The action
+  words are a table in `config` until a second reader needs them, such as the `plan`
+  output of access; then they move to `spec` as `Action::as_str`. Decided by
+  `laptop.architect-2` (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
 
 ### 1.12 Access, identity, and secrets

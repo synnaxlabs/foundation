@@ -1746,7 +1746,8 @@ mod tests {
                 ),
             ];
             for (allow, actions) in cases {
-                let documents = access(&attributes(allow.clone(), Some(200)));
+                let written = actions.contains(&Action::Write).then_some(200);
+                let documents = access(&attributes(allow.clone(), written));
                 assert_eq!(check(&documents), Ok(allowed(actions, 200)), "{allow:?}");
             }
             let every = ["read", "write", "plan", "apply", "secret", "admin"];
@@ -1775,12 +1776,47 @@ mod tests {
         }
 
         #[test]
-        fn reads_an_authority_without_write_as_none() {
-            let read = check(&access(&attributes(string("read"), Some(200)))).unwrap();
+        fn reads_no_authority_without_write_as_none() {
+            let read = check(&access(&attributes(string("read"), None))).unwrap();
             assert_eq!(policy(&read).authority(), None);
             assert_eq!(
                 policy(&read).allow(),
                 Actions::NONE.union([Action::Read].into_iter().collect())
+            );
+        }
+
+        #[test]
+        fn refuses_an_authority_without_write() {
+            let message = "the policy has an `authority` and no `write` in `allow`, \
+                           and only a write uses an authority";
+            let fix = "Add `write` to `allow`, or remove `authority`";
+            for (allow, authority) in [
+                (string("read"), 200),
+                (list(vec![string("read"), reference("plan")]), 0),
+            ] {
+                assert_eq!(
+                    check(&access(&attributes(allow, Some(authority)))),
+                    Err(vec![refused(
+                        "config.authority-without-write",
+                        at(0, 17),
+                        message,
+                        fix,
+                    )]),
+                    "{authority}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_only_the_action_of_a_bad_allow_with_an_authority() {
+            assert_eq!(
+                check(&access(&attributes(string("erase"), Some(5)))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "`erase` is not an action",
+                    ACTION_FIX,
+                )])
             );
         }
 
