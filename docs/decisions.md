@@ -3110,7 +3110,24 @@ How to read this record:
   name comes from a file. A run or a discovery fails with one of three classes:
   `Config` (stop until the spec changes), `Device`, and `Retry` (restart with
   backoff). Decided by the `connector` builder in the plan on #338, after
-  `/eb-review`; approved by the coordinator (#338).
+  `/eb-review`; approved by the coordinator (#338). `Table::check` takes where the file
+  names the kind and puts `connector.unknown-kind` there; `discover` and `run` take
+  their kind from the spec, which has no spans (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC).
+- **READER SETTINGS** `connector::reader::read` is the one reader of the S10 settings
+  of an out connector: the `select` attribute and one `reader` block with `name`,
+  `mode` (`hub::reader::Mode`), and `hold`. With no block the reader is ad hoc and
+  complete. A `hold` with no `name` or in `latest` mode is a plan error
+  (`connector.unnamed-hold`, `connector.latest-hold`), since only a named complete
+  reader holds. `reader::KEYS` (`select`) and `reader::BLOCKS` (`reader`) name what
+  `read` reads, and a kind passes them with its own keys to `document::read::unknown`
+  (DOCUMENT KEYS), so an unknown key gives a `document.*` code. Decided by
+  `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC, and
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
+  2026-10-08 03:05 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
   the caller's token. After `Device` or `Retry` it restarts with full jitter backoff

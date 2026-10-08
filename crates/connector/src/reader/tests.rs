@@ -1,0 +1,366 @@
+use document::{Attribute, Label, Map, Position, Source};
+use proptest::prelude::*;
+
+use super::*;
+
+/// A one-byte span at `offset`.
+fn at(offset: u32) -> Option<document::Span> {
+    let position = |offset| Position {
+        offset,
+        line: 0,
+        column: offset,
+    };
+    document::Span::new(Source(0), position(offset), position(offset + 1))
+}
+
+fn string(text: &str) -> Kind {
+    Kind::String(text.into())
+}
+
+/// A document with `attributes`, each key at its offset and its value one byte after.
+fn document(attributes: &[(u32, &str, Kind)], blocks: Vec<Block>) -> Document {
+    let attributes = attributes
+        .iter()
+        .map(|(offset, key, kind)| Attribute {
+            key: (*key).into(),
+            key_span: at(*offset),
+            value: Value {
+                kind: kind.clone(),
+                span: at(offset + 1),
+            },
+        })
+        .collect();
+    Document {
+        attributes: Map::new(attributes).expect("unique keys"),
+        blocks,
+    }
+}
+
+/// A block with `keyword` at `offset`.
+fn block(offset: u32, keyword: &str, body: Document) -> Block {
+    Block {
+        keyword: keyword.into(),
+        keyword_span: at(offset),
+        labels: Vec::new(),
+        body,
+        span: at(offset),
+    }
+}
+
+/// A config that selects `edge.*`, with `reader` as its one block.
+fn config(reader: &[(u32, &str, Kind)]) -> Document {
+    let reader = block(50, "reader", document(reader, Vec::new()));
+    document(&[(0, "select", string("edge.*"))], vec![reader])
+}
+
+fn name(text: &str) -> Name {
+    text.parse().expect("a name")
+}
+
+fn selector(pattern: &str) -> Selector {
+    Selector::new([pattern]).expect("a selector")
+}
+
+fn refused(code: &'static str, at: u32, message: &str, fix: &str) -> Diagnostic {
+    Diagnostic::new(Code::new(code), self::at(at), message.into(), fix.into())
+}
+
+#[test]
+fn reads_a_named_complete_reader_with_a_hold() {
+    let config = config(&[
+        (60, "name", string("influx")),
+        (70, "mode", string("complete")),
+        (80, "hold", string("2h")),
+    ]);
+    let expected = Settings {
+        name: Some(name("influx")),
+        select: selector("edge.*"),
+        mode: Mode::Complete,
+        hold: "2h".parse().expect("a span"),
+    };
+    assert_eq!(read(&config), Ok(expected));
+}
+
+#[test]
+fn reads_an_ad_hoc_complete_reader_with_no_reader_block() {
+    let config = document(&[(0, "select", string("edge.*"))], Vec::new());
+    let expected = Settings {
+        name: None,
+        select: selector("edge.*"),
+        mode: Mode::Complete,
+        hold: Span::ZERO,
+    };
+    assert_eq!(read(&config), Ok(expected));
+}
+
+#[test]
+fn reads_a_latest_mode_written_as_a_reference() {
+    let config = config(&[(70, "mode", Kind::Reference(name("latest")))]);
+    let settings = read(&config).expect("settings");
+    assert_eq!((settings.mode, settings.hold), (Mode::Latest, Span::ZERO));
+}
+
+#[test]
+fn leaves_the_keys_it_does_not_read_to_the_kind() {
+    let mut config = config(&[]);
+    config = document(
+        &[
+            (0, "select", string("edge.*")),
+            (10, "address", string("x")),
+        ],
+        config.blocks,
+    );
+    config
+        .blocks
+        .push(block(90, "channel", Document::default()));
+    assert_eq!(
+        read(&config).map(|settings| settings.select),
+        Ok(selector("edge.*"))
+    );
+}
+
+#[test]
+fn names_what_it_reads_for_the_kind_to_check() {
+    let config = document(
+        &[
+            (0, "select", string("edge.*")),
+            (10, "address", string("x")),
+            (20, "port", string("y")),
+        ],
+        vec![
+            block(30, "reader", Document::default()),
+            block(40, "channel", Document::default()),
+        ],
+    );
+    let found: Vec<_> = document::read::unknown(
+        &config,
+        "the connector",
+        &["address", KEYS[0]],
+        &BLOCKS,
+    )
+    .into_iter()
+    .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+    .collect();
+    assert_eq!(
+        found,
+        [
+            ("document.unknown-attribute", at(20)),
+            ("document.unknown-block", at(40)),
+        ]
+    );
+}
+
+#[test]
+fn refuses_a_config_with_no_select() {
+    let config = document(&[], Vec::new());
+    let expected = Diagnostic::new(
+        Code::new("document.missing-attribute"),
+        None,
+        "the connector has no `select`".into(),
+        "Add a `select` attribute with the channels it reads, such as \"site_a.**\""
+            .into(),
+    );
+    assert_eq!(read(&config), Err(vec![expected]));
+}
+
+#[test]
+fn refuses_a_select_that_does_not_read() {
+    let config = document(&[(0, "select", Kind::Integer(3))], Vec::new());
+    let expected = refused(
+        "document.bad-selector",
+        1,
+        "a pattern is a string or a reference, not an integer",
+        "Write a string such as \"site_a.*\"",
+    );
+    assert_eq!(read(&config), Err(vec![expected]));
+}
+
+#[test]
+fn refuses_a_hold_with_no_name() {
+    let config = config(&[(80, "hold", string("2h"))]);
+    let expected = refused(
+        "connector.unnamed-hold",
+        80,
+        "the reader has a `hold` and no `name`, and an ad hoc reader holds nothing",
+        "Add a `name`, or remove the `hold`",
+    );
+    assert_eq!(read(&config), Err(vec![expected]));
+}
+
+#[test]
+fn refuses_a_hold_in_latest_mode() {
+    let config = config(&[
+        (60, "name", string("influx")),
+        (70, "mode", string("latest")),
+        (80, "hold", string("0s")),
+    ]);
+    let expected = refused(
+        "connector.latest-hold",
+        80,
+        "the reader has a `hold` in `latest` mode, and only a complete reader holds",
+        "Use `mode = \"complete\"`, or remove the `hold`",
+    );
+    assert_eq!(read(&config), Err(vec![expected]));
+}
+
+#[test]
+fn refuses_an_unknown_mode_and_a_mode_that_is_not_text() {
+    let fix = "Write \"complete\" or \"latest\"";
+    let config_of = |kind| config(&[(70, "mode", kind)]);
+    assert_eq!(
+        read(&config_of(string("all"))),
+        Err(vec![refused(
+            "connector.bad-mode",
+            71,
+            "the reader has no mode \"all\"",
+            fix
+        )])
+    );
+    assert_eq!(
+        read(&config_of(Kind::Bool(true))),
+        Err(vec![refused(
+            "connector.bad-mode",
+            71,
+            "a mode is a string, not a bool",
+            fix
+        )])
+    );
+}
+
+#[test]
+fn refuses_a_name_and_a_hold_that_do_not_read() {
+    let config = config(&[(60, "name", string("a..b")), (80, "hold", string("x"))]);
+    let diagnostics = read(&config).expect_err("refused");
+    let found: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    assert_eq!(
+        found,
+        [("document.bad-name", at(61)), ("document.bad-span", at(81))]
+    );
+}
+
+#[test]
+fn refuses_a_second_reader_block_after_a_good_one() {
+    let mut config = config(&[(60, "name", string("influx"))]);
+    config.blocks.push(block(95, "reader", Document::default()));
+    assert_eq!(
+        read(&config),
+        Err(vec![refused(
+            "config.repeated-block",
+            95,
+            "the connector has a second `reader` block",
+            "Join the two into one",
+        )])
+    );
+}
+
+#[test]
+fn refuses_what_the_reader_block_does_not_take() {
+    let mut config =
+        config(&[(60, "name", string("influx")), (65, "from", string("x"))]);
+    let reader = &mut config.blocks[0];
+    reader.labels.push(Label {
+        text: "r".into(),
+        span: at(55),
+    });
+    reader
+        .body
+        .blocks
+        .push(block(90, "inner", Document::default()));
+    config.blocks.push(block(95, "reader", Document::default()));
+    assert_eq!(
+        read(&config),
+        Err(vec![
+            refused(
+                "config.repeated-block",
+                95,
+                "the connector has a second `reader` block",
+                "Join the two into one",
+            ),
+            refused(
+                "config.label-count",
+                55,
+                "the `reader` block takes no label",
+                "Remove each label, and name the reader with a `name` attribute",
+            ),
+            refused(
+                "document.unknown-attribute",
+                65,
+                "`from` is not an attribute of the `reader` block",
+                "Use `name`, `mode`, or `hold`, or remove it",
+            ),
+            refused(
+                "document.unknown-block",
+                90,
+                "the `reader` block cannot hold the `inner` block",
+                "Remove it",
+            ),
+        ])
+    );
+}
+
+fn names() -> impl Strategy<Value = Name> {
+    "[a-z][a-z0-9_]{0,6}(\\.[a-z][a-z0-9_]{0,6}){0,2}".prop_map(|text| name(&text))
+}
+
+/// Settings, with the pattern of their selector.
+fn settings() -> impl Strategy<Value = (Settings, String)> {
+    let named = (names(), 0..=1_000_000i64).prop_map(|(name, millis)| {
+        (
+            Some(name),
+            Mode::Complete,
+            Span::from_nanos(millis * 1_000_000),
+        )
+    });
+    let unheld =
+        (proptest::option::of(names()), any::<bool>()).prop_map(|(name, latest)| {
+            let mode = if latest { Mode::Latest } else { Mode::Complete };
+            (name, mode, Span::ZERO)
+        });
+    (prop_oneof![named, unheld], names(), any::<bool>()).prop_map(
+        |((name, mode, hold), select, wild)| {
+            let pattern = if wild {
+                format!("{select}.*")
+            } else {
+                select.as_str().to_owned()
+            };
+            let settings = Settings {
+                name,
+                select: selector(&pattern),
+                mode,
+                hold,
+            };
+            (settings, pattern)
+        },
+    )
+}
+
+/// The config that writes `settings`, which select `pattern`, with only the keys that
+/// differ from the defaults.
+fn written(settings: &Settings, pattern: &str) -> Document {
+    let mut reader = Vec::new();
+    if let Some(name) = &settings.name {
+        reader.push((60, "name", string(name.as_str())));
+    }
+    if settings.mode == Mode::Latest {
+        reader.push((70, "mode", string("latest")));
+    }
+    if settings.hold != Span::ZERO {
+        reader.push((80, "hold", string(&settings.hold.to_string())));
+    }
+    let blocks = if reader.is_empty() {
+        Vec::new()
+    } else {
+        vec![block(50, "reader", document(&reader, Vec::new()))]
+    };
+    document(&[(0, "select", string(pattern))], blocks)
+}
+
+proptest! {
+    #[test]
+    fn reads_back_the_settings_a_config_writes((settings, pattern) in settings()) {
+        prop_assert_eq!(read(&written(&settings, &pattern)), Ok(settings));
+    }
+}
