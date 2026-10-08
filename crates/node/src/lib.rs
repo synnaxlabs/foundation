@@ -76,15 +76,17 @@ pub struct Config<M> {
     pub listen: SocketAddr,
     /// The region whose mesh the node opens, or `None` for no mesh. One founding member
     /// has the node's key, and its card holds the public half of the node's private
-    /// key, both from the file `node.key` in the data directory. Give the same value at
-    /// each start: the node keeps no copy of it, and until the mesh stores it (#1209),
-    /// a log opened with another value checks proofs against the wrong voters and
-    /// starts at another spec. A patch until the node keeps its region in its data
-    /// directory when it founds or joins one, and reads it at each start (#1744). The
-    /// hub of each task knows each channel of the founding's `definitions`. Give only a
-    /// founding that `spec::region::check` accepts. One with a data channel whose index
-    /// is not an index of it, or with two channels of one key, makes shard 0 panic, and
-    /// [`Node::join`] gives [`Error::Panicked`].
+    /// key, both from the file `node.key` in the data directory. Only `node` reads that
+    /// file, so until the node founds its region itself (#1744), only the tests of
+    /// `node` give `Some`. Give the same value at each start: the node keeps no copy of
+    /// it, and until the mesh stores it (#1209), a log opened with another value checks
+    /// proofs against the wrong voters and starts at another spec. A patch until the
+    /// node keeps its region in its data directory when it founds or joins one, and
+    /// reads it at each start (#1744). The hub of each task knows each channel of the
+    /// founding's `definitions`. Give only a founding that `spec::region::check`
+    /// accepts. One with a data channel whose index is not an index of it, or with two
+    /// channels of one key, makes shard 0 panic, and [`Node::join`] gives
+    /// [`Error::Panicked`].
     pub region: Option<mesh::region::Founding>,
 }
 
