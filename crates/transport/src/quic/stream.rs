@@ -3487,8 +3487,6 @@ mod tests {
             }
         }
 
-        // The share cannot reach the `Latest` floor: `Latest` goes first while it is
-        // owed, so its credit stays under one message and one window of `Complete`.
         #[test]
         fn credit_past_one_window_goes_once_the_other_class_sends_alone() {
             let (mut share, idle) = (Share::new(99), Budget::new(10));
@@ -7577,9 +7575,10 @@ mod tests {
         }
 
         /// Runs a `Complete` and a held `Latest` with paired credit, then a pause in
-        /// which only `Latest` may send one window, and returns the credit after the
-        /// pause and the bytes `Complete` then sends ahead of one `Latest` sample.
-        fn ahead_after_a_pause(shard: &Shard, latest_sends: bool) -> (isize, usize) {
+        /// which only `Latest` sends `alone` bytes in whole messages, and returns the
+        /// credit after the pause and the bytes `Complete` then sends ahead of one
+        /// `Latest` sample.
+        fn ahead_after_a_pause(shard: &Shard, alone: usize) -> (isize, usize) {
             let mut pair = narrow(shard);
             let (mut receivers, mut read) = (Vec::new(), [0; 4]);
             let big = shard.block(&vec![1; MESSAGE_MAX]);
@@ -7604,17 +7603,18 @@ mod tests {
                 flush(&mut pair, &mut receivers, &mut read, &senders);
             }
             let message = shard.block(&vec![1; MESSAGE_MAX / 4]);
-            if latest_sends {
-                let mut pending = None;
-                let start = read[Class::Latest.rank()];
-                while read[Class::Latest.rank()] < start + NARROW {
-                    if pending.is_none() {
-                        pending = Some(message.clone());
-                    }
+            let start = read[Class::Latest.rank()];
+            for _ in 0..alone.div_ceil(message.len()) {
+                let mut pending = Some(message.clone());
+                while pending.is_some() {
                     send(&mut pair, &mut latest, &mut pending);
                     pair.run(STEP);
                     take(&mut pair, &mut receivers, &mut read);
                 }
+            }
+            while read[Class::Latest.rank()] < start + alone {
+                pair.run(STEP);
+                take(&mut pair, &mut receivers, &mut read);
             }
             pair.run(RUN);
             take(&mut pair, &mut receivers, &mut read);
@@ -7640,10 +7640,12 @@ mod tests {
         #[test]
         fn complete_after_a_silent_pause_goes_ahead_by_its_credit_and_one_message() {
             testing::run(1, |shard| {
-                let (paused, ahead) = ahead_after_a_pause(shard, false);
+                let (paused, ahead) = ahead_after_a_pause(shard, 0);
                 let credit = usize::try_from(paused).expect("`Complete` is owed");
                 assert!(credit > NARROW, "{credit} of {NARROW}");
                 let bound = credit + MESSAGE_MAX / 4;
+                assert!(ahead <= bound, "{ahead} of {bound}");
+                let bound = 3 * NARROW + MESSAGE_MAX / 4;
                 assert!(ahead <= bound, "{ahead} of {bound}");
             });
         }
@@ -7651,7 +7653,7 @@ mod tests {
         #[test]
         fn complete_after_latest_sends_in_a_pause_goes_at_most_one_window_ahead() {
             testing::run(1, |shard| {
-                let (paused, ahead) = ahead_after_a_pause(shard, true);
+                let (paused, ahead) = ahead_after_a_pause(shard, 2 * NARROW);
                 assert!(ahead <= NARROW, "{ahead} of {NARROW}; owed {paused}");
             });
         }
@@ -7680,6 +7682,87 @@ mod tests {
                 let mut complete = open_sender(&mut pair, Class::Complete);
                 fill(&mut pair, shard, &mut complete);
                 assert_eq!(owed(&mut pair), 0);
+            });
+        }
+
+        /// Sends a light load of `light` against a backlog of the other class of the
+        /// share for 1000 [`STEP`]s, then backlogs both for 600. Gives the bytes of
+        /// `light` that the server read in the second phase past its share, and the
+        /// peer window.
+        fn ahead_after_a_light_load(shard: &Shard, light: Class) -> (isize, usize) {
+            let mut pair = connected(shard);
+            let heavy = other(light).expect("a class of the share");
+            let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+            let mut backlogged = open_sender(&mut pair, heavy);
+            let mut lightly = open_sender(&mut pair, light);
+            let big = shard.block(&vec![0; MESSAGE_MAX]);
+            let small = shard.block(&[1; 100]);
+            let mut pending = None;
+            for step in 0..1000 {
+                pair.run(STEP);
+                refill(&mut pair, &mut backlogged, &big);
+                let now = pair.now();
+                let flushed =
+                    pair::write(&mut pair.client.endpoint, now, &lightly, &mut None);
+                assert!(flushed.is_ok(), "{flushed:?}");
+                if step % 10 == 0 && pending.is_none() {
+                    pending = Some(small.clone());
+                }
+                send(&mut pair, &mut lightly, &mut pending);
+                take(&mut pair, &mut receivers, &mut read);
+            }
+            let before = read;
+            for _ in 0..600 {
+                pair.run(STEP);
+                refill(&mut pair, &mut backlogged, &big);
+                refill(&mut pair, &mut lightly, &big);
+                take(&mut pair, &mut receivers, &mut read);
+            }
+            let [_, latest, complete, _] =
+                [0, 1, 2, 3].map(|rank| read[rank] - before[rank]);
+            let total = latest + complete;
+            let ahead = match light {
+                Class::Latest => latest.cast_signed() - (total / 4).cast_signed(),
+                _ => complete.cast_signed() - (3 * total / 4).cast_signed(),
+            };
+            let key = key(&pair.client);
+            let connection =
+                crate::quic::find(&mut pair.client.endpoint.connections, key);
+            let window = connection
+                .expect("a connection")
+                .streams
+                .sending
+                .share
+                .window;
+            (ahead, window)
+        }
+
+        #[test]
+        fn latest_after_a_light_load_goes_at_most_one_window_ahead() {
+            testing::run(1, |shard| {
+                let (ahead, window) = ahead_after_a_light_load(shard, Class::Latest);
+                let bound = (window + MESSAGE_MAX).cast_signed();
+                assert!(ahead <= bound, "{ahead} of {bound}");
+            });
+        }
+
+        #[test]
+        fn complete_after_a_light_load_goes_at_most_three_windows_ahead() {
+            testing::run(1, |shard| {
+                let (ahead, window) = ahead_after_a_light_load(shard, Class::Complete);
+                let bound = (3 * window + MESSAGE_MAX).cast_signed();
+                assert!(ahead <= bound, "{ahead} of {bound}");
+            });
+        }
+
+        #[test]
+        fn complete_after_latest_sends_less_than_a_window_in_a_pause_keeps_its_credit()
+        {
+            testing::run(1, |shard| {
+                let (paused, ahead) = ahead_after_a_pause(shard, 1);
+                let credit = usize::try_from(paused).expect("`Complete` is owed");
+                assert!(credit > NARROW, "{credit} of {NARROW}");
+                assert!(ahead >= credit, "{ahead} of {credit}");
             });
         }
 
