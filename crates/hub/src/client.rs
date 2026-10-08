@@ -137,8 +137,9 @@ impl Client {
             turn: Rc::default(),
             ended: RefCell::new(None),
         });
-        let header = shared.copy(&wire::header::encode(Protocol::Hub)).await?;
-        sender.send(header).await?;
+        shared
+            .send(&mut sender, &wire::header::encode(Protocol::Hub))
+            .await?;
         let first = shared.challenge(&mut receiver).await?;
         let next = shared.hello(&mut sender, &mut receiver, first).await?;
         tasks.spawn(renew(Rc::clone(&shared), sender, receiver, next));
@@ -176,8 +177,9 @@ impl Client {
         }
         let (mut sender, receiver) = shared.session.open(Class::Complete).await?;
         let receiver = open.receiver.insert(receiver);
-        let header = shared.copy(&wire::header::encode(Protocol::Hub)).await?;
-        sender.send(header).await?;
+        shared
+            .send(&mut sender, &wire::header::encode(Protocol::Hub))
+            .await?;
         let signature = shared
             .pair
             .sign(&access::proof::request(shared.connection, body));
@@ -186,7 +188,7 @@ impl Client {
         sender.send(message.freeze()).await?;
         let most = sender.bytes_max().min(shared.pool.largest());
         for chunk in body.chunks(most) {
-            sender.send(shared.copy(chunk).await?).await?;
+            shared.send(&mut sender, chunk).await?;
         }
         sender.finish()?;
         let first = receiver.recv().await;
@@ -225,15 +227,16 @@ impl Shared {
         }
     }
 
-    /// [`Shared::alloc`], filled with `bytes`.
-    async fn copy(&self, bytes: &[u8]) -> Result<block::Block, Error> {
+    /// Sends `bytes` on `sender` in a block of [`Shared::alloc`].
+    async fn send(&self, sender: &mut Sender, bytes: &[u8]) -> Result<(), Error> {
         let mut block = self.alloc(bytes.len()).await?;
         block.copy_from_slice(bytes);
-        Ok(block.freeze())
+        sender.send(block.freeze()).await?;
+        Ok(())
     }
 
-    /// Sleeps until `at`, or gives the error of the close when the session closes
-    /// first.
+    /// Sleeps until `at` while the session is open, and gives the error of the close
+    /// when the session closes first.
     async fn sleep_until(&self, at: Monotonic) -> Result<(), Error> {
         let mut closed = pin!(self.session.closed());
         let mut sleep = pin!(self.clock.sleep_until(at));
@@ -261,19 +264,23 @@ impl Shared {
         receiver: &mut Receiver,
         (challenge, came): (Challenge, Monotonic),
     ) -> Result<(Challenge, Monotonic), Error> {
-        // The mesh time of the challenge is as old as the challenge, so the expiry
-        // adds the time since it came.
         let hello = Hello {
             subject: self.subject.clone(),
             key: self.pair.public(),
             via: self.via,
             connection: self.connection,
             nonce: challenge.nonce,
-            expires: challenge.now.latest + (self.clock.now() - came) + LIFE,
+            expires: challenge.now.latest,
         };
-        let signature = self.pair.sign(&access::proof::hello(&hello));
-        let signed = Signed { hello, signature };
+        let mut signed = Signed {
+            hello,
+            signature: [0; 64],
+        };
         let mut message = self.alloc(signed.encoded_len()).await?;
+        // The expiry is set after the wait for a block, so the wait takes none of the
+        // hello's life. The mesh time of the challenge is as old as the challenge.
+        signed.hello.expires = challenge.now.latest + (self.clock.now() - came) + LIFE;
+        signed.signature = self.pair.sign(&access::proof::hello(&signed.hello));
         signed.encode(&mut message);
         sender.send(message.freeze()).await?;
         self.challenge(receiver).await

@@ -19,7 +19,7 @@ use types::time::{Interval, Span, Stamp};
 use wire::header::MALFORMED;
 use wire::hub::BUSY;
 use wire::hub::client::{
-    BODY_BYTES_MAX, Challenge, REFUSED, Refusal, Request, Response,
+    BODY_BYTES_MAX, Challenge, REFUSED, Refusal, Request, Response, Signed,
 };
 
 use super::link::{
@@ -672,13 +672,14 @@ async fn challenge(hello: &mut Incoming) {
 }
 
 /// Takes the next hello on `hello`.
-async fn take(hello: &mut Incoming) {
-    hello
+async fn take(hello: &mut Incoming) -> Signed {
+    let message = hello
         .receiver
         .recv()
         .await
         .expect("a hello")
         .expect("not finished");
+    Signed::decode(&message).expect("a signed hello")
 }
 
 /// Sends a challenge on `hello` and takes the hello, then admits it with the next
@@ -751,12 +752,25 @@ fn retries_a_renewal_every_ten_milliseconds_while_the_pool_is_full() {
     raw(
         140,
         |session, mut hello, node| async move {
-            let renewal = admit(&mut hello, &node.clock()).await;
-            let late = Span::from_nanos(renewal.nanos() - HALF.nanos());
+            let clock = node.clock();
+            challenge(&mut hello).await;
+            take(&mut hello).await;
+            let sent = clock.now();
+            challenge(&mut hello).await;
+            let renewal = take(&mut hello).await;
+            let came = clock.now() - sent;
+            let late = Span::from_nanos(came.nanos() - HALF.nanos());
             let room = Span::from_nanos(Span::SECOND.nanos() / 4);
             assert!(
                 late >= room && late.nanos() < room.nanos() + RETRY_MAX.nanos(),
                 "the renewal comes soon after the pool has room: {late:?}"
+            );
+            // The challenge gives a mesh time of zero, so a hello whose wait for a
+            // block took none of its life expires `LIFE` after it came.
+            let life = renewal.hello.expires - (Stamp::from_nanos(0) + came);
+            assert!(
+                life <= LIFE && life.nanos() > LIFE.nanos() - RETRY_MAX.nanos(),
+                "the wait for a block takes none of the hello's life: {life:?}"
             );
             drop(session);
         },
