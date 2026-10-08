@@ -68,8 +68,8 @@ pub struct Config {
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
-    /// The node's region, or `None` for a node with no region. With `None`, this node is
-    /// the home of each index.
+    /// The node's region, or `None` for a node with no region. With `None`, this node
+    /// is the home of each index.
     pub region: Option<Region>,
 }
 
