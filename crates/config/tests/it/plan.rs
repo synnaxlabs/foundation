@@ -601,6 +601,47 @@ connector \"w2\" {{
 }
 
 #[test]
+fn takes_the_first_writer_in_source_order_in_any_order_of_the_files() {
+    let first = format!(
+        "{PLANT}\
+connector \"w1\" {{
+  kind = \"writer\"
+  node = \"n1\"
+  writes = [\"a.value\"]
+}}
+"
+    );
+    let second = "\
+connector \"w2\" {
+  kind = \"writer\"
+  node = \"n2\"
+  writes = [\"a.time\"]
+}
+";
+    let members = BTreeSet::from([name("n"), name("n1"), name("n2")]);
+    let spec = Spec::create_empty();
+    let expected = [problem(
+        "config.writer-nodes",
+        (1, value(second, "node", "\"n2\"")),
+        "connectors on the nodes `n1` and `n2` write the index `a.time`, so it has no \
+         one home",
+        "Run each connector that writes `a.time` on one node",
+    )];
+    let mut documents = [read(0, &first), read(1, second)];
+    for _ in 0..2 {
+        let result = config::plan(
+            &documents,
+            spec.pointer,
+            &spec.definitions(),
+            &members,
+            &kinds(),
+        );
+        assert_eq!(problems(result), expected);
+        documents.reverse();
+    }
+}
+
+#[test]
 fn gives_the_problems_in_source_then_source_order() {
     let placement = "\
 placement \"a\" {

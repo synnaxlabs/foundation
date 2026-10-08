@@ -146,6 +146,7 @@ fn checked<'a>(
         }
     }
     if found.diagnostics.is_empty() {
+        found.writers.sort_by_key(|writer| order(writer.at));
         Ok(found)
     } else {
         sort(&mut found.diagnostics);
@@ -153,13 +154,15 @@ fn checked<'a>(
     }
 }
 
-/// Sorts `diagnostics` by the [`document::Source`] of each span, then in source order.
-/// A diagnostic with no span comes first.
+/// Sorts `diagnostics` by the [`order`] of each span.
 fn sort(diagnostics: &mut [Diagnostic]) {
-    diagnostics.sort_by_key(|diagnostic| {
-        let span = diagnostic.span;
-        span.map(|span| (span.source(), span.start().offset))
-    });
+    diagnostics.sort_by_key(|diagnostic| order(diagnostic.span));
+}
+
+/// The key that orders `span` by its [`document::Source`], then in source order. No
+/// span comes first.
+fn order(span: Option<Span>) -> Option<(document::Source, u32)> {
+    span.map(|span| (span.source(), span.start().offset))
 }
 
 /// The name and the label of each block of `kind` in `documents` whose one label
@@ -192,7 +195,8 @@ struct Found<'a> {
     kinds: &'a Table,
     /// The block of each entry, by tree key.
     blocks: BTreeMap<Name, &'a Block>,
-    /// Each connector whose kind accepts its config, in the order of the check.
+    /// Each connector whose kind accepts its config, by the [`order`] of its node once
+    /// the check passes.
     writers: Vec<Writer>,
     /// Each node that a checked `placement` block names, with its span.
     nodes: Vec<(Name, Option<Span>)>,
