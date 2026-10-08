@@ -75,11 +75,11 @@ impl Error {
         json!({ "errors": self.problems() })
     }
 
-    /// Each problem for a terminal, with one empty line between two. A character that
-    /// can add a line or move the cursor is written as its Rust escape. In the text of
-    /// an error but `Config`, so are a backslash and each character that does not
-    /// print, because that text holds the caller's text as given. A config producer
-    /// quotes the text of a file itself.
+    /// Each problem for a terminal, with one empty line between two. In `Config`, each
+    /// control character is written as its Rust escape, because a config producer
+    /// quotes the text of a file itself. In each other error, so are a backslash and
+    /// each character that does not print, because that text holds the caller's text
+    /// as given.
     pub(crate) fn text(&self) -> String {
         let escape: fn(&str) -> String = match self {
             Self::Config(_) => escape_controls,

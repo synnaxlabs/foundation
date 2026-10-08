@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Table};
-use document::diagnostic::{Code, Diagnostic};
-use document::{Document, Source};
+use document::diagnostic::{Code, Diagnostic, Note};
+use document::{Document, Position, Source, Span};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
@@ -463,18 +463,28 @@ fn escapes_a_control_character_in_the_text_of_a_problem() {
     let front_ends = BTreeMap::from([(
         "hcl",
         FrontEnd {
-            read: |_, _| {
-                Err(vec![Diagnostic::new(
+            read: |source, _| {
+                let start = Position {
+                    offset: 0,
+                    line: 0,
+                    column: 0,
+                };
+                let mut diagnostic = Diagnostic::new(
                     Code::new("test.raw"),
                     None,
                     "a\u{1b}[2J\nb\\n".to_owned(),
                     "c\rd".to_owned(),
-                )])
+                );
+                diagnostic.notes.push(Note {
+                    span: Span::new(source, start, start).expect("a span"),
+                    text: "e\u{7}f".to_owned(),
+                });
+                Err(vec![diagnostic])
             },
         },
     )]);
     let error = plan(
-        &files(&[("a.hcl", "")]),
+        &files(&[("a\u{1b}\\.hcl", "")]),
         empty(),
         &BTreeMap::new(),
         &BTreeSet::new(),
@@ -484,8 +494,28 @@ fn escapes_a_control_character_in_the_text_of_a_problem() {
     .expect_err("problems");
     assert_eq!(
         error.text(),
-        "error[test.raw]: a\\u{1b}[2J\\nb\\n\nfix: c\\rd\n"
+        "error[test.raw]: a\\u{1b}[2J\\nb\\n\n\
+         fix: c\\rd\n\
+         note: e\\u{7}f\n  \
+         --> a\\u{1b}\\\\.hcl:1:1\n"
     );
+}
+
+#[test]
+fn quotes_a_path_that_no_front_end_reads() {
+    assert_eq!(
+        problems(&[("a\\\u{202e}\u{2028}b.yaml", "")]).text(),
+        "error[ops.unknown-extension]: no config syntax reads \
+         \"a\\\\\\u{202e}\\u{2028}b.yaml\"\n\
+         fix: Use a file that ends in `.hcl`\n"
+    );
+}
+
+#[test]
+fn picks_the_front_end_by_the_text_after_the_last_dot() {
+    let placed = placed_site();
+    let planned = run(&[("site.v2.hcl", &placed)], &BTreeMap::new()).expect("a plan");
+    assert_eq!(planned.added, 3);
 }
 
 #[test]
