@@ -1652,9 +1652,10 @@ How to read this record:
   frame (`outside_lay` 56 to 69 µs, not 0.1 µs), and a cut of 16 (a frame just over it
   cost 148 to 255 µs more than one just under). The architect also accepted
   `narrow_lay` at +3 to +4 ns per frame (laptop.architect, 2026-10-08T02:33:03Z,
-  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050982066). At the
-  cut, a dense frame pushes its first m/8 series before it walks: the architect
-  accepted +5.6% at `cut_lay` 12,500 for -21.7% at 12,499 (laptop.architect,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050982066). Each
+  dense frame first pushes ceil(m/8) series, for the m entries that the places name,
+  then moves them into the walk: the architect accepted +5.6% at `cut_lay` 12,500 and
+  +1.3% at `reversed_lay` 100k for -21.7% at `cut_lay` 12,499 (laptop.architect,
   2026-10-08T03:07:31Z,
   https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6051347440).
   Amended (#1631): after `Behind`, each message gives `Ended`, before the three steps
