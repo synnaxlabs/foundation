@@ -2335,8 +2335,9 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
   equal change of another call, 2026-10-08T11:46:44Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). The
-  build with `spec::region::tree`, and the build of the root of `Config::founding` with
-  it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
+  build with `spec::region::tree`, and the build of the root of
+  `Config::founding.definitions` with it in `Mesh::open`, decided by `laptop.architect`,
+  2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
   Supersedes the build with `spec::tree::apply` from `tree::empty()`
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771). The
@@ -3084,10 +3085,10 @@ How to read this record:
   snapshots (#253). A watch does not keep the group running, and a dropped watch leaves
   no waker. `open` refuses a node or a voter that is not a member (`Error::NotMember`),
   and a private key that is not the key of this node's member (`Error::WrongKey`).
-  `Config.members` is a list, and the region state holds each record under the key of
-  its card, so the key of a member has one copy. `open` is the one check of a list for
-  two records of one node: a decoder of a join answer passes its records on and does not
-  check them again (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
+  `Config.founding.members` is a list, and the region state holds each record under the
+  key of its card, so the key of a member has one copy. `open` is the one check of a
+  list for two records of one node: a decoder of a join answer passes its records on and
+  does not check them again (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
   https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312, which
   reverses the map of the ruling below). The key of a member is the key that its card's
   signature covers, and `open` refuses a member that the region cannot hold, or two
@@ -3524,9 +3525,9 @@ How to read this record:
   region by name prefix. Regions nest like names. Supersedes: K5 voters policy. The
   prefix is a `types::name::Prefix`, which can be empty: the root prefix
   (`Prefix::ROOT`, text `""`) contains each name, so the root region holds each node.
-  `mesh` holds it in `mesh::Config.region` and `region::State`, and checks each name
-  against the region with `Prefix::contains`; `ticket::Options.prefix` stays a `Name`.
-  Decided by `laptop.architect` (2026-10-07T12:47:19Z):
+  `mesh` holds it in `region::Founding::prefix` and `region::State`, and checks each
+  name against the region with `Prefix::contains`; `ticket::Options.prefix` stays a
+  `Name`. Decided by `laptop.architect` (2026-10-07T12:47:19Z):
   https://github.com/synnaxlabs/foundation/issues/1383#issuecomment-6038223777. Each
   field that holds a region's prefix is a `Prefix`: also `ticket::Ticket`'s region (the
   region that the joining node opens with) and the `region` of `Unfit::Outside` and
@@ -5898,22 +5899,26 @@ How to read this record:
   the region; the error of `serve` ends only its stream. A mesh stream of a client, or
   of a node with no region, is rejected as NODE PORT says. Shard 0 sets no home yet (PR
   4 of #585). Shard 0 opens the mesh with `Config::region` unchanged, and no caller
-  gives definitions yet. From PR 1 of #1744, the code that builds `Config::region` gives
-  the root region the definitions that `spec::founding::create` gives, and each other
-  region an empty map.
-  Decided by `laptop.architect` at 2026-10-08T06:11:30Z
+  gives definitions yet. From PR 1b of #1744, the code that builds `Config::region`
+  gives the root region the definitions that `spec::founding::create` gives, and each
+  other region an empty map. Decided by `laptop.architect` at 2026-10-08T06:11:30Z
   (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053599101).
   `mesh::region::Founding` replaced `node::Region`, which copied three fields of
   `mesh::Config`, so `node` maps no `mesh` value by hand (#1859). Decided by
   `laptop.architect` at 2026-10-08T10:23:48Z
   (https://github.com/synnaxlabs/foundation/pull/1857#issuecomment-6057800438) and
   10:34:37Z (https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
-  A mesh that stops does not stop the node until #1780, before PR 4 gives the mesh to
-  the hub. Lost: `Node::found(region)` at run time, which needs a second open path and a
-  node that runs with no region before it; the key in `Region`, because a node's
-  identity is not region data, and PR 4 needs it with no region. Decided by
-  `laptop.architect-2`
-  (2026-10-08 03:37 UTC):
+  The type lands as PR 1 of #1209, ordered by `laptop.coordinator` at
+  2026-10-08T15:21:38Z
+  (https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6063144369) and
+  approved by `laptop.architect` at 15:26:10Z
+  (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600).
+  Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
+  of #336. A mesh that stops does not stop the node until #1780, before PR 4 gives the
+  mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second open
+  path and a node that runs with no region before it; the key in `Region`, because a
+  node's identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
