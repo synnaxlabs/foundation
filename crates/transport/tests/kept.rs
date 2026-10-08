@@ -26,16 +26,16 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 const CLIENT: PrivateKey = PrivateKey([1; 32]);
 const SERVER: PrivateKey = PrivateKey([2; 32]);
 const PORT: u16 = 4433;
-/// The most heap that the receiver frees when it drops after the read. A list of 64
-/// chunks is 2 KiB, since each slot is 32 bytes; one of 128 is 4 KiB.
-const KEPT_MAX: usize = 3 << 10;
+/// The most net heap that the drop of the receiver gives back after the read: a list
+/// of 64 chunks, since each slot is 32 bytes. The drop also allocates a few bytes.
+const KEPT_MAX: usize = 2 << 10;
 /// When the server reads after it accepts the stream, once the message is in.
 const READ: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its send: past the server's read.
 const LIVE: Span = Span::from_nanos(2_000_000_000);
 
-/// The length of the message that the server's one poll gives, and the heap bytes
-/// that the drop of the receiver then frees.
+/// The length of the message that the server's one poll gives, and the net heap
+/// bytes that the drop of the receiver then gives back.
 type Out = (Option<usize>, usize);
 
 fn main() {

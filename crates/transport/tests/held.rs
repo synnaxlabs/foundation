@@ -38,8 +38,9 @@ const LONG: usize = 100_000;
 /// list twice before it holds the rest.
 const LONGER: usize = 250_000;
 const MESSAGE_BYTES_MAX: usize = 1 << 18;
-/// The most heap that the receiver frees when it drops after the error. A list of 64
-/// chunks is 2 KiB, since each slot is 32 bytes; one of 128 is 4 KiB.
+/// The most net heap that the drop of the receiver gives back after the error. A list
+/// of 64 chunks is 2 KiB, since each slot is 32 bytes, and a closed session adds some
+/// state; one of 128 is 4 KiB.
 const KEPT_MAX: usize = 3 << 10;
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);
@@ -49,7 +50,7 @@ const END: Span = Span::from_nanos(500_000_000);
 const READ: Span = Span::from_nanos(1_000_000_000);
 
 /// The error of the server's read after the end, the heap bytes that read freed, and
-/// those that the drop of the receiver then frees.
+/// the net heap bytes that the drop of the receiver then gives back.
 type Out = (Option<Error>, usize, usize);
 
 /// How the client ends the message that waits.
