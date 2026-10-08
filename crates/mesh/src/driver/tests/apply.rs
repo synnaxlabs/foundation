@@ -287,6 +287,25 @@ fn a_call_whose_answer_is_cut_off_gives_the_pointer_of_its_own_change() {
     }
 }
 
+// A base past the pointer is stale, also at the last version.
+#[test]
+fn an_apply_on_a_base_at_the_last_version_gives_stale() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let last = Pointer {
+            version: u64::MAX,
+            root: tree::empty(),
+        };
+        let definitions = create_subjects(&["plant.a"], 1);
+        let stale = Error::Stale {
+            base: last,
+            pointer: base(),
+        };
+        assert_eq!(mesh.apply(last, definitions).await, Err(stale));
+        assert_eq!(mesh.pointer(), base());
+    });
+}
+
 fn name(text: &str) -> Name {
     text.parse().unwrap()
 }

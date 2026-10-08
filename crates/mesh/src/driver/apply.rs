@@ -53,7 +53,6 @@ impl Mesh {
             });
         }
         let root = update.root;
-        let moved = base.next(root);
         let change = Change::Spec {
             base,
             root,
@@ -61,9 +60,12 @@ impl Mesh {
         };
         loop {
             match self.attempt()?.settle(change.clone()).await? {
-                Some(Ok(())) => return Ok(moved),
-                Some(Err(Refused::Stale { pointer, .. })) if pointer == moved => {
-                    return Ok(moved);
+                Some(Ok(())) => return Ok(base.next(root)),
+                Some(Err(Refused::Stale { pointer, .. }))
+                    if pointer.root == root
+                        && pointer.version.checked_sub(1) == Some(base.version) =>
+                {
+                    return Ok(pointer);
                 }
                 Some(Err(Refused::Stale { base, pointer })) => {
                     return Err(Error::Stale { base, pointer });
