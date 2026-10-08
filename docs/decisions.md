@@ -2333,8 +2333,8 @@ How to read this record:
   with a torn body, are the end of the log. Anything else, or a record after a torn one,
   is `Error::Corrupt`, and the node does not start. The error is at the torn record,
   whatever the version of the record after it, in its file or the next. A record of
-  another version with no torn record before it is `Error::Version` (#1784, approved by
-  the architect, 2026-10-08T04:26:06Z:
+  another version that is the first defect in file order is `Error::Version` (#1784,
+  approved by the architect, 2026-10-08T04:26:06Z:
   https://github.com/synnaxlabs/foundation/pull/1776#issuecomment-6052206016). Open
   writes again, whole, the end file that it finds: the records as it read them, then
   zeros to the end of the file. So a torn record leaves nothing that a later open reads
