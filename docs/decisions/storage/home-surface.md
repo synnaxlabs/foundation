@@ -47,7 +47,7 @@
   after a shed and a carry: `delivery::Readers::end` gives the number after each key of
   a shed index, and panics while a record waits to be taken, and the shard carries each
   index with `Readers::after` at the highest of these. So a hub finds a session by its
-  home key alone. Decided by `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814, and
-  the `delivery` items:
+  home key alone. Decided by `laptop.architect` (2026-10-08T22:24:43Z:
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814, and the
+  `delivery` items, 2026-10-08T22:31:27Z:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046).
