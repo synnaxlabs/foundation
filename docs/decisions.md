@@ -5581,13 +5581,23 @@ How to read this record:
   `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
-  readable at its first poll, in a `OnceLock` with its thread, so no lock is on the
-  receive path. A sender registers for writable at its first poll and after each
-  `EAGAIN`, and the next send that succeeds drops the registration: Linux wakes each
-  `EPOLLOUT` registration of a socket for each datagram that the socket sends (1,000
-  wakes for 1,000 sends on box2), so a sender that stays registered on each shard
-  would wake each parked shard. Decided by `laptop.architect-2` (2026-10-08 18:27 UTC,
-  #119, https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). On
+  readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
+  sender registers for writable at its first poll and after each `EAGAIN`, and the next
+  send that succeeds drops the registration: Linux wakes each `EPOLLOUT` registration of
+  a socket for each datagram that the socket sends (1,000 wakes for 1,000 sends on
+  box2), so a sender that stays registered on each shard would wake each parked shard.
+  Decided by `laptop.architect-2` (2026-10-08 18:27 UTC, #119,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541).
+  The first poll of a UDP half binds it to its thread, whatever its result. A failed
+  `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
+  nothing stores a failure. For a source that is not local or is of the other family,
+  `os` gives the kernel's answer, and `sim` gives `Io { code: 99 }`. On Linux, that is
+  `Unreachable` for IPv4 (`ENETUNREACH`) and `Io { code: 22 }` (`EINVAL`) for IPv6 or
+  the other family. Until #1972 patches `noq-udp`, such a transmit can turn GSO and the
+  IPv4 ECN mark off for the life of the socket. Decided by `laptop.architect-2`
+  (2026-10-08 18:56 and 19:02 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066909518,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743). On
   `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
   stream reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of
   the connect, an IPv4-mapped address as plain IPv4, and any other address as given,
