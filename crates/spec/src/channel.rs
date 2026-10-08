@@ -342,6 +342,18 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_text_that_it_writes() {
+        let data_types = NUMBERS.into_iter().chain(OTHERS).flat_map(shapes).chain([
+            DataType::Sample(sample::Type::String),
+            DataType::Sample(sample::Type::Bytes),
+            DataType::Quality,
+        ]);
+        for data_type in data_types {
+            assert_eq!(data_type.to_string().parse(), Ok(data_type));
+        }
+    }
+
+    #[test]
     fn writes_quality_as_no_sample_type_writes() {
         assert_eq!(
             "quality".parse::<sample::Type>(),
