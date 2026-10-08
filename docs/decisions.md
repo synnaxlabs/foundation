@@ -3567,19 +3567,10 @@ How to read this record:
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
   2026-10-08 02:27 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
-  `connector-opcua` reads its `sources.txt`. The check finds call sites by relocation
-  in objects. Lost: a text search of the C source, which a macro can fool. Decided by
-  `laptop.architect-2`
+  `connector-opcua` reads its `sources.txt`. The check finds call sites by relocation.
+  Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057244538,
-  2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` builds the tag with our CMake
-  options. It copies each `.c` file that the build compiles, each header in the clone
-  that one includes, the headers that CMake generates (`src_generated/`), `LICENSE`,
-  `sources.txt`, `flags.txt` (the `-D`, `-I`, and `-std` flags), and `VERSION`. It
-  builds the copy from its own files at `-O0` with no inlining, so each call stays in
-  its function, and replaces `patches/open62541/` only when the check passes.
-  `cargo xtask open62541` checks the committed copy. The check fails on a call outside
-  the list, a listed pair with no call, a data section that holds the address of a
-  clock function, and a header outside the copy.
+  2026-10-08 09:50 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
