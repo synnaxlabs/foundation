@@ -112,8 +112,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   an error. Panic and assert messages state what broke and the values (r16 20).
 - `Drop` never panics. It never blocks unless the type also gives a call that does
   not block (r16 23). Two exceptions: `sim::Sim` (SIM DROP in
-  `docs/decisions/testing/sim-drop.md`), and the types under `tests/` that TEST DROP
-  names (`docs/decisions/testing/test-drop.md`).
+  `docs/decisions/testing/sim-drop.md`), and the test types that TEST DROP names
+  (`docs/decisions/testing/test-drop.md`).
 
 ## Unsafe
 

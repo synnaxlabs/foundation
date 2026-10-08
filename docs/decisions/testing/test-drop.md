@@ -6,8 +6,11 @@
   (2026-10-08 23:21 UTC, as `laptop.monitor` relayed it, recorded at
   https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6071002339; the
   question: https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6070953004).
-  A type under `tests/` whose `Drop` panic is the input of its test, such as `Bomb` in
+  A type in test code (under `tests/` or in a `#[cfg(test)]` module) whose `Drop`
+  panics or blocks as the input of its test, such as `Bomb` in
   `crates/os/tests/it/common.rs`, is not a helper, and the `Drop` rule of rust.md does
   not hold for it. Decided by `laptop.director`
   (https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071198900,
-  2026-10-08 23:39 UTC).
+  2026-10-08 23:39 UTC, widened at
+  https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071294220,
+  2026-10-08 23:47 UTC).
