@@ -2796,6 +2796,8 @@ mod port {
         fn a_key_that_is_not_valid_stops_the_node() {
             let mut tag = own();
             tag[15] = b'2';
+            let crc = crc32c::crc32c(&tag[..64]);
+            tag[64..].copy_from_slice(&crc.to_le_bytes());
             let mut changed = own();
             changed[40] ^= 1;
             let short = own()[..LEN - 1].to_vec();
@@ -2815,23 +2817,87 @@ mod port {
             );
         }
 
-        /// A failed write of a new key stops the node, and the next start makes one.
+        /// A failed file call on a new key stops the node, and the next start makes
+        /// one.
         #[test]
-        fn a_failed_write_of_the_key_stops_the_node() {
+        fn a_failed_file_call_on_the_key_stops_the_node() {
+            use env::files::Operation::{Open, ReadAt, Sync, WriteAt};
+            for operation in [Open, ReadAt, WriteAt, Sync] {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                host.fail_file(Path::new(FILE), operation);
+                let error = env::files::Error::Io {
+                    path: PathBuf::from(FILE),
+                    operation,
+                    code: 5,
+                };
+                assert_eq!(
+                    start_and_stop(&mut sim, &host),
+                    Err(Error::Directory(error))
+                );
+                assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
+                assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
+            }
+        }
+
+        /// The first start makes its key durable before it serves.
+        #[test]
+        fn a_new_key_survives_a_power_cut() {
+            for seed in 0..16 {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
+                let made = read(&mut sim, &host);
+                sim.crash(&host, sim::Crash::Power);
+                assert_eq!(read(&mut sim, &host), made, "seed {seed}");
+            }
+        }
+
+        /// A key made while the OS clock reads before 1970 has the time 0.
+        #[test]
+        fn a_clock_before_1970_makes_a_key_at_the_epoch() {
             let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            host.fail_file(Path::new(FILE), env::files::Operation::WriteAt);
-            let error = env::files::Error::Io {
-                path: PathBuf::from(FILE),
-                operation: env::files::Operation::WriteAt,
-                code: 5,
-            };
-            assert_eq!(
-                start_and_stop(&mut sim, &host),
-                Err(Error::Directory(error))
-            );
+            let host = sim.node(sim::node::Config {
+                cores: NonZeroUsize::new(2).unwrap(),
+                wall: types::time::Stamp::EPOCH - Span::HOUR,
+                ..sim::node::Config::default()
+            });
             assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
-            assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
+            let made = read(&mut sim, &host);
+            let key = u128::from_be_bytes(made[16..32].try_into().unwrap());
+            assert_eq!(key >> 80, 0, "the millis of the key");
+        }
+
+        /// A load makes no key until its clock has mesh time.
+        #[test]
+        fn a_load_makes_its_key_once_it_has_mesh_time() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 1);
+            let (early, loaded) = sim
+                .run_on(&host, |host, tasks| async move {
+                    let (driver, clock) = ::clock::Clock::new(host.clock());
+                    let loaded = std::rc::Rc::new(std::cell::RefCell::new(None));
+                    let out = std::rc::Rc::clone(&loaded);
+                    let (files, entropy) = (host.files(), host.entropy());
+                    tasks.spawn(async move {
+                        let identity = identity::load(&files, &clock, &entropy).await;
+                        *out.borrow_mut() = Some(identity.map(|identity| identity.key));
+                    });
+                    host.clock().sleep(Span::SECOND).await;
+                    let early = loaded.borrow().is_some();
+                    let wall = host.wall();
+                    tasks.spawn(async move { driver.run(wall).await });
+                    host.clock().sleep(Span::SECOND).await;
+                    (early, loaded.take())
+                })
+                .expect("the run ends");
+            assert!(!early, "a key before mesh time");
+            let key = loaded.expect("a key at mesh time").expect("a key");
+            let made = read(&mut sim, &host);
+            assert_eq!(made[16..32], key.as_u128().to_be_bytes());
         }
 
         /// A failed sync of a new key stops the node, and can leave the key in the
