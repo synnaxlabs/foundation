@@ -420,22 +420,8 @@ impl Receiver {
     ///     receiver.recv().await
     /// }
     /// ```
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "a receiver holds its stream until `stop` takes the receiver"
-    )]
     pub async fn recv(&mut self) -> Result<Option<Block>, Error> {
-        let stream = self.stream.as_mut();
-        let mut receiving = Receiving {
-            session: &self.session,
-            stream: stream
-                .expect("invariant: a receiver holds its stream until it stops"),
-            done: false,
-        };
-        let received =
-            poll_fn(|cx| receiving.session.poll_read(cx, receiving.stream)).await;
-        receiving.done = true;
-        received
+        self.receiving().read(quic::Session::poll_read).await
     }
 
     /// Waits for the next whole message and writes it to the start of `buffer`.
@@ -460,29 +446,24 @@ impl Receiver {
     ///     Ok(())
     /// }
     /// ```
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "a receiver holds its stream until `stop` takes the receiver"
-    )]
     pub async fn recv_into(
         &mut self,
         buffer: &mut [u8],
     ) -> Result<Option<usize>, Error> {
-        let stream = self.stream.as_mut();
-        let mut receiving = Receiving {
+        self.receiving()
+            .read(|session, cx, stream| session.poll_read_into(cx, stream, buffer))
+            .await
+    }
+
+    fn receiving(&mut self) -> Receiving<'_> {
+        Receiving {
             session: &self.session,
-            stream: stream
+            stream: self
+                .stream
+                .as_mut()
                 .expect("invariant: a receiver holds its stream until it stops"),
             done: false,
-        };
-        let received = poll_fn(|cx| {
-            receiving
-                .session
-                .poll_read_into(cx, receiving.stream, buffer)
-        })
-        .await;
-        receiving.done = true;
-        received
+        }
     }
 
     /// Asks the sender to stop: messages not yet received drop, and the sender sees
@@ -508,12 +489,27 @@ impl Drop for Receiver {
     }
 }
 
-/// A [`Receiver::recv`] in progress. Dropping it before it is done gives up its wait
-/// for room in the receive budget, so the room goes to the next read.
+/// A read of a [`Receiver`] in progress. Dropping it before it is done gives up its
+/// wait for room in the receive budget, so the room goes to the next read.
 struct Receiving<'a> {
     session: &'a quic::Session,
     stream: &'a mut quic::stream::Receiver,
     done: bool,
+}
+
+impl Receiving<'_> {
+    async fn read<T>(
+        mut self,
+        mut poll: impl FnMut(
+            &quic::Session,
+            &mut Context<'_>,
+            &mut quic::stream::Receiver,
+        ) -> Poll<T>,
+    ) -> T {
+        let read = poll_fn(|cx| poll(self.session, cx, self.stream)).await;
+        self.done = true;
+        read
+    }
 }
 
 impl Drop for Receiving<'_> {
