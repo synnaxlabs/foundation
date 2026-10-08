@@ -22,7 +22,8 @@ pub struct Rules {
     subjects: Map<Name, Subject>,
 }
 
-/// No subject, policy, or connector: each hello gets [`proof::Error::Unknown`].
+/// No subject, policy, or connector: each hello with mesh time gets
+/// [`proof::Error::Unknown`].
 impl Default for Rules {
     fn default() -> Self {
         Self {
