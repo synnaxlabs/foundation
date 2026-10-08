@@ -7,6 +7,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::cell::OnceCell;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -41,8 +42,8 @@ const MESSAGE_BYTES_MAX: usize = 1 << 18;
 /// The heap of a list of 64 chunks, since each slot is 32 bytes.
 const LIST: usize = 2 << 10;
 /// The heap of the cell that holds a closed session's error, which the drop of its
-/// receiver frees.
-const CLOSED: usize = 72;
+/// receiver frees: an `Rc` box, with its two counts.
+const CLOSED: usize = 2 * size_of::<usize>() + size_of::<OnceCell<Error>>();
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);
 /// When the client ends the stream or the session, after its send.
