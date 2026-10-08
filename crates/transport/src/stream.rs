@@ -758,6 +758,49 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_after_too_large_ends_the_stream() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            same,
+            |side| async move {
+                let opened = side.session.open(Class::Complete).await;
+                let (mut sender, mut receiver) = opened.expect("a stream");
+                sender.send(side.block(&[1; 100])).await.expect("sent");
+                assert_eq!(bytes(receiver.recv().await), Ok(Some(b"b".to_vec())));
+                sender.reset(Code(16));
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+            },
+            |side| async move {
+                let mut incoming = side.session.accept().await.expect("a stream");
+                let mut short = [0; 99];
+                let over = Error::TooLarge {
+                    bytes: 100,
+                    bytes_max: 99,
+                };
+                let read = incoming.receiver.recv_into(&mut short).await;
+                assert_eq!(read, Err(over.clone()));
+                let reply = incoming.sender.as_mut().expect("a reply half");
+                reply.send(side.block(b"b")).await.expect("sent");
+                let reset = Error::Reset { code: Code(16) };
+                let read = loop {
+                    match incoming.receiver.recv_into(&mut short).await {
+                        Err(error) if error == over => {
+                            side.node.clock().sleep(Span::MILLISECOND).await;
+                        }
+                        read => break read,
+                    }
+                };
+                assert_eq!(read, Err(reset.clone()));
+                let read = incoming.receiver.recv_into(&mut short).await;
+                assert_eq!(read, Err(reset));
+                side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_recv_into_gives_the_peers_reset() {
         let (mut sim, ..) = testing::sessions(
             0,

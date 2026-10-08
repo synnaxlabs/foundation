@@ -204,7 +204,7 @@ pub enum Peer {
 mod tests {
     use std::future::poll_fn;
     use std::num::NonZeroUsize;
-    use std::pin::pin;
+    use std::pin::{Pin, pin};
     use std::rc::Rc;
 
     use types::time::Span;
@@ -238,6 +238,15 @@ mod tests {
 
     #[test]
     fn a_dropped_recv_gives_its_wait_for_room_to_the_next_stream() {
+        dropped_wait(false);
+    }
+
+    #[test]
+    fn a_dropped_recv_into_gives_its_wait_for_room_to_the_next_stream() {
+        dropped_wait(true);
+    }
+
+    fn dropped_wait(into: bool) {
         // The receive budget is the window plus the largest message: 2^17 bytes.
         let narrow = |config| Config {
             window_bytes: 1 << 16,
@@ -259,7 +268,7 @@ mod tests {
                 let closed = Error::PeerClosed { code: Code(4) };
                 assert_eq!(side.session.closed().await, closed);
             },
-            |side| async move {
+            move |side| async move {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 let mut receivers = Vec::new();
                 for _ in 0..4 {
@@ -273,8 +282,15 @@ mod tests {
                 assert!(poll_once(pin!(first.recv())).await.is_none());
                 assert!(poll_once(pin!(second.recv())).await.is_none());
                 // Boxed, so that the drop below ends the future, not only a borrow.
-                let mut waiting = Box::pin(waits.recv());
-                assert!(poll_once(waiting.as_mut()).await.is_none());
+                let mut buffer = vec![0; 1 << 16];
+                let mut waiting: Pin<Box<dyn Future<Output = _>>> = if into {
+                    Box::pin(async {
+                        waits.recv_into(&mut buffer).await.map(|len| len.is_some())
+                    })
+                } else {
+                    Box::pin(async { waits.recv().await.map(|m| m.is_some()) })
+                };
+                assert!(poll_once(Pin::new(&mut waiting)).await.is_none());
                 // The small message fits, but waits behind the one before it.
                 assert!(poll_once(pin!(small.recv())).await.is_none());
                 drop(waiting);
