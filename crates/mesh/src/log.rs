@@ -622,9 +622,7 @@ fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
             put_optional_proof(hard.proof.as_ref(), &mut body);
         }
     }
-    for entry in entries {
-        entry::encode(entry, &mut body);
-    }
+    entry::encode(entries, &mut body);
     let mut head = Vec::with_capacity(HEADER);
     head.extend(VERSION.to_le_bytes());
     head.extend(number.to_le_bytes());
@@ -668,10 +666,7 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         }
         _ => return None,
     }
-    let mut entries = Vec::new();
-    while !body.is_empty() {
-        entries.push(entry::decode(body)?);
-    }
+    let entries = entry::decode(std::mem::take(body))?;
     if !follows(wide(stored.entries.len()), &entries) {
         return None;
     }
