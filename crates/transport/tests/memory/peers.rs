@@ -30,12 +30,13 @@ pub(crate) fn main() {
     let grown = last.saturating_sub(first);
     assert!(
         grown < (LAST - FIRST) * KEY,
-        "the server holds {first} heap bytes after {FIRST} peers, and {last} after \
+        "the run holds {first} heap bytes after {FIRST} peers, and {last} after \
          {LAST}"
     );
 }
 
-/// The heap bytes that the server holds after [`FIRST`] and after [`LAST`] peers.
+/// The heap bytes of the run after [`FIRST`] and after [`LAST`] peers. The client drops
+/// each of its transports first, so only the server's heap can grow.
 fn run() -> (usize, usize) {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());
