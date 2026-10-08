@@ -1304,10 +1304,10 @@ impl Streams {
 
     /// Writes the rest of the message that `sender`'s stream of `inner` holds, then
     /// puts `parts` of `message`, when `Some`, a message of `bytes`, on the stream
-    /// after it, and takes the block. Leaves it while the stream holds part of an earlier message. `Ready`
-    /// when the stream holds no message: it took all of `message`, or with `None`,
-    /// all of the one before. `Pending` while it holds one, and [`Event::Writable`]
-    /// follows when a later write can take more.
+    /// after it, and takes the block. Leaves it while the stream holds part of an
+    /// earlier message. `Ready` when the stream holds no message: it took all of
+    /// `message`, or with `None`, all of the one before. `Pending` while it holds
+    /// one, and [`Event::Writable`] follows when a later write can take more.
     ///
     /// # Errors
     ///
