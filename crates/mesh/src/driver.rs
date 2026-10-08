@@ -1775,21 +1775,19 @@ mod tests {
             let mesh = Mesh::start(config).await.unwrap();
             let first = lead(&mesh, &node.clock(), home(1)).await;
             let held = fill(&pool);
-            let results = Rc::new(RefCell::new(Vec::new()));
-            for id in [2, 3] {
-                let (other, results) = (mesh.clone(), Rc::clone(&results));
-                tasks.spawn(async move {
-                    let proposed = other.propose(home(id)).await;
-                    results.borrow_mut().push(proposed.unwrap());
-                });
-            }
+            // Both proposals start in one step of this task. One that starts after
+            // the write of the other found no block gives `Error::Pool`.
+            let mut second = pin!(mesh.propose(home(2)));
+            let mut third = pin!(mesh.propose(home(3)));
+            assert!(now(second.as_mut()).await.is_pending());
+            assert!(now(third.as_mut()).await.is_pending());
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-            assert_eq!(*results.borrow(), []);
+            assert!(now(second.as_mut()).await.is_pending());
+            assert!(now(third.as_mut()).await.is_pending());
             drop(held);
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
-            let mut positions = results.take();
-            positions.sort_by_key(|at| at.index);
-            assert_eq!(positions, [after(first, 1), after(first, 2)]);
+            assert_eq!(now(second).await, Poll::Ready(Ok(after(first, 1))));
+            assert_eq!(now(third).await, Poll::Ready(Ok(after(first, 2))));
         });
     }
 
@@ -4729,11 +4727,141 @@ mod tests {
         solo(|node, tasks| async move {
             let _first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
             let busy = open(&node, &tasks, 1, &[1], &[1]).await.err().unwrap();
-            let path = Path::new(LOG).join("log-0");
-            let cause = log::Error::Files(files::Error::Busy { path });
-            assert_eq!(busy.to_string(), cause.to_string());
-            assert_eq!(busy, Error::Log(cause));
+            assert_eq!(busy.to_string(), locked().to_string());
+            assert_eq!(busy, locked());
         });
+    }
+
+    /// What an open gives while a group holds the directory of the log.
+    fn locked() -> Error {
+        let path = Path::new(LOG).join("lock");
+        Error::Log(log::Error::Files(files::Error::Busy { path }))
+    }
+
+    fn create_sim(run: u64) -> (Sim, sim::node::Node) {
+        let mut sim = Sim::new(sim::Config {
+            seed: run,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        (sim, node)
+    }
+
+    /// Writes one record that fills `log-0`, so the next write starts `log-1`.
+    async fn fill_first_file(node: &sim::node::Node) {
+        let opened = Log::open(node.files(), LOG.into(), create_pool()).await;
+        let (mut log, _) = opened.unwrap();
+        let entries: Vec<Entry> = (1..=20_000)
+            .map(|index| Entry {
+                at: Position {
+                    term: Term(1),
+                    index,
+                },
+                data: Data::Bytes(encoded(&home(1))),
+            })
+            .collect();
+        log.write(None, &entries).await.unwrap();
+    }
+
+    /// Opens node 1 again and again for 1 ms while its first mesh lives, in each of
+    /// 64 runs. Gives each run in which an open did not give `locked`, with what
+    /// each such open gave. With `full`, the first write of the group starts `log-1`.
+    fn opens_of_a_held_log(full: bool) -> Vec<(u64, Vec<String>)> {
+        let mut runs = Vec::new();
+        for run in 0..64 {
+            let (mut sim, node) = create_sim(run);
+            let opens = sim.run_on(&node, move |node, tasks| async move {
+                if full {
+                    fill_first_file(&node).await;
+                }
+                let first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                let clock = node.clock();
+                let end = clock.now().checked_add(Span::MILLISECOND).unwrap();
+                let mut opens = Vec::new();
+                while clock.now() < end {
+                    match open(&node, &tasks, 1, &[1], &[1]).await {
+                        Err(error) if error == locked() => {}
+                        Err(error) => opens.push(error.to_string()),
+                        Ok(second) => {
+                            let names = node.files().list(Path::new(LOG)).await;
+                            clock.sleep(TICK).await;
+                            let proposed = second.propose(home(3)).await;
+                            opens.push(format!("Ok with {names:?}, then {proposed:?}"));
+                        }
+                    }
+                }
+                drop(first);
+                opens
+            });
+            let opens = opens.unwrap();
+            if !opens.is_empty() {
+                runs.push((run, opens));
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn open_gives_busy_on_the_lock_while_a_mesh_lives() {
+        assert_eq!(opens_of_a_held_log(false), []);
+    }
+
+    // The first write of the group starts `log-1` and frees `log-0`.
+    #[test]
+    fn open_gives_busy_on_the_lock_while_a_write_starts_a_file() {
+        assert_eq!(opens_of_a_held_log(true), []);
+    }
+
+    // The record of the changes does not fit in `log-0`, so its write makes `log-1`.
+    // The mesh drops while that write is in progress, and a new open starts at once.
+    #[test]
+    fn an_open_after_a_drop_does_not_share_the_log_with_a_write_that_makes_a_file() {
+        let mut wrong = Vec::new();
+        let mut busy = 0_usize;
+        for run in 0..48 {
+            let (mut sim, node) = create_sim(run);
+            let first = sim.run_on(&node, |node, tasks| async move {
+                let clock = node.clock();
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                lead(&mesh, &clock, home(1)).await;
+                clock.sleep(TICK).await;
+                for _ in 0..20_000 {
+                    assert!(started(&mesh, home(2)).await.is_pending());
+                }
+                clock.sleep(Span::from_nanos(1)).await;
+                drop(mesh);
+                let again = open(&node, &tasks, 1, &[1], &[1]).await;
+                let first = again.as_ref().err().cloned();
+                let mesh = if let Ok(mesh) = again {
+                    mesh
+                } else {
+                    clock.sleep(TICK).await;
+                    open(&node, &tasks, 1, &[1], &[1]).await.unwrap()
+                };
+                let mut watch = mesh.watch(INDEX);
+                lead(&mesh, &clock, home(3)).await;
+                while watch.next().await.unwrap() != Some(key(3)) {}
+                first
+            });
+            let first = first.unwrap();
+            if let Some(error) = &first {
+                assert_eq!(*error, locked(), "run {run}");
+                busy = busy.saturating_add(1);
+            }
+            sim.crash(&node, Crash::Process);
+            let again = sim.run_on(&node, |node, tasks| async move {
+                open(&node, &tasks, 1, &[1], &[1]).await.err()
+            });
+            if let Some(error) = again.unwrap() {
+                wrong.push((run, first, error.to_string()));
+            }
+        }
+        assert_eq!(
+            wrong,
+            [],
+            "(run, the open after the drop, the open after a crash)"
+        );
+        assert_ne!(busy, 0, "no open after the drop met the old task");
     }
 
     #[test]
