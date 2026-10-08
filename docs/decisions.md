@@ -4589,11 +4589,14 @@ How to read this record:
   `config.private-key`, whose message quotes none of the value. A `.pub` line whose
   comment holds `PRIVATE KEY` gets that alarm too, because a missed private key costs
   more. A base64 body with no header lines gets it too: `b3BlbnNzaC1rZXktdjEA` starts
-  each OpenSSH body, and `MC4CAQAwBQYDK2VwBCIE` starts each Ed25519 PKCS #8 body. Each
-  is whole 3-byte groups, so the bytes after it do not change it. Lost: a mark for the
-  body of another algorithm, such as RSA (`MIIE...`), whose start is also the start of a
-  certificate. As OpenSSH reads a `.pub` line, the comment is the rest of the line, so a
-  line with a second key in its comment gives the first key. Decided by
+  each OpenSSH body, and `BQYDK2VwBCIE` is bytes 6 to 14 of each Ed25519 PKCS #8 body,
+  v1 and v2 (#1886 round 1,
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061047969). Each is
+  whole 3-byte groups at an offset of whole groups, so the bytes around it do not
+  change it. An Ed25519 public key (`MCowBQYDK2VwAyEA`) does not hold it. Lost: a mark
+  for the body of another algorithm, such as RSA (`MIIE...`), whose start is also the
+  start of a certificate. As OpenSSH reads a `.pub` line, the comment is the rest of
+  the line, so a line with a second key in its comment gives the first key. Decided by
   `laptop.architect-2` at 2026-10-08T12:06:26Z
   (https://github.com/synnaxlabs/foundation/pull/1858#issuecomment-6059482219).
   `config::check` first looks at each string of each Document, in any block

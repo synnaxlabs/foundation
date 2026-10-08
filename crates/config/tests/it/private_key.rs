@@ -7,10 +7,20 @@ use document::{Document, Source};
 const PEM: &str = r#""-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n""#;
 
 /// The base64 body of a private key with no header lines: OpenSSH, then Ed25519
-/// PKCS #8.
-const BODIES: [&str; 2] = [
+/// PKCS #8 v1 (`openssl genpkey`), v2 with the public key (`ring`), and v2 with
+/// attributes (the sample of RFC 8410).
+const BODIES: [&str; 4] = [
     r#""b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMw""#,
     r#""MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH""#,
+    concat!(
+        r#""MFMCAQEwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"#,
+        r#"HoSMDIQAJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQ==""#,
+    ),
+    concat!(
+        r#""MHICAQEwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVh"#,
+        r#"CoB8wHQYKKoZIhvcNAQkJFDEPDA1DdXJkbGUgQ2hhaXJzgSEAGb9ECWmEzf6FQbr"#,
+        r#"BZ9w7lshQhqowtrbLDFw4rXAxZuE=""#,
+    ),
 ];
 
 fn read(source: u32, text: &str) -> Document {
