@@ -2,51 +2,27 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
-use std::ffi::{CStr, c_char, c_void};
-
-unsafe extern "C" {
-    fn UA_StatusCode_name(code: u32) -> *const c_char;
-    fn UA_DateTime_now() -> i64;
-    fn UA_DateTime_nowMonotonic() -> i64;
-    fn UA_DateTime_localTimeUtcOffset() -> i64;
-}
-
-fn name(code: u32) -> &'static str {
-    // SAFETY: `UA_StatusCode_name` takes any code and gives a static C string.
-    let name = unsafe { UA_StatusCode_name(code) };
-    // SAFETY: the string is static, and ends with a NUL.
-    unsafe { CStr::from_ptr(name) }.to_str().unwrap()
-}
+use crate::ffi::{self, Bytes, Status};
 
 #[test]
 fn the_copy_names_a_status_code() {
-    assert_eq!(name(0), "Good");
-    assert_eq!(name(0x8034_0000), "BadNodeIdUnknown");
+    assert_eq!(Status(0x8034_0000).name(), "BadNodeIdUnknown");
+    assert_eq!(
+        format!("{:?}", Status(0x8034_0000)),
+        "BadNodeIdUnknown (0x80340000)"
+    );
+    assert_eq!(Status::GOOD.name(), "Good");
 }
 
 #[test]
 fn the_global_clocks_give_a_fixed_time() {
     // SAFETY: each takes no argument and reads no state.
-    let now = unsafe { UA_DateTime_now() };
+    let now = unsafe { ffi::UA_DateTime_now() };
     // SAFETY: as above.
-    let monotonic = unsafe { UA_DateTime_nowMonotonic() };
+    let monotonic = unsafe { ffi::UA_DateTime_nowMonotonic() };
     // SAFETY: as above.
-    let offset = unsafe { UA_DateTime_localTimeUtcOffset() };
+    let offset = unsafe { ffi::UA_DateTime_localTimeUtcOffset() };
     assert_eq!((now, monotonic, offset), (0, 0, 0));
-}
-
-#[repr(C)]
-struct UaString {
-    length: usize,
-    data: *mut u8,
-}
-
-unsafe extern "C" {
-    fn UA_EventLoop_new_POSIX(logger: *const c_void) -> *mut c_void;
-    fn UA_ConnectionManager_new_POSIX_TCP(name: UaString) -> *mut c_void;
-    fn UA_ConnectionManager_new_POSIX_UDP(name: UaString) -> *mut c_void;
-    fn UA_ConnectionManager_new_POSIX_Ethernet(name: UaString) -> *mut c_void;
-    fn UA_InterruptManager_new_POSIX(name: UaString) -> *mut c_void;
 }
 
 /// The constructors that abort.
@@ -72,28 +48,30 @@ fn call_refused() {
     let Ok(name) = std::env::var(CHILD) else {
         return;
     };
-    let empty = || UaString {
+    let empty = || Bytes {
         length: 0,
         data: std::ptr::null_mut(),
     };
     match name.as_str() {
         // SAFETY: it aborts before it reads its argument.
-        "UA_EventLoop_new_POSIX" => unsafe { UA_EventLoop_new_POSIX(std::ptr::null()) },
+        "UA_EventLoop_new_POSIX" => unsafe {
+            ffi::UA_EventLoop_new_POSIX(std::ptr::null())
+        },
         // SAFETY: as above.
         "UA_ConnectionManager_new_POSIX_TCP" => unsafe {
-            UA_ConnectionManager_new_POSIX_TCP(empty())
+            ffi::UA_ConnectionManager_new_POSIX_TCP(empty())
         },
         // SAFETY: as above.
         "UA_ConnectionManager_new_POSIX_UDP" => unsafe {
-            UA_ConnectionManager_new_POSIX_UDP(empty())
+            ffi::UA_ConnectionManager_new_POSIX_UDP(empty())
         },
         // SAFETY: as above.
         "UA_ConnectionManager_new_POSIX_Ethernet" => unsafe {
-            UA_ConnectionManager_new_POSIX_Ethernet(empty())
+            ffi::UA_ConnectionManager_new_POSIX_Ethernet(empty())
         },
         // SAFETY: as above.
         "UA_InterruptManager_new_POSIX" => unsafe {
-            UA_InterruptManager_new_POSIX(empty())
+            ffi::UA_InterruptManager_new_POSIX(empty())
         },
         _ => panic!("no POSIX constructor is named {name}"),
     };
