@@ -4,6 +4,7 @@ use spec::definition::Kind;
 use spec::region::Problem;
 use spec::subject::Subject;
 
+use super::send::stop;
 use super::*;
 
 impl Cluster {
@@ -97,7 +98,7 @@ fn apply_gives_each_problem_of_the_spec_and_proposes_nothing() {
 }
 
 #[test]
-fn apply_on_a_node_that_is_not_a_voter_gives_problems_before_no_vote() {
+fn apply_on_a_node_that_is_not_a_voter_gives_problems_and_large_before_no_vote() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
         let valid = create_subjects(&["plant.a"], 1);
@@ -110,6 +111,25 @@ fn apply_on_a_node_that_is_not_a_voter_gives_problems_before_no_vote() {
             region: "plant".parse().unwrap(),
         };
         assert_eq!(applied, Poll::Ready(Err(Error::Problems(vec![problem]))));
+        let applied = now(pin!(mesh.apply(base(), create_large(1951)))).await;
+        assert!(matches!(applied, Poll::Ready(Err(Error::Large { .. }))));
+    });
+}
+
+#[test]
+fn apply_on_a_stopped_group_gives_problems_and_large_before_the_stop() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let stopped = stop(&node, &mesh);
+        node.clock().sleep(Span::MILLISECOND).await;
+        let ungoverned = create_subjects(&["other"], 1);
+        let applied = now(pin!(mesh.apply(base(), ungoverned))).await;
+        assert!(matches!(applied, Poll::Ready(Err(Error::Problems(_)))));
+        let applied = now(pin!(mesh.apply(base(), create_large(1951)))).await;
+        assert!(matches!(applied, Poll::Ready(Err(Error::Large { .. }))));
+        let valid = create_subjects(&["plant.a"], 1);
+        let applied = now(pin!(mesh.apply(base(), valid))).await;
+        assert_eq!(applied, Poll::Ready(Err(Error::Stopped(stopped))));
     });
 }
 
@@ -169,6 +189,16 @@ fn an_apply_on_a_stale_base_gives_the_pointer_through_a_follower_and_the_leader(
             base: base(),
             pointer: moved,
         };
+        assert_eq!(
+            stale.to_string(),
+            format!(
+                "the spec changed: the pointer is version 1, root {}, not the base \
+                 version 0, root {}",
+                moved.root,
+                base().root
+            ),
+            "run {run}"
+        );
         let applied = [
             (first, moved, Ok(moved)),
             (second, moved, Err(stale)),
