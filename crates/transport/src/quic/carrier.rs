@@ -880,7 +880,7 @@ mod tests {
     use noq_proto::{ConnectionHandle, Dir, Side, StreamId};
     use sim::Sim;
     use sim::node::Node;
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::{Monotonic, Span};
 
     use super::{BATCHES, Carrier, Retry, Socket, register};

@@ -74,7 +74,7 @@ pub struct Config<M> {
     /// the port carries TCP (#77).
     pub listen: SocketAddr,
     /// The node's key. Its transport proves the key to each peer.
-    pub private_key: types::node::PrivateKey,
+    pub private_key: types::ed25519::PrivateKey,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -584,7 +584,7 @@ struct Serve {
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
-    private_key: types::node::PrivateKey,
+    private_key: types::ed25519::PrivateKey,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }

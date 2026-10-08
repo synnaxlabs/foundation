@@ -155,7 +155,7 @@ impl Lab {
             disk: types::byte::Size::GIBIBYTE,
             net: host.net(),
             listen: SocketAddr::new(host.addresses()[0], PORT),
-            private_key: types::node::PrivateKey([key; 32]),
+            private_key: types::ed25519::PrivateKey([key; 32]),
         });
         self.members.push(Member {
             name: name.into(),
