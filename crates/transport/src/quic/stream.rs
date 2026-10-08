@@ -4762,7 +4762,8 @@ mod tests {
             fn the_writes_carry_each_byte_in_order_and_copy_at_most_the_copied_most(
                 drawn in vec((0..4000_usize, 0..2000_usize, any::<u8>()), 0..40),
             ) {
-                let block = Bytes::from_iter((0..4000_u32).map(|at| at.to_le_bytes()[0]));
+                let bytes = (0..4000_u32).map(|at| at.to_le_bytes()[0]);
+                let block = Bytes::from_iter(bytes);
                 let parts: Vec<_> = drawn
                     .into_iter()
                     .map(|(start, len, zeros)| {
@@ -4782,8 +4783,8 @@ mod tests {
                     let long = bytes.len() > COPIED_MAX;
                     prop_assert_eq!(long, *kind == "slice", "{} {}", kind, bytes.len());
                 }
-                let sent: Vec<u8> = pieces.into_iter().flat_map(|(_, bytes)| bytes).collect();
-                prop_assert_eq!(sent, all);
+                let sent = pieces.into_iter().flat_map(|(_, bytes)| bytes);
+                prop_assert_eq!(sent.collect::<Vec<u8>>(), all);
             }
         }
     }
