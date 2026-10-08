@@ -121,23 +121,19 @@ impl Set {
     }
 
     /// Drops the readers of the index at `place`, and moves the readers of the last
-    /// place there. Returns the slot of the index it moved, if any.
+    /// place there, as `Vec::swap_remove` moves an item.
     ///
     /// # Panics
     ///
     /// If a reader of the index is open.
-    pub(crate) fn shed(&mut self, place: usize) -> Option<Slot> {
+    pub(crate) fn shed(&mut self, place: usize) {
         let last = self.entries.len() - 1;
         let entry = self.entries.swap_remove(place);
         self.first = self.first.max(entry.readers.end());
         self.listed.retain(|&listed| listed != place);
-        if place == last {
-            return None;
-        }
         if let Some(listed) = self.listed.iter_mut().find(|listed| **listed == last) {
             *listed = place;
         }
-        Some(self.entries[place].slot)
     }
 
     /// Opens an unnamed complete reader on the index at `place` at seq `live`, with a
