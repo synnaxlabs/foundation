@@ -1,6 +1,7 @@
 //! Checks core definitions in Documents, expands templates, hands connector blocks to
 //! kinds, and computes plans, explains, and exports.
 
+mod access;
 mod channel;
 mod node_settings;
 mod placement;
@@ -28,7 +29,8 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
-const KINDS: [(Kind, Check); 4] = [
+const KINDS: [(Kind, Check); 5] = [
+    (Kind::Access, access::check),
     (Kind::Channel, channel::check),
     (Kind::NodeSettings, node_settings::check),
     (Kind::Placement, placement::check),
@@ -566,8 +568,8 @@ mod tests {
                 "config.unknown-block",
                 at(0, 0),
                 "`nodes` is not a kind of block",
-                "Use `channel`, `node_settings`, `placement`, or `retention`, or \
-                 remove the block",
+                "Use `access`, `channel`, `node_settings`, `placement`, or \
+                 `retention`, or remove the block",
             )])
         );
     }
@@ -1649,6 +1651,277 @@ mod tests {
             for attributes in cases {
                 assert_inner_blocks_refused("retention", &attributes);
             }
+        }
+    }
+
+    mod accesses {
+        use spec::access::{Action, Actions, Policy};
+        use types::authority::Authority;
+
+        use super::*;
+
+        const ACTION_FIX: &str = "Use `read`, `write`, `plan`, `apply`, `secret`, or \
+                                  `admin`";
+        const AUTHORITY_FIX: &str = "Write an integer from 0 to 255";
+
+        /// An `access` block in file 0 at offset 0, labeled `edge`.
+        fn access(attributes: &[(&str, Kind)]) -> [Document; 1] {
+            [document(vec![block(0, 0, "access", &["edge"], attributes)])]
+        }
+
+        /// A list of `items`, the item `i` at offset `50 + i`.
+        fn list(items: Vec<Kind>) -> Kind {
+            let items = (50..).zip(items).map(|(offset, kind)| Value {
+                kind,
+                span: at(0, offset),
+            });
+            Kind::List(items.collect())
+        }
+
+        fn reference(text: &str) -> Kind {
+            Kind::Reference(text.parse().unwrap())
+        }
+
+        /// The attributes of a policy that allows `allow`, with `authority` when given.
+        fn attributes(
+            allow: Kind,
+            authority: Option<i128>,
+        ) -> Vec<(&'static str, Kind)> {
+            let mut attributes = vec![
+                ("subjects", string("site_a.operators.*")),
+                ("select", string("edge.**")),
+                ("allow", allow),
+            ];
+            attributes.extend(authority.map(|n| ("authority", Kind::Integer(n))));
+            attributes
+        }
+
+        /// The one entry of an access policy labeled `edge`.
+        fn allowed(actions: &[Action], authority: u8) -> BTreeMap<Name, Entry> {
+            let policy = Policy::new(
+                selector(&["site_a.operators.*"]),
+                selector(&["edge.**"]),
+                actions.iter().copied().collect(),
+                Authority(authority),
+            );
+            let entry = Entry {
+                definition: Definition::Spec(definition::Definition::Access(policy)),
+                label_span: at(0, 1),
+            };
+            BTreeMap::from([(key("edge.@access"), entry)])
+        }
+
+        fn policy(entries: &BTreeMap<Name, Entry>) -> &Policy {
+            match &entries[&key("edge.@access")].definition {
+                Definition::Spec(definition::Definition::Access(policy)) => policy,
+                definition => panic!("not an access policy: {definition:?}"),
+            }
+        }
+
+        #[test]
+        fn reads_an_access_policy_from_strings_and_bare_words() {
+            let both = [Action::Read, Action::Write];
+            let cases = [
+                (list(vec![string("read"), string("write")]), &both[..]),
+                (list(vec![reference("read"), reference("write")]), &both[..]),
+                (list(vec![string("write"), reference("read")]), &both[..]),
+                (string("write"), &[Action::Write][..]),
+                (reference("admin"), &[Action::Admin][..]),
+                (
+                    list(vec![string("read"), reference("read")]),
+                    &[Action::Read][..],
+                ),
+            ];
+            for (allow, actions) in cases {
+                let documents = access(&attributes(allow.clone(), Some(200)));
+                assert_eq!(check(&documents), Ok(allowed(actions, 200)), "{allow:?}");
+            }
+            let every = ["read", "write", "plan", "apply", "secret", "admin"];
+            let documents = access(&attributes(
+                list(every.iter().map(|word| string(word)).collect()),
+                Some(255),
+            ));
+            let all = [
+                Action::Read,
+                Action::Write,
+                Action::Plan,
+                Action::Apply,
+                Action::Secret,
+                Action::Admin,
+            ];
+            assert_eq!(check(&documents), Ok(allowed(&all, 255)));
+        }
+
+        #[test]
+        fn caps_a_write_at_the_least_authority_by_default() {
+            let read = check(&access(&attributes(string("write"), None))).unwrap();
+            assert_eq!(read, allowed(&[Action::Write], 0));
+            assert_eq!(policy(&read).authority(), Some(Authority(0)));
+        }
+
+        #[test]
+        fn reads_an_authority_without_write_as_none() {
+            let read = check(&access(&attributes(string("read"), Some(200)))).unwrap();
+            assert_eq!(policy(&read).authority(), None);
+            assert_eq!(
+                policy(&read).allow(),
+                Actions::NONE.union([Action::Read].into_iter().collect())
+            );
+        }
+
+        #[test]
+        fn refuses_a_word_that_is_not_an_action() {
+            let cases = [
+                (string("erase"), at(0, 15), "`erase` is not an action"),
+                (reference("Read"), at(0, 15), "`Read` is not an action"),
+                (
+                    reference("site_a.read"),
+                    at(0, 15),
+                    "`site_a.read` is not an action",
+                ),
+                (
+                    list(vec![string("read"), string("erase")]),
+                    at(0, 51),
+                    "`erase` is not an action",
+                ),
+                (
+                    list(vec![Kind::Integer(1), string("erase")]),
+                    at(0, 50),
+                    "an action is a string or a reference, not an integer",
+                ),
+                (
+                    Kind::Bool(true),
+                    at(0, 15),
+                    "an action is a string or a reference, not a bool",
+                ),
+            ];
+            for (allow, span, message) in cases {
+                assert_eq!(
+                    check(&access(&attributes(allow, None))),
+                    Err(vec![refused(
+                        "config.bad-action",
+                        span,
+                        message,
+                        ACTION_FIX
+                    )]),
+                    "{message}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_empty_allow() {
+            assert_eq!(
+                check(&access(&attributes(list(vec![]), None))),
+                Err(vec![refused(
+                    "config.empty-allow",
+                    at(0, 15),
+                    "the `allow` list holds no action",
+                    "Add one or more actions, such as \"read\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_authority_that_is_not_from_0_to_255() {
+            for (authority, message) in [
+                (Kind::Integer(256), "the authority 256 is not from 0 to 255"),
+                (Kind::Integer(-1), "the authority -1 is not from 0 to 255"),
+                (string("high"), "an authority is an integer, not a string"),
+            ] {
+                let mut attributes = attributes(string("write"), None);
+                attributes.push(("authority", authority));
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![refused(
+                        "config.bad-authority",
+                        at(0, 17),
+                        message,
+                        AUTHORITY_FIX,
+                    )]),
+                    "{message}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_access_without_subjects_select_or_allow() {
+            let subjects = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `subjects`",
+                "Add a `subjects` attribute with the subjects that it allows, such as \
+                 \"site_a.operators.*\"",
+            );
+            let select = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `select`",
+                "Add a `select` attribute with the names that it allows them to use, \
+                 such as \"site_a.**\"",
+            );
+            let allow = refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `access` block has no `allow`",
+                "Add an `allow` attribute with the actions that it allows, such as \
+                 \"read\"",
+            );
+            let full = attributes(string("read"), None);
+            for (i, diagnostic) in [subjects.clone(), select.clone(), allow.clone()]
+                .into_iter()
+                .enumerate()
+            {
+                let mut attributes = full.clone();
+                attributes.remove(i);
+                assert_eq!(
+                    check(&access(&attributes)),
+                    Err(vec![diagnostic.clone()]),
+                    "{diagnostic:?}"
+                );
+            }
+            assert_eq!(
+                check(&access(&[("authority", Kind::Integer(1))])),
+                Err(vec![subjects, select, allow])
+            );
+        }
+
+        #[test]
+        fn refuses_what_an_access_block_cannot_hold() {
+            let mut attributes = attributes(string("read"), None);
+            attributes.push(("deny", string("write")));
+            assert_eq!(
+                check(&access(&attributes)),
+                Err(vec![refused(
+                    "config.unknown-attribute",
+                    at(0, 16),
+                    "`deny` is not an attribute of the `access` block",
+                    "Use `subjects`, `select`, `allow`, or `authority`, or remove it",
+                )])
+            );
+            assert_inner_blocks_refused(
+                "access",
+                &self::attributes(string("read"), None),
+            );
+        }
+
+        #[test]
+        fn reads_an_access_and_a_node_settings_with_one_label() {
+            let documents = [document(vec![
+                block(0, 0, "access", &["edge"], &attributes(string("read"), None)),
+                settings(
+                    0,
+                    100,
+                    "edge",
+                    &[("select", string("edge.*")), ("disk", string("1GiB"))],
+                ),
+            ])];
+            let keys: Vec<String> = check(&documents)
+                .unwrap()
+                .keys()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(keys, ["edge.@access", "edge.@node_settings"]);
         }
     }
 
