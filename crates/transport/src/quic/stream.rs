@@ -1023,15 +1023,10 @@ impl Sending {
         given: Option<&[Part]>,
     ) -> Poll<()> {
         let order = self.share.order();
-        // A message that waits for room does not hold back a write.
-        if !self
+        let charged = self
             .budget
-            .charge(half.key, half.body, &mut half.claim, order)
-        {
-            half.hold(given);
-            return Poll::Pending;
-        }
-        if self.turns.allows(half, order) {
+            .charge(half.key, half.body, &mut half.claim, order);
+        if charged && self.turns.allows(half, order) {
             let left = half.left();
             let send = &mut inner.send_stream(half.key.id);
             let written = half.write(send, &mut self.buffer, given);
@@ -1047,7 +1042,10 @@ impl Sending {
         } else {
             half.hold(given);
         }
-        self.turns.join(half);
+        // A message that waits for room does not hold back a write.
+        if charged {
+            self.turns.join(half);
+        }
         Poll::Pending
     }
 
