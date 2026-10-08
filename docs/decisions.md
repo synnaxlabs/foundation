@@ -3894,12 +3894,17 @@ How to read this record:
   an empty list is `config.empty-allow`. A word that is not an action is
   `config.bad-action`. `authority` is optional, an integer from 0 to 255
   (`config.bad-authority`). With no `authority`, a write is capped at `Authority(0)`,
-  the least, as default deny gives the least. Such a writer still takes control when no
-  writer holds it (GATE RULES). Lost: an `authority` that `write` makes required, a
-  rule that C8 does not have. The action words are a table in `config` until a second
-  reader needs them, such as the `plan` output of access; then they move to `spec` as
-  `Action::as_str`. Decided by `laptop.architect-2` (2026-10-08T02:41:38Z,
+  the least, as default deny gives the least. The gate gives authority 0 no special
+  meaning: such a writer outranks no writer and follows GATE RULES, so it takes control
+  when it opens on an index that no writer holds. Lost: an `authority` that `write`
+  makes required, a rule that C8 does not have. The action words are a table in
+  `config` until a second reader needs them, such as the `plan` output of access; then
+  they move to `spec` as `Action::as_str`. Decided by `laptop.architect-2`
+  (2026-10-08T02:41:38Z,
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121).
+  `laptop.architect` approved the default cap and wrote the sentence on the gate. It
+  supersedes the sentence on the gate in that comment (2026-10-08T05:21:56Z,
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6052936198).
   An `authority` with no `write` in an `allow` that reads is
   `config.authority-without-write`, also `authority = 0`: only a write uses an
   authority, so the value is a mistake. `Policy::new` still sets the authority of a
