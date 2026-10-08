@@ -406,12 +406,13 @@ mod tests {
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
-    /// `cut` at the least limit a node can have, at the most it has by default, and at
-    /// no limit.
-    fn at_each_limit(cut: Vec<u8>) -> [(Vec<u8>, usize); 3] {
+    /// `cut` at the least limit a node can have, at the most it has by default, at the
+    /// limit of the `Config` example, and at no limit.
+    fn at_each_limit(cut: Vec<u8>) -> [(Vec<u8>, usize); 4] {
         [
             (cut.clone(), 1_472),
             (cut.clone(), 1 << 16),
+            (cut.clone(), 16 << 20),
             (cut, usize::MAX),
         ]
     }
@@ -476,9 +477,12 @@ mod tests {
 
             #[test]
             fn when_stream_ends_inside_a_prefix_it_fails(
+                // A power of two, then a limit of that size.
                 limit in prop_oneof![
                     Just(16),
-                    1_472_usize..=1 << 20,
+                    (11..=usize::BITS).prop_flat_map(|bits| {
+                        1_472.max(1 << (bits - 1))..=usize::MAX >> (usize::BITS - bits)
+                    }),
                     Just(usize::MAX),
                 ],
                 // `None` repeats the first byte.
