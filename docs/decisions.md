@@ -1541,13 +1541,14 @@ How to read this record:
   byte form, little-endian: `Open` is kind 1 (latest) or 2 (complete, then `limit_bytes`
   `u64`), then `channels` `u32`; `Credit` is kind 3, then `limit_bytes` `u64`; `Reply`
   is kind 1 (opened), 2 (head: path `u8`, live 0 and backfill 1, seq `u64`, count
-  `u32`, series `u32`), or 3 (behind, no fields, by the Behind rule,
+  `u32`, series `u32`), or 3 (behind, no fields, by the Behind rule: the architect,
+  2026-10-07T21:07:50Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6046877541); a key is
-  a `u128`; an end is place and end, each `u32`. Amended
-  (2026-10-07, #1196): the message order, the runs, and the head bound move from `hub`
-  to two stateful decoders in `wire`, `hub::Home` at the home and `hub::Reader` at the
-  reader's node, each with an exact error for each broken rule, so `hub` checks no wire
-  rule. Decided by the architect
+  a `u128`; an end is place and end, each `u32`. Amended (2026-10-07, #1196): the
+  message order, the runs, and the head bound move from `hub` to two stateful decoders
+  in `wire`, `hub::Home` at the home and `hub::Reader` at the reader's node, each with
+  an exact error for each broken rule, so `hub` checks no wire rule. Decided by the
+  architect
   (https://github.com/synnaxlabs/foundation/issues/1196#issuecomment-6032630529).
   Amended (2026-10-07T14:56:48Z, #1455): `Reader::decode` checks a message in three
   steps and gives the error of the first that fails: the bytes (its decode error), the
