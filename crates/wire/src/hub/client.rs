@@ -319,6 +319,18 @@ impl Body {
     pub fn remain(&self) -> usize {
         self.remain
     }
+
+    /// Checks that the body ended, when its stream ends.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unfinished`] when bytes of the body remain.
+    pub fn end(&self) -> Result<(), Error> {
+        match self.remain {
+            0 => Ok(()),
+            remain => Err(Error::Unfinished { remain }),
+        }
+    }
 }
 
 /// The fields of `message` after its kind byte, which must be `kind`.

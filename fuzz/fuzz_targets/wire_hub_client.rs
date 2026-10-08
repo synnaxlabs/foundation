@@ -1,7 +1,7 @@
 //! The decoders of `wire::hub::client` never panic, each refuses a message of another
 //! kind with `Error::Kind`, each message that decodes encodes to its bytes, each body
-//! ends at its length, each refusal of a body is the one that its rest gives, and each
-//! valid message made from the input reads back.
+//! ends at its length and nowhere else, each refusal of a body is the one that its
+//! rest gives, and each valid message made from the input reads back.
 //!
 //! Input: the messages of one stream (`fuzz::messages`). Each decoder reads each
 //! message, and the body of the first message, when it is a request or a response,
@@ -133,6 +133,11 @@ fn read(bytes: &[u8]) {
         assert_eq!(body.take(message), expected, "{message:?}");
         assert_eq!(body.remain(), remain, "the rest of the body changed");
     }
+    let ended = match remain {
+        0 => Ok(()),
+        remain => Err(Error::Unfinished { remain }),
+    };
+    assert_eq!(body.end(), ended, "the body ended at another length");
 }
 
 /// Each valid message made from `input` must decode to itself. A key of small order

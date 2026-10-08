@@ -384,6 +384,17 @@ mod body {
     }
 
     #[test]
+    fn ends_only_once_no_byte_remains() {
+        let mut body = request(3).body();
+        assert_eq!(body.end(), Err(Error::Unfinished { remain: 3 }));
+        body.take(b"ab").unwrap();
+        assert_eq!(body.end(), Err(Error::Unfinished { remain: 1 }));
+        body.take(b"c").unwrap();
+        assert_eq!(body.end(), Ok(()));
+        assert_eq!(Response { length: 0 }.body().end(), Ok(()));
+    }
+
+    #[test]
     fn refuses_an_empty_message() {
         let mut body = request(1).body();
         assert_eq!(body.take(&[]), Err(Error::Empty));
@@ -502,6 +513,8 @@ proptest! {
             prop_assert_eq!(sent.remain(), rest.len());
             prop_assert_eq!(answered.remain(), rest.len());
         }
+        prop_assert_eq!(sent.end(), Ok(()));
+        prop_assert_eq!(answered.end(), Ok(()));
         prop_assert_eq!(sent.take(&[0]), Err(Error::Trailing));
         prop_assert_eq!(answered.take(&[0]), Err(Error::Trailing));
     }

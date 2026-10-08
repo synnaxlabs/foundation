@@ -492,6 +492,11 @@ pub enum Error {
     },
     /// A message comes after the body of a request or a response.
     Trailing,
+    /// The stream ended before its body.
+    Unfinished {
+        /// The bytes of the body that did not come.
+        remain: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -553,6 +558,10 @@ impl fmt::Display for Error {
             Self::Trailing => {
                 f.write_str("a hub message came after the body of the stream")
             }
+            Self::Unfinished { remain } => write!(
+                f,
+                "the stream ended with {remain} bytes of its body to come"
+            ),
         }
     }
 }
@@ -1202,6 +1211,10 @@ mod tests {
             (
                 Error::Trailing,
                 "a hub message came after the body of the stream",
+            ),
+            (
+                Error::Unfinished { remain: 3 },
+                "the stream ended with 3 bytes of its body to come",
             ),
         ];
         for (error, text) in cases {
