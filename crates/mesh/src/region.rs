@@ -293,8 +293,8 @@ impl State {
         let mut lower = Vec::with_capacity(names.len());
         for name in names {
             let folded = name.as_str().to_ascii_lowercase();
-            if let Some(&holder) = self.names.get(&folded) {
-                return Err(Unfit::Taken { name, key: holder });
+            if let Some(&taker) = self.names.get(&folded) {
+                return Err(Unfit::Taken { name, key: taker });
             }
             if lower.contains(&folded) {
                 return Err(Unfit::Taken { name, key });

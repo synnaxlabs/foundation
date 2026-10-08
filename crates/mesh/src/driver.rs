@@ -3232,6 +3232,35 @@ mod tests {
             }
         }
 
+        /// Until the apply refuses a join of node 4 whose card holds the public key
+        /// of voter 2, a request of node 4 under that key passes the sender check and
+        /// names node 4. After it, node 4 has no key, and the message is spoofed.
+        #[test]
+        fn a_join_with_the_public_key_of_a_voter_names_its_node_until_it_applies() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let card = card::Card {
+                    public_key: public(2),
+                    ..common::member(4).card.card().clone()
+                };
+                let twin = card::Signed::sign(key(4), card, &common::private(2));
+                let joins = [ticket(), join_with(&twin, 7, Stamp::EPOCH), join(5)];
+                write(&mesh, changes(&joins)).await;
+                let request = message(4, 1, Body::Heartbeat { commit: 0 });
+                let refused = Err(Error::NotVoter { from: key(4) });
+                assert_eq!(mesh.receive(public(2), request), refused);
+                let commit = proven(2, 1, Body::Heartbeat { commit: 3 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::MILLISECOND).await;
+                assert_eq!(mesh.member(key(4)), None);
+                assert_eq!(mesh.holder(public(2)), Some(key(2)));
+                assert_eq!(mesh.holder(public(5)), Some(key(5)));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Err(Error::Spoofed { from: key(4) });
+                assert_eq!(mesh.receive(public(2), reply), spoofed);
+            });
+        }
+
         pub(super) fn changes(changes: &[Change]) -> Vec<Data> {
             let bytes = changes.iter().map(|change| Data::Bytes(encoded(change)));
             bytes.collect()
