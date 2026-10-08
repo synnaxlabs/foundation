@@ -3286,6 +3286,15 @@ How to read this record:
   info, because `Debug` and the field still hold the password. Decided by
   `laptop.architect-2` on #1159
   (https://github.com/synnaxlabs/foundation/issues/1159#issuecomment-6032370253).
+- **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
+  (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
+  refuses with `influx.bad-address` each address that `connector::http::Client::send`
+  refuses, through `connector::http::check`, which `send` uses too, so a plan finds it
+  before a run. `check` gives no channels, and `discover` no documents. Until #1734,
+  `run` fails with `Error::Config` and `influx.not-yet`. Decided by
+  `laptop.architect-2` on #1153
+  (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC).
 - **INFLUX SEQ AND GAPS (#1151)** The InfluxDB out connector stores no seq. A stamp
   names one sample of an index on each path (X31), and InfluxDB keys a point by
   measurement, tag set, and time, so a resend stores each sample once. Each run of
@@ -3299,8 +3308,10 @@ How to read this record:
   index to one database from replacing each other's gap lines. Until a later sample
   comes, the connector keeps one gap per index, and from #1270 one per index and path.
   After a restart the buffer reports the gap again (READER RULES), so a lost gap line is
-  sent again. The measurement name is fixed, and the kind check (#1153) refuses it as a
-  data measurement.
+  sent again. The measurement name is fixed. #1734 names the data measurement, and its
+  kind check refuses `foundation_gaps` as one (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
+  2026-10-08 03:02 UTC).
   Fold rule (6032756428, which replaces the fold rule of 6032215953): `Lab::stored`
   reads each gap line as the seqs `[seq(stamp) - count, seq(stamp))`, where
   `seq(stamp)` is the seq of the data point at its stamp, in the data measurement of

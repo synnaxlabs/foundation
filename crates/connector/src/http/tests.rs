@@ -13,7 +13,7 @@ use http::{Request, Response, StatusCode};
 use sim::{Sim, node};
 use types::time::Span;
 
-use super::{Client, Config, Error};
+use super::{Client, Config, Error, check};
 
 const PORT: u16 = 8086;
 const TIMEOUT: Span = Span::from_nanos(10_000_000_000);
@@ -509,9 +509,24 @@ fn gives_the_connect_error_when_nothing_listens() {
     );
 }
 
-/// The error of a send to `uri`.
+/// The error of a send to `uri`, which `check` gives too.
 fn refused(uri: &str) -> Error {
-    Network::new(10).send(get(uri)).expect_err("a refused URI")
+    let error = Network::new(10).send(get(uri)).expect_err("a refused URI");
+    let checked = check(&uri.parse().expect("a URI")).expect_err("a refused URI");
+    assert_eq!(format!("{checked:?}"), format!("{error:?}"), "{uri}");
+    error
+}
+
+#[test]
+fn checks_a_uri_that_send_takes() {
+    for uri in [
+        "http://influx:8086",
+        "http://10.0.0.2/write?db=site",
+        "http://[fd00::2]:65535/",
+        "HTTP://Influx:1",
+    ] {
+        assert!(check(&uri.parse().expect("a URI")).is_ok(), "{uri}");
+    }
 }
 
 #[test]

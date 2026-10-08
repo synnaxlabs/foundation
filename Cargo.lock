@@ -366,6 +366,7 @@ dependencies = [
  "bytes",
  "connector",
  "counting",
+ "document",
  "env",
  "http",
  "influxdb-line-protocol",

@@ -267,6 +267,16 @@ async fn before<T>(
     .await
 }
 
+/// Checks that [`Client::send`] takes the origin of `uri`, with no I/O.
+///
+/// # Errors
+///
+/// [`Error::Scheme`], [`Error::UserInfo`], [`Error::Host`], and [`Error::Port`], as
+/// [`Client::send`] gives them.
+pub fn check(uri: &Uri) -> Result<(), Error> {
+    origin(uri).map(drop)
+}
+
 /// The end of a connect to the first of `left` addresses, as in Go: an equal share of
 /// the time from `now` to `deadline`, but at least [`ATTEMPT_MIN`]. Gives `None` when
 /// the share is all the time left, so that only the request timeout ends the connect.
