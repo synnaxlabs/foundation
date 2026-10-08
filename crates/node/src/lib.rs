@@ -701,14 +701,7 @@ impl Serve {
             tasks: tasks.clone(),
         });
         if let Some(region) = &self.endpoint.region {
-            hub.define(region.definitions.iter().filter_map(|(name, definition)| {
-                match definition {
-                    spec::definition::Definition::Channel(channel) => {
-                        Some((name, channel))
-                    }
-                    _ => None,
-                }
-            }));
+            hub.define(&region.definitions);
         }
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
