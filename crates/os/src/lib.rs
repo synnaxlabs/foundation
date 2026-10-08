@@ -21,7 +21,7 @@ mod files;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 mod net;
 mod shards;
 mod thread;
@@ -120,7 +120,7 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 ///
 /// A poll of [`env::net::Net::connect`], or the first poll of a stream, listener, UDP
 /// sender, or UDP receiver, on a thread with no Tokio runtime or with no I/O driver.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
 pub fn net() -> env::net::Net {
     env::net::Net::new(net::Driver)

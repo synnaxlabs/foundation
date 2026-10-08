@@ -52,5 +52,10 @@ test = true
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 
+# Under `--cfg loom`, tokio has no `net`.
+[target.'cfg(not(loom))'.dev-dependencies]
+# The simulated servers of the process tests serve over `os::net()`.
+os = { path = "../os", features = ["net"] }
+
 [lints]
 workspace = true
