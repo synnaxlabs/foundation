@@ -42,6 +42,10 @@ pub(crate) enum Call {
         handle: Handle,
         to: PathBuf,
     },
+    /// A remove through a write handle: the entry must name its file.
+    Unlink {
+        handle: Handle,
+    },
 }
 
 impl Call {
@@ -50,7 +54,7 @@ impl Call {
             Self::Open(_) => Operation::Open,
             Self::List => Operation::List,
             Self::CreateDir => Operation::CreateDir,
-            Self::Remove => Operation::Remove,
+            Self::Remove | Self::Unlink { .. } => Operation::Remove,
             Self::SyncDir => Operation::SyncDir,
             Self::Free => Operation::Free,
             Self::Write { .. } => Operation::WriteAt,
@@ -66,7 +70,8 @@ impl Call {
             Self::Write { handle, .. }
             | Self::Read { handle, .. }
             | Self::Sync { handle }
-            | Self::Rename { handle, .. } => Some(*handle),
+            | Self::Rename { handle, .. }
+            | Self::Unlink { handle } => Some(*handle),
             _ => None,
         }
     }
@@ -328,6 +333,9 @@ impl Files {
             }
             Call::Rename { handle, to } => {
                 disk.rename(handle.inode, &path, to).map(|()| Done::Unit)
+            }
+            Call::Unlink { handle } => {
+                disk.unlink(handle.inode, &path).map(|()| Done::Unit)
             }
         };
         if let Some(handle) = call.handle() {
