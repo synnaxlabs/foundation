@@ -31,11 +31,17 @@ types = { path = "../types" }
 wire = { path = "../wire" }
 
 [dev-dependencies]
+bytes = { workspace = true }
 codec = { path = "../codec" }
+connector = { path = "../connector" }
+connector-influx = { path = "../connector-influx", features = ["sim"] }
 counting = { path = "../counting" }
 divan = { workspace = true }
+http = { workspace = true }
 # Turns on `sim` for the bench, since the bench host runs no features.
 node = { path = ".", features = ["sim"] }
+# The simulated servers of the process tests serve over `os::net()`.
+os = { path = "../os", features = ["net"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
