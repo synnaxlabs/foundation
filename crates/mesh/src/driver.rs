@@ -3051,8 +3051,8 @@ mod tests {
             });
         }
 
-        // The same log, with the vote of 4 under its stale key: the node never
-        // counts a wrong key.
+        // The same log, with the vote of 4 under its stale key: with two joins of 4
+        // in the log, the vote is not counted.
         #[test]
         fn a_vote_under_the_stale_key_of_a_node_only_a_chain_names_is_not_counted() {
             solo(|node, tasks| async move {
