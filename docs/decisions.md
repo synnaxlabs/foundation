@@ -2382,11 +2382,15 @@ How to read this record:
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
-  problems (#1741). Two channels of one key, and a data channel whose index is not an
-  index of the founding, are problems at each build, so only a defect gives one:
-  `Hub::define` panics at each open of shard 0. A founding in a join answer (#336)
-  gets no new check. Decided by `laptop.architect`: chunks through `blob` and no BQ12
-  check, 2026-10-07T06:42:23Z
+  problems (#1741). `Hub::define` panics on two channels of one key, or a data channel
+  whose index is not an index of its input: a defect of its caller. `node` runs
+  `spec::region::check` on each spec before it defines it: the founding once it is
+  region state (#1744, #336), and each committed change (#1957). A spec with problems
+  follows #1741: the node defines none of it and keeps the spec it uses, which is
+  empty for a founding with problems. So no spec from disk or a peer makes an open
+  panic. `Config::region` keeps its panic while a Rust caller gives it (NODE PORT).
+  Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
+  2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
@@ -2406,8 +2410,10 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
-  The panic of `Hub::define` at open, 2026-10-08T20:03:40Z
-  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068045531).
+  The panic of `Hub::define` and the check before it, 2026-10-08T20:06:20Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068089189),
+  with the node part by `laptop.architect-2`, 2026-10-08T20:03:39Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068045334).
 - **SPEC APPLY (#1083)** `Mesh::apply(base, definitions, homes)` makes the definitions,
   by tree key, the region's spec through the leader, as `set_home` does, and gives the
   new pointer. It first runs `spec::region::check` (REGION CHECK) at the region's
