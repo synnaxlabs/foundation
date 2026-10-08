@@ -19,6 +19,8 @@ exclude_re = [
   'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
+  # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
+  'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
