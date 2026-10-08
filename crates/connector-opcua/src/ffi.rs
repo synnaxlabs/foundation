@@ -205,5 +205,10 @@ pub(crate) mod test {
             name: Bytes,
         ) -> *mut c_void;
         pub(crate) fn UA_InterruptManager_new_POSIX(name: Bytes) -> *mut c_void;
+
+        pub(crate) fn UA_Client_connectAsync(
+            client: *mut super::Client,
+            url: *const std::ffi::c_char,
+        ) -> u32;
     }
 }

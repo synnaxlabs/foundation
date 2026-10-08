@@ -8,6 +8,7 @@
 #include <open62541/client_config_default.h>
 #include <open62541/plugin/eventloop.h>
 #include <open62541/types.h>
+#include "mp_printf.h"
 #include "timer.h"
 #pragma GCC diagnostic pop
 
@@ -253,19 +254,22 @@ static void el_remove_delayed(UA_EventLoop *el, UA_DelayedCallback *dc) {
 static const char *const LEVELS[] = {"trace", "debug", "info", "warning", "error",
                                      "fatal"};
 
-/* Writes each message of level warning and up to stderr. */
+/* The bytes of a log message, with its NUL. */
+#define LOG_BYTES 512
+
+/* Writes each message of level warning and up to stderr, cut to `LOG_BYTES - 1` bytes.
+ * It allocates nothing. */
 static void log_message(void *context, UA_LogLevel level, UA_LogCategory category,
                         const char *msg, va_list args) {
     (void)context;
     (void)category;
     if(level < UA_LOGLEVEL_WARNING)
         return;
-    UA_String text = UA_STRING_NULL;
-    if(UA_String_vformat(&text, msg, args) != UA_STATUSCODE_GOOD)
-        return;
-    fprintf(stderr, "connector-opcua: open62541 %s: %.*s\n", LEVELS[level / 100 - 1],
-            (int)text.length, (const char *)text.data);
-    UA_String_clear(&text);
+    char text[LOG_BYTES];
+    /* `mp_vsnprintf`, not `vsnprintf`: open62541 formats `%S` and `%N`. */
+    mp_vsnprintf(text, sizeof(text), msg, args);
+    fprintf(stderr, "connector-opcua: open62541 %s: %s\n", LEVELS[level / 100 - 1],
+            text);
 }
 
 /* Gives a fresh loop whose time is `now(clock)`, or NULL when out of memory. */

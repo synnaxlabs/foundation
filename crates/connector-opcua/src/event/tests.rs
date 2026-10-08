@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::ffi::c_void;
+use std::ffi::{CStr, CString, c_void};
 use std::ptr;
 
 use env::rng::Rng;
@@ -403,18 +403,32 @@ fn the_drop_runs_64_passes_of_delayed_callbacks() {
     assert_eq!(drop_queuing(63), (0..=63).rev().collect::<Vec<_>>());
 }
 
-/// The variable that marks the child process of `the_drop_aborts_after_64_passes`.
-const CHILD: &str = "CONNECTOR_OPCUA_PASSES";
+/// The variable that marks a child process of a test.
+const CHILD: &str = "CONNECTOR_OPCUA_CHILD";
 
-/// Runs a 65th pass of a drop, when `CHILD` is set.
-#[test]
-fn drop_65_passes() {
+/// Tells whether this process is a child that `child` started.
+fn is_child() -> bool {
     #[expect(
         clippy::disallowed_methods,
         reason = "the parent test marks its child process"
     )]
     let child = std::env::var_os(CHILD).is_some();
-    if child {
+    child
+}
+
+/// Runs the test `name` of this binary in a child process, and gives its output.
+fn child(name: &str) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env(CHILD, "1")
+        .output()
+        .unwrap()
+}
+
+/// Runs a 65th pass of a drop, when `CHILD` is set.
+#[test]
+fn drop_65_passes() {
+    if is_child() {
         drop_queuing(64);
     }
 }
@@ -424,11 +438,7 @@ fn drop_65_passes() {
 fn the_drop_aborts_after_64_passes() {
     use std::os::unix::process::ExitStatusExt;
     const SIGABRT: i32 = 6;
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "event::tests::drop_65_passes"])
-        .env(CHILD, "1")
-        .output()
-        .unwrap();
+    let output = child("event::tests::drop_65_passes");
     assert_eq!(output.status.signal(), Some(SIGABRT));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -462,4 +472,58 @@ fn a_client_runs_its_housekeeping_on_the_loop() {
 
 fn ms(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
+}
+
+/// Connects a client to `url`, which is not valid, when `CHILD` is set. The copy then
+/// logs a warning and an info message.
+fn connect(url: &CStr) {
+    if !is_child() {
+        return;
+    }
+    let f = Fixture::new();
+    // SAFETY: the loop lives until the client is deleted.
+    let client = unsafe { ffi::shim_client_new(f.events.raw()) };
+    assert!(!client.is_null());
+    // SAFETY: the client lives, and `url` ends with a NUL.
+    let status =
+        Status(unsafe { ffi::test::UA_Client_connectAsync(client, url.as_ptr()) });
+    assert_eq!(status.name(), "BadTcpEndpointUrlInvalid");
+    // SAFETY: the client lives, and the loop outlives it.
+    unsafe { ffi::UA_Client_delete(client) };
+}
+
+#[test]
+fn connect_to_a_bad_url() {
+    connect(c"bad:url");
+}
+
+/// A URL of 600 bytes.
+fn long() -> CString {
+    CString::new(format!("bad:{}", "x".repeat(596))).unwrap()
+}
+
+#[test]
+fn connect_to_a_long_url() {
+    connect(&long());
+}
+
+#[test]
+fn a_warning_goes_to_stderr_and_an_info_message_does_not() {
+    let output = child("event::tests::connect_to_a_bad_url");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "connector-opcua: open62541 warning: Endpoint URL is invalid: bad:url\n"
+    );
+}
+
+#[test]
+fn a_long_message_is_cut_to_511_bytes() {
+    let output = child("event::tests::connect_to_a_long_url");
+    assert!(output.status.success());
+    let message = format!("Endpoint URL is invalid: {}", long().to_str().unwrap());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("connector-opcua: open62541 warning: {}\n", &message[..511])
+    );
 }
