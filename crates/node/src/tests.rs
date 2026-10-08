@@ -2581,10 +2581,9 @@ mod port {
         };
         let own = peer.clone();
         let started = peer.shards().start(shard, move |tasks| async move {
-            let node = transport(&own, tasks.clone(), KEY).0.public_key();
             let (transport, pool) = transport(&own, tasks.clone(), CLIENT);
             let session = transport
-                .dial(node, &[Address::Udp(listen)])
+                .dial(KEY.public(), &[Address::Udp(listen)])
                 .await
                 .expect("a session");
             let message = |bytes: &[u8]| {
@@ -2654,16 +2653,6 @@ mod port {
         /// The first file of the mesh's log.
         const LOG: &str = "mesh/log/log-0";
 
-        /// The public half of `private_key`, from a transport made with it.
-        fn public_key(private_key: PrivateKey) -> types::ed25519::PublicKey {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = sim.node(sim::node::Config::default());
-            let key = sim.run_on(&host, move |host, tasks| async move {
-                transport(&host, tasks, private_key).0.public_key()
-            });
-            key.expect("the run ends")
-        }
-
         /// The member `key` with `private_key`, whose node listens on `host`.
         fn member(
             key: types::node::Key,
@@ -2672,7 +2661,7 @@ mod port {
         ) -> Member {
             let card = Card {
                 name: format!("plant.node{key}").parse().unwrap(),
-                public_key: public_key(private_key.clone()),
+                public_key: private_key.public(),
                 seal_key: SealKey::new([9; 32]).unwrap(),
                 addresses: Addresses::new(vec![Address::Udp(listen(host))]).unwrap(),
                 version: 1,
@@ -2817,13 +2806,18 @@ mod port {
         }
 
         /// The error of the first send that fails, when a peer that is not a member
-        /// opens a one-way mesh stream to a node with a region, then sends `message`
-        /// until a send fails.
-        fn sent_one_way(message: &[u8]) -> transport::Error {
+        /// opens a one-way mesh stream to the node [`OWN`] of a region with [`OTHER`],
+        /// then sends `message` up to 100 times, or `None` when no send fails.
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "a sim error is a test failure, not a send that did not fail"
+        )]
+        fn sent_one_way(message: &[u8]) -> Option<transport::Error> {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
-            let node = start_alone(&host);
             let peer = sim.node(sim::node::Config::default());
+            let members = [member(OWN, &KEY, &host), member(OTHER.0, &OTHER.1, &peer)];
+            let node = start(&host, (OWN, KEY), region(&members));
             let listen = listen(&host);
             let message = message.to_vec();
             let out = Arc::new(Mutex::new(None));
@@ -2834,9 +2828,9 @@ mod port {
             };
             let own = peer.clone();
             let started = peer.shards().start(shard, move |tasks| async move {
-                let node = transport(&own, tasks.clone(), KEY).0.public_key();
                 let (transport, pool) = transport(&own, tasks, CLIENT);
-                let dialed = transport.dial(node, &[Address::Udp(listen)]).await;
+                let dialed =
+                    transport.dial(KEY.public(), &[Address::Udp(listen)]).await;
                 let session = dialed.expect("the dial reaches the node");
                 let sender = session.open_sender(Class::Complete).await;
                 let mut sender = sender.expect("a stream");
@@ -2847,11 +2841,14 @@ mod port {
                 };
                 let header = wire::header::encode(wire::Protocol::Mesh);
                 let mut sent = sender.send(block(&header)).await;
-                while sent.is_ok() {
+                for _ in 0..100 {
+                    if sent.is_err() {
+                        break;
+                    }
                     own.clock().sleep(Span::MILLISECOND).await;
                     sent = sender.send(block(&message)).await;
                 }
-                *seen.lock().unwrap() = Some(sent.unwrap_err());
+                *seen.lock().unwrap() = Some(sent.err());
                 session.closed().await;
             });
             drop(started.expect("the peer starts"));
@@ -2867,17 +2864,20 @@ mod port {
         /// is refused: the mesh stops the stream with the code of a refused message.
         #[test]
         fn a_message_in_the_name_of_a_member_is_refused() {
-            // A `raft` heartbeat reply from [`OWN`] to [`OWN`] in term 1, with no
-            // proof and no chain.
+            // A `raft` heartbeat reply from [`OTHER`] to [`OWN`] in term 0, which
+            // needs no proof, with no chain.
             let mut reply = vec![1];
+            reply.extend(OTHER.0.as_u128().to_le_bytes());
             reply.extend(OWN.as_u128().to_le_bytes());
-            reply.extend(OWN.as_u128().to_le_bytes());
-            reply.extend(1_u64.to_le_bytes());
+            reply.extend(0_u64.to_le_bytes());
             reply.push(0);
             reply.extend(0_u64.to_le_bytes());
             reply.push(6);
             let code = REFUSED;
-            assert_eq!(sent_one_way(&reply), transport::Error::Stopped { code });
+            assert_eq!(
+                sent_one_way(&reply),
+                Some(transport::Error::Stopped { code })
+            );
         }
 
         /// A header with a byte after it names no protocol, so a node with a mesh
