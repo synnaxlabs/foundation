@@ -3407,8 +3407,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). A
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
-  stays its one check. `Start` lost, because `driver.rs` holds `raft::Start`, which
-  changes at each open (`laptop.architect`, 2026-10-08T10:34:37Z:
+  stays its one check, of the members and voters. It checks no definition or home: the
+  founding node checks them. `Start` lost, because `driver.rs` holds `raft::Start`,
+  which changes at each open (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
   `Founding::definitions` adds
   `spec::definition::Definition` and `types::name::Name`, and `Mesh::pointer` gives a
@@ -3884,7 +3885,7 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6040051975), and
   its plan review, 2026-10-08T17:01:08Z
   (https://github.com/synnaxlabs/foundation/issues/1154#issuecomment-6064957210).
-  `Founding::homes` gives each founding index its home (#1931).
+  `Founding::homes` gives a founding index its home (#1931).
 - **BQ6** Asynchronous replication. The `replica` component ships each index's log
   (stored bytes, reader positions, control handoffs, dedup marks) without touching the
   write path. Takeover is the home's crash recovery plus one fence check, inside `home`.

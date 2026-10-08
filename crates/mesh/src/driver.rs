@@ -131,8 +131,9 @@ impl fmt::Debug for Mesh {
 
 impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
-    /// its task on `config.tasks`. Homes are known again when this node applies the
-    /// log, after it hears the leader. It puts each chunk of the founding tree in
+    /// its task on `config.tasks`. Each home of `config.founding.homes` is known when
+    /// `open` returns. Each other home is known again when this node applies the log,
+    /// after it hears the leader. It puts each chunk of the founding tree in
     /// `config.store`.
     ///
     /// The group sends its messages on a session to each member. It dials a member at

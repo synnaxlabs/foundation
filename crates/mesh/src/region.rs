@@ -21,9 +21,10 @@ use crate::status::Status;
 use crate::ticket::{self, Options, Record};
 
 /// The region before the first entry of its log: its prefix, its founding members and
-/// voters, and its spec before the first change. It is the same at each member and at
-/// each open. A founding node builds it from its config. A node that joins takes it
-/// whole from its join answer, and is not one of its members.
+/// voters, its spec before the first change, and the homes of its founding indexes. It
+/// is the same at each member and at each open. A founding node builds it from its
+/// config. A node that joins takes it whole from its join answer, and is not one of its
+/// members.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Founding {
     /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
@@ -42,8 +43,8 @@ pub struct Founding {
     pub homes: BTreeMap<channel::Key, node::Key>,
 }
 
-/// The region state that this node holds: its members, its tickets, the homes that it
-/// applied, and its spec pointer.
+/// The region state that this node holds: its members, its tickets, the founding homes
+/// and the homes that it applied, and its spec pointer.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct State {
@@ -1343,8 +1344,10 @@ mod tests {
         ) {
             let members = create_members(&[1, 2]);
             let voters = keys(&[1]);
+            let founding = BTreeMap::new();
             let mut state =
-                State::new(name("plant").into(), members, FOUNDING, voters, BTreeMap::new()).unwrap();
+                State::new(name("plant").into(), members, FOUNDING, voters, founding)
+                    .unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());
