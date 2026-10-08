@@ -57,7 +57,8 @@ pub fn read(
 ) -> Result<Settings, Vec<Diagnostic>> {
     assert!(
         !keys.contains(&"select") && !blocks.contains(&"reader"),
-        "a kind lists `select` or `reader`, which `read` reads itself"
+        "a kind lists `select` or `reader`, which `read` reads itself: keys {keys:?}, \
+         blocks {blocks:?}"
     );
     let mut diagnostics = document::read::unknown(
         config,

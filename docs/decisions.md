@@ -3203,12 +3203,14 @@ How to read this record:
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
   `document.unknown-attribute` or `document.unknown-block` for each other key it does
   not read (DOCUMENT KEYS), so a kind's key list does not change when `read` reads a new
-  key. A kind that lists `select` or `reader` is a defect in the kind, and `read`
-  panics. Decided by `laptop.architect-2` on #1153
+  key. Decided by `laptop.architect-2` on #1153
   (https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC, and
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019,
-  2026-10-08 03:05 UTC). Supersedes the `KEYS` part of
+  2026-10-08 03:05 UTC). A kind that lists `select` in its attributes or `reader` in its
+  blocks is a defect in the kind, and `read` panics (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6052200724, 2026-10-08
+  04:25 UTC). Supersedes the `KEYS` part of
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152 and
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051327019
   (`laptop.architect-2`,
