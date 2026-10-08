@@ -5497,7 +5497,13 @@ How to read this record:
   second repository, and the change is reviewed outside this one); for the first patch,
   a workaround in `transport` that never stops a stream (the peer sends the rest of the
   stream, and a cancel no longer reaches the sender, against STREAM WIRE). The person
-  decided on 2026-10-05 ("Ok I guess we need to do #2"), #620.
+  decided on 2026-10-05 ("Ok I guess we need to do #2"), #620. The PR that changes a
+  copy of a Rust crate lists its mutants as `docs/dependencies.md`, "Local patches",
+  states; laptop.architect-2 decided on 2026-10-08
+  (https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517). That
+  rule does not cover a C copy. Trigger: the PR that first changes a file in a C copy
+  states how a test outside the copy checks each changed line, for the approval of the
+  architect of `connector-opcua`.
 
 ### 1.16 Retired entries
 
