@@ -477,7 +477,7 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
         // A record right after a torn one, or at the start of the next file, was
         // written after the torn one was durable: the torn one is damaged. A write
         // fills each file before the next one, so a file with no record before a
-        // record is damaged.
+        // file that is not empty is damaged, whatever the version of that file.
         let follows = |claimed: usize| {
             bytes
                 .get(start(claimed)..)
@@ -485,7 +485,9 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
         };
         if torn.is_some_and(follows)
             || (torn.is_some() && matches!(first, Some(At::Header(_))))
-            || (end == 0 && known.is_some())
+            || (end == 0
+                && torn.is_none()
+                && matches!(first, Some(At::Header(_) | At::Garbage)))
             || known.is_some_and(|number| number > next)
         {
             let offset = wide(start(end));
@@ -498,22 +500,6 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             // A next file with no record that is not the last file, or this file
             // when it has no record either. A torn record is the end of the log.
             Some(At::End) if segments.len() > segment.saturating_add(2) => {
-                // A record of another version with no torn record before it gives
-                // the version error, past any number of files with no record.
-                let later = segments.iter().enumerate().skip(segment.saturating_add(2));
-                let other = later
-                    .map(|(index, bytes)| (index, header(bytes)))
-                    .find(|(_, at)| !matches!(at, At::End));
-                if let Some((index, At::Header(head))) = other
-                    && torn.is_none()
-                    && head.version != VERSION
-                {
-                    let path = path(dir, wide(index));
-                    return Err(Error::Version {
-                        path,
-                        found: head.version,
-                    });
-                }
                 let held = end != 0 || torn.is_some();
                 let empty = segment.saturating_add(usize::from(held));
                 let path = path(dir, wide(empty));
@@ -2675,18 +2661,48 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
+    /// Writes a record with `number` and format version 2 at the start of `name`.
+    async fn put_version_2(node: &sim::node::Node, name: &str, number: u64) {
+        let mut record = encode(number, None, &[bytes(2, 10)]);
+        record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+        seal(&mut record);
+        put(node, name, 0, &record).await;
+    }
+
     #[test]
-    fn gives_the_version_error_for_a_record_of_another_version_after_an_empty_log_0() {
+    fn refuses_an_empty_log_0_before_garbage_or_another_version() {
+        for garbage in [false, true] {
+            let (mut sim, node) = create_node(0);
+            sim.run_on(&node, move |node, _| async move {
+                drop(open(&node).await.unwrap());
+                let mode = Mode::Create { len: SEGMENT };
+                drop(node.files().open(&file("log-1"), mode).await.unwrap());
+                node.files().sync_dir(Path::new(DIR)).await.unwrap();
+                if garbage {
+                    put(&node, "log-1", 0, &[0xAB; 40]).await;
+                } else {
+                    put_version_2(&node, "log-1", 0).await;
+                }
+            })
+            .unwrap();
+            let expected = Error::Corrupt {
+                path: file("log-0"),
+                offset: 0,
+            };
+            assert_eq!(stored(&mut sim, &node), Err(expected), "garbage {garbage}");
+        }
+    }
+
+    #[test]
+    fn gives_the_version_error_for_a_record_of_another_version_past_next() {
         let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
             drop(open(&node).await.unwrap());
+            put(&node, "log-0", 0, &encode(0, None, &[bytes(1, 10)])).await;
             let mode = Mode::Create { len: SEGMENT };
             drop(node.files().open(&file("log-1"), mode).await.unwrap());
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
-            let mut record = encode(0, None, &[bytes(1, 10)]);
-            record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-            seal(&mut record);
-            put(&node, "log-1", 0, &record).await;
+            put_version_2(&node, "log-1", 5).await;
         })
         .unwrap();
         let expected = Error::Version {
@@ -2696,37 +2712,10 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
+    // The first empty file is the defect.
     #[test]
-    fn gives_the_version_error_for_a_record_of_another_version_past_next() {
-        // `log-0` with no record, then with record 0.
-        for (records, number) in [(0, 1), (1, 5)] {
-            let (mut sim, node) = create_node(0);
-            sim.run_on(&node, move |node, _| async move {
-                drop(open(&node).await.unwrap());
-                if records == 1 {
-                    put(&node, "log-0", 0, &encode(0, None, &[bytes(1, 10)])).await;
-                }
-                let mode = Mode::Create { len: SEGMENT };
-                drop(node.files().open(&file("log-1"), mode).await.unwrap());
-                node.files().sync_dir(Path::new(DIR)).await.unwrap();
-                let mut record = encode(number, None, &[bytes(2, 10)]);
-                record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-                seal(&mut record);
-                put(&node, "log-1", 0, &record).await;
-            })
-            .unwrap();
-            let expected = Error::Version {
-                path: file("log-1"),
-                found: 2,
-            };
-            assert_eq!(stored(&mut sim, &node), Err(expected), "records {records}");
-        }
-    }
-
-    #[test]
-    fn gives_the_version_error_for_a_record_of_another_version_after_an_empty_log_1() {
-        // `log-0` with no record, then with record 0.
-        for records in [0, 1] {
+    fn refuses_an_empty_log_1_before_a_record_of_another_version() {
+        for (records, blamed) in [(0, "log-0"), (1, "log-1")] {
             let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 drop(open(&node).await.unwrap());
@@ -2738,15 +2727,12 @@ mod tests {
                     drop(node.files().open(&file(name), mode).await.unwrap());
                 }
                 node.files().sync_dir(Path::new(DIR)).await.unwrap();
-                let mut record = encode(records, None, &[bytes(2, 10)]);
-                record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-                seal(&mut record);
-                put(&node, "log-2", 0, &record).await;
+                put_version_2(&node, "log-2", records).await;
             })
             .unwrap();
-            let expected = Error::Version {
-                path: file("log-2"),
-                found: 2,
+            let expected = Error::Corrupt {
+                path: file(blamed),
+                offset: 0,
             };
             assert_eq!(stored(&mut sim, &node), Err(expected), "records {records}");
         }
