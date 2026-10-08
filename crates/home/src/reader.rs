@@ -6,12 +6,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use buffer::Buffer;
-pub use delivery::{Error, Next, Position};
+pub use delivery::{Error, Next, Position, named};
 use delivery::{Reader, Readers, Start};
 use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::frame::{Frame, Path};
-use types::name::Name;
 use types::time::Stamp;
 
 /// An open reader on its shard, in either mode.
@@ -97,8 +96,6 @@ struct Entry {
     readers: Readers,
     /// Whether the set lists the index.
     listed: bool,
-    /// The open named complete sessions, which close at a stamp.
-    named: Vec<delivery::complete::Key>,
 }
 
 impl Set {
@@ -114,7 +111,6 @@ impl Set {
             slot,
             readers: Readers::new(live),
             listed: false,
-            named: Vec::new(),
         });
         // Room for every index, so that `applied` never grows the list.
         self.listed.reserve(self.entries.len());
@@ -165,7 +161,6 @@ impl Set {
         let readers = &mut self.entries[place].readers;
         readers.advance(now);
         let opened = readers.open(reader, start, limit_bytes, charge);
-        self.entries[place].named.push(opened.key);
         self.replaced(place, opened.replaced);
         self.drop_records(place);
         opened
@@ -177,18 +172,17 @@ impl Set {
         self.entries[place].readers.open_latest().key
     }
 
-    /// Opens a latest reader for the reader `name` of `subject` on the index at
-    /// `place`, as [`open_latest`](Self::open_latest) does. A complete session that it
-    /// takes over closes at mesh time `now`.
+    /// Opens a latest session for the named reader `reader` on the index at `place`,
+    /// as [`open_latest`](Self::open_latest) does. A complete session that it takes
+    /// over closes at mesh time `now`.
     pub(crate) fn open_named_latest(
         &mut self,
         place: usize,
-        subject: Name,
-        name: Name,
+        reader: named::Key,
         now: Stamp,
     ) -> delivery::latest::Opened {
         let readers = &mut self.entries[place].readers;
-        let opened = readers.open_named_latest(subject, name, now);
+        let opened = readers.open_named_latest(reader, now);
         self.replaced(place, opened.replaced);
         self.drop_records(place);
         opened
@@ -197,12 +191,8 @@ impl Set {
     /// Forgets the session `replaced` of the index at `place`, which a takeover
     /// closed.
     fn replaced(&mut self, place: usize, replaced: Option<delivery::Key>) {
-        match replaced {
-            Some(delivery::Key::Complete(complete)) => {
-                self.entries[place].named.retain(|&named| named != complete);
-            }
-            Some(delivery::Key::Latest(latest)) => self.forget(place, latest),
-            None => {}
+        if let Some(delivery::Key::Latest(latest)) = replaced {
+            self.forget(place, latest);
         }
     }
 
@@ -243,55 +233,25 @@ impl Set {
         self.entries[place].readers.take(session)
     }
 
-    /// The open named complete session `session` of the index at `place`, or `None`
-    /// when `session` is not one.
-    pub(crate) fn named(
-        &self,
-        place: usize,
-        session: delivery::Key,
-    ) -> Option<delivery::complete::Key> {
-        let delivery::Key::Complete(complete) = session else {
-            return None;
-        };
-        self.entries[place]
-            .named
-            .contains(&complete)
-            .then_some(complete)
-    }
-
-    /// Closes the reader `session` on the index at `place`. Its waiting frames do not
-    /// go out, and [`woken`](Self::woken) does not name it. A close of a closed reader
-    /// changes nothing.
+    /// Closes the reader `session` on the index at `place` at mesh time `now`. Its
+    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it. A
+    /// close of a closed reader changes nothing.
     ///
     /// # Panics
     ///
-    /// If the index never gave `session`, or [`named`](Self::named) gives it.
-    pub(crate) fn close(&mut self, place: usize, session: delivery::Key) {
-        self.entries[place].readers.close(session);
+    /// If the index never gave `session`, or `now` is `None` and `session` is an open
+    /// named complete session.
+    pub(crate) fn close(
+        &mut self,
+        place: usize,
+        session: delivery::Key,
+        now: Option<Stamp>,
+    ) {
+        self.entries[place].readers.close(session, now);
+        self.drop_records(place);
         if let delivery::Key::Latest(latest) = session {
             self.forget(place, latest);
         }
-    }
-
-    /// Closes the named complete reader `session` on the index at `place` at mesh time
-    /// `now`, as [`close`](Self::close) does. It holds its position for its hold.
-    ///
-    /// # Panics
-    ///
-    /// If [`named`](Self::named) does not give `session`.
-    pub(crate) fn close_named(
-        &mut self,
-        place: usize,
-        session: delivery::complete::Key,
-        now: Stamp,
-    ) {
-        let entry = &mut self.entries[place];
-        let i = entry.named.iter().position(|&open| open == session);
-        entry
-            .named
-            .swap_remove(i.expect("invariant: the session is named and open"));
-        entry.readers.close_named(session, now);
-        self.drop_records(place);
     }
 
     /// Drops the closed latest reader `session` of the index at `place` from the
@@ -592,7 +552,7 @@ mod tests {
             assert_eq!(first, second, "each index numbers its own readers");
             set.applied(0, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
             set.applied(1, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
-            set.close(0, first.into());
+            set.close(0, first.into(), None);
             assert_eq!(woken(&mut set), [reader(1, second)]);
         }
     }
@@ -602,14 +562,16 @@ mod tests {
 
         use super::*;
 
-        fn create_name(text: &str) -> Name {
-            text.parse().expect("a valid name")
+        fn key() -> delivery::named::Key {
+            delivery::named::Key {
+                subject: "s".parse().expect("a valid name"),
+                name: "r".parse().expect("a valid name"),
+            }
         }
 
         fn open(set: &mut Set) -> complete::Key {
             let reader = Reader::Named {
-                subject: create_name("s"),
-                name: create_name("r"),
+                reader: key(),
                 hold: Span::from_nanos(10),
             };
             let now = Stamp::from_nanos(0);
@@ -637,11 +599,10 @@ mod tests {
             assert_eq!(records(&mut set), 0);
             let second = open(&mut set);
             assert_eq!(records(&mut set), 0);
-            set.close_named(0, second, Stamp::from_nanos(1));
+            set.close(0, second.into(), Some(Stamp::from_nanos(1)));
             assert_eq!(records(&mut set), 0);
             let _third = open(&mut set);
-            let (s, r) = (create_name("s"), create_name("r"));
-            let _latest = set.open_named_latest(0, s, r, Stamp::from_nanos(2));
+            let _latest = set.open_named_latest(0, key(), Stamp::from_nanos(2));
             assert_eq!(records(&mut set), 0);
         }
 

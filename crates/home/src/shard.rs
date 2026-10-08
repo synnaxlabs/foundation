@@ -13,7 +13,6 @@ use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Draft, Frame, Label, Path};
 use types::hash;
-use types::name::Name;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::Refusal;
@@ -524,12 +523,11 @@ impl Shard {
         reader::complete::Key { slot, session }
     }
 
-    /// Opens a complete reader for the reader `name` of `subject` on the index at
-    /// `slot`, as [`open_complete`](Self::open_complete) does, but it starts at the
-    /// reader's last acked position while the reader holds one: its session is open,
-    /// or it closed less than its `hold` ago. Else it starts at the live tail. It takes
-    /// over the open session of the reader with the same subject and name, in either
-    /// mode. After a close, the reader holds its position for `hold`, in mesh time.
+    /// Opens a complete session for the named reader `reader` on the index at `slot`,
+    /// as [`open_complete`](Self::open_complete) does, but it starts at the reader's
+    /// last acked position while the reader holds one: its session is open, or it
+    /// closed less than its `hold` ago. Else it starts at the live tail. It takes over
+    /// the open session of the same reader, in either mode. After a close, the reader holds its position for `hold`, in mesh time.
     /// When the position is below the frames that memory keeps, the reader gets no
     /// frame: [`take`](Self::take) gives [`Next::Behind`](reader::Next::Behind).
     ///
@@ -543,8 +541,7 @@ impl Shard {
     pub fn open_named_complete(
         &mut self,
         slot: Slot,
-        subject: Name,
-        name: Name,
+        reader: reader::named::Key,
         hold: Span,
         limit_bytes: u64,
         charge: reader::complete::Charge,
@@ -552,11 +549,7 @@ impl Shard {
         let place = self.place(slot);
         let (_, now) = self.now().ok_or(reader::Unsynced)?;
         let live = self.indexes[place].live_tail();
-        let named = Reader::Named {
-            subject,
-            name,
-            hold,
-        };
+        let named = Reader::Named { reader, hold };
         let opened = self.readers.open_named_complete(
             place,
             named,
@@ -587,10 +580,10 @@ impl Shard {
         reader::Key { slot, session }
     }
 
-    /// Opens a latest reader for the reader `name` of `subject` on the index at `slot`,
-    /// as [`open_latest`](Self::open_latest) does. It takes over the open session of
-    /// the reader with the same subject and name, in either mode. A complete session
-    /// that it takes over closes at the shard's mesh time.
+    /// Opens a latest session for the named reader `reader` on the index at `slot`, as
+    /// [`open_latest`](Self::open_latest) does. It takes over the open session of the
+    /// same reader, in either mode. A complete session that it takes over closes at the
+    /// shard's mesh time.
     ///
     /// # Errors
     ///
@@ -602,12 +595,11 @@ impl Shard {
     pub fn open_named_latest(
         &mut self,
         slot: Slot,
-        subject: Name,
-        name: Name,
+        reader: reader::named::Key,
     ) -> Result<reader::Opened<reader::Key>, reader::Unsynced> {
         let place = self.place(slot);
         let (_, now) = self.now().ok_or(reader::Unsynced)?;
-        let opened = self.readers.open_named_latest(place, subject, name, now);
+        let opened = self.readers.open_named_latest(place, reader, now);
         Ok(reader::Opened {
             key: reader::Key {
                 slot,
@@ -673,14 +665,8 @@ impl Shard {
     ///
     /// If the shard never gave `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
-        let place = self.place(key.slot);
-        match self.readers.named(place, key.session) {
-            Some(session) => {
-                let (_, now) = self.time();
-                self.readers.close_named(place, session, now);
-            }
-            None => self.readers.close(place, key.session),
-        }
+        let now = self.now().map(|(_, now)| now);
+        self.readers.close(self.place(key.slot), key.session, now);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
@@ -3741,7 +3727,7 @@ mod tests {
 
         mod named {
             use super::*;
-            use crate::reader::{Error, Opened, Position, Unsynced, complete};
+            use crate::reader::{Error, Opened, Position, Unsynced, complete, named};
 
             const HOLD: Span = Span::from_nanos(1_000_000_000);
             /// One nanosecond less than `HOLD`.
@@ -3754,12 +3740,10 @@ mod tests {
                 subject: &str,
                 name: &str,
             ) -> Opened<complete::Key> {
-                let (subject, name) = (create_name(subject), create_name(name));
                 shard
                     .open_named_complete(
                         Slot::new(0),
-                        subject,
-                        name,
+                        key(subject, name),
                         HOLD,
                         CREDIT,
                         Charge::Whole,
@@ -3773,14 +3757,17 @@ mod tests {
                 subject: &str,
                 name: &str,
             ) -> Opened<reader::Key> {
-                let (subject, name) = (create_name(subject), create_name(name));
                 shard
-                    .open_named_latest(Slot::new(0), subject, name)
+                    .open_named_latest(Slot::new(0), key(subject, name))
                     .expect("synced")
             }
 
-            fn create_name(text: &str) -> Name {
-                text.parse().expect("a valid name")
+            /// The key of the named reader `name` of `subject`.
+            fn key(subject: &str, name: &str) -> named::Key {
+                named::Key {
+                    subject: subject.parse().expect("a valid name"),
+                    name: name.parse().expect("a valid name"),
+                }
             }
 
             fn live(live: u64) -> Position {
@@ -3810,18 +3797,16 @@ mod tests {
                 run(120, |test| async move {
                     let mut shard = test.unsynced().await;
                     shard.carry(Slot::new(0));
-                    let (s, r) = (create_name("s"), create_name("r"));
                     let complete = shard.open_named_complete(
                         Slot::new(0),
-                        s.clone(),
-                        r.clone(),
+                        key("s", "r"),
                         HOLD,
                         CREDIT,
                         Charge::Whole,
                     );
                     assert_eq!(complete, Err(Unsynced));
                     assert_eq!(
-                        shard.open_named_latest(Slot::new(0), s, r),
+                        shard.open_named_latest(Slot::new(0), key("s", "r")),
                         Err(Unsynced)
                     );
                 });
@@ -3866,8 +3851,6 @@ mod tests {
                     committed(&test, &mut shard, a, &[20]).await;
                     let second = named(&mut shard, "a", "r");
                     assert_eq!(second.replaced, Some(first.key.into()));
-                    let session = first.key.session.into();
-                    assert_eq!(shard.readers.named(0, session), None);
                     assert_eq!(woken(&mut shard), []);
                     assert_eq!(taken(&mut shard, first.key.into(), 0), []);
                     assert_eq!(missed(&mut shard, second.key, 0), []);
@@ -3940,8 +3923,7 @@ mod tests {
                     committed(&test, &mut shard, a, &[10, 20]).await;
                     assert_eq!(taken(&mut shard, first.key.into(), 0).len(), 2);
                     shard.ack(first.key, live(1)).expect("forward");
-                    let (s, r) = (create_name("a"), create_name("r"));
-                    let latest = shard.open_named_latest(Slot::new(0), s, r);
+                    let latest = shard.open_named_latest(Slot::new(0), key("a", "r"));
                     let latest = latest.expect("synced");
                     assert_eq!(latest.replaced, Some(first.key.into()));
                     assert_eq!(taken(&mut shard, first.key.into(), 0), []);
