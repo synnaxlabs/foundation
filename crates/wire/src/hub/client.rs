@@ -20,9 +20,10 @@
 //!
 //! - [`Challenge`]: kind 4, the nonce (16), then the earliest and the latest mesh time
 //!   (`u64` nanoseconds each).
-//! - [`Signed`]: kind 4, the subject's length (`u8`) and bytes, the key (32), `via`
-//!   (`u128`), the connection (16), the nonce (16), `expires` (`u64` nanoseconds), and
-//!   the signature (64).
+//! - [`Signed`]: kind 4, the hello as [`Hello::encode`] writes it (the subject's
+//!   length (`u8`) and bytes, the key (32), `via` (`u128`), the connection (16), the
+//!   nonce (16), `expires` (`u64` nanoseconds)), and the signature (64). These are the
+//!   signed bytes of the hello with no tag.
 //! - [`Request`]: kind 5, the body's length (`u64`), and the signature (64).
 //! - [`Response`]: kind 5 and the body's length (`u64`).
 
@@ -120,7 +121,7 @@ impl Signed {
     /// The bytes of the encoded hello.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        self.hello.subject.as_str().len().saturating_add(154)
+        self.hello.encoded_len().saturating_add(65)
     }
 
     /// Writes the hello into `out`.
@@ -129,16 +130,9 @@ impl Signed {
     ///
     /// When `out` is not [`Signed::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
-        let hello = &self.hello;
-        let subject = hello.subject.as_str().as_bytes();
         let mut out = Writer::new(out, self.encoded_len());
-        out.put(&[HELLO, subject_len(subject)]);
-        out.put(subject);
-        out.put(&hello.key.to_bytes());
-        out.put(&hello.via.as_u128().to_le_bytes());
-        out.put(&hello.connection.0);
-        out.put(&hello.nonce);
-        out.put(&hello.expires.nanos().to_le_bytes());
+        out.put(&[HELLO]);
+        self.hello.encode(out.field(self.hello.encoded_len()));
         out.put(&self.signature);
     }
 
@@ -431,10 +425,6 @@ fn assert_body(length: u64) {
         length <= BODY_BYTES_MAX,
         "a body of {length} bytes is over the cap of {BODY_BYTES_MAX}"
     );
-}
-
-fn subject_len(subject: &[u8]) -> u8 {
-    u8::try_from(subject.len()).expect("invariant: a name is at most 255 bytes")
 }
 
 #[cfg(test)]

@@ -23,9 +23,14 @@ impl<'o> Writer<'o> {
 
     /// Writes `bytes` as the next field.
     pub(crate) fn put(&mut self, bytes: &[u8]) {
-        let (field, rest) = mem::take(&mut self.0).split_at_mut(bytes.len());
-        field.copy_from_slice(bytes);
+        self.field(bytes.len()).copy_from_slice(bytes);
+    }
+
+    /// The next field of `len` bytes, for the caller to fill.
+    pub(crate) fn field(&mut self, len: usize) -> &mut [u8] {
+        let (field, rest) = mem::take(&mut self.0).split_at_mut(len);
         self.0 = rest;
+        field
     }
 }
 

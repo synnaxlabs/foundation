@@ -22,24 +22,13 @@ const REQUEST_TAG: &[u8] = b"foundation/request/1";
 /// the 18 bytes `foundation/hello/1`, the length of the subject (1 byte), the
 /// subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
 /// UUID text), the connection (16), the nonce (16), and `expires` in nanoseconds (8).
-///
-/// # Panics
-///
-/// Never: a name is at most [`Name::MAX_BYTES`] (255) bytes.
+/// After the tag, these are the bytes of [`Hello::encode`].
 #[must_use]
 pub fn hello(hello: &Hello) -> Vec<u8> {
-    let subject = hello.subject.as_str().as_bytes();
-    let mut bytes = Vec::with_capacity(HELLO_TAG.len() + 1 + subject.len() + 88);
-    bytes.extend_from_slice(HELLO_TAG);
-    bytes.push(
-        u8::try_from(subject.len()).expect("invariant: a name is at most 255 bytes"),
-    );
-    bytes.extend_from_slice(subject);
-    bytes.extend_from_slice(&hello.key.to_bytes());
-    bytes.extend_from_slice(&hello.via.as_u128().to_le_bytes());
-    bytes.extend_from_slice(&hello.connection.0);
-    bytes.extend_from_slice(&hello.nonce);
-    bytes.extend_from_slice(&hello.expires.nanos().to_le_bytes());
+    let mut bytes = vec![0; HELLO_TAG.len() + hello.encoded_len()];
+    let (tag, fields) = bytes.split_at_mut(HELLO_TAG.len());
+    tag.copy_from_slice(HELLO_TAG);
+    hello.encode(fields);
     bytes
 }
 
