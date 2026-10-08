@@ -165,8 +165,10 @@ impl Running {
             clippy::disallowed_methods,
             reason = "a process test writes to another process while it runs"
         )]
-        let input = std::thread::spawn(move || {
-            stdin.write_all(&input).expect("write the input");
+        let input = std::thread::spawn(move || match stdin.write_all(&input) {
+            // The command closed its standard input: it reads no more.
+            Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
+            written => written.expect("write the input"),
         });
         Self {
             input,
@@ -393,6 +395,22 @@ fn a_run_ends_at_its_limit_when_the_command_reads_none_of_its_input() {
             "the command exits and closes its pipes: not within 1s. The last check \
              saw:\nstdout:\n\nstderr:\n"
         )
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_gives_the_output_of_a_command_that_exits_before_it_reads_its_input() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "echo done"]);
+    let output = run(&os::clock(), PATIENCE, command, &vec![0; 1 << 20]);
+    assert_eq!(
+        (
+            output.status.code(),
+            crate::text(&output.stdout),
+            crate::text(&output.stderr)
+        ),
+        (Some(0), "done\n", "")
     );
 }
 
