@@ -909,6 +909,38 @@ mod tests {
         }
 
         #[test]
+        fn after_the_stream_ends_inside_a_prefix_each_read_fails() {
+            let mut source = Source::new(vec![0x40], 64);
+            let mut reader = Reader::new(16);
+            let ended = Err(Error::Broken {
+                reason: "the stream ended inside a message".to_owned(),
+            });
+            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
+            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
+        }
+
+        #[test]
+        fn after_the_stream_ends_inside_a_buffered_message_it_holds_no_bytes() {
+            let mut source = Source::new(vec![0x05, 1], 64);
+            source.open = true;
+            let mut reader = Reader::new(16);
+            let ended = Err(Error::Broken {
+                reason: "the stream ended inside a message".to_owned(),
+            });
+            assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Room(5)));
+            reader.admit();
+            assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Pending));
+            assert_eq!(reader.held(), (Some((1, 5)), 0));
+            source.open = false;
+            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
+            assert_eq!(reader.held(), (None, 0));
+            assert_eq!(
+                reader.read(|_| panic!("a cut message asks for no bytes")),
+                ended
+            );
+        }
+
+        #[test]
         fn when_stream_ends_inside_a_prefix_it_fails() {
             let pool = pool(1 << 16);
             let mut source = Source::new(vec![0x40], 64);
