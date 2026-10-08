@@ -379,7 +379,7 @@ impl<'a> Layout<'a> {
         }
         let mut end = 0_usize;
         for (descriptor, &(entry, size)) in descriptors.iter_mut().zip(series) {
-            // An empty fill still calls `memset`, which costs about 90 ns each time.
+            // An empty fill still calls `memset`, which costs up to about 90 ns.
             if let Sizes::Lens = sizes
                 && !end.is_multiple_of(SERIES_ALIGN)
             {
