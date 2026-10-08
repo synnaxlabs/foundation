@@ -13,17 +13,19 @@
 //! scenario. A `try_send` makes no poll.
 //!
 //! The `waiting` lines send a round on their streams at once, over a session whose
-//! peer window holds a quarter of a round, so the sends wait for the QUIC window and
-//! for their turn. They time the polls of a send, not the sim or the peer between
-//! polls. `latest and complete 1 KiB waiting` times a send only when it ends while a
-//! send of the other class waits, so a class that sends alone adds nothing; `timed`
-//! gives the share of sends it timed. In each round, a send of each class must end
-//! while the other class waits, and the round must time at least half its sends so
-//! that its figure stands on enough sends. Over the timed rounds, the `Complete`
-//! sends it timed must be from 2.5 to 3.5 times its `Latest` sends: the share gives
-//! `Complete` 3 bytes for each byte of `Latest`, and both classes send messages of
-//! one size. After the rounds, the server must have one stream of each class. If
-//! not, the bench panics. Its control is `complete 1 KiB waiting`, whose send must
+//! peer window holds at most a quarter of a round, so the sends wait for the QUIC
+//! window and for their turn. They time the polls of a send, not the sim or the peer
+//! between polls. `latest and complete 1 KiB waiting` times a send only when it ends
+//! while a send of the other class waits, so a class that sends alone adds nothing;
+//! `timed` gives the share of sends it timed. In each round, a send of each class
+//! must end while the other class waits, and the round must time at least half its
+//! sends so that its figure stands on enough sends. Over the timed rounds, the
+//! `Complete` sends it timed must be from 2.5 to 3.5 times its `Latest` sends: the
+//! share gives `Complete` 3 bytes for each byte of `Latest`, and both classes send
+//! messages of one size. A class may start a round one window ahead, so each round
+//! sends 64 windows of `Complete`, in fewer rounds. After the rounds, the server must
+//! have one stream for each stream opened, of the same class. If not, the bench
+//! panics. Its control is `complete 1 KiB waiting`, whose send must
 //! wait in each round. Each poll has a timing cost, so compare the two lines with
 //! their polls per send.
 //!
@@ -78,7 +80,8 @@ const WIDE: Room = Room {
     window_bytes: 1 << 22,
     message_bytes_max: 1 << 16,
 };
-/// The room of the server for the `WAITING` scenarios: a quarter of a round.
+/// The room of the server for the `WAITING` scenarios: a quarter of a round of
+/// [`SENDS`] messages of 1 KiB.
 const TIGHT: Room = Room {
     window_bytes: 16 << 10,
     message_bytes_max: 4 << 10,
@@ -92,6 +95,14 @@ const PARTS_SENDS: usize = 16;
 const WARMUP: usize = 50;
 /// Timed rounds per scenario.
 const ROUNDS: usize = 500;
+/// Sends per round of a `Premise::Competes` scenario: each `Complete` burst is 64
+/// windows of `TIGHT`, so one window of credit moves its share by under 2%.
+const SHARE_SENDS: usize = 4 * 342;
+/// Rounds of a `Premise::Competes` scenario before its timed rounds.
+const SHARE_WARMUP: usize = 2;
+/// Timed rounds of a `Premise::Competes` scenario, which take about as long as
+/// `ROUNDS` of `SENDS`.
+const SHARE_ROUNDS: usize = 24;
 /// The sim time between rounds, in which the peer reads and acknowledges a round.
 const PAUSE: Span = Span::from_nanos(100_000_000);
 /// How the session ends.
@@ -213,7 +224,12 @@ const WAITING: [(Scenario, Premise); 2] = [
     (
         Scenario {
             name: "latest and complete 1 KiB waiting",
-            load: Load::Streams(&[Class::Latest, Class::Complete]),
+            load: Load::Streams(&[
+                Class::Latest,
+                Class::Complete,
+                Class::Complete,
+                Class::Complete,
+            ]),
             bytes: 1024,
         },
         Premise::Competes,
@@ -593,7 +609,7 @@ async fn open(session: &Session, load: Load) -> Vec<Sender> {
 }
 
 /// Runs the rounds of a `WAITING` scenario: per round, `senders` send [`SENDS`]
-/// blocks at once, split by the share of their classes.
+/// blocks at once, or [`SHARE_SENDS`] under `Premise::Competes`, an equal part each.
 ///
 /// # Panics
 ///
@@ -609,11 +625,15 @@ async fn compete(
     accepted: &Accepted,
 ) -> Measured {
     let classes: Vec<Class> = senders.iter().map(Sender::class).collect();
-    let share = SENDS / senders.len();
-    let mut nanos = Vec::with_capacity(ROUNDS);
+    let (round_sends, warmup, rounds) = match premise {
+        Premise::Waits => (SENDS, WARMUP, ROUNDS),
+        Premise::Competes => (SHARE_SENDS, SHARE_WARMUP, SHARE_ROUNDS),
+    };
+    let share = round_sends / senders.len();
+    let mut nanos = Vec::with_capacity(rounds);
     let (mut allocations, mut polls, mut timed) = (0, 0, 0);
     let (mut complete, mut latest) = (0, 0);
-    for round in 0..WARMUP + ROUNDS {
+    for round in 0..warmup + rounds {
         let tally = Tally::new(classes.clone(), premise);
         let tally = RefCell::new(tally);
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
@@ -630,11 +650,11 @@ async fn compete(
             scenario.name
         );
         assert!(
-            2 * sends >= u64::try_from(SENDS).expect("fits"),
-            "{} times {sends} of {SENDS} sends in round {round}",
+            2 * sends >= u64::try_from(round_sends).expect("fits"),
+            "{} times {sends} of {round_sends} sends in round {round}",
             scenario.name,
         );
-        if round >= WARMUP {
+        if round >= warmup {
             nanos.push(per(tally.timed.nanos) / per(sends));
             allocations += tally.timed.allocations;
             polls += tally.timed.polls;
@@ -664,7 +684,7 @@ async fn compete(
         allocations,
         polls,
         sends: timed,
-        round: SENDS,
+        round: round_sends,
     }
 }
 
@@ -882,17 +902,18 @@ fn part(node: &Node, port: u16) -> transport::port::Part {
 
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
 fn print(lines: &[Measured]) {
-    println!("ns per timed send over {ROUNDS} rounds of {SENDS} sends");
+    println!("ns per timed send over the timed rounds of a scenario");
     println!("pN: the round at percentile N, over its timed sends");
     println!(
         "{:<34} {:>9} {:>9} {:>9} {:>12} {:>11} {:>6}",
         "scenario", "p10", "p50", "p90", "allocs/send", "polls/send", "timed"
     );
     for line in lines {
-        let at = |percent: usize| line.nanos[ROUNDS * percent / 100];
+        let rounds = line.nanos.len();
+        let at = |percent: usize| line.nanos[rounds * percent / 100];
         let allocations = per(line.allocations) / per(line.sends);
         let polls = per(line.polls) / per(line.sends);
-        let timed = per(line.sends) / per(ROUNDS * line.round);
+        let timed = per(line.sends) / per(rounds * line.round);
         let name = &line.name;
         let (p10, p50, p90) = (at(10), at(50), at(90));
         println!(
