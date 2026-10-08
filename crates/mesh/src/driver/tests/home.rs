@@ -176,6 +176,31 @@ fn set_home_refuses_a_member_that_the_node_appended_and_did_not_apply() {
     });
 }
 
+// The node leads, so its own write puts the join in its log.
+#[test]
+fn set_home_refuses_a_member_that_the_leader_wrote_and_did_not_apply() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let first = elect(&mesh).await;
+        mesh.propose(ticket()).await.unwrap();
+        let joined = mesh.propose(join(4)).await.unwrap();
+        let set = now(pin!(mesh.set_home(INDEX, key(4)))).await;
+        assert_eq!(set, Poll::Ready(Err(Error::NotMember(key(4)))));
+        let last = joined.index;
+        let reply = raft::Message {
+            term: first.term,
+            ..message(2, 1, Body::AppendReply { last })
+        };
+        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+        let clock = node.clock();
+        while mesh.member(key(4)).is_none() {
+            clock.sleep(Span::MILLISECOND).await;
+        }
+        let set = now(pin!(mesh.set_home(INDEX, key(4)))).await;
+        assert_eq!(set, Poll::Pending);
+    });
+}
+
 #[test]
 fn set_home_refuses_each_home_on_a_node_that_is_not_a_voter() {
     solo(|node, tasks| async move {
