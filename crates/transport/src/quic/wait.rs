@@ -162,12 +162,14 @@ impl Queue {
         !self.reads.is_empty()
     }
 
-    /// The counts up to `now`.
+    /// The counts of the reads up to `now`, with no budget waits: the endpoint counts
+    /// those.
     pub(super) fn status(&self, now: Monotonic) -> Status {
         let open = self.since.map_or(0, |since| (now - since).nanos());
         Status {
             waited: Span::from_nanos(self.waited.saturating_add(open)),
             refusals: self.refusals,
+            budget_waits: 0,
         }
     }
 
@@ -436,6 +438,7 @@ mod tests {
         let none = Status {
             waited: Span::ZERO,
             refusals: 0,
+            budget_waits: 0,
         };
         assert_eq!(queue.status(at(5)), none);
         switch.refuse();
@@ -445,6 +448,7 @@ mod tests {
         let status = Status {
             waited: millis(5),
             refusals: 2,
+            budget_waits: 0,
         };
         assert_eq!(queue.status(at(15)), status);
         switch.allow();
@@ -453,6 +457,7 @@ mod tests {
         let status = Status {
             waited: millis(20),
             refusals: 2,
+            budget_waits: 0,
         };
         assert_eq!(queue.status(at(40)), status);
         queue.wait(at(50), stream(0, 2), Class::Command, &waker);
@@ -460,6 +465,7 @@ mod tests {
         let status = Status {
             waited: millis(23),
             refusals: 2,
+            budget_waits: 0,
         };
         assert_eq!(queue.status(at(60)), status);
     }
