@@ -3045,6 +3045,8 @@ mod port {
                 let pool = block::Config { budget: 1 << 20 };
                 let memory = block::Heap::new(pool.reservation());
                 let pool = Rc::new(block::Pool::new(pool, memory));
+                // A node gives no read of its chunk store, so the test opens the store
+                // at its private path.
                 let store = blob::Store::open(blob::Config {
                     files: own.files(),
                     dir: crate::directory::blob(),
