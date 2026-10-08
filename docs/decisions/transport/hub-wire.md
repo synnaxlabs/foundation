@@ -194,6 +194,8 @@
   ends that `types` refuses, stops the stream with `MALFORMED`, and a pool with no
   block for `Open`, its keys, a frame, or a `Credit` stops it with `BUSY`. A `Credit`
   that still waits to send when the stream stops drops with its sender, so the home's
-  receive half resets with code 0, not the refusal code, until #2031. Each later
-  `next` gives the same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
+  receive half resets with code 0, not the refusal code, until #2031 (`laptop.architect`,
+  2026-10-08T23:49:49Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071319399). Each
+  later `next` gives the same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
