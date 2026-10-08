@@ -799,7 +799,7 @@ pub enum Error {
     Blob(blob::Error),
     /// The file `node.key` in the data directory is not a key that a node wrote:
     /// another length, tag, or checksum. The node took no session and does not write
-    /// over the file, since a new key is a new node to its region.
+    /// over the file, because a new key is a new node to its region.
     Key,
     /// The node's port did not bind. No shard started.
     Port {

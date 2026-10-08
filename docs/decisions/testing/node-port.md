@@ -84,6 +84,7 @@
   Rust caller gives `Config::region`, a founding with a dangling index or two channels
   of one key makes shard 0 panic. The first PR that gives `node` a `spec::region::check`
   before each define (#1744 or #1957 PR 2) runs it on `Config::region` too, and then a
-  founding with problems defines no channel (#1741), by `laptop.architect-2`:
-  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
+  founding with problems defines no channel (#1741), by `laptop.architect-2` (20:08
+  UTC): https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
+  the ruling of `laptop.architect` (20:08 UTC):
   https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791.
