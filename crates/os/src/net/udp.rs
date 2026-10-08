@@ -260,11 +260,11 @@ fn send_all(
     let Some(segment) = segment else {
         return sent(send(&datagram(contents, None)), remote);
     };
-    // At `EIO` or `EINVAL`, the kernel or the card cannot segment. `noq-udp` then
-    // turns GSO off for the socket, and each datagram goes out alone.
+    // When the kernel or the card cannot segment, `noq-udp` turns GSO off for the
+    // socket, and each datagram goes out alone.
     if bound.state.max_gso_segments().get() > 1 {
         match send(&datagram(contents, Some(segment))) {
-            Err(e) if matches!(errno(&e), Errno::IO | Errno::INVAL) => {}
+            Err(_) if bound.state.max_gso_segments().get() == 1 => {}
             outcome => return sent(outcome, remote),
         }
     }
@@ -512,30 +512,58 @@ mod tests {
     mod send_all {
         use super::*;
 
+        #[derive(Clone, Copy)]
+        enum Outcome {
+            Fails(Errno),
+            /// `noq-udp` refuses a batch with `EINVAL` from the OS, which turns GSO
+            /// off for the socket.
+            Refused,
+        }
+
         /// The contents and segment size of each send, with the outcomes to give.
         struct Recorded {
             sends: Vec<(Vec<u8>, Option<usize>)>,
-            outcomes: Vec<Errno>,
+            outcomes: Vec<Outcome>,
         }
 
         impl Recorded {
-            fn new(outcomes: &[Errno]) -> Self {
+            fn new(outcomes: &[Outcome]) -> Self {
                 Self {
                     sends: Vec::new(),
                     outcomes: outcomes.iter().rev().copied().collect(),
                 }
             }
 
-            fn send(&mut self, datagram: &noq_udp::Transmit<'_>) -> io::Result<()> {
+            fn send(
+                &mut self,
+                bound: &Bound,
+                datagram: &noq_udp::Transmit<'_>,
+            ) -> io::Result<()> {
                 let send = (datagram.contents.to_vec(), datagram.segment_size);
                 self.sends.push(send);
                 match self.outcomes.pop() {
-                    Some(code) => {
+                    Some(Outcome::Fails(code)) => {
                         Err(io::Error::from_raw_os_error(code.raw_os_error()))
                     }
+                    Some(Outcome::Refused) => refuse(bound),
                     None => Ok(()),
                 }
             }
+        }
+
+        /// Sends a batch that Linux refuses with `EINVAL`: more than 64 or 128
+        /// segments.
+        fn refuse(bound: &Bound) -> io::Result<()> {
+            let refused = noq_udp::Transmit {
+                destination: bound.local,
+                ecn: None,
+                contents: &[0; 200],
+                segment_size: Some(1),
+                src_ip: None,
+            };
+            let sent = bound.state.try_send((&bound.socket).into(), &refused);
+            assert_eq!(sent.as_ref().map_err(errno), Err(Errno::INVAL));
+            sent
         }
 
         fn batch(contents: &[u8], segment: usize) -> Transmit<'_> {
@@ -550,7 +578,7 @@ mod tests {
             transmit: &Transmit<'_>,
             recorded: &mut Recorded,
         ) -> Poll<Result<(), Error>> {
-            send_all(&udp.bound, transmit, |d| recorded.send(d))
+            send_all(&udp.bound, transmit, |d| recorded.send(&udp.bound, d))
         }
 
         #[test]
@@ -581,36 +609,35 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn sends_each_datagram_alone_when_the_os_refuses_a_batch() {
-            for refused in [Errno::IO, Errno::INVAL] {
-                let mut recorded = Recorded::new(&[refused]);
-                let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
-                assert_eq!(sent, Poll::Ready(Ok(())));
-                let alone = |bytes: &[u8]| (bytes.to_vec(), None);
-                let expected = [
-                    (b"abcde".to_vec(), Some(2)),
-                    alone(b"ab"),
-                    alone(b"cd"),
-                    alone(b"e"),
-                ];
-                assert_eq!(recorded.sends, expected);
-            }
+            let mut recorded = Recorded::new(&[Outcome::Refused]);
+            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
+            assert_eq!(sent, Poll::Ready(Ok(())));
+            let alone = |bytes: &[u8]| (bytes.to_vec(), None);
+            let expected = [
+                (b"abcde".to_vec(), Some(2)),
+                alone(b"ab"),
+                alone(b"cd"),
+                alone(b"e"),
+            ];
+            assert_eq!(recorded.sends, expected);
         }
 
-        /// Linux refuses a batch of more than 64 or 128 segments with `EINVAL`.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn gives_a_failure_of_a_batch_that_leaves_gso_on() {
+            let failed = Outcome::Fails(Errno::INVAL);
+            let mut recorded = Recorded::new(&[failed]);
+            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
+            let code = Errno::INVAL.raw_os_error();
+            assert_eq!(sent, Poll::Ready(Err(Error::Io { code })));
+            assert_eq!(recorded.sends.len(), 1);
+        }
+
         #[test]
         #[cfg(target_os = "linux")]
         fn sends_each_datagram_alone_after_the_os_refused_a_batch() {
             let udp = loopback();
-            let refused = noq_udp::Transmit {
-                destination: udp.bound.local,
-                ecn: None,
-                contents: &[0; 200],
-                segment_size: Some(1),
-                src_ip: None,
-            };
-            let fd = &udp.bound.socket;
-            let sent = udp.bound.state.try_send(fd.into(), &refused);
-            assert_eq!(sent.map_err(|e| errno(&e)), Err(Errno::INVAL));
+            assert!(refuse(&udp.bound).is_err());
             let mut recorded = Recorded::new(&[]);
             let sent = run(&udp, &batch(b"abc", 2), &mut recorded);
             assert_eq!(sent, Poll::Ready(Ok(())));
@@ -621,7 +648,7 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn gives_another_failure_of_a_batch() {
-            let mut recorded = Recorded::new(&[Errno::AGAIN]);
+            let mut recorded = Recorded::new(&[Outcome::Fails(Errno::AGAIN)]);
             let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
             assert_eq!(sent, Poll::Pending);
             assert_eq!(recorded.sends.len(), 1);
@@ -630,7 +657,7 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn stops_at_a_failure_of_one_datagram() {
-            let outcomes = [Errno::INVAL, Errno::NETUNREACH];
+            let outcomes = [Outcome::Refused, Outcome::Fails(Errno::NETUNREACH)];
             let mut recorded = Recorded::new(&outcomes);
             let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
             let remote = v4(2);
