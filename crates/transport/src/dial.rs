@@ -23,9 +23,9 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// # Errors
 ///
 /// [`Error::Network`] when the socket is broken, or breaks before an attempt connects,
-/// [`Error::Closed`] with code 0 when the carrier drops before one connects, or
-/// [`Error::Unreachable`] with each attempt's cause, in the order started, when none
-/// connects.
+/// [`Error::Closed`] with code 0 when the carrier dropped, unless an attempt in flight
+/// connected first, or [`Error::Unreachable`] with each attempt's cause, in the order
+/// started, when none connects.
 pub(crate) async fn dial(
     dialer: &quic::Dialer,
     peer: PublicKey,
@@ -656,6 +656,33 @@ mod tests {
             (relay, Error::Unroutable),
         ];
         unreachable(&client, addresses, attempts);
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The handshake takes 100 ms over the link, and ends after the drop.
+    #[test]
+    fn an_attempt_in_flight_when_the_carrier_drops_gives_its_session() {
+        let (mut sim, client, server) = nodes(0);
+        let link = sim::link::Config {
+            delay: spans(Span::MILLISECOND, 50),
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &server, link);
+        sim.link(&server, &client, link);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            node.clock().sleep(spans(IDLE, 3)).await;
+            drop(transport);
+        });
+        let addresses = [Address::Udp(address(&server))];
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialer = carrier.dialer();
+            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            assert!(testing::poll_once(dial.as_mut()).await.is_none());
+            drop(carrier);
+            node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+            let peer = dial.await.map(|session| session.peer());
+            assert_eq!(peer, Ok(Peer::Node(SERVER.public())));
+        });
         assert_eq!(sim.run(), Ok(()));
     }
 
