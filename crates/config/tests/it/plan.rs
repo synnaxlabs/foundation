@@ -1,6 +1,7 @@
 //! `config::plan` against applied specs that the tests build and apply.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::slice;
 
 use config::{Definition, Entry, Plan};
 use connector::cancel;
@@ -478,8 +479,8 @@ connector \"w2\" {
 
 /// The fix of `config.unplaced` when the node of a connector has a second role in the
 /// placement that wins for the name.
-const OVERLAP: &str = "Move the node to `home` when it is the one node of the placement, \
-                       else remove it from the placement";
+const OVERLAP: &str = "Move the node to `home` when it is the one node of the \
+                       placement, else remove it from the placement";
 
 #[test]
 fn refuses_each_index_that_cannot_be_placed() {
@@ -1787,18 +1788,18 @@ connector \"d\" {{
 
 #[test]
 fn plans_after_the_split_placement_fix_that_names_a_home_for_an_unwritten_index() {
-    let refused = unwritten(
-        "\
+    let t = "\
 placement \"t\" {
   select = [\"c\"]
   standby = \"k\"
 }
+";
+    let r = "\
 placement \"r\" {
   select = [\"c.time\"]
   home = \"n\"
 }
-",
-    );
+";
     let fixed = unwritten(
         "\
 placement \"t\" {
@@ -1808,7 +1809,45 @@ placement \"t\" {
 }
 ",
     );
-    let expected = [("config.split-placement", homed("t", "c", "n"))];
+    let split = ("config.split-placement", homed("t", "c", "n"));
+    let selected = unwritten(&format!("{t}{r}"));
+    plans_after(&selected, slice::from_ref(&split), &fixed);
+    // No placement selects `c.time`.
+    let unselected = (
+        "config.unplaced",
+        "Select the index with a placement that names a `home`, or write it with a \
+         connector"
+            .to_owned(),
+    );
+    plans_after(&unwritten(t), &[unselected, split], &fixed);
+}
+
+#[test]
+fn plans_after_the_split_placement_fix_of_a_connector_whose_placement_overlaps() {
+    let refused = unwritten(
+        "\
+placement \"p\" {
+  select = [\"c\"]
+  standby = \"n\"
+}
+placement \"r\" {
+  select = [\"c.time\"]
+  home = \"n\"
+}
+",
+    );
+    let fixed = unwritten(
+        "\
+placement \"p\" {
+  select = [\"c\", \"c.time\"]
+  home = \"n\"
+}
+",
+    );
+    let expected = [
+        ("config.unplaced", OVERLAP.to_owned()),
+        ("config.split-placement", homed("p", "c", "n")),
+    ];
     plans_after(&refused, &expected, &fixed);
 }
 
