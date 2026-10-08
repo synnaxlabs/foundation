@@ -19,6 +19,7 @@ dependencies = [
 name = "access"
 version = "0.0.0"
 dependencies = [
+ "document",
  "proptest",
  "spec",
  "types",
@@ -326,6 +327,9 @@ checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 name = "config"
 version = "0.0.0"
 dependencies = [
+ "config-hcl",
+ "connector",
+ "connector-influx",
  "document",
  "proptest",
  "spec",
@@ -352,6 +356,7 @@ dependencies = [
  "env",
  "http",
  "http-body",
+ "hub",
  "hyper",
  "proptest",
  "sim",
@@ -365,6 +370,7 @@ dependencies = [
  "bytes",
  "connector",
  "counting",
+ "document",
  "env",
  "http",
  "influxdb-line-protocol",
@@ -975,13 +981,13 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mesh"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
  "block",
  "clock",
  "env",
  "proptest",
  "raft",
  "sim",
+ "spec",
  "transport",
  "types",
  "wire",
@@ -1886,6 +1892,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 name = "types"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "blake3",
  "block",
  "counting",

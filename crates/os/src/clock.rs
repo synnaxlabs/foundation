@@ -90,11 +90,7 @@ impl env::clock::Driver for Driver {
     }
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
-        Box::pin(Timer {
-            driver: self.clone(),
-            sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
-            armed: None,
-        })
+        Box::pin(Timer::new(self.clone()))
     }
 }
 
@@ -159,6 +155,17 @@ struct Timer {
     armed: Option<Monotonic>,
 }
 
+impl Timer {
+    /// A timer on `driver`, armed for no deadline.
+    fn new(driver: Driver) -> Self {
+        Self {
+            driver,
+            sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            armed: None,
+        }
+    }
+}
+
 impl env::clock::Timer for Timer {
     fn poll_until(
         self: Pin<&mut Self>,
@@ -193,6 +200,31 @@ mod tests {
     use super::*;
 
     const SECOND: u64 = 1_000_000_000;
+
+    /// A deadline past a second is armed for a second, so a slew or a suspend of
+    /// Tokio's clock makes the sleep late by at most that. No public call shows the
+    /// cap, since a sleep of any length ends at its deadline, so the test reads the
+    /// armed deadline.
+    #[test]
+    fn a_poll_arms_a_far_deadline_for_a_second() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let driver = Driver::new();
+        let mut timer = Box::pin(Timer::new(driver.clone()));
+        let far = env::clock::Driver::now(&driver).0 + 5 * SECOND;
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let before = tokio::time::Instant::now();
+        let polled =
+            env::clock::Timer::poll_until(timer.as_mut(), Monotonic(far), &mut cx);
+        let after = tokio::time::Instant::now();
+        assert_eq!(polled, Poll::Pending);
+        let armed = timer.sleep.deadline();
+        assert!(before + ARM_MAX <= armed, "{armed:?} before {before:?}");
+        assert!(armed <= after + ARM_MAX, "{armed:?} after {after:?}");
+    }
 
     #[test]
     fn a_resume_adds_the_time_asleep_to_the_raw_clock() {

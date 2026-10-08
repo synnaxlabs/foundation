@@ -21,7 +21,7 @@ const RANGE: usize = 16;
 /// Bytes of one descriptor: entry and the end of its series in the series bytes (each
 /// `u32`).
 const DESCRIPTOR: usize = 8;
-/// Each series starts at a multiple of this.
+/// Each series starts at a multiple of this. A power of two.
 const SERIES_ALIGN: usize = 8;
 
 /// Offsets of the header's fields: the key set key and the counts of ranges and
@@ -379,7 +379,10 @@ impl<'a> Layout<'a> {
         }
         let mut end = 0_usize;
         for (descriptor, &(entry, size)) in descriptors.iter_mut().zip(series) {
-            if let Sizes::Lens = sizes {
+            // An empty fill still calls `memset`, which costs up to about 90 ns.
+            if let Sizes::Lens = sizes
+                && !end.is_multiple_of(SERIES_ALIGN)
+            {
                 body[end..padded(end)].fill(0);
             }
             end = sizes.end(end, size);
@@ -819,9 +822,11 @@ fn bounds(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, usize) {
 /// Where a series that ends at `end` stops with its padding, and the next one starts.
 /// Saturates at `usize::MAX`.
 const fn padded(end: usize) -> usize {
-    match end.checked_next_multiple_of(SERIES_ALIGN) {
-        Some(start) => start,
-        None => usize::MAX,
+    let (sum, over) = end.overflowing_add(SERIES_ALIGN - 1);
+    if over {
+        usize::MAX
+    } else {
+        sum & !(SERIES_ALIGN - 1)
     }
 }
 
@@ -1845,6 +1850,21 @@ mod tests {
 
     proptest! {
         #[test]
+        fn zeros_only_the_padding_of_a_dirty_draft_from_lengths(
+            lens in proptest::collection::vec(0..40_usize, 4),
+        ) {
+            let (pool, set) = (pool(1 << 16), two_groups());
+            let series: Vec<_> = lens.iter().copied().enumerate().collect();
+            let mut draft = dirty_draft(&pool, Layout::new(&set, &series).unwrap());
+            let mut expected = Vec::new();
+            for &len in &lens {
+                expected.resize(expected.len().next_multiple_of(8), 0);
+                expected.extend(std::iter::repeat_n(0xff_u8, len));
+            }
+            prop_assert_eq!(draft.body_mut(), expected.as_slice());
+        }
+
+        #[test]
         fn reads_back_what_a_draft_wrote(case in cases()) {
             round_trip(&case)?;
         }
@@ -1913,6 +1933,46 @@ mod tests {
         let max = usize::MAX;
         let ends: Vec<_> = super::ends([(0, max), (1, 1)]).collect();
         assert_eq!(ends, [(0, max), (1, max)]);
+    }
+
+    #[test]
+    fn pads_an_end_at_and_around_the_saturation_bound() {
+        let max = usize::MAX;
+        for (end, start) in [
+            (max - 8, max - 7),
+            (max - 7, max - 7),
+            (max - 6, max),
+            (max, max),
+        ] {
+            let ends: Vec<_> = super::ends([(0, end), (1, 0)]).collect();
+            assert_eq!(ends, [(0, end), (1, start)], "{end}");
+        }
+        let set = one_group(&mut interner());
+        let ends = [(0, max - 7), (2, max - 7)];
+        assert_eq!(Layout::from_ends(&set, &ends).unwrap().body_len(), max - 7);
+        let error = Layout::from_ends(&set, &[(0, max - 6), (2, max - 1)]).unwrap_err();
+        assert_eq!(
+            error,
+            Error::End(BadEnd::Before {
+                end: max - 1,
+                start: max
+            })
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn pads_an_end_to_a_multiple_of_8_or_saturates(
+            end in prop_oneof![
+                any::<usize>(),
+                usize::MAX - 16..=usize::MAX,
+                0..17_usize,
+            ],
+        ) {
+            let start = end.checked_next_multiple_of(SERIES_ALIGN);
+            let start = start.unwrap_or(usize::MAX);
+            prop_assert_eq!(super::ends([(0, end), (1, 0)]).nth(1), Some((1, start)));
+        }
     }
 
     #[test]

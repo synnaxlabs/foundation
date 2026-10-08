@@ -74,7 +74,7 @@ pub struct Config<M> {
     /// the port carries TCP (#77).
     pub listen: SocketAddr,
     /// The node's key. Its transport proves the key to each peer.
-    pub private_key: types::node::PrivateKey,
+    pub private_key: types::ed25519::PrivateKey,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -316,16 +316,16 @@ impl Node {
             let joined = shard.handle.join();
             (joined, shard.failed.get().cloned())
         });
-        error(self.failed, shards)
+        error(self.failed, shards.collect())
     }
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
-/// the first panic by core. Takes each item of `shards`, which gives each shard's
-/// join and error in order of core.
+/// the first panic by core. `shards` gives each shard's join and error in order of
+/// core.
 fn error(
     failed: Option<Error>,
-    shards: impl Iterator<Item = (Result<(), env::thread::Panicked>, Option<Error>)>,
+    shards: Vec<(Result<(), env::thread::Panicked>, Option<Error>)>,
 ) -> Result<(), Error> {
     let mut first = failed;
     let mut panicked = None;
@@ -584,7 +584,7 @@ struct Serve {
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
-    private_key: types::node::PrivateKey,
+    private_key: types::ed25519::PrivateKey,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
 }

@@ -3,8 +3,8 @@
 
 use std::future::pending;
 
+use transport::Class;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code};
 
 use super::send::{self, LIMIT, Peer, create_config, stop};
 use super::*;
@@ -353,6 +353,38 @@ fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
         let cause = Unknown::Kind { kind: 9 };
         let stopped = Stopped::Change { at: bad, cause };
         assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+    });
+}
+
+// One reply of node 2 commits a spec change and, after it, an entry that is not a
+// change.
+#[test]
+fn the_pointer_after_a_stop_is_the_pointer_at_the_stop() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let first = elect(&mesh).await;
+        let base = mesh.pointer();
+        let change = Change::Spec {
+            base,
+            root: common::digest(1),
+            chunks: [common::digest(1)].into(),
+        };
+        mesh.propose_data(encoded(&change)).await.unwrap();
+        let bad = mesh.propose_data(vec![9]).await.unwrap();
+        let reply = raft::Message {
+            term: first.term,
+            ..message(2, 1, Body::AppendReply { last: bad.index })
+        };
+        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+        node.clock().sleep(Span::MILLISECOND).await;
+        let cause = Unknown::Kind { kind: 9 };
+        let stopped = Stopped::Change { at: bad, cause };
+        assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        assert_eq!(mesh.pointer(), moved);
     });
 }
 

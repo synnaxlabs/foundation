@@ -1,16 +1,16 @@
 //! For latest sessions, a put and a take make no heap allocation after the first put,
 //! and none after a later open. For complete sessions, a queue, a release, and a take
-//! make none once each session got a frame, also for sessions charged by their places,
-//! nor a release in which sessions miss a frame, with frames waiting or not. An ack
-//! makes none, and no call on a closed key of either mode makes one. This binary has no
-//! test harness: the count covers each thread, and a harness allocates on its own
-//! thread at any time.
+//! make none once each session got a frame, also for sessions charged by their places.
+//! A release in which sessions start to wait for credit makes none, nor one in which
+//! they miss. An ack makes none, and no call on a closed key of either mode makes one.
+//! This binary has no test harness: the count covers each thread, and a harness
+//! allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::sync::Arc;
 
-use delivery::{Position, Reader, Readers, Start, complete, latest};
+use delivery::{Next, Position, Reader, Readers, Start, complete, latest};
 
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
@@ -81,7 +81,10 @@ fn latest(frame: &impl Fn() -> Frame) {
     let closed = keys[0];
     readers.close(closed.into());
     let ((), allocations) = ALLOCATOR.count(|| {
-        assert!(readers.take(closed.into()).is_none(), "a closed key takes");
+        assert!(
+            matches!(readers.take(closed.into()), Next::Empty),
+            "a closed key takes"
+        );
         readers.close(closed.into());
     });
     assert_eq!(allocations, 0, "a call on a closed latest key allocated");
@@ -135,7 +138,10 @@ fn complete(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
         }
         readers.grant(closed, u64::MAX);
         assert_eq!(readers.ack(closed, position), Ok(()), "a closed key acks");
-        assert!(readers.take(closed.into()).is_none(), "a closed key takes");
+        assert!(
+            matches!(readers.take(closed.into()), Next::Empty),
+            "a closed key takes"
+        );
         readers.close(closed.into());
         readers.close_named(closed, Stamp::from_nanos(0));
     });
@@ -187,30 +193,57 @@ fn places(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     );
 }
 
+/// Sessions that never waited for credit start to wait in a release, and miss in the
+/// next: neither allocates, so the frames that wait take no heap per session.
 fn missed(frame: &impl Fn() -> Frame, set: &Arc<KeySet>) {
     let mut readers = Readers::new(0);
     let warm = [open(&mut readers, 0, u64::MAX)];
     let mut seq = 0;
-    for _ in 0..2 {
-        flow(&mut readers, &warm, frame, set, &mut seq);
+    flow(&mut readers, &warm, frame, set, &mut seq);
+    // The queue holds four frames at once: two that wait, and two queued after them.
+    for _ in 0..4 {
+        readers.queue(&frame(), set, seq..seq + 1);
+        seq += 1;
     }
-    // A session of credit 1 takes the first frame and misses with one frame waiting.
+    assert!(
+        readers.release(seq).is_empty(),
+        "the warm session has frames to take"
+    );
+    // A session of credit 0 waits from the first frame, one of credit 1 from the
+    // second.
     let keys: Vec<_> = (0..SESSIONS)
         .map(|i| open(&mut readers, seq, u64::from(i % 2 == 1)))
         .collect();
-    let (woken, allocations) =
-        ALLOCATOR.count(|| flow(&mut readers, &warm, frame, set, &mut seq));
+    let all: Vec<_> = warm.iter().chain(&keys).copied().collect();
+    let ((owed, missed), allocations) = ALLOCATOR.count(|| {
+        let owed = flow(&mut readers, &all, frame, set, &mut seq);
+        (owed, flow(&mut readers, &warm, frame, set, &mut seq))
+    });
     assert_eq!(
         allocations, 0,
-        "a release that wakes a missed session allocated"
+        "a release that makes frames wait for credit, or that misses them, allocated"
     );
     assert_eq!(
-        woken,
-        SESSIONS + 3,
-        "the warm session takes two frames, and the release wakes each session"
+        owed,
+        6 + 1 + SESSIONS / 2,
+        "the warm session takes six frames, and the release wakes it and each \
+         session of credit 1"
     );
+    assert_eq!(
+        missed,
+        2 + 1 + SESSIONS / 2,
+        "the warm session takes two frames, and the release wakes it and each \
+         session of credit 0"
+    );
+    let drained_behind = |readers: &mut Readers, key: complete::Key| loop {
+        match readers.take(key.into()) {
+            Next::Frame(_) => {}
+            Next::Behind => break true,
+            Next::Empty => break false,
+        }
+    };
     assert!(
-        keys.iter().all(|&key| readers.behind(key)),
+        keys.iter().all(|&key| drained_behind(&mut readers, key)),
         "each session missed"
     );
 }
@@ -224,15 +257,29 @@ fn flow(
     set: &Arc<KeySet>,
     seq: &mut u64,
 ) -> usize {
-    let taken: usize = keys
-        .iter()
-        .map(|&key| std::iter::from_fn(|| readers.take(key.into())).count())
-        .sum();
+    let taken: usize = keys.iter().map(|&key| taken(readers, key)).sum();
     for _ in 0..2 {
         readers.queue(&frame(), set, *seq..*seq + 1);
         *seq += 1;
     }
     taken + readers.release(*seq).len()
+}
+
+/// The number of frames that the complete session `key` takes before
+/// [`Next::Empty`].
+///
+/// # Panics
+///
+/// If the session gets [`Next::Behind`].
+fn taken(readers: &mut Readers, key: complete::Key) -> usize {
+    let mut count = 0;
+    loop {
+        match readers.take(key.into()) {
+            Next::Frame(_) => count += 1,
+            Next::Empty => return count,
+            Next::Behind => panic!("the session is behind"),
+        }
+    }
 }
 
 /// Takes each session's frame, then puts two frames. Returns the frames taken plus the
@@ -244,7 +291,7 @@ fn round(
 ) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| usize::from(readers.take(key.into()).is_some()))
+        .map(|&key| usize::from(matches!(readers.take(key.into()), Next::Frame(_))))
         .sum();
     taken + readers.put(frame()).len() + readers.put(frame()).len()
 }
@@ -292,8 +339,7 @@ fn alternating() {
         readers.queue(&fb, &b, *seq + 1..*seq + 2);
         *seq += 2;
         let woken = readers.release(*seq).len();
-        let taken = std::iter::from_fn(|| readers.take(key.into())).count();
-        woken + taken
+        woken + taken(readers, key)
     };
     for _ in 0..2 {
         step(&mut readers, &mut seq);

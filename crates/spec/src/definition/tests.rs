@@ -96,6 +96,7 @@ fn refuses_an_unknown_kind() {
             TIME,
             CHANNEL,
             RETENTION,
+            SUBJECT,
         ]
         .contains(t)
     }) {
@@ -783,6 +784,99 @@ fn refuses_a_retention_that_ends_early() {
     assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at }));
 }
 
+/// The bytes of a subject with `count` written as its count, then `keys`.
+fn subject_bytes(count: u64, keys: &[[u8; 32]]) -> Vec<u8> {
+    let mut bytes = vec![VERSION, SUBJECT];
+    bytes.extend_from_slice(&count.to_le_bytes());
+    for key in keys {
+        bytes.extend_from_slice(key);
+    }
+    bytes
+}
+
+fn subject(keys: &[u8]) -> Definition {
+    let keys = keys
+        .iter()
+        .map(|&b| PublicKey::new([b; 32]).unwrap())
+        .collect();
+    Definition::Subject(Subject::new(keys).unwrap())
+}
+
+#[test]
+fn writes_the_documented_subject_layout_with_keys_in_order() {
+    let expected = subject_bytes(3, &[[2; 32], [5; 32], [9; 32]]);
+    let definition = subject(&[9, 2, 5]);
+    assert_eq!(definition.encode(), expected);
+    assert_eq!(Definition::decode(&expected), Ok(definition));
+}
+
+#[test]
+fn refuses_a_subject_with_no_key() {
+    let bytes = subject_bytes(0, &[]);
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::NoPublicKeys { at: 2 })
+    );
+    assert_eq!(
+        Error::NoPublicKeys { at: 2 }.to_string(),
+        "the subject at byte 2 has no public key"
+    );
+}
+
+#[test]
+fn refuses_keys_out_of_order_or_repeated() {
+    for keys in [[[5; 32], [2; 32]], [[5; 32], [5; 32]]] {
+        let bytes = subject_bytes(2, &keys);
+        assert_eq!(
+            Definition::decode(&bytes),
+            Err(Error::PublicKeyOrder { at: 42 })
+        );
+    }
+    let mut last_byte = [5; 32];
+    last_byte[31] = 4;
+    let bytes = subject_bytes(2, &[[5; 32], last_byte]);
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::PublicKeyOrder { at: 42 })
+    );
+    assert_eq!(
+        Error::PublicKeyOrder { at: 42 }.to_string(),
+        "the public key at byte 42 is not after the key before it"
+    );
+}
+
+#[test]
+fn refuses_a_key_of_small_order() {
+    let bytes = subject_bytes(2, &[[2; 32], [0; 32]]);
+    let error = Definition::decode(&bytes);
+    assert_eq!(error, Err(Error::PublicKeyOrder { at: 42 }));
+    let bytes = subject_bytes(2, &[[0; 32], [2; 32]]);
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::SmallOrder { at: 10 })
+    );
+    assert_eq!(
+        Error::SmallOrder { at: 10 }.to_string(),
+        "the public key at byte 10 is a point of small order"
+    );
+}
+
+#[test]
+fn refuses_more_keys_than_the_bytes_left_can_hold() {
+    for (count, keys) in [(2, 1), (u64::MAX, 1), (1 << 59, 0), (1, 0)] {
+        let mut bytes = subject_bytes(count, &vec![[2; 32]; keys]);
+        let error = Definition::decode(&bytes);
+        assert_eq!(error, Err(Error::Truncated { at: 2 }), "{count}");
+        bytes.extend_from_slice(&[3; 31]);
+        let error = Definition::decode(&bytes);
+        assert_eq!(
+            error,
+            Err(Error::Truncated { at: 2 }),
+            "{count} and 31 bytes"
+        );
+    }
+}
+
 fn key(n: u128) -> Key {
     Key::from_u128(n)
 }
@@ -1285,6 +1379,19 @@ fn channel_strategy() -> impl Strategy<Value = Definition> {
         .prop_map(|(key, kind)| Definition::Channel(Channel { key, kind }))
 }
 
+fn subject_strategy() -> impl Strategy<Value = Definition> {
+    prop::collection::btree_set(any::<[u8; 32]>(), 1..5).prop_filter_map(
+        "no key of small order",
+        |keys| {
+            let keys = keys
+                .into_iter()
+                .map(PublicKey::new)
+                .collect::<Result<_, _>>();
+            Some(Definition::Subject(Subject::new(keys.ok()?).unwrap()))
+        },
+    )
+}
+
 fn definition() -> impl Strategy<Value = Definition> {
     prop_oneof![
         access_strategy(),
@@ -1296,6 +1403,23 @@ fn definition() -> impl Strategy<Value = Definition> {
         time_strategy(),
         channel_strategy(),
         retention_strategy(),
+        subject_strategy(),
+    ]
+}
+
+/// A definition of each kind, with its kind.
+pub(crate) fn kinded() -> impl Strategy<Value = (super::Kind, Definition)> {
+    prop_oneof![
+        access_strategy().prop_map(|d| (super::Kind::Access, d)),
+        connector_strategy().prop_map(|d| (super::Kind::Connector, d)),
+        region_strategy().prop_map(|d| (super::Kind::Region, d)),
+        settings_strategy().prop_map(|d| (super::Kind::NodeSettings, d)),
+        compression_strategy().prop_map(|d| (super::Kind::Compression, d)),
+        placement_strategy().prop_map(|d| (super::Kind::Placement, d)),
+        time_strategy().prop_map(|d| (super::Kind::Time, d)),
+        channel_strategy().prop_map(|d| (super::Kind::Channel, d)),
+        retention_strategy().prop_map(|d| (super::Kind::Retention, d)),
+        subject_strategy().prop_map(|d| (super::Kind::Subject, d)),
     ]
 }
 
@@ -1317,6 +1441,27 @@ proptest! {
         }
         if let Ok(decoded) = Definition::decode(&bytes) {
             prop_assert_eq!(decoded.encode(), bytes);
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn decodes_only_canonical_subject_bytes(
+        count in prop_oneof![0_u64..4, any::<u64>()],
+        keys in prop::collection::vec(
+            prop_oneof![
+                (0_u8..4).prop_map(|b| [b; 32]),
+                any::<[u8; 32]>(),
+            ],
+            0..4,
+        ),
+        tail in prop::collection::vec(any::<u8>(), 0..33),
+    ) {
+        let mut bytes = subject_bytes(count, &keys);
+        bytes.extend_from_slice(&tail);
+        if let Ok(definition) = Definition::decode(&bytes) {
+            prop_assert_eq!(definition.encode(), bytes);
         }
     }
 }
@@ -1517,6 +1662,31 @@ fn decodes_the_malformed_placement_fuzz_inputs_to_the_placement_reader() {
     for (i, (bytes, expected)) in cases.into_iter().enumerate() {
         assert_eq!(Definition::decode(bytes), Err(expected), "case {i}");
     }
+}
+
+#[test]
+fn decodes_the_subject_fuzz_inputs_to_the_subject_reader() {
+    let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/subject");
+    let order =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/subject_order");
+    let small =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/subject_small_order");
+    let large = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/subject_count_too_large"
+    );
+    let empty =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/subject_no_keys");
+    assert_eq!(Definition::decode(valid), Ok(subject(&[2, 9])));
+    assert_eq!(
+        Definition::decode(order),
+        Err(Error::PublicKeyOrder { at: 42 })
+    );
+    assert_eq!(Definition::decode(small), Err(Error::SmallOrder { at: 10 }));
+    assert_eq!(Definition::decode(large), Err(Error::Truncated { at: 2 }));
+    assert_eq!(
+        Definition::decode(empty),
+        Err(Error::NoPublicKeys { at: 2 })
+    );
 }
 
 #[test]

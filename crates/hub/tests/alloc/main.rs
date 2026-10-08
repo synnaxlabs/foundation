@@ -20,6 +20,8 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use common::{SETTLE, hub};
+use home::reader::Next;
+use home::reader::complete::Charge;
 use hub::Hub;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
@@ -158,7 +160,7 @@ fn woken_of_a_reader_that_takes_each_frame() {
         for n in 0..20 {
             calls.push(commit(&mut woken).await);
             assert!(
-                woken.shard.take(woken.readers[0]).is_some(),
+                matches!(woken.shard.take(woken.readers[0]), Next::Frame(_)),
                 "frame {n} waits for the reader"
             );
         }
@@ -187,7 +189,12 @@ fn woken_of_a_reader_that_falls_behind_again() {
                 calls.push(commit(&mut woken).await);
             }
             let reader = woken.readers[0];
-            let taken = std::iter::from_fn(|| woken.shard.take(reader)).count();
+            let taken = std::iter::from_fn(|| match woken.shard.take(reader) {
+                Next::Frame(frame) => Some(frame),
+                Next::Empty => None,
+                Next::Behind => panic!("lag {lag}: the reader is behind"),
+            })
+            .count();
             assert_eq!(taken, DEPTH, "lag {lag}");
             lags.push(calls);
         }
@@ -205,6 +212,43 @@ fn woken_of_a_reader_that_falls_behind_again() {
     .expect("the run ends");
 }
 
+/// The home's `woken` with a reader that takes each frame and one whose credit covers
+/// one frame at a time: once a frame of the second waits for credit, as many frames
+/// wait for it as waited before, so the call allocates nothing.
+fn woken_of_a_reader_whose_frame_waits_for_credit() {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        let mut woken = Woken::new(&node, tasks, 1).await;
+        let slot = woken.set.entries()[woken.set.groups()[0]].slot;
+        let limited = woken.shard.open_complete(slot, 1, Charge::Whole);
+        let mut calls = Vec::new();
+        let mut spent = 0;
+        for n in 0..6 {
+            if n < 5 {
+                woken.shard.grant(limited, spent + 1);
+            }
+            calls.push(commit(&mut woken).await);
+            assert!(
+                matches!(woken.shard.take(woken.readers[0]), Next::Frame(_)),
+                "frame {n} waits for the reader"
+            );
+            if n < 5 {
+                let Next::Frame(frame) = woken.shard.take(limited.into()) else {
+                    panic!("frame {n} waits for the limited reader");
+                };
+                spent += frame.charge();
+            }
+        }
+        assert_eq!(
+            calls[1..],
+            [(2, 0), (2, 0), (2, 0), (2, 0), (1, 0)],
+            "(keys given, allocations) of each call after the first: {calls:?}"
+        );
+    })
+    .expect("the run ends");
+}
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
@@ -213,6 +257,7 @@ fn main() {
     );
     woken_of_a_reader_that_takes_each_frame();
     woken_of_a_reader_that_falls_behind_again();
+    woken_of_a_reader_whose_frame_waits_for_credit();
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, |node, tasks| async move {

@@ -318,11 +318,11 @@ fn leased_voters_drop_the_campaign_of_a_removed_node() {
     assert_eq!(nodes[&key(3)].role(), Role::PreCandidate);
 }
 
-// A known gap until #483: once no voter has a lease, the voters elect a removed node
-// that missed its release. Node 4 holds the leave without its commit, so it
+// A known gap in `raft` alone: once no voter has a lease, the voters elect a removed
+// node that missed its release. Node 4 holds the leave without its commit, so it
 // campaigns, and its log is as long as theirs. After leader 1 fails, node 4 wins,
 // commits an entry of its term, and steps down. Voters 2 and 3 follow it until their
-// election timeout. #483 drops a message from a node outside the configuration.
+// election timeout. `mesh` refuses such a request before `raft` sees it (#1105).
 #[test]
 fn the_voters_elect_a_removed_node_once_the_leader_fails() {
     let mut nodes = lose_the_release(4);
@@ -452,6 +452,129 @@ fn a_removed_leader_that_restarts_before_the_leave_commits_finishes_the_change()
     };
     assert_eq!(a.voters(), &new);
     assert_eq!(b.voters(), &new);
+}
+
+// Node 2 leads {1, 2, 3} and removes node 3. Once the leave commits, each node holds
+// node 3 as removed. A node that starts again from its disk holds the leave but no
+// commit, so it holds node 3 as removed only once a leader gives it the commit index.
+#[test]
+fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
+    let mut nodes: BTreeMap<node::Key, Raft> =
+        (1..=3).map(|id| (key(id), node(id, &[1, 2, 3]))).collect();
+    nodes.get_mut(&key(2)).unwrap().campaign();
+    let (mut committed, _) = run(&mut nodes);
+    assert_eq!(nodes[&key(2)].role(), Role::Leader);
+    nodes
+        .get_mut(&key(2))
+        .unwrap()
+        .propose_voters(set(&[1, 2]))
+        .unwrap();
+    let (more, _) = run(&mut nodes);
+    let removed = |raft: &Raft| [1, 3, 9].map(|id| raft.removed(key(id)));
+    for id in 1..=3 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, true, false], "node {id}");
+    }
+
+    let mut disk = committed.remove(&key(2)).unwrap();
+    disk.extend(more[&key(2)].iter().cloned());
+    assert_eq!(configs(&disk).len(), 2);
+    let restart = Start {
+        hard: nodes[&key(2)].hard(),
+        voters: Voters {
+            incoming: set(&[1, 2, 3]),
+            outgoing: BTreeSet::new(),
+        },
+        entries: disk,
+        applied: 0,
+    };
+    let b = Raft::new(
+        Config {
+            key: key(2),
+            election_ticks: ELECTION,
+            heartbeat_ticks: 1,
+        },
+        restart,
+    )
+    .unwrap();
+    assert_eq!(removed(&b), [false, false, false]);
+    nodes.insert(key(2), b);
+    nodes.get_mut(&key(1)).unwrap().campaign();
+    run(&mut nodes);
+    assert_eq!(nodes[&key(1)].role(), Role::Leader);
+    assert_eq!(removed(&nodes[&key(2)]), [false, true, false]);
+}
+
+// Node 2 leads {1, 2, 3}, adds node 4, removes it, then adds it back. No
+// `Start.voters` holds node 4, so only the committed join holds it. From node 2's
+// disk, a start at a commit below the join holds nothing about node 4, a start at the
+// join holds it as a voter, a start at the second leave holds it as removed while the
+// entries past the commit make it a voter in force, and a start at the last leave
+// holds it as a voter again.
+#[test]
+fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
+    let mut nodes: BTreeMap<node::Key, Raft> =
+        (1..=4).map(|id| (key(id), node(id, &[1, 2, 3]))).collect();
+    nodes.get_mut(&key(2)).unwrap().campaign();
+    let (mut committed, _) = run(&mut nodes);
+    let mut propose = |nodes: &mut BTreeMap<node::Key, Raft>, voters: &[u8]| {
+        nodes
+            .get_mut(&key(2))
+            .unwrap()
+            .propose_voters(set(voters))
+            .unwrap();
+        let (more, _) = run(nodes);
+        committed
+            .get_mut(&key(2))
+            .unwrap()
+            .extend(more[&key(2)].iter().cloned());
+    };
+    propose(&mut nodes, &[1, 2, 3, 4]);
+    let removed = |raft: &Raft| [1, 4].map(|id| raft.removed(key(id)));
+    for id in 1..=4 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, false], "node {id}");
+    }
+    propose(&mut nodes, &[1, 2, 3]);
+    for id in 1..=4 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, true], "node {id}");
+    }
+    propose(&mut nodes, &[1, 2, 3, 4]);
+    for id in 1..=4 {
+        assert_eq!(removed(&nodes[&key(id)]), [false, false], "node {id}");
+    }
+
+    let disk = committed.remove(&key(2)).unwrap();
+    let at: Vec<u64> = disk
+        .iter()
+        .filter(|entry| matches!(entry.data, Data::Voters(_)))
+        .map(|entry| entry.at.index)
+        .collect();
+    assert_eq!(at.len(), 6);
+    let cases = [
+        (0, false),
+        (at[0] - 1, false),
+        (at[1], false),
+        (at[3], true),
+        (at[5], false),
+    ];
+    for (applied, want) in cases {
+        let start = Start {
+            hard: nodes[&key(2)].hard(),
+            voters: Voters {
+                incoming: set(&[1, 2, 3]),
+                outgoing: BTreeSet::new(),
+            },
+            entries: disk.clone(),
+            applied,
+        };
+        let config = Config {
+            key: key(2),
+            election_ticks: ELECTION,
+            heartbeat_ticks: 1,
+        };
+        let raft = Raft::new(config, start).unwrap();
+        assert!(raft.voters().contains(key(4)), "applied {applied}");
+        assert_eq!(removed(&raft), [false, want], "applied {applied}");
+    }
 }
 
 // Whether a message crosses between the sides {1, 4} and {2, 3}.
