@@ -81,10 +81,10 @@
   Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
   is not the home of the index), 18 `FAILED` (the home failed: its buffer or its mesh
   stopped), 19 `BUSY` (the side that stops had no block for the session, in both
-  directions; a later open can succeed), and 2
-  `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
-  or breaks a rule above), which every protocol may use. The meanings of 18 and 19 were
-  decided by the architect (2026-10-07T23:31:29Z,
+  directions; a later open can succeed, but not when the block is larger than each
+  block of that side's pool), and 2 `wire::header::MALFORMED` (a message that does not
+  decode, comes from the wrong side, or breaks a rule above), which every protocol may
+  use. The meanings of 18 and 19 were decided by the architect (2026-10-07T23:31:29Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
   Supersedes the meanings of 18 and 19 in 6047300641 and 6047519084. A reset drops the
   frames in flight, which is correct for `FAILED`, since the session cannot go on (lost:
