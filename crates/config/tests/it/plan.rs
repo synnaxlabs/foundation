@@ -579,7 +579,7 @@ channel \"a.other\" {
   index = \"a.value\"
 }
 ";
-    let documents = [read(0, placement), read(1, channels)];
+    let documents = [read(1, channels), read(0, placement)];
     let members = BTreeSet::from([name("n")]);
     let spec = Spec::create_empty();
     let result =

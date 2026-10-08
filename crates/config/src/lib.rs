@@ -74,8 +74,8 @@ pub struct Entry {
 ///
 /// A private key anywhere in the Documents gives only `config.private-key`, once for
 /// each string that holds one.
-/// Each other problem in the Documents, in the order of `documents`, then in source
-/// order.
+/// Each other problem in the Documents, in the order of their [`document::Source`],
+/// then in source order.
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
@@ -122,7 +122,6 @@ fn checked<'a>(
     }
     let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
-        let start = found.diagnostics.len();
         found
             .diagnostics
             .extend(read::unknown(document, "a file", &[], &keywords));
@@ -145,14 +144,22 @@ fn checked<'a>(
                 found.entries.insert(key, entry);
             }
         }
-        found.diagnostics[start..]
-            .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
     if found.diagnostics.is_empty() {
         Ok(found)
     } else {
+        sort(&mut found.diagnostics);
         Err(found.diagnostics)
     }
+}
+
+/// Sorts `diagnostics` by the [`document::Source`] of each span, then in source order.
+/// A diagnostic with no span comes first.
+fn sort(diagnostics: &mut [Diagnostic]) {
+    diagnostics.sort_by_key(|diagnostic| {
+        let span = diagnostic.span;
+        span.map(|span| (span.source(), span.start().offset))
+    });
 }
 
 /// The name and the label of each block of `kind` in `documents` whose one label
@@ -951,16 +958,19 @@ mod tests {
             "a",
             &[("select", Kind::Integer(1)), ("disk", Kind::Integer(1))],
         );
-        let documents = [
+        let mut documents = [
             document(vec![policy, block(0, 100, "nodes", &[], &[])]),
             document(vec![block(1, 0, "nodes", &[], &[])]),
         ];
-        let spans: Vec<Option<Span>> = check(&documents)
-            .unwrap_err()
-            .iter()
-            .map(|diagnostic| diagnostic.span)
-            .collect();
-        assert_eq!(spans, [at(0, 11), at(0, 13), at(0, 100), at(1, 0)]);
+        for _ in 0..2 {
+            let spans: Vec<Option<Span>> = check(&documents)
+                .unwrap_err()
+                .iter()
+                .map(|diagnostic| diagnostic.span)
+                .collect();
+            assert_eq!(spans, [at(0, 11), at(0, 13), at(0, 100), at(1, 0)]);
+            documents.reverse();
+        }
     }
 
     /// Policies with unique names, each a name and the text of its pattern, disk, and

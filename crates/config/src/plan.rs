@@ -11,7 +11,7 @@ use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
-use crate::{Definition, Entry, Found, channel, checked, span};
+use crate::{Definition, Entry, Found, channel, checked, sort, span};
 
 const UNKNOWN_NODE: Code = Code::new("config.unknown-node");
 const UNPLACED: Code = Code::new("config.unplaced");
@@ -60,11 +60,7 @@ pub fn plan(
     let homes = homes(&found, &stored, &mut diagnostics);
     unknown(&found, members, &mut diagnostics);
     if !diagnostics.is_empty() {
-        diagnostics.sort_by_key(|diagnostic| {
-            diagnostic
-                .span
-                .map(|span| (span.source(), span.start().offset))
-        });
+        sort(&mut diagnostics);
         return Err(diagnostics);
     }
     Ok(Plan {

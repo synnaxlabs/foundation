@@ -16,16 +16,14 @@ const MARKS: [&str; 4] = [
 ];
 
 /// `config.private-key` at each string of `documents` that holds a private key, in
-/// any block, label, key, or value at any depth. The alarms are in the order of
-/// `documents`, then in source order, and quote none of the text.
+/// any block, label, key, or value at any depth. The alarms are in the order of their
+/// [`document::Source`], then in source order, and quote none of the text.
 pub(crate) fn alarms(documents: &[Document]) -> Vec<Diagnostic> {
     let mut alarms = Vec::new();
     for document in documents {
-        let start = alarms.len();
         in_document(document, &mut alarms);
-        alarms[start..]
-            .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
+    crate::sort(&mut alarms);
     alarms
 }
 

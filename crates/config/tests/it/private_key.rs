@@ -119,6 +119,20 @@ fn alarms_alone_over_two_files() {
 }
 
 #[test]
+fn alarms_in_the_order_of_the_sources_in_any_order_of_the_files() {
+    let key = format!("subject \"alice\" {{\n  keys = {PEM}\n}}\n");
+    let files = [read(1, &key), read(0, &key)];
+    let Err(diagnostics) = config::check(&files, &kinds()) else {
+        panic!("a private key passed");
+    };
+    let sources: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.span.map(document::Span::source))
+        .collect();
+    assert_eq!(sources, [Some(Source(0)), Some(Source(1))]);
+}
+
+#[test]
 fn alarms_in_the_order_of_the_files_then_of_the_source() {
     let late = format!("subject \"alice\" {{\n  keys = [\"a\", \"b\", {PEM}]\n}}\n");
     let early = format!("subject \"bob\" {{\n  keys = {PEM}\n}}\n");
