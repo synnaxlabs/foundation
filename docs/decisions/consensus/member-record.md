@@ -110,7 +110,8 @@
   and the status keys, which the voter assigns (UUIDv7). Apply refuses, in this order,
   a forged card, a reserved name (A3), a name outside the region, a status channel
   `<name>.<status>` that is longer than a name can be or reserved, a key that is
-  already a member, a name that a member holds, a status key that a member holds or
+  already a member, a public key that the card of a member holds (`Unfit::Held`), a
+  name that a member holds, a status key that a member holds or
   that the join repeats (A4), an unknown ticket, and each refusal of `Record::admit`.
   So no refusal counts a use. A member's names are its card name and each
   `<name>.<status>`, and two names are equal when they differ only in ASCII case (A3,
