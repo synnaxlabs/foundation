@@ -4384,13 +4384,15 @@ How to read this record:
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
   `access::Rules` keeps each subject by its label, which
-  `spec::definition::Kind::label` gives for its tree key, and skips a subject
-  definition at a key that gives no label. `admit` and `verify` look up the hello's
-  subject and build no key, so only `spec` holds the key form, and `@admin`, a label
-  that `Kind::key` refuses, can sign (FIRST ADMIN). A subject with no definition gives
-  `Error::Unknown`. `Kind::label` is public: `access`, the `plan` of #1744, and
-  `export` call it. Decided by `laptop.architect` at 2026-10-08T11:00:08Z
-  (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812). The
+  `spec::definition::Kind::label` gives for its tree key. `admit` and `verify` look up
+  the hello's subject and build no key, so only `spec` holds the key form, and
+  `@admin`, a label that `Kind::key` refuses, can sign (FIRST ADMIN). A subject with no
+  definition gives `Error::Unknown`. `Kind::label` is public: `access` calls it, and
+  the `plan` of #1744 PR 1b and `export` will call it. Decided by `laptop.architect` at
+  2026-10-08T11:00:08Z
+  (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812).
+  `Rules::new` skips a subject definition at a key that gives no label (#1866,
+  https://github.com/synnaxlabs/foundation/issues/1866, by `laptop.architect`). The
   first ruling kept each subject by `<name>` (`laptop.architect`,
   2026-10-08T06:56:19Z,
   https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636). The
@@ -4445,7 +4447,11 @@ How to read this record:
   The subjects: `laptop.architect`, 2026-10-08T06:56:19Z
   (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636), by
   their tree key at 2026-10-08T08:10:33Z
-  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911).
+  (https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911), and by
+  their label at 2026-10-08T11:00:08Z
+  (https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058397812), which
+  supersedes https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911
+  (SUBJECT KEYS).
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -4500,8 +4506,9 @@ How to read this record:
   refuses a reserved label, and `Kind::label` gives one only for a subject or an access
   policy. A definition whose label (`definition.kind().label(key)`) is reserved is
   Foundation's, and `plan` leaves it out. `access::Rules` finds a subject by its label,
-  so it admits `@admin` (SUBJECT KEYS). Lost: `Kind::key` takes a reserved label behind a flag, so
-  `node` writes the definitions and `config` can make a reserved key by mistake;
+  so it admits `@admin` (SUBJECT KEYS). Lost: `Kind::key` takes a reserved label behind
+  a flag, so `node` writes the definitions and `config` can make a reserved key by
+  mistake;
   `spec::key::reserved(key)`, which needs a list of every kind that a new kind can miss,
   and gives `plan` no label or kind to print. Decided by `laptop.architect-2`
   (2026-10-08T06:01:36Z,
