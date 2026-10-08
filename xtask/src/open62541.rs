@@ -333,8 +333,11 @@ fn inspect(copy: &Path, out: &Path) -> Result<(), Vec<String>> {
         .and_then(|()| std::fs::create_dir_all(out).map_err(|e| format!("{e}")))
         .map_err(|e| vec![e])?;
     let mut cc = Command::new("cc");
-    let verbose = spawn(cc.args(["-xc", "-E", "-v", "/dev/null"])).and_then(wait);
-    let dirs = system_dirs(&verbose.map_err(|e| vec![e])?.1);
+    let (macros, verbose) = spawn(cc.args(["-xc", "-E", "-dM", "-v", "/dev/null"]))
+        .and_then(wait)
+        .map_err(|e| vec![e])?;
+    gcc(&macros).map_err(|e| vec![e])?;
+    let dirs = system_dirs(&verbose);
     let objects = build(copy, &sources, &flags, out).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
     let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
@@ -507,6 +510,20 @@ fn includes(
         problems.push(problem);
     }
     problems
+}
+
+/// Refuses a `cc` that is not GCC, from `macros`, the output of `cc -dM -E`. The
+/// check passes GCC's `-dumpbase`, whose value clang reads as a source file.
+fn gcc(macros: &str) -> Result<(), String> {
+    let defined = |name: &str| {
+        let prefix = format!("#define {name} ");
+        macros.lines().any(|line| line.starts_with(&prefix))
+    };
+    if defined("__GNUC__") && !defined("__clang__") {
+        Ok(())
+    } else {
+        Err("cc is not GCC, which the check needs".to_owned())
+    }
 }
 
 /// The directories of `#include <...>` in `verbose`, the standard error of
@@ -1000,6 +1017,18 @@ OFFSET           TYPE              VALUE
     <c9>   DW_AT_name        : y
 ";
         assert_eq!(inlined(info), ["helper", "d0"]);
+    }
+
+    #[test]
+    fn gcc_refuses_a_cc_that_is_not_gcc() {
+        let gnu = "#define __STDC__ 1\n#define __GNUC__ 13\n";
+        assert_eq!(gcc(gnu), Ok(()));
+        let refused = Err("cc is not GCC, which the check needs".to_owned());
+        assert_eq!(gcc(&format!("{gnu}#define __clang__ 1\n")), refused);
+        assert_eq!(
+            gcc("#define __STDC__ 1\n#define __GNUC_MINOR__ 2\n"),
+            refused
+        );
     }
 
     #[test]
