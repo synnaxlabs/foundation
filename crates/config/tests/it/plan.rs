@@ -181,6 +181,38 @@ fn encode(name: &Name, entry: &Entry, keys: &BTreeMap<Name, Key>) -> Vec<u8> {
     }
 }
 
+/// A kind whose config is one attribute, `writes`: the channels it writes to the device.
+struct Commander;
+
+impl Kind for Commander {
+    type Config = Vec<Name>;
+
+    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
+        Writer.parse(config)
+    }
+
+    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels {
+            reads: Vec::new(),
+            writes: writes.clone(),
+        })
+    }
+
+    fn discover(
+        &self,
+        _: &cancel::Token,
+    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn run(
+        &self,
+        _: Context<Vec<Name>>,
+    ) -> impl Future<Output = Result<(), kind::Error>> {
+        std::future::ready(Ok(()))
+    }
+}
+
 fn read(source: u32, text: &str) -> Document {
     config_hcl::read(Source(source), text).expect("the text is HCL")
 }
@@ -198,6 +230,7 @@ fn kinds() -> Table {
     Table::new()
         .with("influx", connector_influx::Kind::default())
         .with("writer", Writer)
+        .with("commander", Commander)
 }
 
 fn name(text: &str) -> Name {
@@ -475,6 +508,28 @@ connector \"w2\" {
         .plan(&[text], &["w"])
         .expect("no problems");
     assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("w"))]));
+}
+
+#[test]
+fn makes_no_writer_of_a_connector_that_writes_to_its_device() {
+    let text = format!(
+        "{PLANT}\
+connector \"c1\" {{
+  kind = \"commander\"
+  node = \"n1\"
+  writes = [\"a.value\"]
+}}
+connector \"c2\" {{
+  kind = \"commander\"
+  node = \"n2\"
+  writes = [\"a.value\"]
+}}
+"
+    );
+    let plan = Spec::create_empty()
+        .plan(&[&text], &["n", "n1", "n2"])
+        .expect("no problems");
+    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
 }
 
 /// The fix of `config.unplaced` when the node of a connector has a second role in the
