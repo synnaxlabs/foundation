@@ -751,6 +751,52 @@ async fn create_rootless(
     (chunks, root)
 }
 
+// The read of v2 waits on a get of its root. A call starts at v3, and v4 replaces v3
+// before its read begins, so the call waits for the read of v4.
+#[test]
+fn a_call_at_a_pointer_replaced_before_its_read_began_ends_with_the_later_pointer() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let clock = node.clock();
+        let first = mesh
+            .apply(base(), create_subjects(&["plant.a"], 1))
+            .await
+            .unwrap();
+        let x = create_subjects(&["plant.x"], 1);
+        let (x_chunks, x_root) = create_rootless(&mesh, &x).await;
+        let d = create_subjects(&["plant.d"], 1);
+        let (d_chunks, d_root) = create_rootless(&mesh, &d).await;
+        let x_block = mesh.pool.copy(x_chunks.get(x_root).unwrap()).unwrap();
+        let d_block = mesh.pool.copy(d_chunks.get(d_root).unwrap()).unwrap();
+        let mut x_put = pin!(mesh.store.put(x_root, &x_block));
+        assert!(now(x_put.as_mut()).await.is_pending());
+        let mut d_put = pin!(mesh.store.put(d_root, &d_block));
+        assert!(now(d_put.as_mut()).await.is_pending());
+        let holders: BTreeSet<node::Key> = [key(1)].into();
+        let second = mesh
+            .settle_spec(first, x_root, BTreeSet::new(), holders.clone())
+            .await
+            .unwrap();
+        clock.sleep(TICK).await;
+        let third = commit(&mesh, second, &create_subjects(&["plant.c"], 1)).await;
+        let mut call = pin!(mesh.spec());
+        assert_eq!(now(call.as_mut()).await, Poll::Pending);
+        let fourth = mesh
+            .settle_spec(third, d_root, BTreeSet::new(), holders)
+            .await
+            .unwrap();
+        x_put.await.unwrap();
+        clock.sleep(seconds(3)).await;
+        assert_eq!(now(call.as_mut()).await, Poll::Pending);
+        d_put.await.unwrap();
+        clock.sleep(seconds(3)).await;
+        assert_eq!(
+            now(call.as_mut()).await,
+            Poll::Ready(Ok(in_use(fourth, &d)))
+        );
+    });
+}
+
 // The read of v2 waits on a get of its root while v3 commits, then fails. The read of
 // v3 waits on a get of its root, which never ends, so `behind` names v2.
 #[test]
