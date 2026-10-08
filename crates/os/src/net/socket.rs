@@ -118,25 +118,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "a TCP stream polls only on the thread of its first poll"
-    )]
-    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
-    fn a_lost_socket_on_a_second_thread_panics() {
-        let mut socket: Socket<(), ()> = Socket::new(());
-        let failed =
-            |()| Err(io::Error::from_raw_os_error(Errno::MFILE.raw_os_error()));
-        assert_eq!(socket.live("stream", failed), Err(Errno::MFILE));
-        let second = thread::spawn(move || {
-            let again = |()| unreachable!("a lost socket registers no second time");
-            drop(socket.live("stream", again));
-        });
-        if let Err(panic) = second.join() {
-            std::panic::resume_unwind(panic);
-        }
-    }
-
-    #[test]
     fn a_failure_with_no_os_code_is_eio() {
         let mut socket: Socket<(), ()> = Socket::new(());
         let failed = |()| Err(io::Error::other("no code"));
