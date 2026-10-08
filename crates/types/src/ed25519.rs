@@ -6,8 +6,8 @@ use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 
 /// An Ed25519 public key, of a node or of a subject. The value that holds it gives its
 /// role. It is never a point of small order: a signature for such a key passes with
-/// no private key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// no private key. Keys order by their bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
@@ -179,6 +179,14 @@ mod tests {
         fn keeps_any_other_key(key: [u8; 32]) {
             prop_assume!(ENCODINGS.iter().all(|&hex| bytes(hex) != key));
             prop_assert_eq!(PublicKey::new(key).map(PublicKey::to_bytes), Ok(key));
+        }
+
+        #[test]
+        fn orders_keys_by_their_bytes(a: [u8; 32], b: [u8; 32]) {
+            let (Ok(x), Ok(y)) = (PublicKey::new(a), PublicKey::new(b)) else {
+                return Ok(());
+            };
+            prop_assert_eq!(x.cmp(&y), a.cmp(&b));
         }
     }
 
