@@ -473,6 +473,16 @@ mod admit {
     }
 
     #[test]
+    fn refuses_each_subject_by_the_default_rules() {
+        let hello = create_hello();
+        let subject = hello.subject.clone();
+
+        let error = admit(&Rules::default(), NOW, hello).unwrap_err();
+
+        assert_eq!(error, Error::Unknown { subject });
+    }
+
+    #[test]
     fn refuses_the_tree_key_of_a_listed_subject() {
         let subject = name("ops.ana.@subject");
         let hello = Hello {
