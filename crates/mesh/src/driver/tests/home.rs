@@ -153,10 +153,7 @@ fn set_home_refuses_a_member_that_the_node_appended_and_did_not_apply() {
         let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
         let changes = [ticket(), join(4)];
         let entries = changes.iter().zip(1..).map(|(change, index)| Entry {
-            at: Position {
-                term: common::TERM,
-                index,
-            },
+            at: at(index),
             data: Data::Bytes(encoded(change)),
         });
         let append = Body::Append {
