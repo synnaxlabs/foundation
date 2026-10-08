@@ -2,17 +2,18 @@
 
 use std::future::{Ready, pending, poll_fn, ready};
 use std::panic::panic_any;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::task::{Context, Poll, Waker};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use env::threads::Threads;
 use tokio::sync::oneshot;
 use tokio::task::yield_now;
 
-use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
+use crate::common::{
+    Armed, Bomb, Relay, Relayed, Stuck, assert_aborts, assert_joins, panicked,
+};
 
 fn threads() -> Threads {
     os::threads().expect("the OS gives the cores of this process")
@@ -69,21 +70,6 @@ fn a_panic_in_the_call_of_the_body_gives_panicked() {
     let body = || -> Ready<()> { panic!("body") };
     let handle = threads().start("thread-1", body).unwrap();
     assert_joins(handle, panicked("thread-1"));
-}
-
-/// A future that panics when it drops, and in its poll when `faulty`.
-struct Armed {
-    faulty: bool,
-    _bomb: Bomb,
-}
-
-impl Future for Armed {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
-        assert!(!self.faulty, "body");
-        Poll::Ready(())
-    }
 }
 
 #[test]
@@ -295,4 +281,19 @@ fn a_panic_whose_payload_panics_in_its_drop_in_a_tokio_task_gives_panicked() {
     };
     let handle = threads().start("thread-14", body).unwrap();
     assert_joins(handle, panicked("thread-14"));
+}
+
+#[test]
+fn a_panic_in_the_poll_and_then_the_drop_of_a_tokio_task_aborts_the_process() {
+    assert_aborts(|| {
+        let body = || async {
+            drop(tokio::spawn(Armed {
+                faulty: true,
+                _bomb: Bomb,
+            }));
+            pending::<()>().await;
+        };
+        let handle = threads().start("thread-15", body).unwrap();
+        assert_joins(handle, Ok(()));
+    });
 }
