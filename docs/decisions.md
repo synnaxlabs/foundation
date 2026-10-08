@@ -2165,13 +2165,36 @@ How to read this record:
   configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
   missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request
-  only from a voter of the newest configuration in this node's log, and a node whose
-  committed configuration lacks the sender answers `removed`. A request is a PreVote, a
+  only from a voter of the newest configuration that the node knows: the newest in its
+  log, or a newer one that a link of the request's chain proves. A link proves a
+  configuration when the votes it carries elected its leader under a configuration the
+  node already knows, and the leader's signature holds (#881). A configuration entry
+  binds the public key of each voter it adds, under the signature of the leader that
+  writes it. A node answers `removed` only to a sender that a configuration in its own
+  log held, when its committed configuration lacks the sender and the request proves
+  no newer configuration that holds it. Each other sender that is not a voter gets
+  `Error::NotVoter`, and does not stop. The person chose A on 2026-10-06
+  (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
+  text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
+  #1105 builds the `removed` answer and the held rule, #1106 the configuration that a
+  chain proves, and #1107 the key binding. Until #1106, a request proves no newer
+  configuration. A node answers `removed` only to a sender that `Start.voters` or a
+  committed `Voters` entry held, when the last committed configuration lacks it. A
+  sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
+  truncated, and a node whose commit lags would stop a voter that no committed
+  configuration removed, the failure of #1054 (decided by the architect,
+  2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747). The
+  node knows a committed configuration only once one commits after its open: the
+  hard state carries no commit index, so a node that opened again answers `NotVoter`
+  until a leader commits. A request is a PreVote, a
   Vote, a heartbeat, or an append. The rule covers requests only, and `raft` decides
-  which replies count (RAFT SURFACE). The person approved this on 2026-10-06, and the
-  coordinator gives the person's words in its comment on #647. The removed node takes
-  that answer only from a voter of its own region, and stops its `raft` group for that
-  region. `raft` sends such a node no entries, only answers. A voter with a lease drops
+  which replies count (RAFT SURFACE). The person approved the first version on
+  2026-10-06, and the coordinator gives the person's words in its comment on #647.
+  The removed node takes that answer only from a voter of its own configuration, and
+  stops its `raft` group for that region (`Stopped::Removed`). An answer from any
+  other node drops the stream, as any refusal does. `raft` sends such a node no
+  entries, only answers. A voter with a lease drops
   its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's
   term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
   this has no effect. Once no voter has a lease, as after the leader fails, the voters
@@ -2320,7 +2343,9 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038303084). A message
   that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
   stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
-  a reply half with the same code. A group that stopped gives code 16 on a one-way
+  a reply half with the same code. A request from a node that a committed
+  configuration removed, when a committed one held it (RAFT VOTERS), gets
+  code 17 instead (`Error::Removed`). A group that stopped gives code 16 on a one-way
   stream. On a stream that goes both ways it gives no mesh code: it can stop in the
   write of the entry, which then applies after a new open. A `raft` message that finds
   no block in the pool is not a refusal: the receiver drops it, the stream goes on, and
@@ -2366,8 +2391,10 @@ How to read this record:
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
-  `Raft::claims` gives, so a link that the node does not read is not checked. So a
+  (`Error::Removed` for a sender that a committed configuration removed, else
+  `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims
+  being what `Raft::claims` gives, so a link that the node does not read is not
+  checked. So a
   node with a configuration refuses a leader that is not a voter of that
   configuration, when a change that the node does not hold made that leader a voter.
   The node does not get the log from that leader (a known defect, #1096, that #1107

@@ -4,8 +4,8 @@
 
 use std::future::pending;
 
+use transport::Class;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Class, Code};
 
 use super::*;
 

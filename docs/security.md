@@ -181,7 +181,11 @@ state on `main`.
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
-  refuses such a request (`Error::NotVoter`). No node serves mesh streams yet (#471).
+  refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
+  code 17) only to a sender that a committed configuration removed, so a stranger
+  cannot learn from the answer which nodes the log held, and a sender stops its group
+  only on that answer from a voter of its own configuration (#1105). No node serves
+  mesh streams yet (#471).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed
   `AppendReply` is #882.
