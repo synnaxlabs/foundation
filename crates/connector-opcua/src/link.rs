@@ -431,3 +431,53 @@ fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }
+
+/// Clang defines no `__FLOAT_WORD_ORDER__`, so `config.h` must find the float order of
+/// each target from its other macros, or the copy encodes floats on its slow path with
+/// `long double` helpers. A big-endian target must take the slow path. Each system
+/// header is empty, so only the predefined macros of the target decide.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs Clang")]
+fn the_copy_copies_floats_as_they_lie_in_memory_on_little_endian_targets() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let generated = root.join("../../patches/open62541/src_generated");
+    let config = generated.join("open62541/config.h");
+    let empty = std::path::Path::new(env!("OUT_DIR")).join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    for header in text.lines().filter_map(|line| {
+        let line = line.strip_prefix('#')?.trim_start();
+        line.strip_prefix("include")?
+            .trim()
+            .strip_prefix('<')?
+            .strip_suffix('>')
+    }) {
+        let header = empty.join(header);
+        std::fs::create_dir_all(header.parent().unwrap()).unwrap();
+        std::fs::write(header, "").unwrap();
+    }
+    let arch = empty.join("arch.h");
+    std::fs::write(&arch, "").unwrap();
+    for (target, copied) in [
+        ("x86_64-linux-gnu", "1"),
+        ("aarch64-linux-gnu", "1"),
+        ("arm64-apple-macos", "1"),
+        ("aarch64_be-linux-gnu", "0"),
+    ] {
+        let output = std::process::Command::new("clang")
+            .arg(format!("--target={target}"))
+            .args(["-nostdinc", "-E", "-dM", "-x", "c"])
+            .arg(format!("-DUA_ARCH_HEADER=\"{}\"", arch.display()))
+            .arg(format!("-I{}", empty.display()))
+            .arg(&config)
+            .output()
+            .expect("needs Clang");
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{target}: {errors}");
+        let macros = String::from_utf8(output.stdout).unwrap();
+        let overlayable = macros
+            .lines()
+            .find_map(|line| line.strip_prefix("#define UA_BINARY_OVERLAYABLE_FLOAT "));
+        assert_eq!(overlayable, Some(copied), "{target}");
+    }
+}
