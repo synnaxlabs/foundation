@@ -573,9 +573,9 @@ fn check(bytes: &[u8]) -> [u8; CHECK] {
 
 // What is where a record should start.
 enum At<'a> {
-    // Zeros, or too few bytes for a header: the end of the records.
+    // Zeros, or no bytes: the end of the records.
     End,
-    // Bytes that are not zeros and not a header.
+    // Bytes that are not zeros and not a header, also too few for one.
     Garbage,
     Header(Header<'a>),
 }
@@ -632,10 +632,11 @@ impl<'a> Header<'a> {
 }
 
 fn header(bytes: &[u8]) -> At<'_> {
+    let zeros = |bytes: &[u8]| bytes.iter().all(|&byte| byte == 0);
     let Some((head, after)) = bytes.split_first_chunk::<HEADER>() else {
-        return At::End;
+        return if zeros(bytes) { At::End } else { At::Garbage };
     };
-    if head.iter().all(|&byte| byte == 0) {
+    if zeros(head) {
         return At::End;
     }
     match fields(head) {
@@ -2704,6 +2705,39 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
+    }
+
+    // Bytes too few for a header that are not zeros are not the end of the log.
+    #[test]
+    fn refuses_a_short_file_that_is_not_zeros() {
+        // `log-0` with no record, then with record 0.
+        for (records, blamed) in [(0, "log-0"), (1, "log-1")] {
+            let (mut sim, node) = create_node(0);
+            let names = sim
+                .run_on(&node, move |node, _| async move {
+                    drop(open(&node).await.unwrap());
+                    if records == 1 {
+                        let record = encode(0, None, &[bytes(1, 10)]);
+                        put(&node, "log-0", 0, &record).await;
+                    } else {
+                        node.files().remove(&file("log-0")).await.unwrap();
+                        let mode = Mode::Create { len: 0 };
+                        drop(node.files().open(&file("log-0"), mode).await.unwrap());
+                    }
+                    let short = Mode::Create { len: 10 };
+                    drop(node.files().open(&file("log-1"), short).await.unwrap());
+                    node.files().sync_dir(Path::new(DIR)).await.unwrap();
+                    put(&node, "log-1", 0, &[0xAB; 10]).await;
+                    lens(&node).await
+                })
+                .unwrap();
+            assert_eq!(names[2], named(("log-1", 10)), "records {records}");
+            let expected = Error::Corrupt {
+                path: file(blamed),
+                offset: 0,
+            };
+            assert_eq!(stored(&mut sim, &node), Err(expected), "records {records}");
+        }
     }
 
     #[test]
