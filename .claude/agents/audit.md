@@ -19,9 +19,9 @@ from its root: never `cd`, and never use a path outside it, even one that you we
 given. The one path outside it that you may use is the lock file
 `~/.cache/foundation-heavy.lock`. Run each Bash command alone, with no `&&` chain and no
 shell variable. The permission check refuses a command when it cannot prove that the
-command stays inside the worktree. Make each change to a file, and undo it, with the
-Edit tool, never with `sed -i`, `perl -pi`, or another edit in place in Bash: auto mode
-blocks some of those, and three blocks in a row stop the session.
+command stays inside the worktree. Make each change to the code (a revert), and undo it,
+with the Edit tool, never with `sed -i`, `perl -pi`, or another edit in place in Bash:
+auto mode blocks some of those, and three blocks in a row stop the session.
 
 Read `CLAUDE.md`, the section of `docs/decisions.md` for the crates
 (`grep -n '^#' docs/decisions.md`, then that range), `docs/claude/testing.md`,

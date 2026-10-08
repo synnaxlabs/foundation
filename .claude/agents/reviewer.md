@@ -17,9 +17,9 @@ Your worktree starts at `main`. Put the PR's head in it first:
 its root: never `cd`, and never use a path outside it, even one that you were given. Run
 each Bash command alone, with no `&&` chain and no shell variable. The permission check
 refuses a command when it cannot prove that the command stays inside the worktree. Make
-each change to a file, and undo it, with the Edit tool, never with `sed -i`, `perl -pi`,
-or another edit in place in Bash: auto mode blocks some of those, and three blocks in a
-row stop the session.
+each hand change to the code (a mutation, a revert of a fix), and undo it, with the Edit
+tool, never with `sed -i`, `perl -pi`, or another edit in place in Bash: auto mode
+blocks some of those, and three blocks in a row stop the session.
 
 Read `docs/claude/testing.md` and the section of `docs/decisions.md` the PR builds. Then
 read the diff (`gh pr diff <n>`) and every file it touches. In a second round you get
