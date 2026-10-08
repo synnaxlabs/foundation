@@ -28,8 +28,7 @@ const ACTIONS: [(&str, Action); 6] = [
 /// Checks an `access` block and gives its policy. With no `authority`, a write is
 /// capped at the least authority. An `authority` with no `write` is refused.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let fix = "Add a `subjects` attribute with the subjects that it allows, such as \
                \"site_a.operators.*\"";
     let subjects = found.required(block, "subjects", read::selector, fix.into());
