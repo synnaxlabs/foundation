@@ -74,6 +74,12 @@ How to read this record:
 - **Root CLAUDE.md principles** apply to every crate: injected dependencies, no mutable
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
+- **DEVX (#1744, 2026-10-08)** Design each public API that people, agents, or their
+  programs use for developer experience. The person, on the first admin (FIRST ADMIN):
+  "Keep in mind that when we're designing public APIs like this, we really need to
+  think about devx". Recorded by `laptop.architect` from
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981
+  (2026-10-08T02:43:43Z).
 - **Process** Each data structure and key decision is proposed with a sketch and
   locked only on agreement. RESCOPE: delivery and wire internals are tuned by
   benchmarks, not interviewed.
@@ -3778,6 +3784,15 @@ How to read this record:
   `mesh.changes` record, so every node checks its subject signature and the `secret`
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
+- **FIRST ADMIN (#1744, locked 2026-10-08)** A new node has an empty spec, and BQ12
+  checks each apply against a key that the spec names. So the first `foundation start`
+  creates the spec with one admin, and writes the admin's private key to the data
+  directory, readable only by the user who started the node. The CLI on the same host
+  signs with that key. Lost: the first apply from any local process, and an admin
+  public key given before the first start. The person: "Yes, I approve." Recorded by
+  `laptop.architect` from
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981
+  (2026-10-08T02:43:43Z).
 
 ### 1.13 Operations, agents, and the factory
 
