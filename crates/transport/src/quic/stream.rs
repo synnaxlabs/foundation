@@ -1038,9 +1038,9 @@ impl Share {
     /// Counts `bytes` of a message of `class` that noq-proto took, by how the other
     /// class of the share competes in `sending` after the take. With no rival, the
     /// bytes move `owed` toward 0 and never past it, so a class alone makes no debt or
-    /// credit.
+    /// credit. A take of no bytes counts nothing, so it is no offer.
     fn took(&mut self, class: Class, bytes: usize, sending: &Budget) {
-        let Some(other) = other(class) else {
+        let Some(other) = other(class).filter(|_| bytes > 0) else {
             return;
         };
         let change = if class == Class::Latest {
@@ -3524,6 +3524,7 @@ mod tests {
         fn a_class_competes_until_the_other_sends_one_peer_window() {
             let mut share = Share::new(100);
             let budget = Budget::new(10);
+            share.took(Class::Latest, 0, &budget);
             assert!(!share.competes(Class::Latest, &budget));
             share.offered(Class::Latest);
             share.took(Class::Complete, 99, &budget);
@@ -7652,6 +7653,33 @@ mod tests {
             testing::run(1, |shard| {
                 let (paused, ahead) = ahead_after_a_pause(shard, true);
                 assert!(ahead <= NARROW, "{ahead} of {NARROW}; owed {paused}");
+            });
+        }
+
+        #[test]
+        fn a_cancelled_latest_that_sent_nothing_makes_complete_alone_owe_nothing() {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+                let mut catch_up = open_sender(&mut pair, Class::CatchUp);
+                fill(&mut pair, shard, &mut catch_up);
+                let latest = open_sender(&mut pair, Class::Latest);
+                let now = pair.now();
+                let message = shard.block(&[1; 1000]);
+                let written = pair::write(
+                    &mut pair.client.endpoint,
+                    now,
+                    &latest,
+                    &mut Some(message),
+                );
+                assert_eq!(written, Ok(Poll::Pending));
+                pair.client.endpoint.cancel(now, &latest);
+                for _ in 0..4 {
+                    flush(&mut pair, &mut receivers, &mut read, &[&catch_up]);
+                }
+                let mut complete = open_sender(&mut pair, Class::Complete);
+                fill(&mut pair, shard, &mut complete);
+                assert_eq!(owed(&mut pair), 0);
             });
         }
 
