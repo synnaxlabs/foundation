@@ -1091,6 +1091,32 @@ fn defines_a_data_channel_before_its_index_in_one_call() {
     });
 }
 
+/// The quality, error, and control edges point at keys that the hub does not know.
+#[test]
+fn defines_channels_with_edges_it_does_not_read() {
+    run(18, |test| async move {
+        let unknown = || Some(channel::Key::from_u128(9));
+        let time = spec::channel::Channel {
+            key: channel::Key::from_u128(6),
+            kind: Kind::Index {
+                error: unknown(),
+                control: unknown(),
+            },
+        };
+        let index = channel::Key::from_u128(6);
+        let data = Data::new(index, unknown(), DataType::Sample(I64), None);
+        let temp = spec::channel::Channel {
+            key: channel::Key::from_u128(7),
+            kind: Kind::Data(data.expect("no unit")),
+        };
+        let (temp_name, time_name) = (name("plant.temp"), name("plant.time"));
+        test.hub.define([(&temp_name, &temp), (&time_name, &time)]);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+    });
+}
+
 #[test]
 fn gives_a_writer_the_sample_type_of_each_data_channel() {
     run(18, |test| async move {
