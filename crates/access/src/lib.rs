@@ -5,17 +5,12 @@
 
 pub mod proof;
 
-use proof::{Admitted, CAP, Error};
 use spec::access::{Action, Actions, Policy};
-use spec::definition::{Definition, Kind};
+use spec::definition::Definition;
 use spec::subject::Subject;
 use types::authority::Authority;
-use types::ed25519::PublicKey;
 use types::hash::{Map, Set};
-use types::hello::Hello;
 use types::name::{Name, Prefix};
-use types::node;
-use types::time::Interval;
 
 /// The access rules of a mesh: its access policies, its connectors, and the keys of
 /// its subjects. Owners build one from the spec they read and ask it for each
@@ -31,7 +26,7 @@ impl Rules {
     /// Builds the rules from the region trees that the owner reads. Each item is the
     /// prefix of a region, with [`Prefix::ROOT`] for the root region, and the
     /// definitions of its tree by name. Access keeps the access policies, the
-    /// connectors, and each subject by its name, and ignores each other kind.
+    /// connectors, and the subjects, and ignores each other kind.
     pub fn new<'a, T>(trees: impl IntoIterator<Item = (Prefix, T)>) -> Self
     where
         T: IntoIterator<Item = (&'a Name, &'a Definition)>,
@@ -51,7 +46,7 @@ impl Rules {
                         rules.connectors.insert(name.clone());
                     }
                     Definition::Subject(subject) => {
-                        rules.subjects.insert(label(name), subject.clone());
+                        rules.subjects.insert(name.clone(), subject.clone());
                     }
                     Definition::Region(_)
                     | Definition::NodeSettings(_)
@@ -93,107 +88,6 @@ impl Rules {
         }
         grant
     }
-
-    /// Checks `hello`, signed with `signature`, at mesh time `now` (`None` when the
-    /// node has none). `peer` is the node that carried the hello: this node when the
-    /// program connected to it, else the node whose transport session forwarded it.
-    ///
-    /// # Errors
-    ///
-    /// The first that applies, in order: [`Error::Unsynced`], [`Error::Unknown`],
-    /// [`Error::Unlisted`], [`Error::Signature`], [`Error::Via`],
-    /// [`Error::Expired`], [`Error::Capped`].
-    pub fn admit(
-        &self,
-        now: Option<Interval>,
-        peer: node::Key,
-        hello: Hello,
-        signature: &[u8; 64],
-    ) -> Result<Admitted, Error> {
-        let now = now.ok_or(Error::Unsynced)?;
-        let key = self.listed(&hello)?;
-        key.verify(&proof::hello(&hello), signature)
-            .map_err(|_bad| Error::Signature)?;
-        if hello.via != peer {
-            return Err(Error::Via {
-                via: hello.via,
-                peer,
-            });
-        }
-        live(&hello, now)?;
-        let cap = now.earliest + CAP;
-        if hello.expires > cap {
-            return Err(Error::Capped {
-                expires: hello.expires,
-                cap,
-            });
-        }
-        Ok(Admitted { hello })
-    }
-
-    /// Checks that `body`, signed with `signature`, is a request of the connection of
-    /// `admitted`, at mesh time `now`: its subject still lists its key, the hello has
-    /// not expired, and the key signed [`proof::request`] of the hello's connection and
-    /// `body`.
-    ///
-    /// # Errors
-    ///
-    /// The first that applies, in order: [`Error::Unsynced`], [`Error::Unknown`],
-    /// [`Error::Unlisted`], [`Error::Signature`], [`Error::Expired`].
-    pub fn verify(
-        &self,
-        admitted: &Admitted,
-        now: Option<Interval>,
-        body: &[u8],
-        signature: &[u8; 64],
-    ) -> Result<(), Error> {
-        let now = now.ok_or(Error::Unsynced)?;
-        let hello = &admitted.hello;
-        let key = self.listed(hello)?;
-        key.verify(&proof::request(hello.connection, body), signature)
-            .map_err(|_bad| Error::Signature)?;
-        live(hello, now)
-    }
-
-    /// The key of `hello`, when the spec lists it for the hello's subject.
-    fn listed(&self, hello: &Hello) -> Result<PublicKey, Error> {
-        let subject =
-            self.subjects
-                .get(&hello.subject)
-                .ok_or_else(|| Error::Unknown {
-                    subject: hello.subject.clone(),
-                })?;
-        subject
-            .keys()
-            .binary_search(&hello.key)
-            .map(|_at| hello.key)
-            .map_err(|_at| Error::Unlisted {
-                subject: hello.subject.clone(),
-                key: hello.key,
-            })
-    }
-}
-
-/// Refuses `hello` once the latest mesh time reaches its expiry.
-fn live(hello: &Hello, now: Interval) -> Result<(), Error> {
-    if now.latest >= hello.expires {
-        return Err(Error::Expired {
-            expires: hello.expires,
-            now: now.latest,
-        });
-    }
-    Ok(())
-}
-
-/// The name of the subject whose tree key is `key`: `key` without its `@subject`
-/// segment.
-fn label(key: &Name) -> Name {
-    let suffix = Kind::Subject.as_str();
-    key.as_str()
-        .strip_suffix(suffix)
-        .and_then(|label| label.strip_suffix(".@"))
-        .and_then(|label| label.parse().ok())
-        .expect("the spec puts a subject at `<name>.@subject`")
 }
 
 /// What one subject may do on one name.

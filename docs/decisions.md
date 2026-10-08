@@ -4203,9 +4203,11 @@ How to read this record:
   subject at its plain name, which takes that name from a channel or a connector and
   allows no children. Decided by `laptop.architect-2` at 2026-10-08T03:15:41Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051435217).
-  `access::Rules` keeps the keys of each subject by `<name>`, and `admit` finds them,
-  so no caller builds the tree key (`laptop.architect`,
-  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636).
+  `access::Rules` keeps each subject by its tree key, and `admit` and `verify` build
+  that key from the hello's subject with `spec::definition::Kind::key`, so no caller
+  builds it and only `spec` holds the key form (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6054321636; the
+  tree key in place of `<name>`: PENDING).
 - **SUBJECT PROOF (2026-10-08)** `access::Rules::admit` checks a signed
   `types::hello::Hello` and gives an `access::proof::Admitted`, which no other code
   builds. The owner keeps it for the connection, and `Rules::verify` takes it with each
@@ -4214,8 +4216,9 @@ How to read this record:
   expiry check. The signed bytes are a contract for each SDK; each integer is
   little-endian:
   - hello: the 18 bytes `foundation/hello/1`, the subject length (1 byte), the
-    subject, the key (32), `via` (16), the connection key (16), the nonce (16), and
-    `expires` in nanoseconds (8);
+    subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
+    UUID text), the connection key (16), the nonce (16), and `expires` in nanoseconds
+    (8);
   - request or session open: the 20 bytes `foundation/request/1`, the connection key
     (16), and the exact bytes that the program sent.
 

@@ -2,12 +2,15 @@
 
 use std::fmt;
 
+use spec::definition::Kind;
 use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
 use types::name::Name;
 use types::node;
-use types::time::{Span, Stamp};
+use types::time::{Interval, Span, Stamp};
+
+use crate::Rules;
 
 /// How far past the earliest mesh time a hello may expire.
 pub const CAP: Span = Span::from_nanos(15 * Span::MINUTE.nanos());
@@ -17,8 +20,8 @@ const REQUEST_TAG: &[u8] = b"foundation/request/1";
 
 /// The bytes that the signature of `hello` covers. Each integer is little-endian:
 /// the 18 bytes `foundation/hello/1`, the length of the subject (1 byte), the
-/// subject, the key (32), `via` (16), the connection (16), the nonce (16), and
-/// `expires` in nanoseconds (8).
+/// subject, the key (32), `via` as a `u128` (16, the reverse of the byte order of its
+/// UUID text), the connection (16), the nonce (16), and `expires` in nanoseconds (8).
 ///
 /// # Panics
 ///
@@ -52,12 +55,11 @@ pub fn request(connection: connection::Key, body: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// A hello that [`Rules::admit`](crate::Rules::admit) took. Keep it for the
-/// connection, and give it to [`Rules::verify`](crate::Rules::verify) with each
-/// request.
+/// A hello that [`Rules::admit`] took. Keep it for the connection, and give it to
+/// [`Rules::verify`] with each request.
 #[derive(Clone, Debug)]
 pub struct Admitted {
-    pub(crate) hello: Hello,
+    hello: Hello,
 }
 
 impl Admitted {
@@ -67,6 +69,105 @@ impl Admitted {
     pub fn hello(&self) -> &Hello {
         &self.hello
     }
+}
+
+impl Rules {
+    /// Checks `hello`, signed with `signature`, at mesh time `now` (`None` when the
+    /// node has none). `peer` is the node that carried the hello: this node when the
+    /// program connected to it, else the node whose transport session forwarded it.
+    ///
+    /// # Errors
+    ///
+    /// The first that applies, in order: [`Error::Unsynced`], [`Error::Unknown`],
+    /// [`Error::Unlisted`], [`Error::Signature`], [`Error::Via`],
+    /// [`Error::Expired`], [`Error::Capped`].
+    pub fn admit(
+        &self,
+        now: Option<Interval>,
+        peer: node::Key,
+        hello: Hello,
+        signature: &[u8; 64],
+    ) -> Result<Admitted, Error> {
+        let now = now.ok_or(Error::Unsynced)?;
+        self.listed(&hello)?;
+        hello
+            .key
+            .verify(&self::hello(&hello), signature)
+            .map_err(|_bad| Error::Signature)?;
+        if hello.via != peer {
+            return Err(Error::Via {
+                via: hello.via,
+                peer,
+            });
+        }
+        live(&hello, now)?;
+        if let Some(cap) = now.earliest.checked_add(CAP)
+            && hello.expires > cap
+        {
+            return Err(Error::Capped {
+                expires: hello.expires,
+                cap,
+            });
+        }
+        Ok(Admitted { hello })
+    }
+
+    /// Checks that `body`, signed with `signature`, is a request of the connection of
+    /// `admitted`, at mesh time `now`: its subject still lists its key, the hello has
+    /// not expired, and the key signed [`request`] of the hello's connection and
+    /// `body`.
+    ///
+    /// # Errors
+    ///
+    /// The first that applies, in order: [`Error::Unsynced`], [`Error::Unknown`],
+    /// [`Error::Unlisted`], [`Error::Signature`], [`Error::Expired`].
+    pub fn verify(
+        &self,
+        admitted: &Admitted,
+        now: Option<Interval>,
+        body: &[u8],
+        signature: &[u8; 64],
+    ) -> Result<(), Error> {
+        let now = now.ok_or(Error::Unsynced)?;
+        let hello = &admitted.hello;
+        self.listed(hello)?;
+        hello
+            .key
+            .verify(&request(hello.connection, body), signature)
+            .map_err(|_bad| Error::Signature)?;
+        live(hello, now)
+    }
+
+    /// Refuses `hello` unless the spec lists its key for its subject. A subject that
+    /// makes no tree key has no definition.
+    fn listed(&self, hello: &Hello) -> Result<(), Error> {
+        let subject = Kind::Subject
+            .key(hello.subject.as_str())
+            .ok()
+            .and_then(|key| self.subjects.get(&key))
+            .ok_or_else(|| Error::Unknown {
+                subject: hello.subject.clone(),
+            })?;
+        subject
+            .keys()
+            .binary_search(&hello.key)
+            .map(|_at| ())
+            .map_err(|_at| Error::Unlisted {
+                subject: hello.subject.clone(),
+                key: hello.key,
+            })
+    }
+}
+
+/// Refuses `hello` once the latest mesh time reaches its expiry.
+fn live(hello: &Hello, now: Interval) -> Result<(), Error> {
+    if now.latest >= hello.expires {
+        return Err(Error::Expired {
+            expires: hello.expires,
+            now: now.latest,
+        });
+    }
+    Ok(())
 }
 
 /// Why a proof was refused. `Display` gives the message: a lower-case clause with no

@@ -415,6 +415,52 @@ mod admit {
 
         assert_eq!(admitted.hello(), &hello);
     }
+
+    #[test]
+    fn admits_a_hello_when_the_cap_is_past_the_last_stamp() {
+        let latest = Stamp::from_nanos(i64::MAX - 1);
+        let now = Some(Interval {
+            earliest: latest - Span::SECOND,
+            latest,
+        });
+        let hello = Hello {
+            expires: Stamp::from_nanos(i64::MAX),
+            ..create_hello()
+        };
+
+        let admitted = admit(&listed(), now, hello.clone()).unwrap();
+
+        assert_eq!(admitted.hello(), &hello);
+    }
+
+    #[test]
+    fn refuses_a_subject_whose_definition_is_not_at_its_subject_key() {
+        let key = public(&pair(TEST_1));
+        let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
+        let tree: BTreeMap<Name, Definition> = [(name("ops.ana"), subject)].into();
+        let rules = Rules::new([(types::name::Prefix::ROOT, &tree)]);
+
+        let error = admit(&rules, NOW, create_hello()).unwrap_err();
+
+        let subject = name("ops.ana");
+        assert_eq!(error, Error::Unknown { subject });
+    }
+
+    #[test]
+    fn refuses_a_subject_that_makes_no_subject_key() {
+        let reserved = name("ops.@subject");
+        let long = name(&"a".repeat(Name::MAX_BYTES));
+        for subject in [reserved, long] {
+            let hello = Hello {
+                subject: subject.clone(),
+                ..create_hello()
+            };
+
+            let error = admit(&listed(), NOW, hello).unwrap_err();
+
+            assert_eq!(error, Error::Unknown { subject });
+        }
+    }
 }
 
 mod verify {
