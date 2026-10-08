@@ -60,12 +60,15 @@ pub fn plan(
     let found = checked(documents, kinds)?;
     let channels = channels(&found.entries, applied);
     let mut diagnostics = wrong(&found, &channels);
-    let homes = homes(&found, applied, &mut diagnostics);
+    let placements = placements(&found);
+    let indexes = indexes(&found, &placements, &mut diagnostics);
+    connectors(&found, &placements, &indexes, &mut diagnostics);
     unknown(&found, members, &mut diagnostics);
     if !diagnostics.is_empty() {
         sort(&mut diagnostics);
         return Err(diagnostics);
     }
+    let homes = homes(indexes, applied);
     Ok(Plan {
         base,
         changes: changes(found.entries, channels, applied),
@@ -173,15 +176,9 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
         .collect()
 }
 
-/// The home of each index that the stored spec has no index at. Reports each index
-/// that two writer nodes or [`place`] leave with no home, and the problems of
-/// [`connectors`].
-fn homes(
-    found: &Found<'_>,
-    applied: &BTreeMap<Name, definition::Definition>,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> BTreeMap<Name, Name> {
-    let placements: Vec<(&Name, &Policy)> = found
+/// Each placement in the files, with its tree key.
+fn placements<'f>(found: &'f Found<'_>) -> Vec<(&'f Name, &'f Policy)> {
+    found
         .entries
         .iter()
         .filter_map(|(name, entry)| match &entry.definition {
@@ -190,7 +187,16 @@ fn homes(
             }
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+/// Places each index, with the node of its first writer. Reports each index that two
+/// writer nodes or [`place`] leave with no home.
+fn indexes<'f>(
+    found: &'f Found<'_>,
+    placements: &[(&'f Name, &'f Policy)],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> BTreeMap<&'f Name, Result<Placed<'f>, Unplaced>> {
     let mut indexes = BTreeMap::new();
     for (index, entry) in &found.entries {
         let Definition::Channel(spec::channel::Kind::Index { .. }) = entry.definition
@@ -204,7 +210,14 @@ fn homes(
         }
         indexes.insert(index, placed);
     }
-    connectors(found, &placements, &indexes, diagnostics);
+    indexes
+}
+
+/// The home of each placed index that the stored spec has no index at.
+fn homes(
+    indexes: BTreeMap<&Name, Result<Placed<'_>, Unplaced>>,
+    applied: &BTreeMap<Name, definition::Definition>,
+) -> BTreeMap<Name, Name> {
     let stored = |index: &Name| {
         matches!(
             applied.get(index),
