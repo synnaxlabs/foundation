@@ -79,7 +79,7 @@ command outside that worktree. Remove each worktree when its agent returns
    later work is a deferral: file its issue with the trigger, or write the trigger in
    the decisions entry that the ruling cites. So is an answer that a later PR does the
    work, also a later PR of the same issue. When the trigger is the work of another open
-   issue, also comment the deferral issue and its trigger on that issue.
+   issue or PR, also comment the deferral issue and its trigger on that issue or PR.
 
 ## Rating
 
@@ -161,9 +161,10 @@ nothing checked again. So when round 1 led to fix commits:
    given, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
-commits and the fix commits out of every round range. A clean merge, whose
-`git show --remerge-diff <merge>` is empty, needs no round. A merge with a resolution
-gets a round on that diff, which runs as step 1 says.
+commits and the fix commits out of every round range. A clean merge needs no round:
+its `git show --remerge-diff <merge>` is empty, and the base moves no path that the PR
+changed into a code path (REVIEW CHECK in `docs/decisions.md`). Any other merge gets a
+round on that diff, which runs as step 1 says.
 
 ## Done
 
