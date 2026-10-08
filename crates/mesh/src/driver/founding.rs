@@ -24,10 +24,10 @@ const NEW: &str = "founding.new";
 const VERSION: u16 = 1;
 const CHECK: usize = 8;
 
-/// Writes `given`, the byte form of `Config::founding`, to `dir` at its first open, or
-/// checks it against the founding that the first open wrote. `logged` states that the
-/// log of `dir` holds a record. The caller holds the lock of the log, and the largest
-/// block of `pool` is one sector or more.
+/// Writes `given` to `dir` at its first open, or checks it against the founding that
+/// the first open wrote. `logged` states that the log of `dir` holds a record. The
+/// caller holds the lock of the log, and the largest block of `pool` is one sector or
+/// more.
 ///
 /// # Errors
 ///
@@ -40,7 +40,7 @@ pub(super) async fn keep(
     files: &Files,
     dir: &Path,
     pool: &Pool,
-    given: &[u8],
+    given: &Founding,
     logged: bool,
 ) -> Result<(), Error> {
     let names = files.list(dir).await.map_err(failed)?;
@@ -54,12 +54,12 @@ pub(super) async fn keep(
         if *check != digest(rest) || u16::from_le_bytes(*version) != VERSION {
             return Err(unfounded());
         }
-        if body == given {
+        let stored = Founding::decode(body).ok_or_else(unfounded)?;
+        let mut given = given.clone();
+        given.members.sort_by_key(|member| member.card.key());
+        if stored == given {
             return Ok(());
         }
-        let stored = Founding::decode(body).ok_or_else(unfounded)?;
-        let given = Founding::decode(given)
-            .expect("invariant: the byte form of a founding reads back");
         return Err(Error::Founding {
             stored: Box::new(stored),
             given: Box::new(given),
@@ -68,7 +68,7 @@ pub(super) async fn keep(
     if logged {
         return Err(Error::Unfounded { path });
     }
-    write(files, dir, pool, given).await
+    write(files, dir, pool, &given.encode()).await
 }
 
 async fn read(files: &Files, path: &Path, pool: &Pool) -> Result<Vec<u8>, Error> {
