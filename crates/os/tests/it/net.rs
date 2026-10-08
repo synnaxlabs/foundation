@@ -848,12 +848,41 @@ fn udp_panics() {
     drop(net().udp(&config));
 }
 
+fn resolve(host: &str) -> Result<Vec<SocketAddr>, Error> {
+    let found =
+        runtime().block_on(async { timeout(BOUND, net().resolve(host, 4433)).await });
+    let Ok(found) = found else {
+        panic!("the lookup of {host:?} did not end in {BOUND:?}");
+    };
+    found
+}
+
 #[test]
-#[should_panic(expected = "os::net has no resolver yet")]
-fn resolve_of_a_host_name_panics() {
-    runtime().block_on(async {
-        drop(net().resolve("localhost", 80).await);
-    });
+fn localhost_resolves_to_loopback_addresses() {
+    let found = resolve("localhost").expect("localhost has an address");
+    assert!(!found.is_empty());
+    for address in found {
+        assert!(address.ip().is_loopback(), "{address}");
+        assert_eq!(address.port(), 4433, "{address}");
+    }
+}
+
+#[test]
+fn a_name_under_invalid_is_not_found() {
+    let host = "foundation.invalid".to_owned();
+    assert_eq!(resolve(&host), Err(Error::NotFound { host }));
+}
+
+#[test]
+fn a_name_with_a_nul_byte_is_not_found() {
+    let host = "local\0host".to_owned();
+    assert_eq!(resolve(&host), Err(Error::NotFound { host }));
+}
+
+#[test]
+fn a_lookup_needs_no_io_driver() {
+    let found = runtime_with_no_io().block_on(net().resolve("localhost", 4433));
+    assert!(found.is_ok_and(|found| !found.is_empty()));
 }
 
 #[test]

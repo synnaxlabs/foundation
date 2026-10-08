@@ -5457,10 +5457,9 @@ How to read this record:
   Rejected: one I/O thread for every socket, as `os::files` uses; each message would
   cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
-  it lacks, from one `libc::setsockopt`. Until #119 and #1095 land, `os::net()` is
-  behind the cargo feature `net`, and its `udp` and `resolve` of a host name panic
-  ("os::net has no UDP driver yet", "os::net has no resolver yet"); the last of the
-  two removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
+  it lacks, from one `libc::setsockopt`. Until #119 lands, `os::net()` is behind the
+  cargo feature `net`, and its `udp` panics ("os::net has no UDP driver yet"); #119
+  removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
   02:32 UTC, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
   `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
@@ -5475,7 +5474,10 @@ How to read this record:
   retry may fix, and a caller matches the variant, not the code. On `os`,
   `getaddrinfo` maps `EAI_NONAME` and `EAI_NODATA` to `NotFound`, `EAI_SYSTEM` to
   `Io` with `errno`, `EAI_AGAIN` to `Io` with `EAGAIN`, `EAI_MEMORY` to `Io` with
-  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Decided by the
+  `ENOMEM`, and each other code to `Io` with `EIO` (#1095). Each lookup runs
+  `getaddrinfo` on an OS thread of its own, which ends with the lookup, also after
+  its future drops; Tokio's blocking pool lost, because a runtime drop waits for each
+  of its tasks. A host with a NUL byte is `NotFound`. Decided by the
   architect, #995
   (https://github.com/synnaxlabs/foundation/issues/995#issuecomment-6030922608).
   From the review of #1018: the bracketed IPv6 literal, and what `NotFound` and `Io`
