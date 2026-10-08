@@ -6,7 +6,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-use block::{Block, Heap, Pool, Unique};
+use block::{Block, Heap, Pool};
 use sim::node::Node;
 use transport::{Config, Port};
 use types::node::{PrivateKey, PublicKey};
@@ -55,15 +55,4 @@ pub(crate) fn filled(pool: &Pool, len: usize) -> Block {
     let mut block = pool.alloc(len).expect("the pool has room");
     block.fill(0x5a);
     block.freeze()
-}
-
-/// Takes every block of `pool` that could hold a message of `len` bytes.
-pub(crate) fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
-    let mut full = Vec::new();
-    for len in [pool.largest(), len] {
-        while let Ok(block) = pool.alloc(len) {
-            full.push(block);
-        }
-    }
-    full
 }
