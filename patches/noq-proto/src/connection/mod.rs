@@ -2714,6 +2714,20 @@ impl Connection {
         Ok(())
     }
 
+    /// The number of the next packet sent in the Data space on [`PathId::ZERO`]
+    ///
+    /// A later [`Connection::largest_acked`] at or above it proves that the peer got a
+    /// packet sent after this call. Foundation patch.
+    pub fn next_packet_number(&self) -> u64 {
+        self.spaces[SpaceId::Data].number_spaces[&PathId::ZERO].next_packet_number
+    }
+
+    /// The largest packet number that the peer acknowledged in the Data space on
+    /// [`PathId::ZERO`], if any. Foundation patch.
+    pub fn largest_acked(&self) -> Option<u64> {
+        self.spaces[SpaceId::Data].number_spaces[&PathId::ZERO].largest_acked_packet_pn
+    }
+
     /// Update traffic keys spontaneously
     ///
     /// This can be useful for testing key updates, as they otherwise only happen infrequently.

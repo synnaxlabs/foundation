@@ -91,7 +91,7 @@ so the `Advisories of each patched release` step of the `deny` job in
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
-| `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `noq-proto` | 1.3.0 | `Connection::next_packet_number` and `Connection::largest_acked`, two read-only methods of the data space on path 0 | No event tells when the peer acknowledged a ping, and the tie-break of ONE SESSION PER PEER waits for one (#1363). The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415, no change yet) |
 | `noq-udp` | 1.3.0 | None yet | One send that gets `EIO` or `EINVAL` turns off GSO for the life of the socket, and one that gets `EINVAL` also turns off the IPv4 ECN mark, also when the cause is a bad source or port 0 of that one transmit (#1972) |
 | `open62541` (C library) | 1.5.9 | The random state `UA_rng` of `src/util/ua_util.c` is one per thread (`UA_THREAD_LOCAL`), and a draw on a thread with no start value aborts | With one state per process, the values of a test server depend on the draws of other threads; a thread with no start value draws the same values as each other such thread (#435) |
 
