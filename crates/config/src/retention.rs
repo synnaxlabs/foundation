@@ -1,9 +1,9 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
-use spec::definition::Definition;
+use spec::definition;
 use spec::retention::{Error, Policy};
 
-use crate::Found;
+use crate::{Definition, Found};
 
 const NEGATIVE_SPAN: Code = Code::new("config.negative-span");
 const KEYS: [&str; 2] = ["select", "keep"];
@@ -19,7 +19,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         return None;
     };
     match Policy::new(select, keep) {
-        Ok(policy) => Some(Definition::Retention(policy)),
+        Ok(policy) => Some(Definition::Spec(definition::Definition::Retention(policy))),
         Err(error @ Error::Negative(_)) => {
             let at = block
                 .body
