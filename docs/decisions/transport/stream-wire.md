@@ -34,12 +34,12 @@
   `send` writes the rest of its message; the stream writes the rest of a message from
   `try_send` or of a finished stream. A rest that the stream held for a waiting caller
   would take each freed byte before the other class's caller wakes. The send budget
-  gives room in the order of the turn. While the other class holds room, room that a
-  message of the owed class frees waits for that class's next message, and the budget
-  starts no new message of the other class, so neither class can take the share through
-  the budget (#819). A change of this share changes the share bound of
-  `transport/benches/send.rs` in the same PR. Decided by architect-2 (#977, 2026-10-07
-  17:15 UTC):
+  gives room in the order of the turn. While the owed class competes and a claim of
+  the other class holds room, room that a message of the owed class frees waits for
+  that class's next message, and the budget starts no new message of the other class,
+  so neither class can take the share through the budget (#819). A change of this
+  share changes the share bound of `transport/benches/send.rs` in the same PR. Decided
+  by architect-2 (#977, 2026-10-07 17:15 UTC):
   https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. The
   competition memory and the cap: architect-2 (#1311, 2026-10-07):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6036747607 and
