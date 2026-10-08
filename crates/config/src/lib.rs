@@ -7,7 +7,7 @@ mod connector;
 mod node_settings;
 mod openssh;
 mod placement;
-mod plan;
+pub mod plan;
 mod private_key;
 mod retention;
 mod subject;
@@ -21,8 +21,6 @@ use document::{Block, Document, Label, Span, read};
 use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
-
-pub use plan::{Change, Plan, plan};
 
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
