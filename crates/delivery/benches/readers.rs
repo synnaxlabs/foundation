@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use delivery::complete::{Charge, Key};
-use delivery::{Position, Reader, Readers, Start};
+use delivery::{Next, Position, Reader, Readers, Start};
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
@@ -76,6 +76,34 @@ fn release(bencher: Bencher<'_, '_>, sessions: usize) {
         divan::black_box(readers.release(seq));
         for &key in &keys {
             divan::black_box(readers.take(key.into()));
+        }
+    });
+}
+
+/// The frames of one release in [`release_waiting`].
+const BURST: u64 = 64;
+
+/// A release of [`BURST`] frames to `sessions` recording readers with credit for 8,
+/// so each later frame waits for a grant. Each session takes each frame and grants
+/// after each take, as a hub reader does.
+#[divan::bench(args = [1, 16])]
+fn release_waiting(bencher: Bencher<'_, '_>, sessions: usize) {
+    let (frame, set) = frame();
+    let window = 8 * frame.charge();
+    let (mut readers, keys) = opened(sessions, window);
+    let mut spent = vec![0; sessions];
+    let mut seq = 0;
+    bencher.bench_local(|| {
+        for _ in 0..BURST {
+            readers.queue(&frame, &set, seq..seq + 1);
+            seq += 1;
+        }
+        divan::black_box(readers.release(seq));
+        for (&key, spent) in keys.iter().zip(&mut spent) {
+            while let Next::Frame(frame) = readers.take(key.into()) {
+                *spent += frame.charge();
+                readers.grant(key, *spent + window);
+            }
         }
     });
 }
