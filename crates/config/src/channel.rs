@@ -1,12 +1,12 @@
 use document::diagnostic::{Code, Diagnostic};
-use document::value::{self, Value};
+use document::value::Value;
 use document::{Block, Span, read};
 use spec::channel::{Data, Edge, Error, Kind};
 use spec::data_type::DataType;
 use spec::unit::Unit;
 use types::name::Name;
 
-use crate::{Definition, Found, Reported};
+use crate::{Definition, Found, Reported, written};
 
 const BAD_CHANNEL_KIND: Code = Code::new("config.bad-channel-kind");
 const BAD_DATA_TYPE: Code = Code::new("config.bad-data-type");
@@ -22,7 +22,6 @@ type Attributes = fn(&mut Found<'_>, &Block) -> Option<Kind<Name>>;
 /// `kind` stops the check of each attribute but the edges, because the others depend
 /// on it.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    found.unknown_blocks(block);
     let attributes = found.attribute(block, "kind", |value| -> Result<Attributes, _> {
         match text(value, BAD_CHANNEL_KIND, "the channel kind", "\"index\"")? {
             "index" => Ok(index),
@@ -36,6 +35,9 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         }
     });
     let Ok(attributes) = attributes else {
+        // A bad kind hides which attributes are unknown, but not the blocks inside.
+        let keys: Vec<&str> = block.body.attributes.iter().map(|a| &*a.key).collect();
+        drop(found.unknown(block, &keys));
         for each in [Edge::Index, Edge::Quality, Edge::Error, Edge::Control] {
             drop(edge(found, block, each));
         }
@@ -46,7 +48,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
 }
 
 fn index(found: &mut Found<'_>, block: &Block) -> Option<Kind<Name>> {
-    let unknown = found.unknown_attributes(block, &INDEX_KEYS);
+    let unknown = found.unknown(block, &INDEX_KEYS);
     let error = edge(found, block, Edge::Error);
     let control = edge(found, block, Edge::Control);
     let (Ok(()), Ok(error), Ok(control)) = (unknown, error, control) else {
@@ -56,7 +58,7 @@ fn index(found: &mut Found<'_>, block: &Block) -> Option<Kind<Name>> {
 }
 
 fn data(found: &mut Found<'_>, block: &Block) -> Option<Kind<Name>> {
-    let unknown = found.unknown_attributes(block, &DATA_KEYS);
+    let unknown = found.unknown(block, &DATA_KEYS);
     let index = edge(found, block, Edge::Index).and_then(|index| {
         index.ok_or_else(|| {
             let fix = "Add an `index` attribute with the name of an index channel, \
@@ -163,13 +165,4 @@ fn text<'v>(
             format!("Write a string such as {example}"),
         )
     })
-}
-
-/// The text of a string or a reference, as the file wrote it.
-fn written(value: &Value) -> Option<&str> {
-    match &value.kind {
-        value::Kind::String(text) => Some(text),
-        value::Kind::Reference(name) => Some(name.as_str()),
-        _ => None,
-    }
 }
