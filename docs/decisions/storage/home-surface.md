@@ -38,8 +38,9 @@
   (2026-10-08T22:24:43Z, #2020): `Shard::shed` stops carrying an index, the pair of
   `carry`. Its control gate goes, and with it a handoff that waits for room. Each named
   reader of the index stops holding its position. Its frames stay in the buffer, so a
-  later `carry` of the slot continues each path from its tail in the buffer, as after a
-  restart: a lost seq whose gap is not durable is given again (`Outcome::Lost`). Lost: a
+  later `carry` of the slot continues each path from its tail in the buffer, the last
+  entry appended, on disk or not: a lost seq is given again only when no later live
+  entry of the index was appended (`Outcome::Lost`). Lost: a
   map of the live tail of each shed index, which grows with each index that leaves for
   good, and still gives the seq again after a restart (`laptop.architect`,
   2026-10-08T22:50:41Z:
