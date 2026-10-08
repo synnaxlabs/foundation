@@ -354,26 +354,27 @@ async fn create_leader(node: &sim::node::Node, tasks: &Tasks) -> Mesh {
     mesh
 }
 
-// This mesh has no session, so the group holds a waker of a call only while the call
-// waits for the outcome of its entry. No call of `Mesh` shows that, so this test
-// reads the group.
+// A count of 3 means that the group holds a clone of the waker, which it does only
+// while the call waits for the outcome of its entry. The failed write stops the group
+// with no change of the term, which would wake each call too.
 #[test]
 fn a_call_that_waits_for_its_entry_gets_the_cause_when_the_group_stops() {
     solo(|node, tasks| async move {
         let mesh = create_leader(&node, &tasks).await;
-        let result = Rc::new(RefCell::new(None));
-        let (calling, returned) = (mesh.clone(), Rc::clone(&result));
-        tasks.spawn(async move {
-            let set = calling.set_home(INDEX, key(2)).await;
-            *returned.borrow_mut() = Some(set);
-        });
+        let held = Arc::new(Idle);
+        let waker = Waker::from(Arc::clone(&held));
+        let mut cx = Context::from_waker(&waker);
+        let mut call = Box::pin(mesh.set_home(INDEX, key(2)));
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
         let clock = node.clock();
-        clock.sleep(seconds(1)).await;
-        assert_eq!(mesh.group.borrow().calls.len(), 1);
-        assert_eq!(*result.borrow(), None);
-        let stopped = stop(&node, &mesh);
-        clock.sleep(Span::MILLISECOND).await;
-        assert_eq!(*result.borrow(), Some(Err(Error::Stopped(stopped))));
+        clock.sleep(TICK).await;
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(Arc::strong_count(&held), 3);
+        let stopped = Error::Stopped(fail_sync(&node));
+        assert_eq!(mesh.propose_data(vec![9]).await, Err(stopped.clone()));
+        assert_eq!(Arc::strong_count(&held), 2);
+        let cause = Poll::Ready(Err(stopped));
+        assert_eq!(call.as_mut().poll(&mut cx), cause);
     });
 }
 
@@ -421,6 +422,60 @@ fn a_dropped_call_that_waits_for_its_entry_leaves_no_waker_and_no_floor() {
         drop(call);
         assert_eq!(Arc::strong_count(&held), 2);
         assert_eq!(mesh.group.borrow().applied, Applied::default());
+    });
+}
+
+// The spawned call waits for the outcome of its entry when the other call drops.
+#[test]
+fn a_dropped_call_leaves_the_waker_of_another_call_that_waits_for_its_entry() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let first = elect(&mesh).await;
+        let mut dropped = Box::pin(mesh.set_home(INDEX, key(2)));
+        assert_eq!(now(dropped.as_mut()).await, Poll::Pending);
+        let result = Rc::new(RefCell::new(None));
+        let (calling, returned) = (mesh.clone(), Rc::clone(&result));
+        tasks.spawn(async move {
+            let set = calling.set_home(INDEX, key(3)).await;
+            *returned.borrow_mut() = Some(set);
+        });
+        let clock = node.clock();
+        clock.sleep(TICK).await;
+        assert_eq!(now(dropped.as_mut()).await, Poll::Pending);
+        drop(dropped);
+        let reply = raft::Message {
+            term: first.term,
+            ..message(
+                2,
+                1,
+                Body::AppendReply {
+                    last: after(first, 2).index,
+                },
+            )
+        };
+        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+        clock.sleep(Span::MILLISECOND).await;
+        assert_eq!(*result.borrow(), Some(Ok(())));
+    });
+}
+
+// A count of 3 means that the group holds a clone of that waker.
+#[test]
+fn a_call_that_waits_for_its_entry_keeps_the_waker_of_its_last_poll() {
+    solo(|node, tasks| async move {
+        let mesh = create_leader(&node, &tasks).await;
+        let (old, new) = (Arc::new(Idle), Arc::new(Idle));
+        let old_waker = Waker::from(Arc::clone(&old));
+        let new_waker = Waker::from(Arc::clone(&new));
+        let mut call = Box::pin(mesh.set_home(INDEX, key(2)));
+        let mut cx = Context::from_waker(&old_waker);
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        node.clock().sleep(TICK).await;
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!(Arc::strong_count(&old), 3);
+        let mut cx = Context::from_waker(&new_waker);
+        assert_eq!(call.as_mut().poll(&mut cx), Poll::Pending);
+        assert_eq!((Arc::strong_count(&old), Arc::strong_count(&new)), (2, 3));
     });
 }
 
