@@ -1030,3 +1030,41 @@ fn answers_a_request_on_a_stream_opened_before_the_hello() {
         ]
     );
 }
+
+/// The node does not check the client wire rule: a request stream whose header the
+/// node reads before it admits the hello is served once the hello is admitted.
+#[test]
+fn serves_a_request_whose_header_came_before_the_admission() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, POOL, true).await;
+        test.hub.set_rules(rules());
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut first = session.accept().await.expect("a stream");
+        header(&mut first).await;
+        let hello = link.serve(first);
+        let mut second = session.accept().await.expect("a stream");
+        header(&mut second).await;
+        let request = link.serve(second);
+        tasks.spawn(async move {
+            drop(hello.await);
+        });
+        node.clock().sleep(QUIET).await;
+        let served = answer(request, &node.clock()).await;
+        *kept.lock().expect("not poisoned") = Some(served);
+        node.clock().sleep(QUIET).await;
+        drop((link, test));
+    };
+    run(109, home, |mut agent| async move {
+        let mut stream = agent.open().await;
+        agent.admit().await;
+        stream.request(4, b"ping").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.response().await, b"gnip");
+    });
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Ok(Got::Request(name(SUBJECT), b"ping".to_vec()))));
+}
