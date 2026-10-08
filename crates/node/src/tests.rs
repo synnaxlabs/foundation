@@ -3062,8 +3062,8 @@ mod port {
             );
         }
 
-        /// A private call: the sim cannot make two causes ready at one poll, as a
-        /// fault that stops the group stops the node at the same instant.
+        /// A private call: no sim test makes the transport and the group ready at one
+        /// poll.
         #[test]
         fn a_stop_of_the_node_ranks_first_then_the_transport() {
             let error = transport::Error::Network {
