@@ -166,10 +166,15 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
   `Kind::edges` gives each edge and the channel it points at, in this order: the error
   then the control channel of an index, or the index then the quality channel of a
-  data channel. `check` reads the edges through it, and `config` will too. Each user
-  error has a fix: `unit::Error::fix`, and `document::value::Kind::noun` names a value
-  that has the wrong kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
+  data channel. `check` reads the edges through it. Each user error has a fix:
+  `unit::Error::fix`, and `document::value::Kind::noun` names a value that has the wrong
+  kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
+  Amended: `config` reads each edge from its attribute, so that another bad attribute
+  does not hide an unknown edge (`laptop.architect-2`, 2026-10-08T01:32:47Z,
+  https://github.com/synnaxlabs/foundation/pull/1685#issuecomment-6050335562).
+  Supersedes the `config` caller of `Kind::edges` in
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294.
   `types` owns the text of `sample::Type` both ways (`Display` and `FromStr`): exact
   case, no leading zero in a count, and one space after the comma of a list; `Stamp` and
   `Span` read and show as `timestamp` and `duration` (A9), so a text that reads shows as
@@ -3713,6 +3718,21 @@ How to read this record:
   not depend on the order that a tool reads them. The problems can differ. Decided by
   architect-2 (#1444, 2026-10-07T17:08:05Z,
   https://github.com/synnaxlabs/foundation/pull/1444#issuecomment-6042832407).
+- **CHANNEL BLOCK (2026-10-08)** `channel "<name>" { kind, ... }` defines one channel
+  (S5) at its own name. `kind` is `"index"` or `"data"`, and `"data"` is the default.
+  An index takes `error` and `control`. A data channel takes `index` and `data_type`,
+  which it needs, and `quality` and `unit`. Each value is a string or a reference.
+  `config::check` gives `config::Definition::Channel`, a `spec::channel::Kind<Name>`
+  whose edges are names until `plan` gives each channel its key. `Definition::Spec`
+  holds each other definition. Each edge must name a channel that a `channel` block of
+  the Documents defines, or `check` gives `config.unknown-channel`, at the span of the
+  edge, in source order. An edge to a channel that only the stored spec has (X28) gives
+  it too, until #1082. Lost: `spec::definition::Definition<C = Channel>`, because `plan`
+  would then wrap each of the eight variants again to change one. Decided by
+  `laptop.architect-2` (#1152, 2026-10-07T11:17:44Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927, and
+  2026-10-08T00:51:39Z,
+  https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
 
 ### 1.12 Access, identity, and secrets
 
