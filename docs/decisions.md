@@ -3993,7 +3993,23 @@ How to read this record:
   because it moves the file that the include check reads. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058103514,
-  2026-10-08 10:42 UTC).
+  2026-10-08 10:42 UTC). No flag of the upstream build is lost with no error. Decided
+  by `laptop.director`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260,
+  2026-10-08 13:10 UTC). `cargo xtask open62541` puts each flag of a compile in
+  `flags.txt` (`-D`, `-I`, `-std`, and `CODE_FLAGS`, the flags that change the code)
+  or in `LEFT_OUT`, a closed list with the reason of each, and fails on any other
+  flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
+  compiled with the flags of the connector. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
+  2026-10-08 13:31 UTC). A `-W` flag with no `,` is a warning, which changes no code,
+  so `collect` leaves it out by that pattern, not by name. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
+  2026-10-08 13:57 UTC) and `laptop.director`
+  (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
+  2026-10-08 14:00 UTC). Supersedes, for `-W` flags, the closed list of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060613260.
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
   (READER SETTINGS). `address` is an `http::Uri`, since a `Name` is a mesh name. `parse`
   reads `address` through `connector::http::uri`, so a plan finds an address that
