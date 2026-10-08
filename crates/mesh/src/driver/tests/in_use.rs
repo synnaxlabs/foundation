@@ -455,8 +455,6 @@ fn keep_ends_when_the_group_stops_during_a_retry() {
     });
 }
 
-// As in the test above, but the retry get finds the missed chunk, and the retry read
-// that follows waits on a put of the other.
 // The first read of v1 waits on a put of its root, and the group stops. The test, the
 // mesh, and `keep` hold the store.
 #[test]
@@ -492,6 +490,9 @@ fn a_first_read_ends_when_the_group_stops() {
     });
 }
 
+// As in `a_call_at_a_later_pointer_waits_for_no_retry_of_an_older_one`, but the retry
+// get finds the missed chunk, and the retry read that follows waits on a put of the
+// other.
 #[test]
 fn a_call_at_a_later_pointer_waits_for_no_retry_read_of_an_older_one() {
     solo(|node, tasks| async move {
