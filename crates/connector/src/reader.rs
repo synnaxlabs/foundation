@@ -53,8 +53,8 @@ pub fn read(
     let mut diagnostics = document::read::unknown(
         config,
         "the connector",
-        &[&["select"], keys].concat(),
-        &[&["reader"], blocks].concat(),
+        &with("select", keys),
+        &with("reader", blocks),
     );
     let select = keep(
         document::read::required(
@@ -191,6 +191,12 @@ fn mode(value: &Value) -> Result<Mode, Diagnostic> {
             "Write \"complete\" or \"latest\"".into(),
         )),
     }
+}
+
+/// `own` and then each of `keys` that is not `own`.
+fn with<'a>(own: &'a str, keys: &[&'a str]) -> Vec<&'a str> {
+    let others = keys.iter().copied().filter(|key| *key != own);
+    std::iter::once(own).chain(others).collect()
 }
 
 /// The value of `result`, or `None` after it adds the diagnostic.
