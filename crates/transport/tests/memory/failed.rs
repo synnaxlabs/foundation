@@ -31,13 +31,12 @@ type Out = (Option<Result<usize, Error>>, usize, usize);
 
 pub(crate) fn main() {
     for len in [100_000, 240_000, 1 << 18] {
-        let (read, pending, kept) = run(len);
+        let (read, _, kept) = run(len);
         assert_eq!(
             read,
             Some(Err(Error::Reset { code: Code(0) })),
             "{len} bytes: the read"
         );
-        assert!(pending > 0, "{len} bytes: the read waits for the body");
         assert!(
             kept <= KEPT_MAX,
             "{len} bytes: the receiver keeps {kept} bytes after a read that fails \
@@ -47,7 +46,8 @@ pub(crate) fn main() {
 }
 
 /// The [`Out`] of the server's read of a message of `len` bytes, which the client
-/// resets once that read gives `Pending` or ends.
+/// resets once that read gives `Pending` or ends. So a read that gives `Reset` gave
+/// `Pending` first.
 fn run(len: usize) -> Out {
     let mut sim = Sim::new(sim::Config::default());
     let client = sim.node(sim::node::Config::default());

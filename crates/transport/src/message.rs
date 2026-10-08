@@ -823,6 +823,7 @@ mod tests {
             );
             // Private: only a peer that misframes ends a stream inside a message, and
             // no heap count is exact in a binary with a test harness.
+            assert_eq!(reader.held.buffer.capacity(), 0);
             let slots = reader.held.chunks.capacity();
             assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
         }
