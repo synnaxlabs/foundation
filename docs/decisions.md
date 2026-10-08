@@ -6059,20 +6059,24 @@ How to read this record:
   approved by `laptop.architect` at 15:26:10Z
   (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600).
   Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
-  of #336. A mesh whose group stops stops the node, and `Node::join` gives
-  `Error::Mesh` with `mesh::Error::Stopped`. Of a transport that stops and a group
-  that stops, `join` gives the first; at one poll, the transport's (#1780). Lost:
-  `Mesh::stopped()`, because `Watch::next` gives the stop as its contract and one
-  caller does not justify a new `mesh` item; add `Mesh::stopped` when a second caller
-  needs the stop of the group and reads no home, and ask `laptop.architect` for it.
-  Decided by `laptop.architect-2` at 2026-10-08T17:27:20Z
-  (https://github.com/synnaxlabs/foundation/issues/1780#issuecomment-6065408760).
-  Lost: `Node::found(region)` at run time, which needs a second open path and a node
-  that runs with no region before it; the key in `node::Region`, because a node's
-  identity is not region data, and PR 4 needs it with no region.
-  Decided by `laptop.architect-2` (2026-10-08 03:37 UTC):
+  of #336. Lost: `Node::found(region)` at run time, which needs a second open path and
+  a node that runs with no region before it; the key in `node::Region`, because a
+  node's identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
-  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943. A
+  mesh whose group stops stops the node, and `Node::join` gives `Error::Group` with
+  the cause. Of a transport that stops and a group that stops, `join` gives the first,
+  and the transport's when both stop at once (#1780). Lost: `Mesh::stopped()`, because
+  `Watch::next` gives the stop as its contract and one caller does not justify a new
+  `mesh` item; add `Mesh::stopped` when a second caller needs the stop of the group
+  and reads no home, and ask `laptop.architect` for it. Decided by
+  `laptop.architect-2` at 2026-10-08T17:27:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1780#issuecomment-6065408760), and
+  changed by `laptop.architect-2` at 17:32:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136): the
+  stop has its own variant. Lost: `Error::Mesh` with `mesh::Error::Stopped`, which
+  gives one variant two meanings.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

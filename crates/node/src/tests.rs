@@ -2929,11 +2929,10 @@ mod port {
             assert_eq!(sim.run_for(OPEN), Ok(()));
             host.fail_file(Path::new(LOG), env::files::Operation::WriteAt);
             assert_eq!(sim.run(), Ok(()));
-            let error = ::mesh::Error::Stopped(write_failed());
-            assert_eq!(node.join(), Err(Error::Mesh(error.clone())));
+            assert_eq!(node.join(), Err(Error::Group(write_failed())));
             assert_eq!(
-                Error::Mesh(error).to_string(),
-                format!("the node's mesh stopped: {}", write_failed())
+                Error::Group(write_failed()).to_string(),
+                format!("the group of the node's mesh stopped: {}", write_failed())
             );
         }
 

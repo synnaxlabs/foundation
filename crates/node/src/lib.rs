@@ -300,7 +300,7 @@ impl Node {
     /// runs until it completes or shard 0 ends, which drops it. A panic in a task ends
     /// shard 0 and fails the node: [`Node::join`] gives [`Error::Panicked`], unless
     /// the transport or the mesh's group stopped first, which gives
-    /// [`Error::Transport`] or [`Error::Mesh`].
+    /// [`Error::Transport`] or [`Error::Group`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
         F: Future<Output = ()> + 'static,
@@ -325,11 +325,11 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, [`Error::Blob`] for a chunk store that did not open,
-    /// [`Error::Mesh`] for a mesh that did not open or whose group stopped, or
-    /// [`Error::Transport`] for a transport that stopped, the first of the last two,
-    /// and the transport's when both are seen at one poll, else [`Error::Panicked`]
-    /// for the first shard by core that panicked. Any failed shard stops the node.
+    /// whose buffer did not open, [`Error::Blob`] for a chunk store or [`Error::Mesh`]
+    /// for a mesh that did not open, or [`Error::Transport`] or [`Error::Group`],
+    /// whichever stopped first, and the transport's when both stopped at once, else
+    /// [`Error::Panicked`] for the first shard by core that panicked. Any failed shard
+    /// stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -671,11 +671,11 @@ impl Serve {
     /// Opens the endpoint, then runs each task given with a hub over `home`, and
     /// serves the node's port, until `guard` completes, the transport stops, or the
     /// mesh's group stops. A transport or a group that stops goes into `failed`
-    /// before any task drops. Then drops the
-    /// tasks, the hub, `home`, `guard`, each session and stream future, and the mesh,
-    /// and waits for each task of the mesh to end, the last of which drops the
-    /// transport. Runs no task and takes no session when a shard did not open, or when
-    /// the mesh did not open, which goes into `failed`.
+    /// before any task drops. Then drops the tasks, the hub, `home`, `guard`, each
+    /// session and stream future, and the mesh, and waits for each task of the mesh to
+    /// end, the last of which drops the transport. Runs no task and takes no session
+    /// when a shard did not open, or when the mesh did not open, which goes into
+    /// `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -734,7 +734,7 @@ impl Serve {
                     return Poll::Ready(());
                 }
                 group.as_mut().poll(cx).map(|stopped| {
-                    fail(Error::Mesh(mesh::Error::Stopped(stopped)));
+                    fail(Error::Group(stopped));
                 })
             });
             self.inbox.serve(hub, tasks, stop).await;
@@ -791,9 +791,11 @@ pub enum Error {
     /// The transport of the node's port stopped, as when the OS breaks its socket.
     /// The node stops.
     Transport(transport::Error),
-    /// The mesh did not open, and the node took no session, or its group stopped
-    /// ([`mesh::Error::Stopped`]), which stops the node.
+    /// The mesh did not open. The node took no session.
     Mesh(mesh::Error),
+    /// The group of the node's mesh stopped, as when a write of its log fails. The
+    /// node stops.
+    Group(mesh::Stopped),
     /// The chunk store did not open. The node took no session.
     Blob(blob::Error),
     /// The node's port did not bind. No shard started.
@@ -832,10 +834,10 @@ impl fmt::Display for Error {
             Self::Transport(error) => {
                 write!(f, "the node's transport stopped: {error}")
             }
-            Self::Mesh(mesh::Error::Stopped(stopped)) => {
-                write!(f, "the node's mesh stopped: {stopped}")
-            }
             Self::Mesh(error) => write!(f, "the node's mesh did not open: {error}"),
+            Self::Group(stopped) => {
+                write!(f, "the group of the node's mesh stopped: {stopped}")
+            }
             Self::Blob(error) => {
                 write!(f, "cannot open the node's chunk store: {error}")
             }
