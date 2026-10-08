@@ -19,7 +19,6 @@ dependencies = [
 name = "access"
 version = "0.0.0"
 dependencies = [
- "aws-lc-rs",
  "document",
  "proptest",
  "spec",
