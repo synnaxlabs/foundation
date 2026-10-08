@@ -235,3 +235,26 @@ fn the_shim_check_uses_the_compiler_of_cc() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("No such file or directory"), "{stdout}");
 }
+
+unsafe extern "C" {
+    fn UA_Timer_init(timer: *mut std::ffi::c_void);
+    fn UA_Timer_next(timer: *mut std::ffi::c_void) -> i64;
+    fn UA_Timer_process(timer: *mut std::ffi::c_void, now: i64) -> i64;
+    fn UA_Timer_remove(timer: *mut std::ffi::c_void, key: u64);
+    fn UA_Timer_clear(timer: *mut std::ffi::c_void);
+}
+
+/// The library does not compile `timer.c`, and the archive drops an object that
+/// nothing names. So this test links only when `sources.txt` holds it.
+#[test]
+fn the_copy_links_the_timer() {
+    let functions = std::hint::black_box([
+        UA_Timer_init as *const (),
+        UA_Timer_next as *const (),
+        UA_Timer_process as *const (),
+        UA_Timer_remove as *const (),
+        UA_Timer_clear as *const (),
+    ]);
+    let distinct: std::collections::BTreeSet<_> = functions.iter().collect();
+    assert_eq!(distinct.len(), functions.len());
+}

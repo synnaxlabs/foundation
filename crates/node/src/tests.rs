@@ -605,9 +605,9 @@ mod buffer {
         let clock = host.clock();
         node.spawn(move |hub| async move {
             let names = ["c", "b", "a"];
-            for (key, name) in [3, 2, 1].into_iter().zip(names) {
-                super::hub::define(&hub, key, name, super::hub::STAMP, key);
-            }
+            let channels = [3, 2, 1].map(super::hub::index);
+            let channels: Vec<_> = names.into_iter().zip(channels).collect();
+            super::hub::define(&hub, &channels);
             let writer = super::hub::writer(&hub, &clock, &names).await;
             let entries = writer.set().entries();
             let slot = |key| entries.iter().find(|e| e.key == Key::from_u128(key));
@@ -1786,9 +1786,11 @@ mod lock {
 }
 
 mod hub {
+    use ::hub::Hub;
     use ::hub::reader::{Mode, Received};
     use ::hub::writer::{self, Writer};
-    use ::hub::{Channel, Hub};
+    use spec::channel::{Channel, Data, Kind};
+    use spec::data_type::DataType;
     use types::authority::Authority;
     use types::channel::Key;
     use types::frame::key_set::KeySet;
@@ -1798,29 +1800,39 @@ mod hub {
 
     use super::*;
 
-    pub(super) const STAMP: Type = Type::Scalar(Scalar::Stamp);
-    const I64: Type = Type::Scalar(Scalar::I64);
+    pub(super) const I64: Type = Type::Scalar(Scalar::I64);
     /// The wall time when a host is added, which is before the node's mesh time.
-    const WALL: i64 = 1_767_225_600_000_000_000;
+    pub(super) const WALL: i64 = 1_767_225_600_000_000_000;
 
     fn name(name: &str) -> Name {
         name.parse().expect("a valid name")
     }
 
-    /// Defines channel `key`, named `name`, of `data_type` on index `index`.
-    pub(super) fn define(
-        hub: &Hub,
-        key: u128,
-        name: &str,
-        data_type: Type,
-        index: u128,
-    ) {
-        hub.define(Channel {
+    /// The index `key`.
+    pub(super) fn index(key: u128) -> Channel {
+        Channel {
             key: Key::from_u128(key),
-            name: self::name(name),
-            data_type,
-            index: Key::from_u128(index),
-        });
+            kind: Kind::Index {
+                error: None,
+                control: None,
+            },
+        }
+    }
+
+    /// The data channel `key` of `data_type` on the index `index`.
+    pub(super) fn data(key: u128, data_type: Type, index: u128) -> Channel {
+        let index = Key::from_u128(index);
+        let data = Data::new(index, None, DataType::Sample(data_type), None);
+        Channel {
+            key: Key::from_u128(key),
+            kind: Kind::Data(data.expect("no unit")),
+        }
+    }
+
+    /// Defines each of `channels`, by its name, in one call.
+    pub(super) fn define(hub: &Hub, channels: &[(&str, Channel)]) {
+        let channels: Vec<_> = channels.iter().map(|(n, c)| (name(n), c)).collect();
+        hub.define(channels.iter().map(|(name, channel)| (name, *channel)));
     }
 
     /// A writer on `channels`, opened again each millisecond of `clock` until the node
@@ -1854,7 +1866,7 @@ mod hub {
     }
 
     /// Writes one sample at `stamp` to `time` and `value` to `value`.
-    fn write(writer: &mut Writer, stamp: i64, value: i64) {
+    pub(super) fn write(writer: &mut Writer, stamp: i64, value: i64) {
         let set = writer.set();
         let (time, data) = (entry(set, 1), entry(set, 2));
         let group = set.entries()[time].group;
@@ -1871,7 +1883,7 @@ mod hub {
     }
 
     /// The samples of channel `key` in `received`.
-    fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
+    pub(super) fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
         let entry = entry(received.set, key);
         let entries = received.set.entries();
         let range = received.view.range(entries[entry].group).expect("a range");
@@ -1906,8 +1918,7 @@ mod hub {
         let clock = host.clock();
         let probe = probe(&node);
         node.spawn(move |hub| async move {
-            define(&hub, 1, "time", STAMP, 1);
-            define(&hub, 2, "value", I64, 1);
+            define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
             let reader = hub.reader(&[name("value")], Mode::Complete).await;
             let mut reader = reader.expect("the reader opens");
             let mut writer = writer(&hub, &clock, &["value"]).await;
@@ -2055,7 +2066,7 @@ mod hub {
         let task = Dropped(Arc::clone(&dropped));
         node.spawn(move |hub| async move {
             let _task = task;
-            define(&hub, 1, "time", STAMP, 1);
+            define(&hub, &[("time", index(1))]);
             let reader = hub.reader(&[name("time")], Mode::Complete).await;
             let mut reader = reader.expect("the reader opens");
             drop(reader.next().await);
@@ -2093,8 +2104,7 @@ mod hub {
                     interner,
                     tasks: spawn,
                 });
-                define(&hub, 1, "time", STAMP, 1);
-                define(&hub, 2, "value", I64, 1);
+                define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;
                 drop(guard);
                 drop((writer, hub));
@@ -2690,6 +2700,110 @@ mod port {
                 region: Some(region),
                 ..config(host, Size::MEBIBYTE, Box::new(heap))
             })
+        }
+
+        /// The region of the node [`OWN`] on `host` alone, whose founding spec holds
+        /// the index `plant.time` (key 1) and the data channel `plant.value` (key 2).
+        fn founded(host: &sim::node::Node) -> Founding {
+            use super::super::hub::{I64, data, index};
+            let mut founding = region(&[member(OWN, &KEY, host)]);
+            let channels = [("plant.time", index(1)), ("plant.value", data(2, I64, 1))];
+            for (name, channel) in channels {
+                let name = name.parse().unwrap();
+                founding
+                    .definitions
+                    .insert(name, Definition::Channel(channel));
+            }
+            founding
+        }
+
+        /// Starts the node [`OWN`] on `host` with the region [`founded`], and gives
+        /// what a task reads back after it writes 7 at `stamp` to `plant.value`, by
+        /// name: the samples of keys 1 and 2.
+        fn round_trip(
+            sim: &mut sim::Sim,
+            host: &sim::node::Node,
+            stamp: i64,
+        ) -> Option<(Vec<i64>, Vec<i64>)> {
+            use super::super::hub::{samples, write, writer};
+            let node = start(host, (OWN, KEY), founded(host));
+            let read = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&read);
+            let clock = host.clock();
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mut reader = reader.expect("the reader opens");
+                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                write(&mut writer, stamp, 7);
+                let received = reader.next().await.expect("a frame");
+                *out.lock().unwrap() =
+                    Some((samples(&received, 1), samples(&received, 2)));
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            read.lock().unwrap().take()
+        }
+
+        /// The hub knows each channel of the founding spec, so a task opens a writer
+        /// and a reader on them by name.
+        #[test]
+        fn a_task_opens_sessions_on_the_channels_of_the_founding_spec() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let stamp = super::super::hub::WALL;
+            let read = round_trip(&mut sim, &host, stamp);
+            assert_eq!(read, Some((vec![stamp], vec![7])));
+        }
+
+        /// A founding with a data channel whose index the spec does not hold fails the
+        /// node at its first open.
+        #[test]
+        fn a_founding_with_a_dangling_index_fails_the_node() {
+            use super::super::hub::{I64, data};
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let mut founding = region(&[member(OWN, &KEY, &host)]);
+            let name = "plant.value".parse().unwrap();
+            let channel = Definition::Channel(data(2, I64, 1));
+            founding.definitions.insert(name, channel);
+            let node = start(&host, (OWN, KEY), founding);
+            let index = types::channel::Key::from_u128(1);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: format!(
+                        "the index {index} of channel plant.value is not a known index"
+                    ),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(
+                node.join(),
+                Err(Error::Panicked(thread::Panicked {
+                    name: "shard-0".into()
+                }))
+            );
+        }
+
+        /// The node defines the founding channels at each open, not only at the
+        /// first.
+        #[test]
+        fn a_node_that_opens_again_knows_the_founding_channels() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let stamp = super::super::hub::WALL;
+            assert!(
+                round_trip(&mut sim, &host, stamp).is_some(),
+                "the first open"
+            );
+            let later = stamp + TEN.nanos();
+            let read = round_trip(&mut sim, &host, later);
+            assert_eq!(read, Some((vec![later], vec![7])));
         }
 
         /// The node with key [`OWN`] on `host`, the one member and voter of its region.
