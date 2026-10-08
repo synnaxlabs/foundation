@@ -991,8 +991,8 @@ mod tests {
             #[test]
             fn handshakes_with_any_key(bytes: [u8; 32]) {
                 let (a, b) = (PrivateKey(bytes), PrivateKey([2; 32]));
-                let peers =
-                    handshake(Tls::new(&a).client(b.public()), Tls::new(&b).server().expect("a node"));
+                let server = Tls::new(&b).server().expect("a node");
+                let peers = handshake(Tls::new(&a).client(b.public()), server);
                 prop_assert_eq!(
                     peers,
                     Ok((Peer::Node(b.public()), Peer::Node(a.public())))

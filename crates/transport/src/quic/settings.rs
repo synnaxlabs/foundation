@@ -819,6 +819,8 @@ mod tests {
                 });
                 let largest =
                     shard.config(pair::SERVER_KEY, Span::SECOND).pool.largest();
+                // The datagram calls wait on #68, and the path MTU caps the limit a
+                // peer reads, so this reads the limit the server sends.
                 let shown = format!("{:?}", pair.server.endpoint.settings.transport);
                 let limit = format!("datagram_receive_buffer_size: Some({largest}),");
                 assert!(shown.contains(&limit), "{shown}");
