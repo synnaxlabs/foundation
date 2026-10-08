@@ -1,8 +1,13 @@
-- **TEST DROP (2026-10-08)** A test helper under `tests/` may panic or block in its
-  `Drop`, but only when the thread is not already panicking. A `Drop` that does not
-  panic hides a failure when a test does not stop the helper. This is the second
-  exception to the rust.md rule "`Drop` never panics", after SIM DROP. The person
-  chose it: "B is fine" (2026-10-08 23:21 UTC, as `laptop.monitor` relayed it,
-  recorded at
+- **TEST DROP (2026-10-08)** A test helper under `tests/` may block in its `Drop`, and
+  may panic in it only when the thread is not already panicking. A `Drop` that does not
+  panic hides a failure when a test does not stop the helper, and a second panic aborts
+  the test binary. This is the second exception to the rust.md rule "`Drop` never
+  panics", after SIM DROP. The person chose it: "B is fine" (2026-10-08 23:21 UTC, as
+  `laptop.monitor` relayed it, recorded at
   https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6071002339; the
   question: https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6070953004).
+  A type under `tests/` whose `Drop` panic is the input of its test, such as `Bomb` in
+  `crates/os/tests/it/common.rs`, is not a helper, and the `Drop` rule of rust.md does
+  not hold for it. Decided by `laptop.director`
+  (https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071198900,
+  2026-10-08 23:39 UTC).
