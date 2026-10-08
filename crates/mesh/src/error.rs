@@ -3,12 +3,13 @@ use std::fmt;
 use raft::Position;
 use types::node::{self, PublicKey};
 
-use crate::region::{Unfit, Unknown};
-use crate::{grant, log, status};
+use crate::change::Unknown;
+use crate::region::Unfit;
+use crate::{claim, log};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// The log did not open.
     Log(log::Error),
     /// `raft` refused the log, a message, or a proposal.
@@ -30,24 +31,28 @@ pub(crate) enum Error {
         /// The key that the peer proved.
         peer: PublicKey,
     },
-    /// A message carries a grant or a change that does not hold.
-    Grant(grant::Error),
+    /// A message carries a claim that does not hold.
+    Claim(claim::Error),
     /// A call names a node that is not a member of the region.
     NotMember(node::Key),
+    /// This node is not a voter of its configuration, and only a voter proposes a
+    /// change. Call it on a voter.
+    NoVote,
     /// The region cannot hold a member record of the config.
     Member(Unfit),
     /// This node's private key is not the key of its member.
     WrongKey,
-    /// This node has no mesh time that can stamp a join: none yet, one with an unknown
-    /// error, or one whose later edge is before the Unix epoch.
-    Unsynced,
-    /// A join request names more than 64 status channels.
-    Status(status::Many),
     /// The pool has no block now (`Exhausted` or `Refused`). Try again later. For the
     /// write of the log, the group takes no proposal and no message until the write
-    /// ends. For the answer to a forwarded proposal, the group did not see the
-    /// proposal.
+    /// ends. For the answer to a forwarded proposal, the peer gets no answer, and the
+    /// group can hold the entry of the proposal.
     Pool(block::Error),
+    /// A message on a stream is the byte form of no message, or is not one that its
+    /// stream carries. The stream stopped with code 2, but after the answer only the
+    /// half that `serve` reads stopped.
+    Malformed,
+    /// A stream of a peer, or its session, failed.
+    Stream(transport::Error),
     /// The group stopped.
     Stopped(Stopped),
 }
@@ -70,22 +75,22 @@ impl fmt::Display for Error {
                 "the peer with the public key {peer} forwarded a change, but no voter \
                  holds that key"
             ),
-            Self::Grant(error) => error.fmt(f),
+            Self::Claim(error) => error.fmt(f),
             Self::NotMember(key) => {
                 write!(f, "node {key} is not a member of the region")
             }
+            Self::NoVote => f.write_str(
+                "this node is not a voter, and only a voter proposes a change",
+            ),
             Self::Member(refused) => refused.fmt(f),
             Self::WrongKey => {
                 f.write_str("the private key of this node is not the key of its member")
             }
-            Self::Unsynced => f.write_str(
-                "this node has no mesh time with a known error at or after the Unix \
-                 epoch, so it stamps no join",
-            ),
-            Self::Status(many) => many.fmt(f),
             Self::Pool(cause) => {
                 write!(f, "the pool has no block for the mesh now: {cause}")
             }
+            Self::Malformed => f.write_str("a message on a mesh stream is not valid"),
+            Self::Stream(cause) => write!(f, "a mesh stream failed: {cause}"),
             Self::Stopped(stopped) => write!(f, "the group stopped: {stopped}"),
         }
     }
@@ -105,15 +110,21 @@ impl From<raft::Error> for Error {
     }
 }
 
-impl From<grant::Error> for Error {
-    fn from(error: grant::Error) -> Self {
-        Self::Grant(error)
+impl From<claim::Error> for Error {
+    fn from(error: claim::Error) -> Self {
+        Self::Claim(error)
+    }
+}
+
+impl From<transport::Error> for Error {
+    fn from(error: transport::Error) -> Self {
+        Self::Stream(error)
     }
 }
 
 /// Why a group stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Stopped {
+pub enum Stopped {
     /// A write of the log failed, so `raft` cannot go on. Open the mesh again.
     Write(log::Error),
     /// The committed change at `at` has 0 bytes or a kind that this build does not
@@ -142,3 +153,5 @@ impl fmt::Display for Stopped {
         }
     }
 }
+
+impl std::error::Error for Stopped {}

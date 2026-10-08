@@ -6,11 +6,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use raft::{Grant, Position, Proof, Signature, Term};
+use block::{Block, Pool};
+use raft::{Change, Grant, Position, Proof, Signature, Term, Voters};
 use types::channel;
 use types::name::Name;
 use types::node::{self, PublicKey};
 use types::time::{Span, Stamp};
+
+/// A block of `pool` that holds `bytes`.
+pub(crate) fn block(pool: &Pool, bytes: &[u8]) -> Result<Block, block::Error> {
+    let mut block = pool.alloc(bytes.len())?;
+    block.copy_from_slice(bytes);
+    Ok(block.freeze())
+}
 
 /// Takes `N` bytes.
 pub(crate) fn take<const N: usize>(bytes: &mut &[u8]) -> Option<[u8; N]> {
@@ -235,6 +243,35 @@ pub(crate) fn put_proof(proof: &Proof, out: &mut Vec<u8>) {
         put_key(voter, out);
         put_signature(signature, out);
     }
+}
+
+/// Adds a change: its incoming keys, its outgoing keys (each as [`put_keys`]), its
+/// votes as [`put_proof`], then the leader's signature.
+///
+/// # Panics
+///
+/// When the change or a vote has no signature, as [`put_signature`].
+pub(crate) fn put_change(change: &Change, out: &mut Vec<u8>) {
+    put_keys(&change.voters.incoming, out);
+    put_keys(&change.voters.outgoing, out);
+    put_proof(&change.votes, out);
+    put_signature(change.signature, out);
+}
+
+/// Takes what [`put_change`] gives. `None` when keys or voters are not in rising
+/// order.
+pub(crate) fn take_change(bytes: &mut &[u8]) -> Option<Change> {
+    let voters = Voters {
+        incoming: take_keys(bytes)?,
+        outgoing: take_keys(bytes)?,
+    };
+    let proof = take_proof(bytes)?;
+    let signature = Some(take_signature(bytes)?);
+    Some(Change {
+        voters,
+        votes: proof,
+        signature,
+    })
 }
 
 /// Takes what [`put_bool`] gives, or a presence byte. `None` for a byte that is

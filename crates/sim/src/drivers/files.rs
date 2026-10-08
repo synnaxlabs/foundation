@@ -1,5 +1,6 @@
 //! The `env::files` drivers of a simulated node.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -54,7 +55,7 @@ impl env::files::Driver for Node {
                 unreachable!("invariant: an open gives a file")
             };
             let node = self.clone();
-            let path = path.to_path_buf();
+            let path = RefCell::new(path.to_path_buf());
             let descriptor: Box<dyn env::files::Descriptor> = Box::new(Descriptor {
                 node,
                 path,
@@ -128,8 +129,8 @@ impl Drop for Wait {
 /// One open file of a node. A drop closes it.
 struct Descriptor {
     node: Node,
-    /// The path that opened it.
-    path: PathBuf,
+    /// Its path now: a rename changes it.
+    path: RefCell<PathBuf>,
     handle: Handle,
     len: u64,
 }
@@ -147,7 +148,7 @@ impl env::files::Descriptor for Descriptor {
             bytes,
         };
         let held = Some(Held::Parts(parts.to_vec()));
-        let wait = self.node.submit(&self.path, call, held);
+        let wait = self.node.submit(&self.path.borrow(), call, held);
         Box::pin(async move { wait.await.result.map(drop) })
     }
 
@@ -158,7 +159,9 @@ impl env::files::Descriptor for Descriptor {
             offset,
             len,
         };
-        let wait = self.node.submit(&self.path, call, Some(Held::Into(into)));
+        let wait = self
+            .node
+            .submit(&self.path.borrow(), call, Some(Held::Into(into)));
         Box::pin(async move {
             let Ended { result, held } = wait.await;
             let (Done::Read(bytes), Some(Held::Into(mut into))) = (result?, held)
@@ -174,11 +177,39 @@ impl env::files::Descriptor for Descriptor {
         let call = Call::Sync {
             handle: self.handle,
         };
-        self.node.request(&self.path, call, drop)
+        self.node.request(&self.path.borrow(), call, drop)
+    }
+
+    fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
+        let call = Call::Rename {
+            handle: self.handle,
+            to: to.to_path_buf(),
+        };
+        let wait = self.node.submit(from, call, None);
+        Box::pin(async move {
+            wait.await.result?;
+            *self.path.borrow_mut() = to.to_path_buf();
+            Ok(())
+        })
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
         Box::pin(Close(Some(*self)))
+    }
+
+    fn remove(
+        self: Box<Self>,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<(), env::files::Error>>>> {
+        let call = Call::Unlink {
+            handle: self.handle,
+        };
+        let wait = self.node.submit(&path, call, None);
+        Box::pin(async move {
+            let result = wait.await.result.map(drop);
+            Close(Some(*self)).await;
+            result
+        })
     }
 }
 

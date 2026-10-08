@@ -14,6 +14,7 @@ cargo-fuzz = true
 block = { path = "../crates/block" }
 buffer = { path = "../crates/buffer" }
 codec = { path = "../crates/codec" }
+config = { path = "../crates/config" }
 config-hcl = { path = "../crates/config-hcl" }
 connector-modbus = { path = "../crates/connector-modbus" }
 crc32c = "0.6.8"
@@ -46,6 +47,13 @@ bench = false
 [[bin]]
 name = "codec_series"
 path = "fuzz_targets/codec_series.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_check"
+path = "fuzz_targets/config_check.rs"
 test = false
 doc = false
 bench = false
@@ -95,6 +103,20 @@ bench = false
 [[bin]]
 name = "mesh_change"
 path = "fuzz_targets/mesh_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_entries"
+path = "fuzz_targets/mesh_entries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_message"
+path = "fuzz_targets/mesh_message.rs"
 test = false
 doc = false
 bench = false
@@ -193,6 +215,13 @@ bench = false
 [[bin]]
 name = "types_sample"
 path = "fuzz_targets/types_sample.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spec_data_type"
+path = "fuzz_targets/spec_data_type.rs"
 test = false
 doc = false
 bench = false

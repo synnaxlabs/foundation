@@ -13,7 +13,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
@@ -90,8 +90,8 @@ impl Shard {
         block.freeze()
     }
 
-    /// Makes the ring file with `len` zero bytes and no header.
-    async fn zeroed(&self, len: u64) {
+    /// Makes the ring file with `len` zero bytes and no header, when no file is there.
+    async fn create_zeroed(&self, len: u64) {
         self.memory
             .files()
             .open(FilePath::new(RING), Mode::Create { len })
@@ -403,6 +403,134 @@ where
     let (mut sim, handle) = start(seed, memory, main);
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
+}
+
+/// The result of a call to the memory driver, which ends at once.
+fn ready<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("a memory call ends at once"),
+    }
+}
+
+#[test]
+fn a_memory_rename_to_a_taken_name_spelled_with_a_dot_gives_exists() {
+    let files = Memory::default().files();
+    let create = Mode::Create { len: 4_096 };
+    drop(ready(files.open(FilePath::new("b"), create)).unwrap());
+    let mut file = ready(files.open(FilePath::new("a"), create)).unwrap();
+    let found = ready(file.rename(FilePath::new("./b")));
+    assert_eq!(found, Err(FileError::Exists { path: "./b".into() }));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, [PathBuf::from("a"), PathBuf::from("b")]);
+    ready(file.rename(FilePath::new("./c"))).unwrap();
+    let reopened = ready(files.open(FilePath::new("c"), Mode::Read)).unwrap();
+    assert_eq!(reopened.len(), 4_096);
+}
+
+#[test]
+fn a_memory_path_spelled_with_a_dot_names_the_same_file_in_each_call() {
+    let memory = Memory::default();
+    let files = memory.files();
+    let create = Mode::Create { len: 4_096 };
+    let mut file = ready(files.open(FilePath::new("./a"), create)).unwrap();
+    drop(ready(files.open(FilePath::new("a"), create)).unwrap());
+    assert_eq!(memory.bytes("./a").len(), 4_096);
+    ready(file.rename(FilePath::new("b"))).unwrap();
+    ready(files.remove(FilePath::new("./b"))).unwrap();
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(names, Vec::<PathBuf>::new());
+}
+
+#[test]
+fn a_memory_path_with_a_trailing_slash_names_only_a_directory() {
+    let files = Memory::default().files();
+    drop(ready(files.open(FilePath::new("a"), Mode::Create { len: 1 })).unwrap());
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("a/", Mode::Write),
+        ("a/.", Mode::Read),
+        ("a//", Mode::Read),
+        ("a/", Mode::Create { len: 1 }),
+        ("b/", Mode::Create { len: 1 }),
+        ("b/", Mode::Read),
+        ("b/.", Mode::Read),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("a/"))));
+    let names = ready(files.list(FilePath::new(""))).unwrap();
+    assert_eq!(
+        names,
+        [PathBuf::from("a")],
+        "a refused remove keeps the file"
+    );
+    for path in ["b/", "a"] {
+        results.push(ready(files.remove(FilePath::new(path))));
+    }
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let expected = [
+        Err(io("a/", Operation::Open, 20)),
+        Err(io("a/.", Operation::Open, 20)),
+        Err(io("a//", Operation::Open, 20)),
+        Err(io("a/", Operation::Open, 21)),
+        Err(io("b/", Operation::Open, 21)),
+        Err(FileError::NotFound { path: "b/".into() }),
+        Err(FileError::NotFound { path: "b/.".into() }),
+        Err(io("a/", Operation::Remove, 20)),
+        Ok(()),
+        Ok(()),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_memory_path_of_the_data_directory_names_no_file() {
+    let files = Memory::default().files();
+    let io = |path: &str, operation, code| FileError::Io {
+        path: path.into(),
+        operation,
+        code,
+    };
+    let mut results = Vec::new();
+    for (path, mode) in [
+        ("./", Mode::Read),
+        ("./", Mode::Write),
+        (".", Mode::Read),
+        (".", Mode::Create { len: 1 }),
+    ] {
+        results.push(ready(files.open(FilePath::new(path), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new("."))));
+    let expected = [
+        Err(io("./", Operation::Open, 21)),
+        Err(io("./", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Open, 21)),
+        Err(io(".", Operation::Remove, 21)),
+    ];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn a_memory_empty_path_names_no_file() {
+    let files = Memory::default().files();
+    let mut results = Vec::new();
+    for mode in [Mode::Read, Mode::Write, Mode::Create { len: 1 }] {
+        results.push(ready(files.open(FilePath::new(""), mode)).map(drop));
+    }
+    results.push(ready(files.remove(FilePath::new(""))));
+    let not_found = || FileError::NotFound { path: "".into() };
+    let expected = [Err(not_found()), Err(not_found()), Err(not_found()), Ok(())];
+    assert_eq!(results, expected);
+    assert_eq!(
+        ready(files.list(FilePath::new(""))).unwrap(),
+        Vec::<PathBuf>::new()
+    );
 }
 
 #[test]
@@ -1337,7 +1465,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
         let blocks = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
         let files = shard.memory.files();
         files.remove(FilePath::new(RING)).await.expect("removes");
-        shard.zeroed(AREA_START).await;
+        shard.create_zeroed(AREA_START).await;
         shard.memory.put(RING, 0, &blocks);
         let opened = shard
             .open(layout(2 * AREA, BODY_MAX), &mut Slots::new())
@@ -1355,7 +1483,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
 #[test]
 fn a_file_shorter_than_the_header_blocks_is_not_read() {
     run(17, Memory::default(), |shard| async move {
-        shard.zeroed(BLOCK).await;
+        shard.create_zeroed(BLOCK).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(
             opened.map(drop),
@@ -1370,7 +1498,7 @@ fn a_file_shorter_than_the_header_blocks_is_not_read() {
 #[test]
 fn a_file_with_no_header_is_missing() {
     run(11, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA).await;
+        shard.create_zeroed(AREA_START + AREA).await;
         shard.memory.put(RING, 0, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
@@ -1381,7 +1509,7 @@ fn a_file_with_no_header_is_missing() {
 #[test]
 fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
     run(11, Memory::default(), |shard| async move {
-        shard.zeroed(AREA_START + AREA).await;
+        shard.create_zeroed(AREA_START + AREA).await;
         shard.memory.put(RING, COVER, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
@@ -1678,7 +1806,7 @@ fn a_ring_with_no_checkpoint_takes_the_layout_of_the_open() {
 /// An open makes a ring with no checkpoint again. A crash at any point of it leaves
 /// a ring that opens: with the layout of its checkpoint when it has one, or else
 /// with the layout of that open. The cuts leave each state that the remake goes
-/// through.
+/// through, and the file with no bytes that a crash in its create leaves.
 #[test]
 fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
     let (old, new) = (layout(2 * AREA, BODY_MAX), layout(AREA, BODY_MAX));
@@ -1701,7 +1829,7 @@ fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
             }
             ended
         });
-        let zero = lens.map(Found::Unwritten);
+        let zero = [0, lens[0], lens[1]].map(Found::Unwritten);
         let all = [Found::Absent, Found::Written].into_iter().chain(zero);
         assert_eq!(left, all.collect(), "{crash:?}");
     }
@@ -3013,6 +3141,23 @@ fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
 }
 
 #[test]
+fn a_header_with_an_area_under_four_records_is_unfit() {
+    run(157, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = 3 * BLOCK;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area,
+            body_max: BODY_MAX,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
+    });
+}
+
+#[test]
 fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     let area = u64::MAX - 4095;
     assert_eq!(
@@ -3046,9 +3191,9 @@ fn each_open_starts_a_new_chain() {
 /// it has blocks opens and takes its largest record.
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
-    for area in [2 * BLOCK, AREA] {
+    for ring in [least(BODY_MAX), layout(AREA, BODY_MAX)] {
         run(24, Memory::default(), move |shard| async move {
-            let ring = layout(area, BODY_MAX);
+            let area = ring.area();
             for _ in 0..area / BLOCK {
                 drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
             }
@@ -3162,6 +3307,38 @@ fn a_failed_record_write_ends_the_buffer_with_its_error() {
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             Err(Rejected::Files(failed))
         );
+    })
+    .expect("the buffer ends");
+}
+
+/// A `Commit` answers only for the entries appended before its call: past the drop,
+/// a later failed write does not change its result.
+#[test]
+fn a_commit_held_past_the_drop_gives_ok_when_a_later_write_fails() {
+    let (mut sim, node) = create_node(113);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let early = buffer.committed();
+        assert_eq!(buffer.committed().await, Ok(()));
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, Some(40), Parts::default())])
+            .expect("queues");
+        let late = buffer.committed();
+        drop(buffer);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(early.await, Ok(()));
+        assert_eq!(late.await, Err(failed));
     })
     .expect("the buffer ends");
 }
@@ -3944,8 +4121,8 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
     });
 }
 
-/// A `Commit` taken before a later append and held past the drop resolves only when
-/// the task wrote that append and ended, so a reopen after it recovers everything.
+/// A `Commit` taken before a later append and held past the drop resolves once the
+/// task ended, here after it wrote that append, so a reopen recovers both entries.
 #[test]
 fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
     run(137, Memory::default(), |shard| async move {
@@ -3983,6 +4160,66 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
             buffer.tail(slots.assign(key(1)), Path::Live),
             tail(2, Some(2))
         );
+    });
+}
+
+/// A drop while a commit runs, with nothing queued, ends the task at the end of that
+/// commit: not at once, and not at its next deadline.
+#[test]
+fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
+    run(162, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        drop(buffer);
+        shard.clock.sleep(tenths(1)).await;
+        assert_eq!(shard.memory.open_files(), 1, "the sync still runs");
+        shard.clock.sleep(tenths(2)).await;
+        assert_eq!(shard.memory.open_files(), 0, "the task ended at the sync");
+    });
+}
+
+/// A drop while a commit runs ends the task when that commit fails: it never writes
+/// the entries queued at the drop, nor waits for its next deadline.
+#[test]
+fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
+    run(161, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let opened = shard.memory.syncs();
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues while the first sync runs");
+        let commit = buffer.committed();
+        drop(buffer);
+        let dropped = shard.clock.now();
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(commit.await, Err(failed));
+        assert_eq!(shard.clock.now() - dropped, tenths(2), "at the failed sync");
+        assert_eq!(shard.memory.syncs() - opened, 1, "no write after the drop");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
     });
 }
 

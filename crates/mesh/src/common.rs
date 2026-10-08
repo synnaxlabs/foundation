@@ -5,24 +5,30 @@ use std::rc::Rc;
 
 use block::Pool;
 use raft::{
-    Answer, Body, Change, Data, Entry, Grant, Message, Position, Proof, Ready,
-    Signature, Term, Voters,
+    Answer, Body, Data, Entry, Grant, Message, Position, Proof, Ready, Signature, Term,
+    Voters,
 };
 use transport::Address;
 use types::channel;
 use types::name::Name;
 use types::node::{self, PrivateKey, PublicKey, SealKey};
+use types::time::{Span, Stamp};
 
 use crate::bytes::{put_channel, put_count, put_name};
 use crate::card::{self, Card};
+use crate::change::{Change, Join};
+use crate::claim::Signer;
 use crate::ed25519;
-use crate::grant::Signer;
 use crate::member::Member;
 use crate::status::Status;
-use crate::ticket::{Ticket, Voter};
+use crate::ticket::{Options, Ticket, Voter};
 
 /// The term of each message.
 pub(crate) const TERM: Term = Term(5);
+
+pub(crate) const EXPIRY: Stamp = Stamp::from_nanos(1_000);
+const BEFORE_EXPIRY: Stamp = Stamp::from_nanos(999);
+pub(crate) const EPHEMERAL: Span = Span::from_nanos(60);
 
 pub(crate) fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
@@ -98,9 +104,10 @@ pub(crate) fn create_members(ids: &[u8]) -> Vec<Member> {
     ids.iter().map(|&id| member(id)).collect()
 }
 
-/// A pool of 4 MiB.
+/// A pool of 1 MiB. It reserves 51 MiB, so the tests of 8 threads stay under the
+/// 4 GiB that CI gives a test process.
 pub(crate) fn create_pool() -> Rc<Pool> {
-    let config = block::Config { budget: 4 << 20 };
+    let config = block::Config { budget: 1 << 20 };
     let memory = block::Heap::new(config.reservation());
     Rc::new(Pool::new(config, memory))
 }
@@ -113,6 +120,7 @@ pub(crate) fn message(from: u8, to: u8, body: Body) -> Message {
         term: TERM,
         body,
         proof: None,
+        chain: Vec::new(),
     }
 }
 
@@ -134,9 +142,48 @@ pub(crate) fn granted(voter: u8, grant: Grant, candidate: u8) -> Message {
     ready.messages.remove(0)
 }
 
+/// `voter`'s signature of its `grant` to `candidate` in `TERM`.
 pub(crate) fn signature(voter: u8, grant: Grant, candidate: u8) -> Signature {
-    let (_, signature) = granted(voter, grant, candidate).claims().next().unwrap();
-    signature.unwrap()
+    grant_in(TERM, voter, grant, candidate)
+}
+
+/// `voter`'s signature of its `grant` to `candidate` in `term`.
+pub(crate) fn grant_in(
+    term: Term,
+    voter: u8,
+    grant: Grant,
+    candidate: u8,
+) -> Signature {
+    grant_signed(term, voter, voter, grant, candidate)
+}
+
+/// The signature of the `grant` of `voter` to `candidate` in `term`, made with the
+/// private key of `signer`: a forgery unless `signer` is `voter`.
+pub(crate) fn grant_signed(
+    term: Term,
+    voter: u8,
+    signer: u8,
+    grant: Grant,
+    candidate: u8,
+) -> Signature {
+    let body = reply_body(grant, Answer::Granted(None));
+    let mut ready = Ready {
+        messages: vec![Message {
+            term,
+            ..message(voter, candidate, body)
+        }],
+        ..Ready::default()
+    };
+    Signer::new(key(voter), &private(signer)).sign(&mut ready);
+    match ready.messages.remove(0).body {
+        Body::PreVoteReply {
+            answer: Answer::Granted(signature),
+        }
+        | Body::VoteReply {
+            answer: Answer::Granted(signature),
+        } => signature.expect("`sign` signs the grant"),
+        body => unreachable!("a grant answers with {body:?}"),
+    }
 }
 
 /// `body` from `leader` to `to`, with the leader's votes from 1, 2 and 3, signed.
@@ -145,18 +192,44 @@ pub(crate) fn signature(voter: u8, grant: Grant, candidate: u8) -> Signature {
 ///
 /// When `leader` is not 1, 2 or 3: a proof holds its candidate as a voter.
 pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
+    proven_in(TERM, leader, to, body)
+}
+
+/// As [`proven`], in `term`.
+pub(crate) fn proven_in(term: Term, leader: u8, to: u8, body: Body) -> Message {
     assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
-    let vote = |voter| {
-        let signed = (voter != leader).then(|| signature(voter, Grant::Vote, leader));
+    proven_at(
+        leader,
+        to,
+        term,
+        &[1, 2, 3].map(|voter| (voter, voter)),
+        body,
+    )
+}
+
+/// `body` from `leader` to `to` in `term`, signed, with the leader's vote from each
+/// `(voter, signer)`, which the private key of `signer` signs. The leader's own vote
+/// carries no signature.
+pub(crate) fn proven_at(
+    leader: u8,
+    to: u8,
+    term: Term,
+    votes: &[(u8, u8)],
+    body: Body,
+) -> Message {
+    let vote = |&(voter, signer): &(u8, u8)| {
+        let signed = (voter != leader)
+            .then(|| grant_signed(term, voter, signer, Grant::Vote, leader));
         (key(voter), signed)
     };
     let proof = Proof {
         grant: Grant::Vote,
         candidate: key(leader),
-        voters: [1, 2, 3].map(vote).into(),
+        voters: votes.iter().map(vote).collect(),
     };
     let mut ready = Ready {
         messages: vec![Message {
+            term,
             proof: Some(proof),
             ..message(leader, to, body)
         }],
@@ -166,20 +239,98 @@ pub(crate) fn proven(leader: u8, to: u8, body: Body) -> Message {
     ready.messages.remove(0)
 }
 
+pub(crate) fn index(bits: u128) -> channel::Key {
+    channel::Key::from_u128(bits)
+}
+
+pub(crate) fn name(text: &str) -> Name {
+    text.parse().unwrap()
+}
+
+pub(crate) fn options(prefix: &str, reusable: bool) -> Options {
+    Options {
+        prefix: name(prefix),
+        reusable,
+        expiry: EXPIRY,
+        ephemeral: Some(EPHEMERAL),
+    }
+}
+
+pub(crate) fn record(id: u8, options: Options) -> Change {
+    Change::Ticket {
+        public_key: public(id),
+        options,
+    }
+}
+
+/// The join of node `id` with the name `name_text`, which ticket `ticket_id` admits.
+pub(crate) fn join(ticket_id: u8, id: u8, name_text: &str) -> Join {
+    let card = signed(id, name_text);
+    Join {
+        ticket: public(ticket_id),
+        at: BEFORE_EXPIRY,
+        card: card::Unchecked {
+            key: key(id),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        },
+        admission: ticket(ticket_id).admission(&card),
+        status: status([(name("disk"), index(9))]),
+    }
+}
+
+pub(crate) fn home(i: u128, h: u128) -> Change {
+    Change::Home {
+        index: index(i),
+        home: node::Key::from_u128(h),
+    }
+}
+
+pub(crate) fn with_status(mut join: Join, status: &[(&str, u128)]) -> Join {
+    let map = status.iter().map(|&(text, key)| (name(text), index(key)));
+    join.status = Status::new(map.collect()).unwrap();
+    join
+}
+
+// The vote of each of `voted` for `leader` in `term`, each signed but the leader's
+// own.
+fn votes(term: Term, leader: u8, voted: &[u8]) -> Proof {
+    let vote = |&voter: &u8| {
+        let signed =
+            (voter != leader).then(|| grant_in(term, voter, Grant::Vote, leader));
+        (key(voter), signed)
+    };
+    Proof {
+        grant: Grant::Vote,
+        candidate: key(leader),
+        voters: voted.iter().map(vote).collect(),
+    }
+}
+
 /// The configuration entry `voters` that `leader` wrote at `at`, with its votes from
-/// 1, 2 and 3, signed as `sign` signs a change.
+/// 1, 2 and 3 in the term of `at`, signed as `sign` signs a change.
 ///
 /// # Panics
 ///
 /// When `leader` is not 1, 2 or 3, as [`proven`].
 pub(crate) fn change(leader: u8, at: Position, voters: Voters) -> Entry {
-    let to = if leader == 1 { 2 } else { 1 };
-    let proof = proven(leader, to, Body::HeartbeatReply).proof;
+    assert!((1..=3).contains(&leader), "leader {leader} is not a voter");
+    change_voted(leader, at, voters, &[1, 2, 3])
+}
+
+/// The configuration entry `voters` that `leader` wrote at `at`, with the vote of
+/// each of `voted` in the term of `at`, signed as `sign` signs a change.
+pub(crate) fn change_voted(
+    leader: u8,
+    at: Position,
+    voters: Voters,
+    voted: &[u8],
+) -> Entry {
     let entry = Entry {
         at,
-        data: Data::Voters(Change {
+        data: Data::Voters(raft::Change {
             voters,
-            votes: proof.expect("a proven message holds a proof"),
+            votes: votes(at.term, leader, voted),
             signature: None,
         }),
     };

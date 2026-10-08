@@ -20,27 +20,16 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 
 ## Each merged PR
 
-For each code PR, launch a fresh subagent with the PR number. It checks, with file:line:
+For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
+number, its merge commit, its issue, and its crates. It checks tests, the review trail,
+design, performance, and defects, by the rules at the merge commit, never by a rule in
+an open PR or in your branch. Check each problem that it reports yourself, and drop the
+ones you cannot confirm. Post its verdict as one comment on the PR: your name line, then
+its rating and summary as given, then each problem you confirmed and each check that
+passed. Then act on each problem:
 
-- **Tests.** They fail when the change is reverted. They test behavior, not private
-  state. They cover the failure paths, not only the happy path.
-- **Review trail.** Every round finished before the merge. Each finding was fixed, or
-  deferred to a linked issue with the architect's OK in a risk crate. Each ruling and
-  surface in the merged code has the architect's approval of that meaning.
-- **Design.** It fits the crate's section of `docs/decisions.md`. Each public item has a
-  caller on the path. No patch hides a cause.
-- **Performance.** For a change on a hot path, the PR answers the six questions of
-  `docs/claude/performance.md` with numbers for `main` and the PR on a named machine,
-  and the `performance` reviewer ran. It also finds a hot path that the PR did not
-  declare, and each allocation, copy, lock, or wakeup on it that the rules forbid.
-- **Defects** it can show.
-
-It also gives the rating and summary that `/review` "Rating" defines. It judges the
-PR by the rules at its merge commit (`git show <merge>:<path>`), never by a rule in an
-open PR or in your branch. Post the verdict as one comment on the PR that starts with
-them, as given. Then act on each problem:
-
-- A defect: an issue with its `crate:` label.
+- A defect: an item of an open issue in its crate when its fix is a small change, else
+  an issue with its `crate:` label (`docs/coordination.md`, "Small changes").
 - A contract question: send it to the crate's architect.
 - A gap in the process that let it through: fix the rule at its cause (The bar).
 
@@ -68,10 +57,12 @@ person.
 ## Red-team PRs
 
 Each red-team PR waits for your approval before it merges. Run `/review <pr>`, and check
-that each new test fails on the code it targets. Post one comment that starts with the
-rating and summary of the last round, as given, then the line
-``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. A
-later push needs a new approval.
+that each new test fails on the code it targets. Post one comment that starts with its
+name line, then the rating and summary of the last round, as given, then the line
+``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. Send
+each approval, with the PR number and the sha, to `laptop.monitor`, which approves the
+PR on the person's account, marks it ready, and queues it. A later push needs a new
+approval.
 
 ## The bar
 
@@ -82,10 +73,10 @@ later push needs a new approval.
 - You own the review and test rules: `.claude/skills/review/`, the gate and test rules
   in `.claude/skills/build/`, `.claude/agents/`, and `docs/claude/testing.md`. Collect
   the rule changes from your audits in one draft rule PR, and keep only one open at a
-  time. Send its link to `laptop.monitor` when it holds a set of rules, at most once
-  every two hours (12 a day). The monitor gets the person's approval, then marks it
-  ready and queues it.
+  time. Send its link to `laptop.monitor` when it holds a set of rules and its last
+  `/review` round finds nothing, at most once every two hours (12 a day). The monitor
+  gets the person's approval, then marks it ready and queues it.
 - Each day, post on the plan issue: code PRs merged, defects found after merge per
-  merged PR, performance findings after merge, acceptance scenarios passing, and review
-  rounds per PR.
+  merged PR, performance findings after merge, acceptance scenarios passing, review
+  rounds per PR, and PRs of under 50 lines.
 - Never weaken an oracle or a review rule to gain speed.

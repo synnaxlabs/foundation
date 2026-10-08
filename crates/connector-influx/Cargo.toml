@@ -6,14 +6,34 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-sim = ["dep:influxdb-line-protocol"]
+sim = [
+    "dep:bytes",
+    "dep:connector",
+    "connector/sim",
+    "dep:env",
+    "dep:http",
+    "dep:influxdb-line-protocol",
+]
 
 [dependencies]
+bytes = { workspace = true, optional = true }
+connector = { path = "../connector", optional = true }
+env = { path = "../env", optional = true }
+http = { workspace = true, optional = true }
 influxdb-line-protocol = { workspace = true, optional = true }
 types = { path = "../types" }
+unicode-properties.workspace = true
 
 [dev-dependencies]
+connector = { path = "../connector" }
+counting = { path = "../counting" }
 proptest.workspace = true
+sim = { path = "../sim" }
+
+[[test]]
+name = "memory"
+harness = false
+required-features = ["sim"]
 
 [lints]
 workspace = true

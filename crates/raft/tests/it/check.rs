@@ -20,7 +20,7 @@ fn edge() -> impl Strategy<Value = u64> {
     prop_oneof![0..4u64, Just(u64::MAX - 1), Just(u64::MAX)]
 }
 
-fn position() -> impl Strategy<Value = Position> {
+pub(crate) fn position() -> impl Strategy<Value = Position> {
     (edge(), edge()).prop_map(|(term, index)| Position {
         term: Term(term),
         index,
@@ -128,6 +128,7 @@ proptest! {
             term: Term(term),
             body,
             proof,
+            chain: Vec::new(),
         };
         if raft.step(message).is_err() {
             let after = (raft.hard(), raft.role(), raft.leader());
@@ -167,6 +168,7 @@ proptest! {
             term,
             body,
             proof: None,
+            chain: Vec::new(),
         };
         if raft.step(message).is_ok() {
             let term = raft.hard().term;

@@ -1,11 +1,15 @@
 //! The `raft` state of one region on disk: the hard state and the log entries.
 //!
 //! The log is the files `log-0`, `log-1`, and so on in one directory. A file holds
-//! records back to back, then zeros. One record is one [`Log::write`]: a header, then
-//! the body. The header holds its own check, the format version, the record's number,
-//! the length of the body, and the check of the body. Record numbers count up from 0
-//! through all files. A record that does not fit in the rest of a file starts the
-//! next file, or makes the file again, larger, when it holds no record.
+//! records back to back, then zeros. One record is one write of the log: a header,
+//! then the body. The header holds its own check, the format version, the record's
+//! number, the length of the body, and the check of the body. Record numbers count up
+//! from 0 through all files. A record that does not fit in the rest of a file starts
+//! the next file, or makes the file again, larger, when it holds no record.
+//!
+//! The directory also holds the file `lock`, which has no bytes. A log holds it open
+//! for writing while it lives, so a second open of the directory gives
+//! [`files::Error::Busy`] on it.
 //!
 //! A header never crosses a 512-byte sector: a record whose header would cross one
 //! starts at the next sector. A power cut keeps all or none of a sector, so a header
@@ -34,7 +38,7 @@ use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
 use crate::bytes::{
-    put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
+    block, put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
 
@@ -49,6 +53,8 @@ const SECTOR: usize = files::SECTOR;
 const SEGMENT: u64 = 1 << 20;
 /// The most bytes in one block of a read or a write.
 const CHUNK: usize = 64 << 10;
+/// The name of the file that a log holds open while it lives.
+const LOCK: &str = "lock";
 
 const NO_HARD: u8 = 0;
 const HARD: u8 = 1;
@@ -64,7 +70,7 @@ pub(crate) struct Stored {
 
 /// Why a log call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// A file call failed.
     Files(files::Error),
     /// The pool has no block for a read or a write.
@@ -83,7 +89,8 @@ pub(crate) enum Error {
         /// The version of the record.
         found: u16,
     },
-    /// A file in the directory of the log that is not the next log file.
+    /// A file in the directory of the log that is not the lock and not the next log
+    /// file.
     Stray {
         /// The file.
         path: PathBuf,
@@ -161,6 +168,9 @@ pub(crate) struct Log {
     last: u64,
     // A write failed or was dropped, so the end of the log is not known.
     poisoned: bool,
+    // Held so that a second open of `dir` fails. A write that starts a file lets go
+    // of `file`, so `file` does not do that.
+    _lock: File,
 }
 
 impl Log {
@@ -169,14 +179,19 @@ impl Log {
     /// durable when the call returns. A torn record at the end, which a crash leaves,
     /// is dropped.
     ///
+    /// One log at a time holds `dir`, from its open until it drops. A file call of a
+    /// write that was dropped can end after that.
+    ///
     /// # Errors
     ///
-    /// - [`Error::Files`] when a file call fails.
+    /// - [`Error::Files`] when a file call fails. It holds [`files::Error::Busy`] on
+    ///   the file `lock` of `dir` while another log holds `dir`.
     /// - [`Error::Pool`] when the largest block of `pool` is less than one sector of
     ///   512 bytes, or `pool` has no block for a read or a write.
     /// - [`Error::Corrupt`] when a record is not valid and is not a torn end.
     /// - [`Error::Version`] when a record has another format version.
-    /// - [`Error::Stray`] when `dir` holds a file that is not the next log file.
+    /// - [`Error::Stray`] when `dir` holds a file that is not the lock and not the
+    ///   next log file.
     pub(crate) async fn open(
         files: Files,
         dir: PathBuf,
@@ -187,14 +202,9 @@ impl Log {
             let requested = SECTOR;
             return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
         }
-        let names = match files.list(&dir).await {
-            Ok(names) => names,
-            Err(files::Error::NotFound { .. }) => {
-                files.create_dir(&dir).await?;
-                Vec::new()
-            }
-            Err(error) => return Err(error.into()),
-        };
+        files.create_dir(&dir).await?;
+        let lock = files.open(&dir.join(LOCK), Mode::Create { len: 0 }).await?;
+        let names = files.list(&dir).await?;
         let mut open = Vec::new();
         let mut segments = Vec::new();
         for path in sequence(&dir, names)? {
@@ -242,6 +252,7 @@ impl Log {
             next: scan.next,
             last: wide(scan.stored.entries.len()),
             poisoned: false,
+            _lock: lock,
         };
         Ok((log, scan.stored))
     }
@@ -372,9 +383,10 @@ fn start(end: usize) -> usize {
     }
 }
 
-// The log files among the `names` in `dir`, in number order. Each name must be
-// `log-<n>` for an `n` below the count, once.
-fn sequence(dir: &Path, names: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
+// The log files among the `names` in `dir`, in number order. Each name but that of
+// the lock must be `log-<n>` for an `n` below the count, once.
+fn sequence(dir: &Path, mut names: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
+    names.retain(|name| name != Path::new(LOCK));
     let mut paths = vec![None; names.len()];
     for name in names {
         let path = dir.join(&name);
@@ -421,10 +433,9 @@ async fn write_in_blocks(
             .expect("invariant: a block of the log is one sector or more");
         let len = if over == 0 { chunk } else { over }.min(bytes.len());
         let (rest, part) = bytes.split_at(bytes.len().saturating_sub(len));
-        let mut block = pool.alloc(part.len())?;
-        block.copy_from_slice(part);
+        let block = block(pool, part)?;
         let offset = at.saturating_add(wide(rest.len()));
-        file.write_at(offset, &[block.freeze()]).await?;
+        file.write_at(offset, &[block]).await?;
         *bytes = rest;
     }
     Ok(())
@@ -611,9 +622,7 @@ fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
             put_optional_proof(hard.proof.as_ref(), &mut body);
         }
     }
-    for entry in entries {
-        entry::encode(entry, &mut body);
-    }
+    entry::encode(entries, &mut body);
     let mut head = Vec::with_capacity(HEADER);
     head.extend(VERSION.to_le_bytes());
     head.extend(number.to_le_bytes());
@@ -657,10 +666,7 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         }
         _ => return None,
     }
-    let mut entries = Vec::new();
-    while !body.is_empty() {
-        entries.push(entry::decode(body)?);
-    }
+    let entries = entry::decode(std::mem::take(body))?;
     if !follows(wide(stored.entries.len()), &entries) {
         return None;
     }
@@ -740,9 +746,8 @@ mod tests {
     async fn put(node: &sim::node::Node, file: &str, offset: u64, bytes: &[u8]) {
         let path = Path::new(DIR).join(file);
         let file = node.files().open(&path, Mode::Write).await.unwrap();
-        let mut block = create_pool().alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        file.write_at(offset, &[block.freeze()]).await.unwrap();
+        let block = block(&create_pool(), bytes).unwrap();
+        file.write_at(offset, &[block]).await.unwrap();
         file.sync().await.unwrap();
     }
 
@@ -1683,15 +1688,13 @@ mod tests {
 
     #[test]
     fn refuses_a_file_that_is_not_the_next_log_file() {
-        for name in ["notes", "log-2", "log-01"] {
+        for name in ["notes", "log-2", "log-01", "lock-1"] {
             let (mut sim, node) = create_node(0);
             sim.run_on(&node, move |node, _| async move {
                 drop(open(&node).await.unwrap());
-                let mode = Mode::Create { len: 0 };
-                drop(node.files().open(&file(name), mode).await.unwrap());
-                node.files().sync_dir(Path::new(DIR)).await.unwrap();
             })
             .unwrap();
+            create_with_no_bytes(&mut sim, &node, &file(name));
             let error = stored(&mut sim, &node).unwrap_err();
             assert_eq!(error, Error::Stray { path: file(name) }, "{name}");
             assert_eq!(
@@ -1702,6 +1705,153 @@ mod tests {
                 )
             );
         }
+    }
+
+    fn busy() -> Error {
+        Error::Files(files::Error::Busy { path: file("lock") })
+    }
+
+    #[test]
+    fn a_second_open_gives_busy_on_the_lock_while_the_first_log_lives() {
+        for records in [0, 3] {
+            let (mut sim, node) = create_node(0);
+            sim.run_on(&node, move |node, _| async move {
+                let (mut first, _) = open(&node).await.unwrap();
+                for index in 1..=records {
+                    first.write(None, &[bytes(index, 100)]).await.unwrap();
+                }
+                drop(first);
+                let (first, _) = open(&node).await.unwrap();
+                assert_eq!(open(&node).await.unwrap_err(), busy(), "{records}");
+                let text = "file mesh/lock is open for writing in another handle";
+                assert_eq!(busy().to_string(), text);
+                drop(first);
+                let (_, stored) = open(&node).await.unwrap();
+                assert_eq!(wide(stored.entries.len()), records);
+            })
+            .unwrap();
+        }
+    }
+
+    // The write starts `log-1`, so the log lets go of `log-0` while the write runs.
+    #[test]
+    fn a_second_open_gives_busy_on_the_lock_while_a_write_starts_a_file() {
+        let (mut sim, node) = create_node(0);
+        let entries = [bytes(1, 100), bytes(2, narrow(SEGMENT))];
+        let written = entries.clone();
+        sim.run_on(&node, move |node, _| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            log.write(None, &written[..1]).await.unwrap();
+            let mut polls = 0_u32;
+            {
+                let mut write = pin!(log.write(None, &written[1..]));
+                while poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+                {
+                    assert_eq!(open(&node).await.unwrap_err(), busy(), "{polls}");
+                    polls = polls.saturating_add(1);
+                }
+            }
+            assert_ne!(polls, 0);
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, ["lock", "log-0", "log-1"].map(PathBuf::from));
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: entries.into(),
+        };
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    #[test]
+    fn an_open_that_meets_a_log_that_drops_gives_busy_or_each_entry() {
+        let mut wrong = Vec::new();
+        for steps in 0..32 {
+            let (mut sim, node) = create_node(0);
+            let result = sim
+                .run_on(&node, move |node, _| async move {
+                    let clock = node.clock();
+                    let (mut first, _) = open(&node).await.unwrap();
+                    first.write(None, &[bytes(1, 100)]).await.unwrap();
+                    let mut second = pin!(open(&node));
+                    for _ in 0..steps {
+                        let poll =
+                            poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx))).await;
+                        if let Poll::Ready(result) = poll {
+                            return result.map(|(_, stored)| stored.entries.len());
+                        }
+                        clock.sleep(Span::from_nanos(20_000)).await;
+                    }
+                    first
+                        .write(None, &[bytes(2, narrow(SEGMENT))])
+                        .await
+                        .unwrap();
+                    drop(first);
+                    second.await.map(|(_, stored)| stored.entries.len())
+                })
+                .unwrap();
+            if result != Err(busy()) && result != Ok(2) {
+                wrong.push((steps, result));
+            }
+        }
+        assert_eq!(wrong, []);
+    }
+
+    #[test]
+    fn a_power_cut_frees_the_lock_of_a_log_that_lives() {
+        let (mut sim, node) = create_node(0);
+        let own = node.clone();
+        let handle = node.shards().start(shard("holder"), move |_| async move {
+            let (mut log, _) = open(&own).await.unwrap();
+            log.write(None, &[bytes(1, 100)]).await.unwrap();
+            pending::<()>().await;
+        });
+        drop(handle.unwrap());
+        sim.run_for(Span::SECOND).unwrap();
+        sim.crash(&node, Crash::Power);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, 100)],
+        };
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    #[test]
+    fn opens_a_directory_that_holds_only_the_lock() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            let files = node.files();
+            files.create_dir(Path::new(DIR)).await.unwrap();
+            let mode = Mode::Create { len: 0 };
+            drop(files.open(&file("lock"), mode).await.unwrap());
+            assert_eq!(files.list(Path::new(DIR)).await, Ok(vec!["lock".into()]));
+        })
+        .unwrap();
+        assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
+    }
+
+    #[test]
+    fn refuses_a_lock_that_has_bytes() {
+        let (mut sim, node) = create_node(0);
+        sim.run_on(&node, |node, _| async move {
+            let files = node.files();
+            files.create_dir(Path::new(DIR)).await.unwrap();
+            let mode = Mode::Create { len: wide(SECTOR) };
+            drop(files.open(&file("lock"), mode).await.unwrap());
+        })
+        .unwrap();
+        let error = stored(&mut sim, &node).unwrap_err();
+        let length = files::Error::Length {
+            path: file("lock"),
+            expected: 0,
+            found: wide(SECTOR),
+        };
+        assert_eq!(error, Error::Files(length));
+        let text = "file mesh/lock has 512 bytes, but 0 bytes were expected";
+        assert_eq!(error.to_string(), text);
     }
 
     #[test]
@@ -1850,7 +2000,7 @@ mod tests {
                 log.write(None, std::slice::from_ref(entry)).await.unwrap();
             }
             let names = node.files().list(Path::new(DIR)).await.unwrap();
-            let expected = ["log-0", "log-1", "log-2"].map(PathBuf::from);
+            let expected = ["lock", "log-0", "log-1", "log-2"].map(PathBuf::from);
             assert_eq!(names, expected);
             Stored {
                 hard: Hard::default(),
@@ -1883,7 +2033,7 @@ mod tests {
                 (len, node.files().list(Path::new(DIR)).await.unwrap())
             })
             .unwrap();
-        assert_eq!(names, [PathBuf::from("log-0")]);
+        assert_eq!(names, ["lock", "log-0"].map(PathBuf::from));
         let expected = Stored {
             hard: Hard::default(),
             entries: vec![bytes(1, 10), bytes(2, len)],
@@ -1934,22 +2084,32 @@ mod tests {
     }
 
     /// Writes one record, with entry 1, to `log-0` and makes `log-1` with `len` bytes
-    /// and no record, then cuts the power.
+    /// and no record, then cuts the power. With no bytes, the cut is in its create.
     fn create_spare(sim: &mut Sim, node: &sim::node::Node, len: u64) {
         sim.run_on(node, move |node, _| async move {
             let (mut log, _) = open(&node).await.unwrap();
             log.write(None, &[bytes(1, 10)]).await.unwrap();
-            let mode = Mode::Create { len };
-            drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            if len > 0 {
+                let mode = Mode::Create { len };
+                drop(node.files().open(&file("log-1"), mode).await.unwrap());
+            }
             node.files().sync_dir(Path::new(DIR)).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        if len == 0 {
+            create_with_no_bytes(sim, node, &file("log-1"));
+        } else {
+            sim.crash(node, Crash::Power);
+        }
     }
 
     /// The files of a log after `create_spare`.
-    fn spare(len: u64) -> [(PathBuf, u64); 2] {
-        [("log-0".into(), SEGMENT), ("log-1".into(), len)]
+    fn spare(len: u64) -> [(PathBuf, u64); 3] {
+        [
+            ("lock".into(), 0),
+            ("log-0".into(), SEGMENT),
+            ("log-1".into(), len),
+        ]
     }
 
     fn removes_a_spare(len: u64) {
@@ -1960,7 +2120,7 @@ mod tests {
             let (mut log, stored) = open(&node).await.unwrap();
             assert_eq!(stored.entries, [bytes(1, 10)]);
             let names = node.files().list(Path::new(DIR)).await.unwrap();
-            assert_eq!(names, [PathBuf::from("log-0")]);
+            assert_eq!(names, ["lock", "log-0"].map(PathBuf::from));
             log.write(None, &[bytes(2, LARGE)]).await.unwrap();
         })
         .unwrap();
@@ -1996,6 +2156,10 @@ mod tests {
         }
     }
 
+    fn named((name, len): (&str, u64)) -> (PathBuf, u64) {
+        (name.into(), len)
+    }
+
     /// The name and the length of each file of the log.
     async fn lens(node: &sim::node::Node) -> Vec<(PathBuf, u64)> {
         let mut lens = Vec::new();
@@ -2007,18 +2171,51 @@ mod tests {
         lens
     }
 
-    /// Makes `log-0` with no bytes, as a crash before the allocation of a create
-    /// leaves it, then cuts the power.
+    /// Makes the file at `path` with no bytes through power crashes in its create.
+    /// The directory of `path` must be durable.
+    fn create_with_no_bytes(sim: &mut Sim, node: &sim::node::Node, path: &Path) {
+        for _ in 0..64 {
+            let (own, cut) = (node.clone(), path.to_owned());
+            let handle = node.shards().start(shard("create"), move |_| async move {
+                let mode = Mode::Create { len: SEGMENT };
+                drop(own.files().open(&cut, mode).await);
+                pending::<()>().await;
+            });
+            drop(handle.unwrap());
+            sim.run_for(Span::from_nanos(1_000)).unwrap();
+            sim.crash(node, Crash::Power);
+            let own = path.to_owned();
+            let len = sim
+                .run_on(node, move |node, _| async move {
+                    let opened = node.files().open(&own, Mode::Read).await;
+                    opened.ok().map(|file| file.len())
+                })
+                .unwrap();
+            match len {
+                Some(0) => return,
+                Some(_) => {
+                    let whole = path.to_owned();
+                    sim.run_on(node, move |node, _| async move {
+                        node.files().remove(&whole).await.unwrap();
+                        let dir = whole.parent().expect("a file in a directory");
+                        node.files().sync_dir(dir).await.unwrap();
+                    })
+                    .unwrap();
+                }
+                None => {}
+            }
+        }
+        panic!("64 power crashes in a create left no {}", path.display());
+    }
+
+    /// Makes `log-0` with no bytes through power crashes in its create.
     fn create_first_file_with_no_bytes(sim: &mut Sim, node: &sim::node::Node) {
         sim.run_on(node, |node, _| async move {
             node.files().create_dir(Path::new(DIR)).await.unwrap();
-            let mode = Mode::Create { len: 0 };
-            drop(node.files().open(&file("log-0"), mode).await.unwrap());
-            node.files().sync_dir(Path::new(DIR)).await.unwrap();
             node.files().sync_dir(Path::new("")).await.unwrap();
         })
         .unwrap();
-        sim.crash(node, Crash::Power);
+        create_with_no_bytes(sim, node, &file("log-0"));
     }
 
     #[test]
@@ -2031,7 +2228,8 @@ mod tests {
             assert_eq!(stored, Stored::default());
             log.write(None, &[bytes(1, 10)]).await.unwrap();
             drop(log);
-            assert_eq!(lens(&node).await, [(PathBuf::from("log-0"), SEGMENT)]);
+            let expected = [("lock", 0), ("log-0", SEGMENT)];
+            assert_eq!(lens(&node).await, expected.map(named));
         })
         .unwrap();
         sim.crash(&node, Crash::Power);
@@ -2061,7 +2259,7 @@ mod tests {
             path: file("log-0"),
         };
         assert_eq!(errors, (io("log-0", Operation::Remove), poisoned));
-        assert_eq!(lens, [(PathBuf::from("log-0"), 0)]);
+        assert_eq!(lens, [("lock", 0), ("log-0", 0)].map(named));
         sim.crash(&node, Crash::Power);
         assert_eq!(stored(&mut sim, &node), Ok(Stored::default()));
     }
@@ -2121,7 +2319,7 @@ mod tests {
                 assert_eq!(stored.entries.len(), 3);
                 log.write(None, &[bytes(4, LARGE)]).await.unwrap();
                 let names = node.files().list(Path::new(DIR)).await.unwrap();
-                assert_eq!(names, ["log-0", "log-1"].map(PathBuf::from));
+                assert_eq!(names, ["lock", "log-0", "log-1"].map(PathBuf::from));
             })
             .unwrap();
             sim.crash(&node, Crash::Power);
@@ -2140,7 +2338,7 @@ mod tests {
                 path: file("log-0"),
                 offset: starts[record],
             };
-            let kept = ["log-0", "log-1"].map(PathBuf::from).to_vec();
+            let kept = ["lock", "log-0", "log-1"].map(PathBuf::from).to_vec();
             assert_eq!((result, names), (Err(expected), kept), "record {record}");
         }
     }
@@ -2184,7 +2382,7 @@ mod tests {
                 let large = bytes(2, LARGE);
                 log.write(None, std::slice::from_ref(&large)).await.unwrap();
                 let names = node.files().list(Path::new(DIR)).await.unwrap();
-                assert_eq!(names, ["log-0", "log-1"].map(PathBuf::from));
+                assert_eq!(names, ["lock", "log-0", "log-1"].map(PathBuf::from));
                 Stored {
                     hard: Hard::default(),
                     entries: vec![bytes(1, 2000), large],
@@ -2207,7 +2405,7 @@ mod tests {
             })
             .unwrap();
         let len = wide(encode(0, None, &[bytes(1, LARGE)]).len());
-        assert_eq!(files, [(PathBuf::from("log-0"), len)]);
+        assert_eq!(files, [("lock", 0), ("log-0", len)].map(named));
     }
 
     #[test]
@@ -2480,18 +2678,15 @@ mod tests {
     #[test]
     fn a_record_after_a_stopped_first_record_starts_the_file_of_that_record() {
         let files = files_after_a_stopped_large_write(&[]);
-        assert_eq!(files, [(PathBuf::from("log-0"), 3_145_788)]);
+        assert_eq!(files, [("lock", 0), ("log-0", 3_145_788)].map(named));
     }
 
     // The record of 100 bytes fits in `log-0`, and the end of the log is in `log-1`.
     #[test]
     fn a_record_after_a_stopped_record_starts_the_file_of_that_record() {
         let files = files_after_a_stopped_large_write(&[10]);
-        let expected = [("log-0", SEGMENT), ("log-1", 3_145_788)];
-        assert_eq!(
-            files,
-            expected.map(|(name, len)| (PathBuf::from(name), len))
-        );
+        let expected = [("lock", 0), ("log-0", SEGMENT), ("log-1", 3_145_788)];
+        assert_eq!(files, expected.map(named));
     }
 
     // The sync that fails is the one of the third record, which the files keep or

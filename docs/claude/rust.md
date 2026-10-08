@@ -157,8 +157,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Determinism
 
 - Use `types::hash::Map` and `Set`, never std `HashMap` or `HashSet`. Their order and
-  hashes are the same in every run, so a simulated run replays. A map keyed by
-  outside input needs a keyed hasher with its key from `env` randomness (r16 43).
+  hashes are the same in every run, so a simulated run replays. A map whose keys a
+  party outside the node picks is a `BTreeMap`, unless the node limits those keys to a
+  small count (R16-7).
 - Hash iteration order never decides behavior. Sort, or use a `BTreeMap` (r16 44).
 - Never print a pointer. Addresses change from run to run (r16 45).
 - No mutable globals: no `thread_local!` and no `static` with interior mutability

@@ -1,9 +1,9 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
-use spec::definition::Definition;
+use spec::definition;
 use spec::node_settings::{Error, Policy};
 
-use crate::Found;
+use crate::{Definition, Found};
 
 const ZERO_SIZE: Code = Code::new("config.zero-size");
 const KEYS: [&str; 3] = ["select", "disk", "pool"];
@@ -11,8 +11,7 @@ const KEYS: [&str; 3] = ["select", "disk", "pool"];
 /// Checks a `node_settings` block and gives its policy. An unknown attribute stops the
 /// budget check, because it may be a budget under a wrong key.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let select = found.select(block, "nodes that it sets", "site_a.*");
     let disk = found.attribute(block, "disk", read::size);
     let pool = found.attribute(block, "pool", read::size);
@@ -20,7 +19,9 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         return None;
     };
     match Policy::new(select, disk, pool) {
-        Ok(policy) => Some(Definition::NodeSettings(policy)),
+        Ok(policy) => Some(Definition::Spec(definition::Definition::NodeSettings(
+            policy,
+        ))),
         Err(error) => {
             refuse(found, block, error);
             None

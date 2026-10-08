@@ -1,6 +1,7 @@
 //! Counts heap allocations, so a test can assert that code does not allocate, and
 //! finds freed blocks that hold given bytes, so a test can assert that code erases a
-//! secret before it frees it.
+//! secret before it frees it ([`Allocator`]). Counts the heap bytes held, so a test can
+//! bound the memory of a structure ([`Bytes`]).
 
 #![expect(unsafe_code, reason = "the allocator implements `GlobalAlloc`")]
 
@@ -9,6 +10,10 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize};
 use std::{fmt, hint, ptr, slice};
+
+mod bytes;
+
+pub use bytes::Bytes;
 
 /// An allocator that gets its memory from [`System`] and counts the allocations. Each
 /// `alloc`, `alloc_zeroed`, and `realloc` that succeeds counts as one; a failed one and
@@ -195,8 +200,8 @@ impl Drop for Running<'_> {
 }
 
 // SAFETY: every block comes from `System`, and each method keeps the contract of the
-// `System` call it makes. `realloc` is the trait's own, which calls `alloc` and
-// `dealloc`.
+// `System` call it makes. `realloc` is the trait's own, which allocates, copies, and
+// frees, because the scan of a free must read the old block.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
