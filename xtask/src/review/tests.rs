@@ -1226,6 +1226,8 @@ fn passes_a_round_whose_text_github_shows_as_text() {
         "[^a\\]b]: <source",
         "[^a b]: <source",
         "[^a\tb]: <source",
+        "[^a] <source",
+        "[^a]<source",
     ];
     for text in shown {
         let comment =

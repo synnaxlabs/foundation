@@ -34,10 +34,12 @@
   the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
   block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source,
   after the indent and the marks of quotes, list items, and footnote labels, starts
-  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. The
-  message names the line. GitHub reads some of these lines in a different way, and an
-  open `<!--` or `<details>` hides the text after it. A round comment that fails by
-  this rule gets an edit that puts the line in a code span, and the cutoff stays. In
+  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. A footnote label
+  here is as GitHub reads it: `[^`, one or more characters other than `]`, space, or
+  tab, then `]:`, with no backslash escapes. The message names the line. GitHub reads
+  some of these lines in a different way, and an open `<!--` or `<details>` hides the
+  text after it. A round comment that fails by this rule gets an edit that puts the
+  line in a code span, and the cutoff stays. In
   an old round, a `Hot path:` line, or a `Reviewers:` line of a round that does not
   parse, counts where GitHub shows it as a line of text of a paragraph, at any depth
   and any indent. A line of a code block or an HTML block does not count. Changed by
