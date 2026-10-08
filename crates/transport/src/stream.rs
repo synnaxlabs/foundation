@@ -1704,7 +1704,7 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    /// Sends `part` of a block of 4 bytes on a stream that finished, with
+    /// Sends `parts` of a block of 4 bytes on a stream that finished, with
     /// `try_send_parts` when `tried`, and gives the run.
     fn after_finish(parts: Vec<Part>, tried: bool) -> Result<(), sim::Error> {
         let (mut sim, ..) = testing::sessions(
