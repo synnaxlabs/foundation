@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use spec::channel::Channel;
+use spec::data_type::DataType;
 use spec::definition::Kind;
 use spec::region::Problem;
 use spec::subject::Subject;
@@ -1017,9 +1018,21 @@ fn apply_refuses_a_home_of_a_name_that_is_not_an_index_and_proposes_nothing() {
         lead(&mesh, &node.clock(), home(1)).await;
         let mut definitions = create_indexes(1);
         definitions.extend(create_subjects(&["plant.a"], 1));
+        let quality = spec::channel::Data::new(
+            channel::Key::from_u128(7),
+            None,
+            DataType::Quality,
+            None,
+        );
+        let data = Channel {
+            key: channel::Key::from_u128(1),
+            kind: spec::channel::Kind::Data(quality.unwrap()),
+        };
+        let data_name = Kind::Channel.key("plant.d").unwrap();
+        definitions.insert(data_name.clone(), Definition::Channel(data));
         let subject = name("plant.a.@subject");
         let absent = Kind::Channel.key("plant.i1").unwrap();
-        for index in [subject, absent] {
+        for index in [subject, absent, data_name] {
             let homes = [(index.clone(), name("plant.node1"))].into();
             let applied = mesh.apply(base(), definitions.clone(), homes).await;
             assert_eq!(applied, Err(Error::NotIndex(index.clone())));
