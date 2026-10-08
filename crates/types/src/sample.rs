@@ -471,6 +471,14 @@ mod tests {
     }
 
     #[test]
+    fn refuses_the_matrix_fuzz_inputs() {
+        let over = include_str!("../../../oracles/fuzz/types_sample/matrix_over");
+        let three = include_str!("../../../oracles/fuzz/types_sample/three_lengths");
+        assert_eq!(over.parse::<Type>(), Err(Error::Matrix));
+        assert_eq!(three.parse::<Type>(), Err(Error::Lengths));
+    }
+
+    #[test]
     fn gives_the_width_of_the_largest_matrix() {
         let max = matrix(Scalar::Uuid, u16::MAX, u16::MAX);
         assert_eq!(max.width(), Some(16 * 65_535 * 65_535));

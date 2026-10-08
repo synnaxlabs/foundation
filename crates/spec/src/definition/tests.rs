@@ -1402,14 +1402,22 @@ fn decodes_the_channel_fuzz_inputs_to_the_channel_reader() {
     let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/channel");
     let unit =
         include_bytes!("../../../../oracles/fuzz/spec_definition/channel_bool_unit");
+    let matrix_input =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/channel_matrix");
     let scalar = |element| DataType::Sample(sample::Type::Scalar(element));
-    let kpa = Unit::new("kPa").unwrap();
-    let data = Data::new(key(9), None, scalar(Scalar::F64), Some(kpa)).unwrap();
-    let channel = Channel {
-        key: key(7),
-        kind: channel::Kind::Data(data),
+    let channel = |data_type| {
+        let kpa = Unit::new("kPa").unwrap();
+        let data = Data::new(key(9), None, data_type, Some(kpa)).unwrap();
+        Ok(Definition::Channel(Channel {
+            key: key(7),
+            kind: channel::Kind::Data(data),
+        }))
     };
-    assert_eq!(Definition::decode(valid), Ok(Definition::Channel(channel)));
+    assert_eq!(Definition::decode(valid), channel(scalar(Scalar::F64)));
+    assert_eq!(
+        Definition::decode(matrix_input),
+        channel(matrix(Scalar::F32, 2, 3))
+    );
     assert_eq!(
         Definition::decode(unit),
         Err(Error::Channel {
