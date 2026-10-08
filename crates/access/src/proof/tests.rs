@@ -436,7 +436,7 @@ mod admit {
     }
 
     #[test]
-    fn keeps_each_subject_of_each_region_tree_by_its_tree_key() {
+    fn keeps_each_subject_of_each_region_tree_by_its_label() {
         let key = public(&pair(TEST_1));
         let subject = Definition::Subject(Subject::new(vec![key]).unwrap());
         let region: BTreeMap<Name, Definition> =
@@ -486,19 +486,16 @@ mod admit {
     }
 
     #[test]
-    fn refuses_a_subject_that_makes_no_subject_key() {
-        let reserved = name("ops.@subject");
-        let long = name(&"a".repeat(Name::MAX_BYTES));
-        for subject in [reserved, long] {
-            let hello = Hello {
-                subject: subject.clone(),
-                ..create_hello()
-            };
+    fn refuses_the_tree_key_of_a_listed_subject() {
+        let subject = name("ops.ana.@subject");
+        let hello = Hello {
+            subject: subject.clone(),
+            ..create_hello()
+        };
 
-            let error = admit(&listed(), NOW, hello).unwrap_err();
+        let error = admit(&listed(), NOW, hello).unwrap_err();
 
-            assert_eq!(error, Error::Unknown { subject });
-        }
+        assert_eq!(error, Error::Unknown { subject });
     }
 }
 
