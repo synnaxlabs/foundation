@@ -46,14 +46,11 @@ fn rules(policies: &[(&str, Policy)], connectors: &[&str]) -> Rules {
     let rooted = connectors.iter().map(|at| ("", name(at), connector()));
     let mut trees = Vec::<(&str, Tree)>::new();
     for (region, key, definition) in placed.chain(rooted) {
-        let at = match trees.iter().position(|(r, _)| *r == region) {
-            Some(at) => at,
-            None => {
-                trees.push((region, Tree::new()));
-                trees.len() - 1
-            }
-        };
-        trees[at].1.insert(key, definition);
+        if !trees.iter().any(|(r, _)| *r == region) {
+            trees.push((region, Tree::new()));
+        }
+        let (_, tree) = trees.iter_mut().find(|(r, _)| *r == region).unwrap();
+        tree.insert(key, definition);
     }
     Rules::new(trees.iter().map(|(r, tree)| (r.parse().unwrap(), tree)))
 }
