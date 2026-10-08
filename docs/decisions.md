@@ -3871,7 +3871,13 @@ How to read this record:
   and cancels it. `ctx` gives hub sessions, status, run commands, secrets, and cancel.
   `hub` and `home` enforce the rules. `connector` is a library of components plus
   ready-made compositions built only from public parts. Supersedes: r8 Q5 actor with
-  device hooks.
+  device hooks. `kind::Context` gives a run its name, config, cancel, clock,
+  randomness, network (`net`), and tasks, and `writer`, `reader`, and `status` come
+  with #1731 (`laptop.architect-2`, 2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6050855677). It is
+  not `Send`: a kind's own thread takes clones of the parts it needs
+  (`laptop.architect-2`, 2026-10-08T18:07:05Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6066078510).
 - **C5 + KINDS OWN THEIR CONFIG** Each kind owns parse, check, discover, and run, built
   on shared components. `config` never knows a kind's fields. A kind returns diagnostics
   with positions plus the channels it reads and writes. Calculations are a kind. The
@@ -3880,7 +3886,13 @@ How to read this record:
   check, resource isolation (own threads with a budget, or another node), determinism
   (time only from samples and ctx), and outputs on the calculation's own index.
   Supersedes: r3 single-expression language, r3 first-input index, r8 JSON Schema
-  check in `config`.
+  check in `config`. The channels of a kind's `check` are from the mesh's side:
+  `reads` are the channels it reads from the mesh (commands for the device, or samples
+  it sends out), and `writes` the channels it writes to the mesh (samples from the
+  device) (`laptop.architect-2`, 2026-10-07T15:17:11Z:
+  https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688; item on
+  #1731, 2026-10-08T06:24:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6053789750).
 - **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
   methods. `kind::Table` erases it inside `connector` with a private trait that takes
   the `Document` and parses again, so callers see one concrete type with no `Any` and
@@ -3947,9 +3959,22 @@ How to read this record:
   7, 2026-10-08 04:53 UTC).
 - **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
   run before the last one returned, and none after a cancel. Each run gets a child of
-  the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
-  (1 s first, 60 s cap, constants). The waits start again from 1 s after a run that
-  lasted at least 60 s. `Ok` from `run` ends the connector.
+  the caller's token, which the supervisor cancels once the run returns or its future
+  drops, so each task that the run spawned to wait on it ends with the run
+  (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
+  supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
+  entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
+  2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
+  `hub` field lands after #1941 (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789, item 4),
+  as the tests that need a hub wait on #1941 (`laptop.architect`,
+  2026-10-08T17:50:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
+  `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
+  constants). The waits start again from 1 s after a run that lasted at least 60 s.
+  `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
   changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
   `connector` builder in the plan on #338, after `/eb-review`; approved by the
@@ -4095,11 +4120,12 @@ How to read this record:
   and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
-  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and each thread with none draws the same fixed values. So
-  `connector-opcua` (PR 4 of #435) sets the start value with
-  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
-  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  2026-10-08 12:03 UTC). A draw on a thread with no start value aborts
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Nothing in the library sets a start value, also in
+  production. So `connector-opcua` (PR 4 of #435) sets the start value
+  with `UA_random_seed_deterministic`, taken from the randomness of `env`, and never
+  calls `UA_random_seed`, which reads the clock. It does so on each thread before that
   thread calls open62541, and runs each server and each client on one thread. Its
   test server sets the start value of the test at start, and its end-to-end check
   asserts the same run for the same value. A state for each `UA_Server` and
@@ -4108,6 +4134,21 @@ How to read this record:
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  A second change of `src/util/ua_util.c` keeps a flag for each thread, which
+  `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
+  `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
+  calls each of the two draws on a thread with none, and the test asserts the abort
+  and its exact output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Supersedes the record text "each thread with none draws the
+  same fixed values", which cited
+  https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. The
+  line of `UA_random_seed` that sets the flag has no test: no path of our build
+  reaches it, and a test needs a driver whose clock does not abort. Approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC). This change and its driver test ship in a PR of their own,
+  apart from the connector code (same comment).
   The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
   with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
   clock functions give 0, and the 5 POSIX constructors print their name and abort,

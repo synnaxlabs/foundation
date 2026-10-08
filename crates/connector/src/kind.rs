@@ -3,15 +3,17 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Span};
 use env::clock::Clock;
-use env::entropy::Entropy;
+use env::net::Net;
 use env::rng::Rng;
+use env::tasks::Tasks;
 use types::name::Name;
 
-use crate::cancel;
+use crate::{cancel, supervisor};
 
 /// The noun of the document that [`Kind::parse`] gets, for the text of a diagnostic.
 pub const NOUN: &str = "the connector";
@@ -54,9 +56,10 @@ pub trait Kind: Send + Sync + 'static {
 /// What a checked connector reads and writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Channels {
-    /// The channels it reads from the device, which it writes to the mesh.
+    /// The channels it reads from the mesh: commands for the device, or samples it
+    /// sends out.
     pub reads: Vec<Name>,
-    /// The channels it writes to the device.
+    /// The channels it writes to the mesh: samples from the device.
     pub writes: Vec<Name>,
 }
 
@@ -99,14 +102,14 @@ impl std::error::Error for Error {
     }
 }
 
-/// One run's capabilities.
+/// One run's capabilities. It is not `Send`: it stays on the supervisor's shard, so a
+/// kind's own thread takes clones of the parts it needs.
 #[derive(Debug)]
 pub struct Context<C> {
     name: Name,
     config: C,
     cancel: cancel::Token,
-    clock: Clock,
-    entropy: Entropy,
+    inputs: Rc<supervisor::Config>,
 }
 
 impl<C> Context<C> {
@@ -114,15 +117,13 @@ impl<C> Context<C> {
         name: Name,
         config: C,
         cancel: cancel::Token,
-        clock: Clock,
-        entropy: Entropy,
+        inputs: Rc<supervisor::Config>,
     ) -> Self {
         Self {
             name,
             config,
             cancel,
-            clock,
-            entropy,
+            inputs,
         }
     }
 
@@ -132,8 +133,7 @@ impl<C> Context<C> {
             name: self.name,
             config,
             cancel: self.cancel,
-            clock: self.clock,
-            entropy: self.entropy,
+            inputs: self.inputs,
         }
     }
 
@@ -149,7 +149,7 @@ impl<C> Context<C> {
         &self.config
     }
 
-    /// Cancelled when the run must stop.
+    /// Cancelled when the run must stop, and when it has returned.
     #[must_use]
     pub fn cancel(&self) -> &cancel::Token {
         &self.cancel
@@ -158,13 +158,26 @@ impl<C> Context<C> {
     /// The node's clock.
     #[must_use]
     pub fn clock(&self) -> &Clock {
-        &self.clock
+        &self.inputs.clock
     }
 
     /// A new random source, seeded from the node's entropy, that simulation replays.
     #[must_use]
     pub fn rng(&self) -> Rng {
-        self.entropy.rng()
+        self.inputs.entropy.rng()
+    }
+
+    /// Connects streams and datagrams.
+    #[must_use]
+    pub fn net(&self) -> &Net {
+        &self.inputs.net
+    }
+
+    /// Runs the kind's own tasks on its shard. Each task must end when
+    /// [`Context::cancel`] is cancelled.
+    #[must_use]
+    pub fn tasks(&self) -> &Tasks {
+        &self.inputs.tasks
     }
 }
 
@@ -322,11 +335,10 @@ mod tests {
     use document::{Attribute, Map, Position, Source};
 
     use std::cell::RefCell;
-    use std::rc::Rc;
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::run;
+    use crate::common::{inputs, run, run_on};
 
     const MISSING: Code = Code::new("test.missing");
     const RANGE: Code = Code::new("test.range");
@@ -366,8 +378,8 @@ mod tests {
                 return Err(vec![diagnostic(RANGE, "n is over 8")]);
             }
             Ok(Channels {
-                reads: (0..*n).map(|i| name(&format!("counter.c{i}"))).collect(),
-                writes: Vec::new(),
+                reads: Vec::new(),
+                writes: (0..*n).map(|i| name(&format!("counter.c{i}"))).collect(),
             })
         }
 
@@ -411,12 +423,12 @@ mod tests {
     #[test]
     fn checks_a_config_through_its_kind() {
         let channels = table().check("counter", None, &config(2));
-        let reads = vec![name("counter.c0"), name("counter.c1")];
+        let writes = vec![name("counter.c0"), name("counter.c1")];
         assert_eq!(
             channels,
             Ok(Channels {
-                reads,
-                writes: Vec::new()
+                reads: Vec::new(),
+                writes
             })
         );
     }
@@ -548,15 +560,11 @@ mod tests {
 
     #[test]
     fn runs_until_cancelled_with_its_context() {
-        let (early, late, out, ctx_name, n) = run(|clock, tasks, entropy| async move {
+        let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
-            let ctx = Context::new(
-                name("plant.counter"),
-                3,
-                token.clone(),
-                clock.clone(),
-                entropy,
-            );
+            let inputs = Rc::new(inputs(&node, tasks.clone(), Table::new()));
+            let ctx = Context::new(name("plant.counter"), 3, token.clone(), inputs);
+            let clock = node.clock();
             let (ctx_name, n) = (ctx.name().clone(), *ctx.config());
             let out = Rc::new(RefCell::new(None));
             let slot = Rc::clone(&out);
@@ -578,8 +586,9 @@ mod tests {
 
     #[test]
     fn gives_a_new_random_source_on_each_call() {
-        let (a, b) = run(|clock, _, entropy| async move {
-            let ctx = Context::new(name("a"), (), Token::new(), clock, entropy);
+        let (a, b) = run_on(|node, tasks| async move {
+            let inputs = Rc::new(inputs(&node, tasks, Table::new()));
+            let ctx = Context::new(name("a"), (), Token::new(), inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
         assert_ne!(a, b);
