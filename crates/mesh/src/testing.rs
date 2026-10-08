@@ -111,9 +111,6 @@ mod tests {
             "spec_held",
             "spec_held_chunks_1024",
             "spec_holders_out_of_order",
-            "spec_chunks_0_homed",
-            "spec_held_homed",
-            "spec_held_chunks_1024_homed",
         );
         let digest = |at: usize| {
             let mut bytes = [0; 32];
@@ -141,7 +138,6 @@ mod tests {
             ),
         ] {
             let homed = homed(inputs[name]);
-            assert_eq!(inputs[format!("{name}_homed").as_str()], homed, "{name}");
             assert_eq!(Change::decode(&homed), Ok(spec(chunks)), "{name}");
             assert_eq!(round_trip_change(&homed), Some(homed), "{name}");
         }
@@ -161,8 +157,7 @@ mod tests {
         over[73..75].copy_from_slice(&1025_u16.to_le_bytes());
         over.extend(digest(CHUNKS_MAX).0);
         assert_eq!(inputs["spec_chunks_1025"], over);
-        for (name, bytes) in inputs.iter().filter(|(name, _)| !name.ends_with("_homed"))
-        {
+        for (name, bytes) in &inputs {
             let body = Malformed::Body {
                 kind: 4,
                 length: bytes.len(),
@@ -178,6 +173,32 @@ mod tests {
         let mut bytes = unhomed(&order);
         bytes[77..].rotate_left(16);
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
+    }
+
+    // Each decodes as the input before the homes does with the count added, which the
+    // tests above check.
+    #[test]
+    fn each_input_with_a_count_of_0_homes_is_its_input_before_the_homes_with_it() {
+        let before = inputs!(
+            "mesh_change": "spec_chunks_0",
+            "spec_held",
+            "spec_held_chunks_1024",
+            "spec_holders_64",
+        );
+        let counted = inputs!(
+            "mesh_change": "spec_chunks_0_homes_0",
+            "spec_homes_0",
+            "spec_held_chunks_1024_homes_0",
+            "spec_holders_64_homes_0",
+        );
+        for (name, counted_name) in [
+            ("spec_chunks_0", "spec_chunks_0_homes_0"),
+            ("spec_held", "spec_homes_0"),
+            ("spec_held_chunks_1024", "spec_held_chunks_1024_homes_0"),
+            ("spec_holders_64", "spec_holders_64_homes_0"),
+        ] {
+            assert_eq!(counted[counted_name], homed(before[name]), "{name}");
+        }
     }
 
     // With the counts that its byte form lacks, each fails for what its name says.
@@ -241,11 +262,7 @@ mod tests {
 
     #[test]
     fn each_holder_bound_input_is_what_its_name_says() {
-        let inputs = inputs!(
-            "mesh_change": "spec_holders_64",
-            "spec_holders_64_homed",
-            "spec_holders_65",
-        );
+        let inputs = inputs!("mesh_change": "spec_holders_64", "spec_holders_65");
         let at_bound = Change::Spec {
             base: Pointer {
                 version: 1,
@@ -258,7 +275,6 @@ mod tests {
         };
         let mut bytes = unhomed(&at_bound);
         assert_eq!(inputs["spec_holders_64"], bytes);
-        assert_eq!(inputs["spec_holders_64_homed"], homed(&bytes));
         assert_eq!(Change::decode(&homed(&bytes)), Ok(at_bound));
         // The count of holders is after the count of chunks, which is 0.
         bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
