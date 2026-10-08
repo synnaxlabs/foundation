@@ -27,6 +27,11 @@ impl Drift {
         Some(Self(ppb))
     }
 
+    /// The bound in parts per billion.
+    pub(crate) const fn ppb(self) -> u32 {
+        self.0
+    }
+
     /// [`Drift::over`] in billionths of a nanosecond, not rounded.
     pub(crate) fn over_exact(self, elapsed_ns: u64) -> i128 {
         i128::from(elapsed_ns) * i128::from(self.0)
