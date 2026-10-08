@@ -398,7 +398,7 @@ fn refuses_an_unsigned_integer_and_stores_no_field_of_its_line() {
         error.to_string(),
         format!(
             "the line {line:?} gives the field \"u\" an unsigned integer, which \
-             InfluxDB 1 refuses"
+             InfluxDB 1 OSS refuses"
         )
     );
     assert_eq!(times(&store, "m", &[]), [20]);

@@ -687,7 +687,7 @@ impl fmt::Display for Error {
             Self::Unsigned { line, key } => write!(
                 f,
                 "the line {line:?} gives the field {key:?} an unsigned integer, which \
-                 InfluxDB 1 refuses"
+                 InfluxDB 1 OSS refuses"
             ),
             Self::Conflict {
                 line,

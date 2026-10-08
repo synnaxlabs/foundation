@@ -108,7 +108,8 @@ impl Measurement {
     }
 }
 
-/// One field value, in InfluxDB's types.
+/// One field value, in a type that InfluxDB 1, 2, and 3 each store, so no unsigned
+/// integer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     /// A 64-bit float.
