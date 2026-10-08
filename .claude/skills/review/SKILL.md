@@ -144,7 +144,7 @@ verdict with the line ``Director: approved at `<sha>` `` at the head.
 In 4 of the 5 worst escaped defects, the defect came in through a fix or a deferral that
 nothing checked again. So when round 1 led to fix commits:
 
-1. Run `reviewer` and `breaker` again on the fix commits only (`<first-fix>^..HEAD`),
+1. Run `reviewer` and `breaker` on the fix commits only (`<first-fix>^..<head sha>`),
    with the round 1 comment and each architect review attached. Only a range in which
    the check counts no code change (Round comment) skips `breaker`, and its round
    comment says so. In a trial until 2026-10-09T04:00Z, `box1.builder-1`,
