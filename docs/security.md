@@ -377,5 +377,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`),
 `mesh::Member::decode` (the join answer of #336 adds its target), `spec` tree chunks
-(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), and
-each connector's protocol parser.
+(#64), `types::time::Rate`, the header and hard state of a mesh log record (#1711), the
+names of a mesh log directory (`mesh::log::sequence`, #1746), and each connector's
+protocol parser.
