@@ -3251,9 +3251,12 @@ How to read this record:
   `plan` (#1082) maps a key to its region with the function of `spec::region`, and
   keeps no copy (`laptop.architect-2`, 2026-10-08T09:09:16Z,
   https://github.com/synnaxlabs/foundation/pull/1844#issuecomment-6056571263). The
-  check of the key form accepts a reserved label only for a subject and an access
-  policy, the kinds of the founding definitions (FIRST ADMIN). Each other kind at a
-  reserved label is `Misplaced`, so a region there makes no child region. A file
+  check of the key form accepts a reserved label only at a key of
+  `spec::founding::create` (FIRST ADMIN). Each other definition at a reserved label is
+  `Misplaced`, so a region there makes no child region. This changes "only for a
+  subject and an access policy, the kinds of the founding definitions", as
+  `ops.@x.@subject` then passed (#1877; `laptop.architect`, 2026-10-08T12:36:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621). A file
   still cannot hold a reserved label (`Kind::key`).
   Lost: a check that skips each reserved key, as a channel at `@admin.@subject` is
   then no problem and the check needs `spec::key::reserved`. Decided by
@@ -4676,8 +4679,14 @@ How to read this record:
   at `@admin.@access`, which allows the subjects `@admin` every action on `**` with no
   authority, so its writes cap at `Authority(0)` (ACCESS BLOCK). A policy in a file can
   give the admin more. Their labels are reserved, so no file holds them: `Kind::key`
-  refuses a reserved label, and `Kind::label` gives one only for a subject or an access
-  policy. A definition whose label (`definition.kind().label(key)`) is reserved is
+  refuses a reserved label, and `Kind::label` gives one only at a key of `create`. A
+  private table in `spec::founding` holds the founding labels by kind. A later build can
+  add an entry and never removes one, as a committed spec holds the keys of an earlier
+  build. This changes "only for a subject or an access policy", as a client's plan could
+  then add a signing subject such as `ops.@x` that no plan shows (#1877;
+  `laptop.architect`, 2026-10-08T12:36:57Z,
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621). A
+  definition whose label (`definition.kind().label(key)`) is reserved is
   Foundation's, and `plan` leaves it out. `access::Rules` finds a subject by its label,
   so it admits `@admin` (SUBJECT KEYS). Lost: `Kind::key` takes a reserved label behind
   a flag, so `node` writes the definitions and `config` can make a reserved key by

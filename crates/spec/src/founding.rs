@@ -13,6 +13,10 @@ use crate::subject::Subject;
 /// The label of the first admin's subject and of its access policy.
 const ADMIN: &str = "@admin";
 
+/// The kind and label of each founding definition. A later build can add an entry and
+/// never removes one: a committed spec holds the keys that an earlier build made.
+const LABELS: [(Kind, &str); 2] = [(Kind::Subject, ADMIN), (Kind::Access, ADMIN)];
+
 /// The definitions that Foundation makes at the first start of a mesh, by tree key:
 /// the subject `@admin`, which holds `admin`, and the access policy `@admin`, which
 /// allows that subject every action on `**`, with no authority. No file can hold
@@ -35,6 +39,12 @@ pub fn create(admin: PublicKey) -> BTreeMap<Name, Definition> {
         (key(Kind::Subject), Definition::Subject(subject)),
         (key(Kind::Access), Definition::Access(policy)),
     ])
+}
+
+/// Whether a founding definition of kind `kind` has the label `label`: a key that
+/// [`create`] makes, or that an earlier build made.
+pub(crate) fn founds(kind: Kind, label: &Name) -> bool {
+    LABELS.contains(&(kind, label.as_str()))
 }
 
 fn key(kind: Kind) -> Name {

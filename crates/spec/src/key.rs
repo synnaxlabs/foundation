@@ -42,9 +42,9 @@ impl Kind {
     }
 
     /// The label of `key` when `key` has the form of a tree key of this kind, or `None`
-    /// when it does not. Only a subject or an access policy can have a reserved label:
-    /// Foundation makes those ([`crate::founding::create`]), and [`Kind::key`] refuses
-    /// them, so no file holds a definition whose label is reserved.
+    /// when it does not. A reserved label has that form only at a key of
+    /// [`crate::founding::create`]: Foundation makes those definitions, and
+    /// [`Kind::key`] refuses a reserved label, so no file holds one.
     #[must_use]
     pub fn label(self, key: &Name) -> Option<Name> {
         let label: Name = match self.segment() {
@@ -56,8 +56,7 @@ impl Kind {
                 .parse()
                 .ok()?,
         };
-        let founding = matches!(self, Self::Subject | Self::Access);
-        (founding || !label.reserved()).then_some(label)
+        (!label.reserved() || crate::founding::founds(self, &label)).then_some(label)
     }
 
     /// The segment of the kind in its tree key, or `None` for a connector or a channel,
