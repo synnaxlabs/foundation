@@ -1195,6 +1195,24 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
   Supersedes item 3 of
   https://github.com/synnaxlabs/foundation/pull/1926#issuecomment-6066382854.
+  Amended (2026-10-08T19:18:09Z, #340): the hub takes the region's mesh
+  (`hub::Config::mesh`, `None` for a node with no region), and `hub::Config::node` stays
+  the one source of this node's key. `define` never carries an index. A writer, a
+  reader, or an open that `Link::serve` gives waits until the mesh names a home for each
+  of its indexes. At this node, the first such session carries the index, once; with no
+  mesh, this node is the home of each index. No frame comes before a session, so nothing
+  waits on the carry. When the home is another node, `writer::Error::Remote` and
+  `reader::Error::Remote` give it, and `serve` stops the stream with `NOT_HOME`. A
+  stopped mesh gives `Mesh` with why it stopped (code `FAILED` in `serve`). Trigger:
+  4d-b of #340 removes `reader::Error::Remote` when the hub reads from another node.
+  Decided by `laptop.architect`: the mesh (2026-10-08T18:42:42Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536), the
+  split and `reader::Error::Remote` (2026-10-08T18:51:16Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273), and one
+  carry rule (2026-10-08T19:18:09Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
+  supersedes item 2 of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.
 - **HUB END (#585)** The hub's commit task holds the hub's state weakly, and keeps its
   waker in the state while it sleeps and while it waits for a commit. The state wakes
   it on drop, and the task ends at its first poll after that. Lost:
@@ -7362,7 +7380,10 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152), and
    `ops` may take `config-hcl`, so its plan tests read a real file
    (`laptop.architect-2`, 2026-10-08T16:00:18Z:
-   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). A crate
+   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745), and
+   `hub` may take `blob`, so its region tests open a real `mesh::Mesh` on a
+   `blob::Store` (`laptop.architect`, 2026-10-08T19:18:09Z:
+   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
    https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
@@ -7401,7 +7422,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `block`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
-| 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, the layer-3 window, and the client session of a program. | `access`, `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home`; `buffer` as a dev-dependency only |
+| 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, the layer-3 window, and the client session of a program. | `access`, `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home`; `buffer` and `blob` as dev-dependencies only |
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. Seals a value to a node's seal key, and opens it. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |

@@ -77,7 +77,8 @@ pub enum Error {
     ManyIndexes,
     /// The reader names no channel.
     Empty,
-    /// The home of the index is another node. Remote readers are not built yet.
+    /// The home of the index is `home`, another node, and this hub does not yet read
+    /// from another node (#340).
     Remote {
         /// The home.
         home: types::node::Key,
