@@ -4,6 +4,8 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::iter;
+
 use codec::{Decoder, Encoder, Error, VECTOR_LEN, max_len};
 use types::sample::{Scalar, Type};
 
@@ -58,7 +60,6 @@ fn main() {
         );
     }
     round_trip_types();
-    round_trip_utf8();
     refuse();
 }
 
@@ -152,43 +153,11 @@ fn round_trip_types() {
     }
 }
 
-/// Encodes, checks, and decodes a `String` series that is not ASCII, whose elements
-/// span two vectors with a char across them.
-fn round_trip_utf8() {
-    let count = VECTOR_LEN + 1;
-    let mut ends = Vec::new();
-    let mut elements = Vec::new();
-    for i in 0..count {
-        elements.extend(if i % 2 == 0 { "\u{e9}" } else { "a" }.bytes());
-        let end = u32::try_from(elements.len()).expect("lengths are small");
-        ends.extend(end.to_le_bytes());
-    }
-    assert_eq!(
-        elements[1_023..1_025],
-        *"\u{e9}".as_bytes(),
-        "a char spans vectors"
-    );
-    let values = [ends, elements].concat();
-    let case = "a String that is not ASCII";
-    check(
-        &mut Encoder::new(Type::String),
-        Type::String,
-        count,
-        &values,
-        case,
-    );
-}
-
 /// The raw bytes of `count` samples of `data_type`, an array or a variable type. A
 /// variable sample holds 0 to 4 elements, after the ends and their padding. A
-/// `String` sample is ASCII.
+/// `String` sample is one char of its length, so that some chars span vectors.
 fn values(data_type: Type, count: usize) -> Vec<u8> {
-    let mask = if data_type == Type::String {
-        0x7f
-    } else {
-        0xff
-    };
-    let bytes = |len| (0..len).map(move |i| mix(i).to_le_bytes()[0] & mask);
+    let bytes = |len| (0..len).map(|i| mix(i).to_le_bytes()[0]);
     let width = match data_type {
         Type::List { element, .. } => element.width(),
         Type::String | Type::Bytes => 1,
@@ -208,7 +177,16 @@ fn values(data_type: Type, count: usize) -> Vec<u8> {
     let elements = elements * u64::try_from(width).expect("widths are small");
     let mut values: Vec<u8> = ends.iter().flat_map(|end| end.to_le_bytes()).collect();
     values.resize(values.len().next_multiple_of(width.min(8)), 0);
-    values.extend(bytes(elements));
+    if data_type == Type::String {
+        let chars = ["", "a", "\u{e9}", "\u{20ac}", "\u{1f600}"];
+        let starts = iter::once(0).chain(ends.iter().copied());
+        for (start, end) in starts.zip(&ends) {
+            let len = usize::try_from(end - start).expect("lengths are small");
+            values.extend(chars[len].bytes());
+        }
+    } else {
+        values.extend(bytes(elements));
+    }
     values
 }
 
