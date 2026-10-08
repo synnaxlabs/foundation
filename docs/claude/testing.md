@@ -6,10 +6,10 @@ names rule N in `docs/research/r16-rust-guides.md`.
 ## Injection
 
 Every component gets clock, network, disk, and randomness as inputs (`env`). Production
-passes the real ones. Tests pass the simulated ones from `sim`, except a process test
-(Process tests). Nothing reads the OS clock, the network, the disk, or a random source
-directly. Clippy's `disallowed-methods` list in `clippy.toml` enforces this. Only `os`
-implements the `env` seams and calls the OS, sockets included.
+passes the real ones. Tests pass the simulated ones from `sim`, except the tests of `os`
+itself and a process test (Process tests). Nothing reads the OS clock, the network, the
+disk, or a random source directly. Clippy's `disallowed-methods` list in `clippy.toml`
+enforces this. Only `os` implements the `env` seams and calls the OS, sockets included.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
@@ -61,19 +61,20 @@ links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
 
 ## Process tests
 
-A process test runs the `foundation` binary on the seams of `os`: a temporary data
-directory and loopback. It checks the wiring of those seams and what a user sees (exit
-codes, stderr, `foundation status`), not logic that a simulated test can reach.
+A process test starts the `foundation` binary. It checks the wiring of the `os` seams
+and what a user sees (exit codes, standard output and error, `foundation status`), not
+logic that a simulated test can reach.
 
 - It lives in `crates/node/tests/it/`: Cargo sets `CARGO_BIN_EXE_foundation` only for
-  the tests of `node`.
-- It takes its clock, files, and network from `os`, as `node` does, so the
+  the integration tests and benchmarks of `node`.
+- It takes each seam it needs (a clock for a deadline, files) from `os`, so the
   `disallowed-methods` list holds for it too.
-- Each test makes its own temporary data directory and removes it at the end.
-- Each listener binds port 0 on loopback, and the test reads the port it got. No fixed
-  port, and nothing outside loopback.
-- Each wait polls its condition under a deadline, and a missed deadline fails with the
-  state it saw. Never a fixed sleep.
+- A test that starts a node makes its own temporary data directory and removes it at the
+  end.
+- Each listener of the node binds port 0 on loopback, and the test reads the port it
+  got. No fixed port, and nothing outside loopback.
+- Each wait (for output, for an exit, for a condition) ends at a deadline, and a missed
+  deadline fails with the state it saw. Never a fixed sleep.
 - The test ends each process it starts, also when it fails.
 - A defect that a process test finds gets its regression test in simulation when the
   seams of `sim` can make it happen.
