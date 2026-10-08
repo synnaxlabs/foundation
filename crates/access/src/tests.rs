@@ -196,8 +196,8 @@ fn takes_the_connectors_of_each_region_tree() {
     let root = Tree::from([(name("gw.daq"), connector())]);
     let site_a = Tree::from([(name("site_a.daq"), connector())]);
     let rules = Rules::new([
-        (Prefix::ROOT, &root),
         (name("site_a").into(), &site_a),
+        (Prefix::ROOT, &root),
         (name("site_b").into(), &Tree::new()),
     ]);
     let write = [Action::Write].into_iter().collect();

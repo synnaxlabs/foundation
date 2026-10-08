@@ -330,6 +330,8 @@ mod tests {
             ("access", "document", None, false),
             ("access", "document", Some("build"), false),
             ("codec", "document", Some("dev"), false),
+            ("access", "buffer", Some("dev"), false),
+            ("hub", "connector-modbus", Some("dev"), false),
             ("connector-ni", "daqmx-stub", Some("dev"), true),
             ("connector-ni", "daqmx-stub", None, false),
             ("connector-ni", "daqmx-stub", Some("build"), false),
