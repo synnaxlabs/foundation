@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
@@ -16,10 +17,12 @@ use block::{Heap, Pool, Unique};
 use env::clock::Clock;
 use env::files::Operation;
 use env::tasks::Tasks;
+use hub::Hub;
 use hub::home::{Outcome, Refusal};
 use hub::reader::{self, Ended, Mode, Reader, Received};
 use hub::writer::{self, Writer};
-use hub::{Channel, Hub};
+use spec::channel::{Data, Kind};
+use spec::data_type::DataType;
 use types::authority::Authority;
 use types::channel::{self, Slot};
 use types::frame::key_set::Interner;
@@ -124,14 +127,14 @@ impl Test {
                 paused: Rc::clone(&paused),
             }),
         });
-        for (key, channel, data_type, index) in CHANNELS {
-            hub.define(Channel {
-                key: channel::Key::from_u128(key),
-                name: name(channel),
-                data_type,
-                index: channel::Key::from_u128(index),
-            });
-        }
+        let channels: BTreeMap<_, _> = CHANNELS
+            .into_iter()
+            .map(|(key, channel, data_type, index)| {
+                let data_type = DataType::Sample(data_type);
+                (name(channel), spec_channel(key, data_type, index))
+            })
+            .collect();
+        hub.define(&channels);
         Self {
             clock: node.clock(),
             node,
@@ -913,12 +916,8 @@ fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
 #[test]
 fn writes_and_reads_a_channel_of_a_variable_type() {
     run(19, |test| async move {
-        test.hub.define(Channel {
-            key: channel::Key::from_u128(6),
-            name: name("text"),
-            data_type: Type::String,
-            index: channel::Key::from_u128(1),
-        });
+        let text = spec_channel(6, DataType::Sample(Type::String), 1);
+        test.hub.define([(&name("text"), &text)]);
         let mut reader = test.reader(&["text"], Mode::Complete).await;
         let mut writer = test.writer("a", &["text"]).await;
         let now = test.now();
@@ -957,12 +956,8 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
 #[test]
 fn refuses_a_string_sample_that_is_not_utf8() {
     run(19, |test| async move {
-        test.hub.define(Channel {
-            key: channel::Key::from_u128(6),
-            name: name("text"),
-            data_type: Type::String,
-            index: channel::Key::from_u128(1),
-        });
+        let text = spec_channel(6, DataType::Sample(Type::String), 1);
+        test.hub.define([(&name("text"), &text)]);
         let mut writer = test.writer("a", &["text"]).await;
         let now = test.now();
         let set = Arc::clone(writer.set());
@@ -1012,15 +1007,37 @@ fn opens_a_writer_on_each_channel_once_with_its_index() {
     });
 }
 
-/// Defines a channel of `I64` on `index` in a new hub, which panics.
-fn define(key: u128, channel: &'static str, index: u128) {
+/// The channel `key` of the spec: an index when `index` is `key`, else a data channel
+/// of `data_type` on `index`.
+fn spec_channel(key: u128, data_type: DataType, index: u128) -> spec::channel::Channel {
+    let kind = if key == index {
+        Kind::Index {
+            error: None,
+            control: None,
+        }
+    } else {
+        let index = channel::Key::from_u128(index);
+        Kind::Data(Data::new(index, None, data_type, None).expect("no unit"))
+    };
+    spec::channel::Channel {
+        key: channel::Key::from_u128(key),
+        kind,
+    }
+}
+
+/// Defines `channels`, each `(key, name, index)` and of `I64`, in one call to a new
+/// hub. A `Vec`, not a map, so that a name may come twice.
+fn define(channels: Vec<(u128, &'static str, u128)>) {
     run(18, move |test| async move {
-        test.hub.define(Channel {
-            key: channel::Key::from_u128(key),
-            name: name(channel),
-            data_type: I64,
-            index: channel::Key::from_u128(index),
-        });
+        let channels: Vec<_> = channels
+            .into_iter()
+            .map(|(key, channel, index)| {
+                let data_type = DataType::Sample(I64);
+                (name(channel), spec_channel(key, data_type, index))
+            })
+            .collect();
+        test.hub
+            .define(channels.iter().map(|(name, channel)| (name, channel)));
     });
 }
 
@@ -1029,7 +1046,7 @@ fn define(key: u128, channel: &'static str, index: u128) {
     expected = "a channel with key 00000000-0000-0000-0000-000000000002 or name other is known already"
 )]
 fn define_panics_on_a_known_key() {
-    define(2, "other", 1);
+    define(vec![(2, "other", 1)]);
 }
 
 #[test]
@@ -1037,7 +1054,7 @@ fn define_panics_on_a_known_key() {
     expected = "a channel with key 00000000-0000-0000-0000-000000000009 or name value is known already"
 )]
 fn define_panics_on_a_known_name() {
-    define(9, "value", 1);
+    define(vec![(9, "value", 1)]);
 }
 
 #[test]
@@ -1045,7 +1062,7 @@ fn define_panics_on_a_known_name() {
     expected = "the index 00000000-0000-0000-0000-000000000002 of channel other is not a known index"
 )]
 fn define_panics_on_an_index_that_is_a_data_channel() {
-    define(9, "other", 2);
+    define(vec![(9, "other", 2)]);
 }
 
 #[test]
@@ -1053,7 +1070,84 @@ fn define_panics_on_an_index_that_is_a_data_channel() {
     expected = "the index 00000000-0000-0000-0000-000000000008 of channel other is not a known index"
 )]
 fn define_panics_on_an_unknown_index() {
-    define(9, "other", 8);
+    define(vec![(9, "other", 8)]);
+}
+
+#[test]
+#[should_panic(
+    expected = "a channel with key 00000000-0000-0000-0000-00000000000a or name other is known already"
+)]
+fn define_panics_on_a_name_twice_in_one_call() {
+    define(vec![(9, "other", 1), (10, "other", 1)]);
+}
+
+/// Name order puts a data channel before its index.
+#[test]
+fn defines_a_data_channel_before_its_index_in_one_call() {
+    run(18, |test| async move {
+        let (temp, time) = (name("plant.temp"), name("plant.time"));
+        let channels = [
+            (&temp, &spec_channel(7, DataType::Sample(I64), 6)),
+            (&time, &spec_channel(6, DataType::Sample(STAMP), 6)),
+        ];
+        test.hub.define(channels);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+    });
+}
+
+/// The quality, error, and control edges point at keys that the hub does not know.
+#[test]
+fn defines_channels_with_edges_it_does_not_read() {
+    run(18, |test| async move {
+        let unknown = || Some(channel::Key::from_u128(9));
+        let time = spec::channel::Channel {
+            key: channel::Key::from_u128(6),
+            kind: Kind::Index {
+                error: unknown(),
+                control: unknown(),
+            },
+        };
+        let index = channel::Key::from_u128(6);
+        let data = Data::new(index, unknown(), DataType::Sample(I64), None);
+        let temp = spec::channel::Channel {
+            key: channel::Key::from_u128(7),
+            kind: Kind::Data(data.expect("no unit")),
+        };
+        let (temp_name, time_name) = (name("plant.temp"), name("plant.time"));
+        test.hub.define([(&temp_name, &temp), (&time_name, &time)]);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+    });
+}
+
+#[test]
+fn gives_a_writer_the_sample_type_of_each_data_channel() {
+    run(18, |test| async move {
+        let types = [
+            (6, "text", DataType::Sample(Type::String)),
+            (7, "quality", DataType::Quality),
+        ];
+        let channels: BTreeMap<_, _> = types
+            .into_iter()
+            .map(|(key, channel, data_type)| {
+                (name(channel), spec_channel(key, data_type, 1))
+            })
+            .collect();
+        test.hub.define(&channels);
+        let writer = test.writer("a", &["text", "quality"]).await;
+        let entries: Vec<_> = writer
+            .set()
+            .entries()
+            .iter()
+            .map(|e| (e.key.as_u128(), e.data_type))
+            .collect();
+        let quality = DataType::Quality.sample();
+        assert_eq!(entries, [(1, STAMP), (6, Type::String), (7, quality)]);
+        assert_eq!(quality, Type::Scalar(Scalar::U32));
+    });
 }
 
 #[test]
