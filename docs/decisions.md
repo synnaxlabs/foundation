@@ -3815,10 +3815,8 @@ How to read this record:
   2026-10-08 13:10 UTC). `cargo xtask open62541` puts each flag of a compile in
   `flags.txt` (`-D`, `-I`, `-std`, and `CODE_FLAGS`, the flags that change the code)
   or in `LEFT_OUT`, a closed list with the reason of each, and fails on any other
-  flag. A `-W` flag with no `,` is a warning, which changes no code, so `collect`
-  leaves it out by that pattern, not by name. `build.rs` and the check both read
-  `flags.txt`, so the check reads objects compiled with the flags of the connector.
-  Decided by `laptop.architect-2`
+  flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
+  compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
   2026-10-08 13:31 UTC).
 - **INFLUX KIND** `connector_influx::Kind` reads `address` and the reader settings
