@@ -67,6 +67,8 @@ pub struct Entry {
 /// whole (a policy's budgets, for example) only when each of its attributes is known
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
+/// A bad `kind` of channel hides the problems of the attributes that a kind of channel
+/// knows.
 pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found {
         channels: channels(documents),
@@ -2407,7 +2409,7 @@ mod tests {
         }
 
         #[test]
-        fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
+        fn checks_the_edges_and_unknown_attributes_after_a_bad_kind() {
             let documents = value(&[
                 ("kind", string("stream")),
                 ("other", string("x")),
@@ -2425,6 +2427,13 @@ mod tests {
                         "\"stream\" is not a kind of channel",
                         "Write \"index\" or \"data\"",
                     ),
+                    refused(
+                        "document.unknown-attribute",
+                        at(0, 112),
+                        "`other` is not an attribute of the `channel` block",
+                        "Use `control`, `data_type`, `error`, `index`, `kind`, `quality`, \
+                         or `unit`, or remove it",
+                    ),
                     unknown(
                         at(0, 115),
                         "no `channel` block defines the index channel `edge.tim`",
@@ -2440,6 +2449,32 @@ mod tests {
                     unknown(
                         at(0, 121),
                         "no `channel` block defines the control channel `edge.c`",
+                    ),
+                ])
+            );
+        }
+
+        #[test]
+        fn leaves_an_attribute_that_a_kind_knows_after_a_bad_kind() {
+            let documents = value(&[
+                ("kind", string("stream")),
+                ("data_type", string("f65")),
+                ("control", Kind::Integer(7)),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![
+                    refused(
+                        "config.bad-channel-kind",
+                        at(0, 111),
+                        "\"stream\" is not a kind of channel",
+                        "Write \"index\" or \"data\"",
+                    ),
+                    refused(
+                        "document.bad-name",
+                        at(0, 115),
+                        "a name is a string or a reference, not an integer",
+                        "Write a name such as \"site_a.node_1\"",
                     ),
                 ])
             );
