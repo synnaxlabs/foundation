@@ -91,3 +91,67 @@ fn each_posix_constructor_prints_its_name_and_aborts() {
         );
     }
 }
+
+/// Checks `shim.c` with `line` added after the line `after`, with the build of the
+/// shim. Gives the compiler's errors, which are empty when it compiles. A warning is an
+/// error in the shim.
+fn check_shim(after: &str, line: &str) -> String {
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::Stdio;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = root.join("../../patches/open62541");
+    let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
+    let target = env!("CONNECTOR_OPCUA_TARGET");
+    let mut shim = crate::compiler::builds(&copy, &flags, "").shim;
+    let tool = shim
+        .target(target)
+        .host(target)
+        .opt_level(0)
+        .cargo_metadata(false)
+        .cargo_warnings(false)
+        .get_compiler();
+    let text = std::fs::read_to_string(root.join("src/shim.c")).unwrap();
+    let (at, _) = text
+        .match_indices(after)
+        .next()
+        .expect("shim.c holds the line");
+    let at = at + after.len();
+    let source = format!("{}\n{line}{}", &text[..at], &text[at..]);
+    let mut child = tool
+        .to_command()
+        .args(["-fsyntax-only", "-x", "c", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(source.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let errors = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.success(), errors.is_empty(), "{errors}");
+    errors
+}
+
+#[test]
+fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
+    let headers = "#include <open62541/types.h>";
+    assert_eq!(check_shim(headers, ""), "");
+    let parameter = "int in_the_headers(int unused) { return 0; }";
+    assert_eq!(check_shim(headers, parameter), "");
+    let variable = check_shim(
+        headers,
+        "int in_the_headers(void) { int unused; return 0; }",
+    );
+    assert!(variable.contains("unused variable 'unused'"), "{variable}");
+    let body = check_shim(
+        "#include <stdlib.h>",
+        "int in_the_body(int unused) { return 0; }",
+    );
+    assert!(body.contains("unused parameter 'unused'"), "{body}");
+}
