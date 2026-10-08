@@ -379,17 +379,16 @@ fn connectors<'f>(
         }) = placed
             && home != node
         {
-            let fix = moves.get(name).map(String::as_str);
-            diagnostics.push(connector_home(found, placement, home, name, node, fix));
+            diagnostics
+                .push(connector_home(found, placement, home, name, node, &moves));
         } else {
             diagnostics.extend(unplaced(entry.label_span, placed));
         }
     }
     for (index, _, own, (connector, _, _, theirs)) in nearest {
         if let (Ok(own), Ok(theirs)) = (own, theirs) {
-            let fix = moves.get(connector).map(String::as_str);
             let (own, theirs) = (own.placement, theirs.placement);
-            diagnostics.extend(split(found, index, own, connector, theirs, fix));
+            diagnostics.extend(split(found, index, own, connector, theirs, &moves));
         }
     }
 }
@@ -488,28 +487,50 @@ fn each(keys: &[&Name]) -> String {
     }
 }
 
+/// What a diagnostic of a connector finds wrong.
+#[derive(Clone, Copy)]
+enum Mismatch<'a> {
+    /// The winner of the connector names a `home` that is not `node`, the node of the
+    /// connector.
+    Home { node: &'a Name },
+    /// The winners of the connector and of an index differ, and `placement` is the one
+    /// to win for both.
+    Split { placement: &'a Name },
+}
+
+/// The fix of a diagnostic of `connector`: the fix that [`moves`] gives `connector`, or
+/// else the fix of `mismatch` alone.
+fn fix(
+    moves: &BTreeMap<&Name, String>,
+    connector: &Name,
+    mismatch: Mismatch<'_>,
+) -> String {
+    if let Some(moved) = moves.get(connector) {
+        return moved.clone();
+    }
+    match mismatch {
+        Mismatch::Home { node } => format!(
+            "Name `{node}` as the `home`, and keep `{node}` out of `standby` and `copies`"
+        ),
+        Mismatch::Split { placement } => format!(
+            "Make the placement `{}` win for the connector `{connector}` and its indexes",
+            label(placement)
+        ),
+    }
+}
+
 /// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
-/// `placement` names `home`. `moved` is the fix of each diagnostic of `connector` when
-/// `placement` also wins for a connector, or an index of one, on another node, which a
-/// new `home` would move the problem to.
+/// `placement` names `home`, with the fix that [`fix`] gives from `moves`.
 fn connector_home(
     found: &Found<'_>,
     placement: &Name,
     home: &Name,
     connector: &Name,
     node: &Name,
-    moved: Option<&str>,
+    moves: &BTreeMap<&Name, String>,
 ) -> Diagnostic {
     let p = label(placement);
-    let fix = moved.map_or_else(
-        || {
-            format!(
-                "Name `{node}` as the `home`, and keep `{node}` out of `standby` and \
-                 `copies`"
-            )
-        },
-        str::to_owned,
-    );
+    let fix = fix(moves, connector, Mismatch::Home { node });
     Diagnostic::new(
         CONNECTOR_HOME,
         span(found.blocks[placement], "home"),
@@ -522,15 +543,15 @@ fn connector_home(
 }
 
 /// A `config.split-placement` diagnostic when `own`, the placement that wins for
-/// `index`, is not `theirs`, the one that wins for the connector `connector`. `moved`
-/// is the fix that [`moves`] gives `connector`, if any.
+/// `index`, is not `theirs`, the one that wins for the connector `connector`, with the
+/// fix that [`fix`] gives from `moves`.
 fn split(
     found: &Found<'_>,
     index: &Name,
     own: Option<&Name>,
     connector: &Name,
     theirs: Option<&Name>,
-    moved: Option<&str>,
+    moves: &BTreeMap<&Name, String>,
 ) -> Option<Diagnostic> {
     let (at, message) = match (own, theirs) {
         (Some(own), Some(theirs)) if own != theirs => (
@@ -560,16 +581,8 @@ fn split(
         ),
         _ => return None,
     };
-    let fix = moved.map_or_else(
-        || {
-            format!(
-                "Make the placement `{}` win for the connector `{connector}` and its \
-                 indexes",
-                label(theirs.unwrap_or(at))
-            )
-        },
-        str::to_owned,
-    );
+    let placement = theirs.unwrap_or(at);
+    let fix = fix(moves, connector, Mismatch::Split { placement });
     Some(Diagnostic::new(
         SPLIT_PLACEMENT,
         found.entries[at].label_span,
