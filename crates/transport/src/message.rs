@@ -718,8 +718,8 @@ mod tests {
             }
         }
 
-        /// Each copy of a full list, not only the first two that `tests/chunks.rs`
-        /// pins, keeps the list at the bound.
+        /// Each copy of a full list, not only the first two that
+        /// `tests/alloc/chunks.rs` pins, keeps the list at the bound.
         #[test]
         fn a_read_of_many_tiny_chunks_never_holds_more_than_chunks_max() {
             let pool = pool(1 << 20);

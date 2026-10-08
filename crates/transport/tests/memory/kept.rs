@@ -2,35 +2,27 @@
 //! many, also one that waits for a block, the receiver keeps a list of at most 64
 //! chunks, not one sized by the message, both before and after it reads the end of
 //! the stream. A short message comes first, so a read over many also waits for the
-//! prefix of the long one. The count covers each thread, so this binary has no test
-//! harness. The sim runs on one thread, so the count is exact.
-
-#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+//! prefix of the long one.
 
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-use block::{Block, Heap, Pool};
+use block::Block;
 use env::clock::Clock;
 use sim::Sim;
 use sim::node::Node;
 use transport::stream::Receiver;
-use transport::{Address, Class, Config, Error, Port, Transport};
-use types::node::{PrivateKey, PublicKey};
+use transport::{Address, Class, Error, Transport};
 use types::time::Span;
 
-#[global_allocator]
-static ALLOCATOR: counting::Bytes = counting::Bytes::new();
+use crate::ALLOCATOR;
+use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
+use crate::fill;
 
-const CLIENT: PrivateKey = PrivateKey([1; 32]);
-const SERVER: PrivateKey = PrivateKey([2; 32]);
-const PORT: u16 = 4433;
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
 const KEPT_MAX: usize = 2 << 10;
@@ -100,7 +92,7 @@ struct Out {
     kept: usize,
 }
 
-fn main() {
+pub(crate) fn main() {
     for reading in [Reading::Whole, Reading::Parts, Reading::Waited] {
         for (len, end) in [60_000, 100_000, 240_000, 1 << 18]
             .into_iter()
@@ -280,50 +272,4 @@ async fn next(
         on_pending();
         clock.sleep(Span::MILLISECOND).await;
     }
-}
-
-/// Takes every block of `pool` that could hold a message of `len` bytes.
-fn fill(pool: &Pool, len: usize) -> Vec<block::Unique> {
-    let mut full = Vec::new();
-    for len in [pool.largest(), len] {
-        while let Ok(block) = pool.alloc(len) {
-            full.push(block);
-        }
-    }
-    full
-}
-
-/// A block of `len` bytes from `pool`.
-fn filled(pool: &Pool, len: usize) -> Block {
-    let mut block = pool.alloc(len).expect("the pool has room");
-    block.fill(0x5a);
-    block.freeze()
-}
-
-fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
-    let pool = block::Config { budget: 1 << 20 };
-    let memory = Heap::new(pool.reservation());
-    Config {
-        private_key: key,
-        message_bytes_max: NonZeroUsize::new(1 << 18).expect("not zero"),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(16).expect("not zero"),
-        idle: Span::from_nanos(10 * Span::SECOND.nanos()),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks,
-        pool: Rc::new(Pool::new(pool, memory)),
-    }
-}
-
-fn part(node: &Node, port: u16) -> transport::port::Part {
-    let at = SocketAddr::new(node.addresses()[0], port);
-    let port = Port::bind(&node.net(), at).expect("a port");
-    port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }

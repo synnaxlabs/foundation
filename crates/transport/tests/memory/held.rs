@@ -12,7 +12,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use block::{Pool, Unique};
 use sim::Sim;
 use sim::node::Node;
 use transport::{Address, Class, Code, Error, Transport};
@@ -20,6 +19,7 @@ use types::time::Span;
 
 use crate::ALLOCATOR;
 use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
+use crate::fill;
 
 /// A message that the read takes over many polls.
 const LEN: usize = 60_000;
@@ -170,15 +170,4 @@ fn serve(node: &Node, len: usize, first: Span, out: Arc<Mutex<Out>>) {
 /// Polls `future` once.
 async fn poll_once<F: Future + ?Sized>(mut future: Pin<&mut F>) -> Poll<F::Output> {
     poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
-}
-
-/// Takes every block of `pool` that holds a message of `len` bytes.
-fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
-    let mut full = Vec::new();
-    for len in [pool.largest(), len] {
-        while let Ok(block) = pool.alloc(len) {
-            full.push(block);
-        }
-    }
-    full
 }

@@ -7,10 +7,27 @@
 #[path = "../common/mod.rs"]
 mod common;
 mod held;
+mod kept;
+mod opened;
+
+use block::{Pool, Unique};
 
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
 fn main() {
     held::main();
+    kept::main();
+    opened::main();
+}
+
+/// Takes every block of `pool` that could hold a message of `len` bytes.
+fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
+    let mut full = Vec::new();
+    for len in [pool.largest(), len] {
+        while let Ok(block) = pool.alloc(len) {
+            full.push(block);
+        }
+    }
+    full
 }

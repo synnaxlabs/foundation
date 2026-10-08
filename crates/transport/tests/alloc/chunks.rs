@@ -7,32 +7,23 @@
 //! 64 chunks makes no more allocations than a list that grows 1.5 times or more from
 //! 1 slot to 64, and one of 65 chunks makes one more: the buffer, and no larger list.
 //! A second copy makes none, and a read of a short message after it makes none: the
-//! reader keeps its list. The counts cover each thread, so this binary has no test
-//! harness. The sim runs on one thread, so the counts are exact.
-
-#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+//! reader keeps its list.
 
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-use block::{Block, Heap, Pool};
+use block::{Block, Pool};
 use sim::Sim;
 use sim::node::Node;
-use transport::{Address, Class, Config, Error, Port, Transport};
-use types::node::{PrivateKey, PublicKey};
+use transport::{Address, Class, Error, Transport};
 use types::time::Span;
 
-#[global_allocator]
-static ALLOCATOR: counting::Allocator = counting::Allocator::new();
+use crate::ALLOCATOR;
+use crate::common::{CLIENT, PORT, SERVER, config, filled, part, public};
 
-const CLIENT: PrivateKey = PrivateKey([1; 32]);
-const SERVER: PrivateKey = PrivateKey([2; 32]);
-const PORT: u16 = 4433;
 /// The bytes of the pattern, longer than a packet.
 const PATTERN: usize = 4096;
 /// A message that comes in 64 chunks in this sim, a full list that the read never
@@ -62,7 +53,7 @@ type Read = (Poll<Result<Option<Vec<u8>>, Error>>, u64, u64);
 /// The [`Read`] of the long message and of the short one after it.
 type Out = [Read; 2];
 
-fn main() {
+pub(crate) fn main() {
     let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
     let cases = [
         (FULL, 0, 0),
@@ -132,12 +123,9 @@ fn run(pattern: &[u8], len: usize, at: usize) -> Out {
             .open_sender(Class::Complete)
             .await
             .expect("a stream");
-        for (pattern, len, at) in [(&message[..], len, at), (&[], SHORT, 0)] {
-            sender
-                .send(filled(&pool, pattern, len, at))
-                .await
-                .expect("sent");
-        }
+        let long = patterned(&pool, &message, len, at);
+        sender.send(long).await.expect("sent");
+        sender.send(filled(&pool, SHORT)).await.expect("sent");
         node.clock().sleep(LIVE).await;
     })
     .expect("the run ends");
@@ -176,37 +164,9 @@ fn serve(node: &Node, pattern: Vec<u8>, out: Arc<Mutex<Out>>) {
 }
 
 /// A block of `len` bytes from `pool` with `pattern` at `at`.
-fn filled(pool: &Pool, pattern: &[u8], len: usize, at: usize) -> Block {
+fn patterned(pool: &Pool, pattern: &[u8], len: usize, at: usize) -> Block {
     let mut block = pool.alloc(len).expect("the pool has room");
     block.fill(0x5a);
     block[at..at.saturating_add(pattern.len())].copy_from_slice(pattern);
     block.freeze()
-}
-
-fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
-    let pool = block::Config { budget: 1 << 20 };
-    let memory = Heap::new(pool.reservation());
-    Config {
-        private_key: key,
-        message_bytes_max: NonZeroUsize::new(1 << 18).expect("not zero"),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(16).expect("not zero"),
-        idle: Span::from_nanos(10 * Span::SECOND.nanos()),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks,
-        pool: Rc::new(Pool::new(pool, memory)),
-    }
-}
-
-fn part(node: &Node, port: u16) -> transport::port::Part {
-    let at = SocketAddr::new(node.addresses()[0], port);
-    let port = Port::bind(&node.net(), at).expect("a port");
-    port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }
