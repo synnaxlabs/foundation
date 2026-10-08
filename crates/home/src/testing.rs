@@ -31,8 +31,8 @@ pub struct Env {
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
 /// earlier commit runs. A commit takes whole 4 KiB blocks (one for a frame, three for
-/// 64 frames), and nothing frees the ring until #160, so a run fills it at 1023
-/// one-frame commits.
+/// 64 frames), and each open takes one. Nothing frees the ring until #160, so a new
+/// ring fills at 1023 one-frame commits.
 ///
 /// # Panics
 ///
@@ -77,6 +77,7 @@ pub async fn shard(env: Env) -> (Shard, Interner, Stamp) {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -101,17 +102,20 @@ mod tests {
         let mut sim = sim::Sim::new(sim::Config::default());
         let node = sim.node(config);
         sim.run_on(&node, |node, tasks| async move {
-            let env = Env {
-                files: node.files(),
-                clock: node.clock(),
-                wall: node.wall(),
-                entropy: node.entropy(),
-                tasks,
-            };
-            let (shard, interner, now) = shard(env).await;
+            let (shard, interner, now) = shard(env(&node, tasks)).await;
             body(node, shard, interner, now).await
         })
         .expect("the run ends")
+    }
+
+    fn env(node: &sim::node::Node, tasks: env::tasks::Tasks) -> Env {
+        Env {
+            files: node.files(),
+            clock: node.clock(),
+            wall: node.wall(),
+            entropy: node.entropy(),
+            tasks,
+        }
     }
 
     #[test]
@@ -168,30 +172,85 @@ mod tests {
         outcomes.expect("the home takes it").to_vec()
     }
 
-    #[test]
-    fn fills_the_ring_at_1023_one_frame_commits() {
-        let applied = run(
+    /// Writes a frame at each stamp of `stamps` and waits for their commit, or gives
+    /// false when the ring loses one.
+    async fn commit(
+        shard: &mut Shard,
+        writer: crate::writer::Key,
+        set: &KeySet,
+        stamps: Range<i64>,
+    ) -> bool {
+        for stamp in stamps {
+            let outcomes = write(shard, writer, set, Stamp::from_nanos(stamp));
+            if !matches!(outcomes[..], [Outcome::Applied { .. }]) {
+                assert!(
+                    matches!(outcomes[..], [Outcome::Lost { .. }]),
+                    "{outcomes:?}"
+                );
+                return false;
+            }
+        }
+        shard.committed().await.expect("commits");
+        true
+    }
+
+    /// The count of commits of `frames` frames each that a new ring takes.
+    fn fill(frames: i64) -> u64 {
+        run(
             sim::node::Config::default(),
-            |_, mut shard, mut interner, now| async move {
+            move |_, mut shard, mut interner, now| async move {
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let mut commits = 0;
+                let mut stamp = now.nanos();
+                while commit(&mut shard, writer, &set, stamp..stamp + frames).await {
+                    commits += 1;
+                    stamp += frames;
+                }
+                commits
+            },
+        )
+    }
+
+    #[test]
+    fn fills_a_new_ring_at_1023_one_frame_commits() {
+        assert_eq!(fill(1), 1023);
+    }
+
+    #[test]
+    fn fills_a_new_ring_at_341_commits_of_64_frames() {
+        assert_eq!(fill(64), 341);
+    }
+
+    #[test]
+    fn takes_a_block_of_the_ring_for_each_open() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let commits = sim
+            .run_on(&node, |node, tasks| async move {
+                let (mut shard, mut interner, now) =
+                    shard(env(&node, tasks.clone())).await;
                 let (writer, set) = open_writer(&mut shard, &mut interner);
                 let mut stamp = now.nanos();
-                loop {
-                    let outcomes =
-                        write(&mut shard, writer, &set, Stamp::from_nanos(stamp));
-                    if !matches!(outcomes[..], [Outcome::Applied { .. }]) {
-                        assert!(
-                            matches!(outcomes[..], [Outcome::Lost { .. }]),
-                            "{outcomes:?}"
-                        );
-                        return stamp - now.nanos();
-                    }
-                    shard.committed().await.expect("commits");
+                for _ in 0..10 {
+                    assert!(commit(&mut shard, writer, &set, stamp..stamp + 1).await);
                     stamp += 1;
                 }
-            },
-        );
+                let ended = shard.committed();
+                drop(shard);
+                ended.await.expect("the buffer ends");
+                let (mut shard, mut interner, _) =
+                    super::shard(env(&node, tasks)).await;
+                let (writer, set) = open_writer(&mut shard, &mut interner);
+                let mut commits = 10;
+                while commit(&mut shard, writer, &set, stamp..stamp + 1).await {
+                    commits += 1;
+                    stamp += 1;
+                }
+                commits
+            })
+            .expect("the run ends");
 
-        assert_eq!(applied, 1023);
+        assert_eq!(commits, 1022);
     }
 
     #[test]
