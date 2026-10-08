@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::future::poll_fn;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::task::Poll;
@@ -10,29 +10,9 @@ use std::task::Poll;
 use block::{Block, Pool};
 use env::files::{Error, File, Files, Mode, Operation};
 
+use crate::disk::{self, Scratch, opened};
+
 const KIB: u64 = 1 << 10;
-
-/// A directory of its own for the test on this thread, removed when it drops.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Self {
-        let thread = std::thread::current();
-        let test = thread.name().expect("invariant: libtest names the thread");
-        let name = format!("foundation-os-{}-{test}", std::process::id());
-        let dir = std::env::temp_dir().join(name.replace("::", "-"));
-        std::fs::create_dir(&dir).unwrap();
-        Self(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            std::fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
-}
 
 /// The files of `dir`, on an I/O thread named `name`, and the handle of the thread.
 fn files(dir: &Path, name: &str) -> (Files, env::thread::Handle) {
@@ -799,4 +779,27 @@ fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
         let found = files.open(Path::new("a"), Mode::Read).await.map(drop);
         assert_eq!(found, Ok(()));
     });
+}
+
+#[test]
+fn a_file_or_directory_that_is_there_keeps_its_mode() {
+    let scratch = Scratch::new();
+    let data = scratch.0.join("data");
+    std::fs::create_dir_all(data.join("d")).unwrap();
+    let len = usize::try_from(disk::LEN).unwrap();
+    std::fs::write(data.join("f"), vec![0; len]).unwrap();
+    for (path, mode) in [("", 0o755), ("f", 0o644), ("d", 0o755)] {
+        let mode = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(data.join(path), mode).unwrap();
+    }
+    assert_eq!(opened(&scratch.0), [0o755, 0o644, 0o755]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_directory_takes_the_setgid_bit_of_its_parent() {
+    let scratch = Scratch::new();
+    let mode = std::fs::Permissions::from_mode(0o2750);
+    std::fs::set_permissions(&scratch.0, mode).unwrap();
+    assert_eq!(opened(&scratch.0), [0o2700, 0o600, 0o2700]);
 }

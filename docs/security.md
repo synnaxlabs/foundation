@@ -31,7 +31,8 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
-| Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
+| Local user that runs the node, or root | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
+| Other local user | Read a file that a node made before `os` made each file `0600` in a `0700` directory | Read a file that `os` makes |
 | Agent host | Use the key of the agent's subject, which the MCP process holds | Go past that subject's allows |
 | Dependency | Ship hostile or defective code in a crate we build | |
 
