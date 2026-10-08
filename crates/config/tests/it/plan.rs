@@ -282,7 +282,8 @@ fn plans_no_change_after_its_apply() {
     spec.apply(&spec.plan(&[EDGE, INFLUX], &members).expect("no problems"));
     let plan = spec.plan(&[EDGE, INFLUX], &members).expect("no problems");
     assert_eq!(changes(&plan), []);
-    assert_eq!(plan.homes, BTreeMap::new());
+    let homes = BTreeMap::from([(name("edge.time"), name("edge"))]);
+    assert_eq!(plan.homes, homes);
     assert_eq!(plan.base.version, 1);
     assert_eq!(plan.base, spec.pointer);
 }
@@ -383,7 +384,8 @@ placement \"b\" {
         .collect();
     let added = ["a.@placement", "a.time", "a.value", "b.@placement"];
     assert_eq!(found, added.map(|name| (name, None)));
-    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
+    let homes = [(name("a.time"), name("n")), (name("b.time"), name("n"))];
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 #[test]
@@ -447,7 +449,8 @@ fn places_a_data_channel_that_becomes_an_index() {
         .map(|change| change.name.as_str())
         .collect();
     assert_eq!(keys, ["a.value"]);
-    assert_eq!(plan.homes, BTreeMap::from([(name("a.value"), name("n"))]));
+    let homes = [(name("a.time"), name("n")), (name("a.value"), name("n"))];
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 #[test]

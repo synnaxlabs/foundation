@@ -409,6 +409,7 @@ fn gives_the_json_of_a_change_and_a_removal() {
     ]);
     let planned = run(&[("site.hcl", &placed_site())], &applied).expect("a plan");
     let json = json(&planned);
+    assert_eq!(json["homes"], serde_json::json!({ "site.time": "edge" }));
     let changes = &json["changes"];
     assert_eq!(
         *changes,

@@ -1036,8 +1036,8 @@ fn apply_refuses_a_home_on_a_node_that_is_not_a_member_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         lead(&mesh, &node.clock(), home(1)).await;
-        let homes = create_homes(1, "plant.node2");
-        let applied = mesh.apply(base(), create_indexes(1), homes).await;
+        let homes = [(Kind::Channel.key("plant.i1").unwrap(), name("plant.node2"))];
+        let applied = mesh.apply(base(), create_indexes(2), homes.into()).await;
         let error = Error::UnknownNode(name("plant.node2"));
         assert_eq!(applied, Err(error.clone()));
         assert_eq!(
@@ -1068,6 +1068,56 @@ fn apply_refuses_more_homes_than_one_change_gives_before_no_vote() {
         let applied = mesh.apply(base(), create_indexes(most), homes).await;
         assert_eq!(applied, Err(Error::NoVote));
     });
+}
+
+#[test]
+fn apply_counts_against_the_most_only_the_listed_indexes_with_no_home() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let most = u128::try_from(HOMES_MAX).unwrap();
+        let first = create_indexes(most);
+        let moved = pointer(1, &first);
+        let homes = create_homes(most, "plant.node1");
+        assert_eq!(mesh.apply(base(), first, homes).await, Ok(moved));
+        let definitions = create_indexes(most + 1);
+        let next = pointer(2, &definitions);
+        let homes = create_homes(most + 1, "plant.node1");
+        assert_eq!(mesh.apply(moved, definitions, homes).await, Ok(next));
+        let last = channel::Key::from_u128(most + 7);
+        assert_eq!(mesh.watch(last).next().await, Ok(Some(key(1))));
+    });
+}
+
+// The listed node of `plant.i0` is no member, but the index has a home, so the apply
+// reads no node of it.
+#[test]
+fn a_change_gives_only_the_listed_homes_of_the_indexes_with_no_home() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let first = create_indexes(1);
+        let moved = pointer(1, &first);
+        let homes = create_homes(1, "plant.node1");
+        assert_eq!(mesh.apply(base(), first, homes).await, Ok(moved));
+        let definitions = create_indexes(2);
+        let next = pointer(2, &definitions);
+        let mut homes = create_homes(2, "plant.node2");
+        homes.insert(Kind::Channel.key("plant.i0").unwrap(), name("plant.node9"));
+        assert_eq!(mesh.apply(moved, definitions, homes).await, Ok(next));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+    });
+    let homes: Vec<_> = specs(&entries)
+        .into_iter()
+        .map(|change| match change {
+            Change::Spec { homes, .. } => homes,
+            _ => unreachable!(),
+        })
+        .collect();
+    let given = [
+        BTreeMap::from([(INDEX, key(1))]),
+        BTreeMap::from([(SECOND, key(2))]),
+    ];
+    assert_eq!(homes, given);
 }
 
 #[test]

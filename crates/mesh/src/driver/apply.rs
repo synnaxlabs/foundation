@@ -18,21 +18,21 @@ use crate::region::{self, Refused};
 
 impl Mesh {
     /// Makes `definitions`, by tree key, the region's spec, when the pointer is still
-    /// `base`. `homes` gives the home node of each index that has no home, by index
-    /// name to node name. At the apply, each index that has no home gets its listed
-    /// one, and a listed index that has a home keeps it. On `Ok`, a put of each chunk
-    /// of the new tree in [`Config::store`](super::Config::store) has returned. The
-    /// change lists each chunk of the new tree that the tree of `base` lacks, or each
-    /// chunk of the new tree when the store cannot give the tree of `base`. A follower
-    /// forwards the change to the leader. Returns the new pointer once its entry has
-    /// committed and this node applied it. It tries again when a new leader replaces
-    /// the entry, and after each tick while no leader takes it, as [`Mesh::set_home`]
-    /// does. On `Ok`, the pointer is the one this call makes, and each index of `homes`
-    /// has a home in this node's state when the call settles, the listed one or
-    /// another. A call whose entry finds that pointer, after a lost answer or an equal
-    /// change of another call, returns it when each index of `homes` has a home then,
-    /// and else gives `Stale`. A retry that finds a later pointer gives `Stale`, even
-    /// when an entry of this call applied before it.
+    /// `base`. `homes` gives the home node of an index, by index name to node name. The
+    /// change gives its listed home to each index of `homes` that has no home in this
+    /// node's state, and at the apply, an index that has a home keeps it. On `Ok`, a
+    /// put of each chunk of the new tree in [`Config::store`](super::Config::store) has
+    /// returned. The change lists each chunk of the new tree that the tree of `base`
+    /// lacks, or each chunk of the new tree when the store cannot give the tree of
+    /// `base`. A follower forwards the change to the leader. Returns the new pointer
+    /// once its entry has committed and this node applied it. It tries again when a new
+    /// leader replaces the entry, and after each tick while no leader takes it, as
+    /// [`Mesh::set_home`] does. On `Ok`, the pointer is the one this call makes, and
+    /// each index of `homes` has a home in this node's state when the call settles, the
+    /// listed one or another. A call whose entry finds that pointer, after a lost
+    /// answer or an equal change of another call, returns it when each index of `homes`
+    /// has a home then, and else gives `Stale`. A retry that finds a later pointer
+    /// gives `Stale`, even when an entry of this call applied before it.
     ///
     /// # Errors
     ///
@@ -43,11 +43,12 @@ impl Mesh {
     /// - [`Error::Problems`] when the spec has problems.
     /// - [`Error::NotIndex`] when `definitions` does not hold an index of `homes` as
     ///   an index channel.
-    /// - [`Error::Homes`] when `homes` holds more homes than one change can give.
+    /// - [`Error::Homes`] when more indexes of `homes` have no home than one change can
+    ///   give.
     /// - [`Error::Large`] when the change lists more chunks than one change can list.
     /// - [`Error::NoVote`] and [`Error::Stopped`] as for [`Mesh::set_home`].
-    /// - [`Error::UnknownNode`] when no member of the region has the name of a node
-    ///   of `homes`. It reads what this node applied.
+    /// - [`Error::UnknownNode`] when no member of the region has the name of the node
+    ///   of an index of `homes` that has no home. It reads what this node applied.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
     /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
@@ -81,6 +82,7 @@ impl Mesh {
                 _ => return Err(Error::NotIndex(index)),
             }
         }
+        indexes.retain(|&(index, _)| self.group.borrow().state.home(index).is_none());
         if indexes.len() > HOMES_MAX {
             return Err(Error::Homes {
                 homes: indexes.len(),

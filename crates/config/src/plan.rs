@@ -68,7 +68,7 @@ pub fn plan(
         sort(&mut diagnostics);
         return Err(diagnostics);
     }
-    let homes = homes(indexes, applied);
+    let homes = homes(indexes);
     Ok(Plan {
         base,
         changes: changes(found.entries, channels, applied),
@@ -85,8 +85,9 @@ pub struct Plan {
     pub base: spec::Pointer,
     /// Each change, in tree key order. Empty when the files match the spec.
     pub changes: Vec<Change>,
-    /// The home node of each index that has none before the apply, by index name: a
-    /// new index, or a data channel that becomes one.
+    /// The home node of each index of the files, as the placements give it, by index
+    /// name. The apply gives this home only to an index with no home, so an index with
+    /// a home keeps it.
     pub homes: BTreeMap<Name, Name>,
 }
 
@@ -216,23 +217,10 @@ fn indexes<'f>(
     indexes
 }
 
-/// The home of each placed index that the stored spec has no index at.
-fn homes(
-    indexes: BTreeMap<&Name, Index<'_>>,
-    applied: &BTreeMap<Name, definition::Definition>,
-) -> BTreeMap<Name, Name> {
-    let stored = |index: &Name| {
-        matches!(
-            applied.get(index),
-            Some(definition::Definition::Channel(Channel {
-                kind: spec::channel::Kind::Index { .. },
-                ..
-            }))
-        )
-    };
+/// The home of each placed index.
+fn homes(indexes: BTreeMap<&Name, Index<'_>>) -> BTreeMap<Name, Name> {
     indexes
         .into_iter()
-        .filter(|(index, _)| !stored(index))
         .filter_map(|(index, (_, placed))| {
             Some((index.clone(), placed.ok()?.home.clone()))
         })
