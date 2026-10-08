@@ -3852,10 +3852,10 @@ How to read this record:
   `region =` attribute). The advisor approved it on 2026-10-05, #474.
   The `<kind>` segment of each kind is its HCL keyword: `@access`, `@region`,
   `@node_settings`, `@compression` (compression section), `@placement` (S12),
-  `@retention` (#895), `@subject` (#1755), and `@time`. No time keyword was on record (C6 shows `[[time]]`,
-  and X36 replaced its content), so the architect decided `time`. A connector has no
-  segment: it is at its own name, and its channels are its children (#758, 2.2, C8). A
-  channel has no segment either: it is at its own name (#756,
+  `@retention` (#895), `@subject` (#1755), and `@time`. No time keyword was on record
+  (C6 shows `[[time]]`, and X36 replaced its content), so the architect decided `time`.
+  A connector has no segment: it is at its own name, and its channels are its children
+  (#758, 2.2, C8). A channel has no segment either: it is at its own name (#756,
   https://github.com/synnaxlabs/foundation/issues/756#issuecomment-6031378098). The `@`
   check still applies to both names. A region record is at `<prefix>.@region` in the
   parent's tree (#758). This is not an exception to X2: the region that holds the record
