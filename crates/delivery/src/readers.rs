@@ -1586,16 +1586,18 @@ pub(super) mod tests {
             let frames = Frames::new(1);
             let mut readers = Readers::after(0, 5);
             let key = readers
-                .open(Reader::Unnamed, Start::At(live(0)), CHARGE, Charge::Whole)
+                .open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole)
                 .key;
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             readers.grant(complete::Key(3), u64::MAX);
+            assert_eq!(readers.release(1), []);
+            assert!(matches!(readers.take(key.into()), Next::Empty));
             assert_eq!(readers.ack(complete::Key(3), live(1)), Ok(()));
             assert!(matches!(readers.take(complete::Key(3).into()), Next::Empty));
             assert!(matches!(readers.take(latest::Key(3).into()), Next::Empty));
             readers.close(complete::Key(3).into(), None);
             readers.close(latest::Key(3).into(), None);
-            assert_eq!(readers.release(1), [key]);
+            readers.grant(key, CHARGE);
             assert_eq!(taken(&mut readers, key), [1]);
         }
 
