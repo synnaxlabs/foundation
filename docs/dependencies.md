@@ -80,12 +80,14 @@ https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059938562.
 The hand mutant rule: decided by laptop.architect-2, 2026-10-08T12:05:01Z:
 https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6059458510. Supersedes
 the empty-list sentence of
-https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy is a
-path package, so `cargo deny` does not check it against advisories (#1867).
+https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337. A copy of
+a Rust crate is a path package, so `cargo deny` does not check it against advisories
+(#1867).
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
 | `noq-proto` | 1.3.0 | None yet | The gap between two probes grows with a cut, so a stream waits seconds after the cut heals (#1415) |
+| `open62541` (C library) | 1.5.9 | None yet | `connector-opcua` builds the OPC UA client from this copy, with the flags of `flags.txt` (#435) |
 
 ## Tests, benchmarks, and tools
 
