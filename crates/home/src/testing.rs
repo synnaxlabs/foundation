@@ -30,9 +30,10 @@ pub struct Env {
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
-/// earlier commit runs. A commit takes whole 4 KiB blocks (one for a frame, three for
-/// 64 frames), and each open takes one. Nothing frees the ring until #160, so a new
-/// ring fills at 1023 one-frame commits.
+/// earlier commit runs. A commit takes whole 4 KiB blocks, and each open takes one. A
+/// commit of one frame of a stamp and an `i64` sample takes one block, and of 64 such
+/// frames takes three. Nothing frees the ring until #160, so a new ring fills at 1023
+/// commits of one such frame.
 ///
 /// # Panics
 ///
