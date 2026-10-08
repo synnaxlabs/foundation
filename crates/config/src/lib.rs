@@ -127,7 +127,7 @@ pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagno
 fn channels(documents: &[Document]) -> BTreeSet<Name> {
     let blocks = documents.iter().flat_map(|document| &document.blocks);
     blocks
-        .filter(|block| &*block.keyword == "channel")
+        .filter(|block| &*block.keyword == Kind::Channel.as_str())
         .filter_map(|block| match block.labels.as_slice() {
             [label] => read::label(label).ok(),
             _ => None,
