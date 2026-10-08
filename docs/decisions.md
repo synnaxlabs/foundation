@@ -3798,7 +3798,7 @@ How to read this record:
   with that key, so the first `apply` needs no key step. A node that joins by ticket
   (BQ11a) joins a mesh that has a spec, so it creates none. BQ12 holds as written:
   each node checks each apply, the first one too, against a key in the spec. Lost: the
-  first apply from any local process, since any local user could then take the node.
+  first apply from any local process, because any local user could then take the node.
   Also lost: an admin public key given before the first start, a step before the first
   use. Decided by the person ("Yes, I approve."), relayed by `laptop.monitor` at
   2026-10-08T02:43:43Z:
