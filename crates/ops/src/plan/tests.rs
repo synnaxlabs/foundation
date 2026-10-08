@@ -14,7 +14,7 @@ use types::sample;
 
 use super::{File, FrontEnd, Planned, Problems, plan};
 
-const PLANT: &str = include_str!("../../../node/tests/it/one_node/plant.hcl");
+const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
 const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
 
 /// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
