@@ -4110,7 +4110,8 @@ How to read this record:
   completes the handshake until the mesh states its rule. At the stop, each session and
   stream future drops, then the transport. The bound on the wait for a header is #1628.
   A transport that stops with an error stops the node, and `Node::join` gives
-  `Error::Transport` (#1647). Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
+  `Error::Transport`, by `laptop.architect-2` on #1647 (2026-10-08):
+  https://github.com/synnaxlabs/foundation/issues/1647#issuecomment-6049354544. Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
   datagrams and the key, by `laptop.architect-2` (2026-10-07 23:26 UTC):
