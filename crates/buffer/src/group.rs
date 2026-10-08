@@ -427,12 +427,19 @@ mod tests {
 
     impl Area {
         fn new() -> Self {
-            Self::with_body_max(BODY_MAX)
+            Self::with(Layout::new(AREA, BODY_MAX).expect("the sizes make a ring"))
         }
 
+        /// The smallest area whose records hold a body of at most `body_max` bytes.
         fn with_body_max(body_max: usize) -> Self {
-            let bytes = vec![0; index(AREA)];
-            let layout = Layout::new(AREA, body_max).expect("the sizes make a ring");
+            let min = Layout::fit(0, body_max)
+                .expect_err("no ring in no bytes")
+                .min;
+            Self::with(Layout::fit(min, body_max).expect("the least length fits"))
+        }
+
+        fn with(layout: Layout) -> Self {
+            let bytes = vec![0; index(layout.area())];
             let mut cursor = Cursor::new(layout, start(), 1 << 16);
             let Window { place, len } = cursor.window();
             let step = cursor.next(&bytes[index(place)..index(place) + len]);
@@ -693,6 +700,7 @@ mod tests {
             area.push(&mut group, header(1, Path::Live, 2 * first), part.into());
             let closed = group.close(&mut area.writer);
             let sealed = area.commit(closed);
+            area.writer.synced(sealed.ends());
             if first == 0 {
                 tail = sealed.ends().record;
             }

@@ -411,7 +411,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::write`], or why the session ended.
+    /// As [`Endpoint::write`].
     ///
     /// # Panics
     ///
@@ -425,9 +425,6 @@ impl Session {
         self.with(|endpoint, clock, slot, _| {
             match endpoint.write(clock.now(), sender, message) {
                 Ok(Poll::Pending) => {
-                    if let Some(error) = &slot.end {
-                        return Poll::Ready(Err(error.clone()));
-                    }
                     register_one(&mut slot.writing, sender.key().id, cx.waker());
                     Poll::Pending
                 }
@@ -441,19 +438,13 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::finish`], or why the session ended.
+    /// As [`Endpoint::finish`].
     ///
     /// # Panics
     ///
     /// After a [`Session::finish`] that gave `Ok`, or a [`Session::reset`].
     pub(crate) fn finish(&self, sender: &mut Sender) -> Result<(), Error> {
-        self.with(|endpoint, clock, slot, _| {
-            sender.check_open();
-            if let Some(error) = &slot.end {
-                return Err(error.clone());
-            }
-            endpoint.finish(clock.now(), sender)
-        })
+        self.with(|endpoint, clock, _, _| endpoint.finish(clock.now(), sender))
     }
 
     /// Puts `message` on `sender`'s stream when the stream can take it now, as
@@ -461,7 +452,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::try_write`], or why the session ended.
+    /// As [`Endpoint::try_write`].
     ///
     /// # Panics
     ///
@@ -471,12 +462,8 @@ impl Session {
         sender: &Sender,
         message: Block,
     ) -> Result<Option<Block>, Error> {
-        self.with(|endpoint, clock, slot, _| {
-            let given = endpoint.try_write(clock.now(), sender, message)?;
-            match &slot.end {
-                Some(error) => Err(error.clone()),
-                None => Ok(given),
-            }
+        self.with(|endpoint, clock, _, _| {
+            endpoint.try_write(clock.now(), sender, message)
         })
     }
 
@@ -488,12 +475,15 @@ impl Session {
         });
     }
 
-    /// Cancels the message that `sender`'s stream took from the last
-    /// [`Session::poll_write`], as [`Endpoint::cancel`] does.
-    pub(crate) fn cancel(&self, sender: &Sender) {
+    /// Ends the last [`Session::poll_write`] on `sender`'s stream: drops its waker,
+    /// and when `taken`, cancels the message the stream took from it, as
+    /// [`Endpoint::cancel`] does.
+    pub(crate) fn abandon(&self, sender: &Sender, taken: bool) {
         self.with(|endpoint, clock, slot, _| {
             slot.writing.remove(&sender.key().id);
-            endpoint.cancel(clock.now(), sender);
+            if taken {
+                endpoint.cancel(clock.now(), sender);
+            }
         });
     }
 
@@ -503,7 +493,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As [`Endpoint::read`], or why the session ended.
+    /// As [`Endpoint::read`].
     pub(crate) fn poll_read(
         &self,
         cx: &mut Context<'_>,
@@ -511,21 +501,12 @@ impl Session {
     ) -> Poll<Result<Option<Block>, Error>> {
         self.with(|endpoint, clock, slot, waits| {
             let (now, stream, class) = (clock.now(), receiver.key(), receiver.class());
-            let mut asked = false;
-            let take = |pool: &_, len| {
-                asked = true;
-                waits.take(now, pool, stream, class, len, cx.waker())
-            };
+            let take =
+                |pool: &_, len| waits.take(now, pool, stream, class, len, cx.waker());
             let read = match endpoint.read(now, receiver, take) {
                 Ok(Poll::Pending) => {
-                    let Some(error) = &slot.end else {
-                        if !asked {
-                            waits.park(now, stream);
-                        }
-                        register_one(&mut slot.reading, stream.id, cx.waker());
-                        return Poll::Pending;
-                    };
-                    Err(error.clone())
+                    register_one(&mut slot.reading, stream.id, cx.waker());
+                    return Poll::Pending;
                 }
                 Ok(Poll::Ready(message)) => Ok(message),
                 Err(error) => Err(error),
@@ -889,6 +870,7 @@ mod tests {
     use std::future::poll_fn;
     use std::net::SocketAddr;
     use std::pin::pin;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
@@ -1422,6 +1404,46 @@ mod tests {
             let session = dialed.expect("a session");
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn each_stream_call_after_the_drain_gives_the_end() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        shard(&client, CLIENT, move |config, node| async move {
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), address(&node));
+            let carrier = Carrier::new(config, part);
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            let open = poll_fn(|cx| session.poll_open(cx, Class::Complete)).await;
+            let (sender, mut receiver) = open.expect("a stream");
+            let open = poll_fn(|cx| session.poll_open_sender(cx, Class::Latest)).await;
+            let mut finishing = open.expect("a stream");
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            node.clock().sleep(spans(IDLE, 3)).await;
+            // A private read: no public call shows the drain.
+            assert!(session.state.borrow().endpoint.drained());
+            let block = || testing::block(&pool, b"a");
+            let mut message = Some(block());
+            let written = poll_fn(|cx| session.poll_write(cx, &sender, &mut message));
+            assert_eq!(written.await, Err(closed.clone()));
+            assert!(message.is_some());
+            let flushed = poll_fn(|cx| session.poll_write(cx, &sender, &mut None));
+            assert_eq!(flushed.await, Err(closed.clone()));
+            let given = session.try_write(&sender, block());
+            assert_eq!(given.map(|given| given.is_some()), Err(closed.clone()));
+            assert_eq!(session.finish(&mut finishing), Err(closed.clone()));
+            let read = poll_fn(|cx| session.poll_read(cx, &mut receiver)).await;
+            assert_eq!(read.map(|read| read.is_some()), Err(closed));
         });
         assert_eq!(sim.run(), Ok(()));
     }

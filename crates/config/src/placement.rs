@@ -1,9 +1,9 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
-use spec::definition::Definition;
+use spec::definition;
 use spec::placement::{Error, Nodes, Policy};
 
-use crate::Found;
+use crate::{Definition, Found};
 
 const EMPTY_PLACEMENT: Code = Code::new("config.empty-placement");
 const ROLE_OVERLAP: Code = Code::new("config.role-overlap");
@@ -11,8 +11,7 @@ const KEYS: [&str; 4] = ["select", "home", "standby", "copies"];
 
 /// Checks a `placement` block and gives its policy.
 pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
-    let unknown = found.unknown_attributes(block, &KEYS);
-    found.unknown_blocks(block);
+    let unknown = found.unknown(block, &KEYS);
     let select =
         found.select(block, "connectors and indexes that it places", "site_a.*");
     let home = found.attribute(block, "home", read::name);
@@ -29,7 +28,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         copies: copies.unwrap_or_default(),
     };
     match Policy::new(select, nodes.clone()) {
-        Ok(policy) => Some(Definition::Placement(policy)),
+        Ok(policy) => Some(Definition::Spec(definition::Definition::Placement(policy))),
         Err(error) => {
             refuse(found, block, &nodes, &error);
             None

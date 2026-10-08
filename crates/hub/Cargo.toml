@@ -6,6 +6,31 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+env = { path = "../env" }
+home = { path = "../home" }
+types = { path = "../types" }
+
+[dev-dependencies]
+block = { path = "../block" }
+buffer = { path = "../buffer" }
+clock = { path = "../clock" }
+codec = { path = "../codec" }
+counting = { path = "../counting" }
+sim = { path = "../sim" }
+
+[[test]]
+name = "alloc"
+harness = false
+
+[[bench]]
+name = "reader"
+harness = false
+test = true
+
+[[bench]]
+name = "woken"
+harness = false
+test = true
 
 [lints]
 workspace = true

@@ -98,7 +98,8 @@ impl Slots {
     }
 
     /// The slot of `key`. The first call for a key assigns the next slot, from 0. A
-    /// slot is never reused.
+    /// slot is never reused. Give it only keys from the spec or the node's disk, which
+    /// limit the keys that the table holds: it hashes with no key.
     ///
     /// # Panics
     ///
