@@ -584,6 +584,36 @@ fix: Rename the file to a UTF-8 name
     );
 }
 
+#[test]
+fn gives_a_path_that_is_not_utf8_in_file_order_with_the_other_problems() {
+    let mut files = files(&[("a.hcl", "channel {\n"), ("a.txt", "")]);
+    files.insert(1, bytes(&[b"a\xff.hcl"], "").remove(0));
+    let error = plan(
+        &files,
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &front_ends(),
+        &Table::new(),
+    )
+    .expect_err("problems");
+    assert_eq!(
+        error.text(),
+        "\
+error[hcl.syntax]: the file needs a key, a block, or the end of the body here
+  --> a.hcl:2:1
+fix: Write it here, or correct the text here or before it
+
+error[ops.path-not-utf8]: the path \"a\\xFF.hcl\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+
+error[ops.unknown-extension]: no config syntax reads this file
+  --> a.txt:1:1
+fix: Use a file that ends in `.hcl`
+"
+    );
+}
+
 /// Lines that `ssh-keygen -t ed25519` wrote, and the fingerprint that
 /// `ssh-keygen -lf` gives for each.
 const ALICE: &str = concat!(
