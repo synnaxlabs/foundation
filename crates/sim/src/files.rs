@@ -375,10 +375,10 @@ impl Files {
     /// Crashes `node` by `crash` at true time `at`: each call, result, close, and hold
     /// of the node ends, a leaked one too. A call in flight ends as one whose future
     /// dropped, in the order of its end time. A create open in flight that makes a file
-    /// can make it with no bytes. After a `Power` crash only each write and each such
-    /// create can take effect, and the disk keeps what is durable. Returns the wakers
-    /// of the closes and the blocks of the calls, for the caller to drop after it
-    /// releases the lock.
+    /// can make it with no bytes. After a `Power` crash a `sync` or `sync_dir` in
+    /// flight has no effect, and the disk keeps what is durable and a prefix of its
+    /// log. Returns the wakers of the closes and the blocks of the calls, for the
+    /// caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,

@@ -200,7 +200,6 @@ impl Disk {
             Target::File(inode) => inode,
             Target::New { dir, name, len } => {
                 self.take(len)?;
-                self.dir_mut(dir).entries.insert(name.into(), key);
                 let file = File {
                     len,
                     sectors: BTreeMap::new(),
@@ -212,7 +211,7 @@ impl Disk {
                     logged: 0,
                 };
                 self.inodes.insert(key, Inode::File(file));
-                self.change(dir, vec![(name.into(), Some(key))]);
+                self.edit(dir, vec![(name.into(), Some(key))]);
                 key
             }
         };
@@ -261,9 +260,8 @@ impl Disk {
             Some(Inode::File(_)) => Err(Cause::Code(EXISTS)),
             None => {
                 self.take(DIR_BYTES)?;
-                self.dir_mut(dir).entries.insert(name.into(), key);
                 self.inodes.insert(key, Inode::Dir(Dir::default()));
-                self.change(dir, vec![(name.into(), Some(key))]);
+                self.edit(dir, vec![(name.into(), Some(key))]);
                 Ok(())
             }
         }
@@ -282,8 +280,7 @@ impl Disk {
             .get(*name)
             .ok_or(Cause::NotFound)?;
         self.named(inode, slashed)?.linked = false;
-        self.dir_mut(dir).entries.remove(*name);
-        self.change(dir, vec![(name.into(), None)]);
+        self.edit(dir, vec![(name.into(), None)]);
         self.collect(inode);
         Ok(())
     }
@@ -310,9 +307,7 @@ impl Disk {
         if dir.entries.contains_key(new) {
             return Err(Cause::Exists(to.to_path_buf()));
         }
-        dir.entries.remove(*old);
-        dir.entries.insert(new.to_owned(), inode);
-        self.change(
+        self.edit(
             key,
             vec![((*old).into(), None), (new.to_owned(), Some(inode))],
         );
@@ -340,7 +335,7 @@ impl Disk {
     /// of a prefix of the log, what they no longer reach is freed, and each sector
     /// keeps its durable bytes or its bytes after one write that no sync covered, by
     /// `rng`. The prefix draws from `rng` only when the log is not empty. Returns the
-    /// number of changes that it kept.
+    /// number of changes that a `Power` crash kept, or 0 after a `Process` crash.
     pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) -> u64 {
         let inodes: Vec<u64> = self.inodes.keys().copied().collect();
         for inode in inodes {
@@ -378,8 +373,10 @@ impl Disk {
         self.log = log;
         let mut ended: BTreeSet<u64> = old.into_values().collect();
         for inode in synced.iter().flat_map(Change::named) {
-            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
-                file.logged -= 1;
+            match self.inodes.get_mut(&inode) {
+                Some(Inode::File(file)) => file.logged -= 1,
+                Some(Inode::Dir(_)) => {}
+                None => unreachable!("invariant: a logged edit keeps inode {inode}"),
             }
             ended.insert(inode);
         }
@@ -397,12 +394,16 @@ impl Disk {
         Ok(())
     }
 
-    /// Logs a change of the entries of directory `dir` by `edits`.
-    fn change(&mut self, dir: u64, edits: Vec<(OsString, Option<u64>)>) {
+    /// Changes the entries of directory `dir` by `edits`, and logs the change. Each
+    /// inode that `edits` names must be in `inodes` first, so the log holds it.
+    fn edit(&mut self, dir: u64, edits: Vec<(OsString, Option<u64>)>) {
         let change = Change { dir, edits };
+        change.apply(&mut self.dir_mut(dir).entries);
         for inode in change.named() {
-            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
-                file.logged += 1;
+            match self.inodes.get_mut(&inode) {
+                Some(Inode::File(file)) => file.logged += 1,
+                Some(Inode::Dir(_)) => {}
+                None => unreachable!("invariant: an edit names inode {inode}"),
             }
         }
         self.log.push(change);
@@ -455,14 +456,8 @@ impl Disk {
             0 => 0,
             changes => rng.below(changes + 1),
         };
-        for change in log.into_iter().take(index(kept)) {
-            let dir = self.dir_mut(change.dir);
-            for (name, inode) in change.edits {
-                match inode {
-                    Some(inode) => dir.durable.insert(name, inode),
-                    None => dir.durable.remove(&name),
-                };
-            }
+        for change in log.iter().take(index(kept)) {
+            change.apply(&mut self.dir_mut(change.dir).durable);
         }
         let mut reached = BTreeSet::from([ROOT]);
         let mut next = vec![ROOT];
@@ -489,6 +484,16 @@ impl Disk {
 }
 
 impl Change {
+    /// Puts its edits on `entries`, in order.
+    fn apply(&self, entries: &mut BTreeMap<OsString, u64>) {
+        for (name, inode) in &self.edits {
+            match inode {
+                Some(inode) => entries.insert(name.clone(), *inode),
+                None => entries.remove(name),
+            };
+        }
+    }
+
     /// The inodes that its edits name.
     fn named(&self) -> impl Iterator<Item = u64> {
         self.edits.iter().filter_map(|(_, inode)| *inode)

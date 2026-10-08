@@ -299,7 +299,7 @@ fn each_node_has_its_own_disk() {
 }
 
 #[test]
-fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
+fn free_counts_a_removed_file_until_its_last_handle_closes_and_its_remove_is_durable() {
     let frees = run(0, MIB, |node, _| async move {
         let files = node.files();
         let mut frees = vec![files.free().await.unwrap()];
