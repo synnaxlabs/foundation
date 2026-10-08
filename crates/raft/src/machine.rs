@@ -3083,6 +3083,25 @@ mod tests {
             assert_eq!((raft.term(), raft.leader()), (Term(3), Some(key(2))));
         }
 
+        // Only a voter that led a term at or above the committed one can forge a
+        // link.
+        #[test]
+        fn a_link_of_a_term_below_the_committed_one_is_refused() {
+            let start = Start {
+                entries: [vec![leave()], entries(&[(2, 2)])].concat(),
+                applied: 2,
+                ..start(&ALL, at_term(2))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            sent(&mut raft);
+            let heartbeat = Message {
+                proof: Some(proof(Grant::Vote, 2, &[2, 4])),
+                chain: vec![link(position(1, 3), 3, &ALL, plain(&[2, 4]))],
+                ..message(2, 3, Body::Heartbeat { commit: 0 })
+            };
+            refuses(&mut raft, heartbeat, "a term below the committed one");
+        }
+
         // Node 1 committed the leave of term 1. A second change of term 1 was voted
         // under the configuration before the term, not under the leave.
         #[test]
