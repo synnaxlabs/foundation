@@ -3452,12 +3452,12 @@ mod port {
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
 
-        /// A task that wakes as the group stops, and panics after one yield, before the
-        /// node sees the stop: `join` gives the panic. The panic comes before the group
-        /// stops: no yield count reaches a panic between the stop and the node's poll,
-        /// because the sim picks each next task at random (#2016).
+        /// A task that panics one yield after the instant of the write that fails,
+        /// before the group stops: `join` gives the panic. No input reaches a panic
+        /// between the group's stop and the node's poll, because the sim picks each
+        /// next task at random (#2016).
         #[test]
-        fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
+        fn a_panic_before_the_group_stops_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
@@ -3541,8 +3541,8 @@ mod port {
             );
         }
 
-        /// A stop of the node from a task on shard 0, in the poll that breaks the node's
-        /// UDP socket: the node sees its stop, the transport's, and the group's
+        /// A stop of the node from a task on shard 0, in the poll that breaks the
+        /// node's UDP socket: the node sees its stop, the transport's, and the group's
         /// `Dropped` at one poll, and its stop ranks first.
         #[test]
         fn a_stop_as_the_transport_and_the_group_stop_gives_no_error() {
