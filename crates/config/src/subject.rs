@@ -1,3 +1,5 @@
+use std::slice;
+
 use base64ct::{Base64, Encoding};
 use document::Block;
 use document::diagnostic::{Code, Diagnostic, Note};
@@ -6,13 +8,16 @@ use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
 
-use crate::{Definition, Found, items};
+use crate::{Definition, Found};
 
 const BAD_PUBLIC_KEY: Code = Code::new("config.bad-public-key");
 const PUBLIC_KEY_ALGORITHM: Code = Code::new("config.public-key-algorithm");
 const PRIVATE_KEY: Code = Code::new("config.private-key");
 const NO_PUBLIC_KEYS: Code = Code::new("config.no-public-keys");
 const DUPLICATE_PUBLIC_KEY: Code = Code::new("config.duplicate-public-key");
+/// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, and a
+/// PuTTY `.ppk` file.
+const PRIVATE_MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
 const KEYS: [&str; 1] = ["keys"];
 const ALGORITHM: &str = "ssh-ed25519";
 /// The name of each other algorithm of an OpenSSH public key. A message names only
@@ -54,7 +59,10 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
 
 /// Reads one public key or a list of them as a subject.
 fn subject(value: &Value) -> Result<Subject, Diagnostic> {
-    let items = items(value);
+    let items = match &value.kind {
+        Kind::List(items) => items.as_slice(),
+        _ => slice::from_ref(value),
+    };
     items.iter().try_for_each(no_private_key)?;
     let keys = items.iter().map(key).collect::<Result<_, _>>()?;
     Subject::new(keys).map_err(|error| {
@@ -81,7 +89,7 @@ fn no_private_key(value: &Value) -> Result<(), Diagnostic> {
     let Kind::String(text) = &value.kind else {
         return Ok(());
     };
-    if !text.contains("PRIVATE KEY-----") {
+    if !PRIVATE_MARKS.iter().any(|mark| text.contains(mark)) {
         return Ok(());
     }
     Err(Diagnostic::new(

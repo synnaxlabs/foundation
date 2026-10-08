@@ -9,7 +9,6 @@ mod retention;
 mod subject;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
-use std::slice;
 
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
@@ -313,14 +312,6 @@ impl<'a> Found<'a> {
 /// The name of `block` in a message: "the `retention` block".
 fn of(block: &Block) -> String {
     format!("the `{}` block", block.keyword)
-}
-
-/// The items of a list, or the one value that is not a list.
-fn items(value: &Value) -> &[Value] {
-    match &value.kind {
-        document::value::Kind::List(items) => items,
-        _ => slice::from_ref(value),
-    }
 }
 
 #[cfg(test)]
@@ -2874,9 +2865,17 @@ mod tests {
                            b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMw\n\
                            -----END OPENSSH PRIVATE KEY-----\n";
             let rsa = "  -----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n";
+            let ssh2 = "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\n\
+                        Comment: \"rsa-key-20261008\"\nP2/56wAAA+wAAAA3aWYtbW9kbntz\n";
+            let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n\
+                       Comment: alice@laptop\nPublic-Lines: 2\n";
+            let comment = format!("{ALICE} PRIVATE KEY");
             let cases = [
                 (string(openssh), at(0, 11)),
                 (string(rsa), at(0, 11)),
+                (string(ssh2), at(0, 11)),
+                (string(ppk), at(0, 11)),
+                (string(&comment), at(0, 11)),
                 (list(&[string(ALICE), string(openssh)]), at(0, 51)),
                 (list(&[Kind::Integer(7), string(openssh)]), at(0, 51)),
             ];
