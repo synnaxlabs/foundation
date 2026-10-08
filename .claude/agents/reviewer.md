@@ -28,23 +28,23 @@ the code and against "Findings" step 3 of `.claude/skills/review/SKILL.md` on `m
 Name each answer that defers work or decides what a ruling means, with its issue and
 each link to the architect that step 3 asks for. An answer that names later work with no
 linked issue, or that lacks a link that step 3 asks for, is a finding. Read each such
-link, and each approval that a `Public surface:` line of an earlier round links: one
-that does not name the item, or whose approved SHA comes before a commit that changes
-the item's surface or the meaning of a ruling (`.claude/skills/architect/SKILL.md`,
-"Review before the person" step 3), counts as missing, which is a finding. Take each
-decision or public doc that the PR adds or changes and that states what a crate does,
-when that crate, the crate whose section or doc holds the text, and the crates that the
-PR changes are not all on one architect's list (`docs/factory.md`, "Architects"). One
-with no link on the PR to the approval of `laptop.architect` (Round 1 of the `review`
-skill) is a finding. Read that approval: one that does not name the text, or whose
-approved SHA comes before a commit that changes what the text states, counts as missing.
-Read each architect review and ruling on the PR, on a PR that it replaces, on each issue
-that it closes, and linked from a round comment, and the text of each issue that it
-closes: each later step or trigger that one names, and that lacks the record that "Done"
-in the `review` skill asks for, is a finding. A report gives, after the summary, the
-`Public surface:` and `Hot path:` lines that `.claude/agents/architecture.md` defines:
-in a second round for the range, and in a round 1 that runs no `architecture` agent for
-the PR.
+link, and each approval that a `Public surface:` line of an earlier round links (not the
+link of a `departs from` item): one that does not name the item, or whose approved SHA
+comes before a commit that changes the item's surface or the meaning of a ruling
+(`.claude/skills/architect/SKILL.md`, "Review before the person" step 3), counts as
+missing, which is a finding. Take each decision or public doc that the PR adds or
+changes and that states what a crate does, when that crate, the crate whose section or
+doc holds the text, and the crates that the PR changes are not all on one architect's
+list (`docs/factory.md`, "Architects"). One with no link on the PR to the approval of
+`laptop.architect` (Round 1 of the `review` skill) is a finding. Read that approval: one
+that does not name the text, or whose approved SHA comes before a commit that changes
+what the text states, counts as missing. Read each architect review and ruling on the
+PR, on a PR that it replaces, on each issue that it closes, and linked from a round
+comment, and the text of each issue that it closes: each later step or trigger that one
+names, and that lacks the record that "Done" in the `review` skill asks for, is a
+finding. A report gives, after the summary, the `Public surface:` and `Hot path:` lines
+that `.claude/agents/architecture.md` defines: in a second round for the range, and in a
+round 1 that runs no `architecture` agent for the PR.
 
 Check:
 
