@@ -2018,13 +2018,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1197#issuecomment-6032529738).
   `send_parts` gives the carrier one slice of the block for each run of adjacent parts
   over 1452 bytes. It copies each stretch of shorter runs and zeros between them into
-  the connection's buffer, in one walk of its parts. A last part of at most 1452 bytes
-  with no zeros goes to noq from the block, and noq copies it. The write reads the
-  caller's parts, and the stream keeps only the parts that the carrier did not take, the
-  first one cut at the first byte not taken, in a list that keeps its capacity. Lost: a
-  list of slices and stretches built for each message, because it costs each part on
-  each send. Decided by `laptop.architect-2` (#68, 2026-10-07 19:01
-  UTC:
+  the connection's buffer, in one walk of its parts. When only the last part is left,
+  and it has at most 1452 bytes and no zeros, it goes to noq from the block, and noq
+  copies it. The write reads the caller's parts, and the stream keeps only the parts
+  that the carrier did not take, the first one cut at the first byte not taken, in a
+  list that keeps its capacity. Lost: a list of slices and stretches built for each
+  message, because it costs each part on each send. Decided by `laptop.architect-2`
+  (#68, 2026-10-07 19:01 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6044783047, and
   2026-10-07 20:44 UTC:
   https://github.com/synnaxlabs/foundation/issues/68#issuecomment-6046501911). The
