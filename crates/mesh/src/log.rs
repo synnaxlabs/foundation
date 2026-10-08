@@ -1923,13 +1923,7 @@ mod tests {
     fn gives_the_version_error_for_a_next_file_of_another_version() {
         let (mut sim, node) = create_node(0);
         create_three_files(&mut sim, &node);
-        sim.run_on(&node, |node, _| async move {
-            let mut record = encode(9, None, &[bytes(4, 10)]);
-            record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
-            sign(&mut record);
-            put(&node, "log-2", 0, &record).await;
-        })
-        .unwrap();
+        put_other_version(&mut sim, &node);
         let expected = Error::Version {
             path: file("log-2"),
             found: 2,
@@ -1937,8 +1931,36 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
+    #[test]
+    fn refuses_a_next_file_of_another_version_after_a_torn_record() {
+        let (mut sim, node) = create_node(0);
+        create_three_files(&mut sim, &node);
+        put_other_version(&mut sim, &node);
+        sim.run_on(&node, |node, _| async move {
+            put(&node, "log-1", wide(HEADER) + 5, &[0xFF]).await;
+        })
+        .unwrap();
+        let expected = Error::Corrupt {
+            path: file("log-1"),
+            offset: 0,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    /// Writes a record with number 9 and format version 2 at the start of `log-2`.
+    fn put_other_version(sim: &mut Sim, node: &sim::node::Node) {
+        sim.run_on(node, |node, _| async move {
+            let mut record = encode(9, None, &[bytes(4, 10)]);
+            record[CHECK..CHECK + 2].copy_from_slice(&2_u16.to_le_bytes());
+            sign(&mut record);
+            put(&node, "log-2", 0, &record).await;
+        })
+        .unwrap();
+    }
+
     // A record after a torn one, in its file or the next, was written after the torn
-    // one, whatever its version or number.
+    // one, whatever its version or number. No write of the log makes these files, so
+    // the test gives their bytes to `scan`.
     #[test]
     fn refuses_a_record_after_a_torn_one() {
         let good = encode(0, None, &[bytes(1, 10)]);
@@ -1953,19 +1975,44 @@ mod tests {
             path: file("log-0"),
             offset: wide(good.len()),
         };
-        let same = [[head.clone(), other.clone()].concat()];
+        let same = [[head.clone(), other].concat()];
         assert_eq!(scan(Path::new(DIR), &same), Err(expected.clone()), "same");
-        assert_eq!(
-            scan(Path::new(DIR), &[head.clone(), other]),
-            Err(expected.clone()),
-            "next of another version"
-        );
         for number in [0, 1] {
             let record = encode(number, None, &[bytes(3, 10)]);
             let segments = [head.clone(), record];
             let scanned = scan(Path::new(DIR), &segments);
             assert_eq!(scanned, Err(expected.clone()), "next at {number}");
         }
+    }
+
+    #[test]
+    fn a_torn_record_before_a_spare_is_the_end() {
+        let (mut sim, node) = create_node(0);
+        create_spare(&mut sim, &node, 512);
+        sim.run_on(&node, |node, _| async move {
+            put(&node, "log-0", wide(HEADER) + 5, &[0xFF]).await;
+            let (_, stored) = open(&node).await.unwrap();
+            assert_eq!(stored, Stored::default());
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, [PathBuf::from("log-0")]);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn refuses_garbage_in_a_file_after_a_torn_record() {
+        let (mut sim, node) = create_node(0);
+        create_spare(&mut sim, &node, 512);
+        sim.run_on(&node, |node, _| async move {
+            put(&node, "log-0", wide(HEADER) + 5, &[0xFF]).await;
+            put(&node, "log-1", 0, &[0xAB; HEADER]).await;
+        })
+        .unwrap();
+        let expected = Error::Corrupt {
+            path: file("log-1"),
+            offset: 0,
+        };
+        assert_eq!(stored(&mut sim, &node), Err(expected));
     }
 
     // A crash can leave the next file with no record. Its length can differ from
