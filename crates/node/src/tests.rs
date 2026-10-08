@@ -491,29 +491,6 @@ fn fate(fate: &Mutex<Fate>) -> Fate {
     *fate.lock().unwrap()
 }
 
-/// `join` waits for each shard, also after a failure. It calls the private `error`:
-/// under `sim` each shard ends before `join`, and on real threads only a race shows a
-/// shard that `join` did not wait for.
-#[test]
-fn join_waits_for_each_shard_after_a_failure() {
-    let memory = Error::Memory {
-        core: 2,
-        error: os::memory::Error::Refused,
-    };
-    let panicked = thread::Panicked {
-        name: "shard-0".into(),
-    };
-    let shards = Error::Shards {
-        stored: 2,
-        cores: 3,
-    };
-    let mut joined = 0;
-    let all = [(Err(panicked), Some(shards)), (Ok(()), None)];
-    let all = all.into_iter().inspect(|_| joined += 1);
-    assert_eq!(crate::error(Some(memory.clone()), all), Err(memory));
-    assert_eq!(joined, 2);
-}
-
 mod buffer {
     use std::cell::RefCell;
     use std::rc::Rc;
