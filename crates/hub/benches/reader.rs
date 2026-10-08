@@ -1,11 +1,16 @@
-//! The per-frame cost of a `hub` reader, on one shard of a sim node. Run with
+//! The per-frame cost of a `hub` write and read, on one shard of a sim node. Run with
 //! `cargo bench -p hub --bench reader`.
 //!
 //! Each round writes `FRAMES` frames of one sample on an index and one data channel,
-//! and times six lines:
+//! and times these lines:
 //!
 //! - `timer`: an empty closure, the floor of each line's figure.
-//! - `write`, the control: one `Writer::write` of a frame whose draft is ready.
+//! - `first write`: the first `Writer::write` of a round, after the round before it
+//!   committed. It wakes the commit task.
+//! - `write`, the control: each later `Writer::write` of a round but the last. The
+//!   draft of each write is ready before it is timed.
+//! - `write wake`: the last `Writer::write` of a round. The latest reader waits for it
+//!   with a counting waker, which the write wakes.
 //! - `latest next`: one poll of a latest reader's `next` right after each write, which
 //!   gives that frame before its commit.
 //! - `complete next`: one poll of a complete reader's `next` after the round's commit,
@@ -24,20 +29,27 @@
 //! The write reads the sim clock once, which costs less than an `os` read, so compare a
 //! figure only with the control or with another build. The `timer` floor is a large
 //! part of a poll's figure, so judge a change in a poll by `net`, its p50 less the
-//! floor's. To compare two builds, run each several times in turn on one pinned core.
+//! floor's. To compare two builds, run each several times in turn on one pinned core
+//! whose SMT sibling is idle: a busy sibling doubles `write`.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 #[path = "../tests/common/mod.rs"]
 mod common;
+#[path = "../tests/common/shard.rs"]
+mod shard;
+mod table;
 
 use std::pin::pin;
-use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
-use common::{SETTLE, name};
+use common::SETTLE;
 use hub::reader::{Mode, Reader};
 use hub::writer;
+use shard::name;
+use table::Line;
 use types::authority::Authority;
 
 #[global_allocator]
@@ -46,64 +58,40 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// Frames per round. A round fits the window of a complete reader.
 const FRAMES: usize = 64;
 /// `WARMUP + ROUNDS` commits, under the 341 of `FRAMES` frames that the ring of
-/// `common::shard` holds.
+/// `shard::shard` holds.
 const WARMUP: usize = 20;
 const ROUNDS: usize = 200;
 
 fn main() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    let lines = sim.run_on(&node, bench).expect("the run ends");
-    print(&lines);
+    let (timer, lines) = sim.run_on(&node, bench).expect("the run ends");
+    let title = format!("ns per call over {ROUNDS} rounds of {FRAMES} frames");
+    table::print(&title, &timer, &lines);
 }
 
-/// One line of the table.
-struct Line {
-    name: &'static str,
-    /// The timed calls of each round.
-    calls: u64,
-    /// The ns and allocations of the round so far.
-    round: (u64, u64),
-    /// The ns per call of each timed round.
-    nanos: Vec<u64>,
-    /// The allocations of all timed rounds.
-    allocations: u64,
-}
+/// A waker that counts its wakes.
+#[derive(Default)]
+struct Count(AtomicUsize);
 
-impl Line {
-    fn new(name: &'static str, calls: usize) -> Self {
-        Self {
-            name,
-            calls: u64::try_from(calls).expect("few"),
-            round: (0, 0),
-            nanos: Vec::with_capacity(ROUNDS),
-            allocations: 0,
-        }
+impl Wake for Count {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
     }
 
-    fn add(&mut self, (nanos, allocations): (u64, u64)) {
-        self.round.0 += nanos;
-        self.round.1 += allocations;
-    }
-
-    /// The ns per call of the round at `percent`.
-    fn at(&self, percent: usize) -> u64 {
-        let mut nanos = self.nanos.clone();
-        nanos.sort_unstable();
-        nanos[ROUNDS * percent / 100]
-    }
-
-    /// Ends a round, and keeps its figures when it is `timed`.
-    fn close(&mut self, timed: bool) {
-        let (nanos, allocations) = std::mem::take(&mut self.round);
-        if timed {
-            self.nanos.push(nanos / self.calls);
-            self.allocations += allocations;
-        }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
+impl Count {
+    fn wakes(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// The `timer` line and the lines that it is the floor of.
+async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, [Line; 7]) {
     let (hub, mut stamp) = common::hub(&node, tasks).await;
     let config = writer::Config {
         subject: name("bench"),
@@ -115,41 +103,51 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
     let channels = [name("value")];
     let mut latest = hub.reader(&channels, Mode::Latest).await.expect("opens");
     let mut complete = hub.reader(&channels, Mode::Complete).await.expect("opens");
+    let count = Arc::new(Count::default());
+    let waker = Waker::from(Arc::clone(&count));
     let mut timer = Line::new("timer", FRAMES);
-    let mut write = Line::new("write", FRAMES);
-    let mut latest_next = Line::new("latest next", FRAMES);
-    let mut complete_next = Line::new("complete next", FRAMES);
-    let mut grant = Line::new("complete grant", 1);
-    let mut wait = Line::new("complete wait", FRAMES - 1);
+    let mut lines = [
+        Line::new("first write", 1),
+        Line::new("write", FRAMES - 2),
+        Line::new("write wake", 1),
+        Line::new("latest next", FRAMES),
+        Line::new("complete next", FRAMES),
+        Line::new("complete grant", 1),
+        Line::new("complete wait", FRAMES - 1),
+    ];
     for round in 0..WARMUP + ROUNDS {
-        for _ in 0..FRAMES {
+        let [first, write, wake, latest_next, complete_next, grant, wait] = &mut lines;
+        for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
-            timer.add(timed(|| ()));
-            write.add(timed(|| common::write(&mut writer, draft)));
+            timer.add(table::timed(&ALLOCATOR, || ()).1);
+            if frame == FRAMES - 1 {
+                assert!(!poll(&mut latest, &waker), "the latest reader waits");
+                assert_eq!(count.wakes(), round, "the poll wakes nothing");
+            }
+            let line = match frame {
+                0 => &mut *first,
+                _ if frame == FRAMES - 1 => &mut *wake,
+                _ => &mut *write,
+            };
+            line.add(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
             latest_next.add(take(&mut latest));
         }
+        let woken = count.wakes();
+        assert_eq!(woken, round + 1, "each round's last write wakes the reader");
         node.clock().sleep(SETTLE).await;
         for _ in 0..FRAMES {
             complete_next.add(take(&mut complete));
         }
-        grant.add(timed(|| pending(&mut complete)));
+        grant.add(table::timed(&ALLOCATOR, || pending(&mut complete)).1);
         for _ in 1..FRAMES {
-            wait.add(timed(|| pending(&mut complete)));
+            wait.add(table::timed(&ALLOCATOR, || pending(&mut complete)).1);
         }
-        let lines = [
-            &mut timer,
-            &mut write,
-            &mut latest_next,
-            &mut complete_next,
-            &mut grant,
-            &mut wait,
-        ];
-        for line in lines {
+        for line in std::iter::once(&mut timer).chain(&mut lines) {
             line.close(round >= WARMUP);
         }
     }
-    [timer, write, latest_next, complete_next, grant, wait]
+    (timer, lines)
 }
 
 /// The ns and allocations of the poll of `reader.next()` that gives the frame that
@@ -160,9 +158,9 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> [Line; 6] {
 /// When no frame waits.
 fn take(reader: &mut Reader) -> (u64, u64) {
     for _ in 0..2 {
-        let ((ready, span), counted) = ALLOCATOR.count(|| clocked(|| poll(reader)));
+        let (ready, figures) = table::timed(&ALLOCATOR, || poll(reader, Waker::noop()));
         if ready {
-            return (span, counted);
+            return figures;
         }
     }
     panic!("a frame waits for the reader");
@@ -174,69 +172,20 @@ fn take(reader: &mut Reader) -> (u64, u64) {
 ///
 /// When the poll gives a frame.
 fn pending(reader: &mut Reader) {
-    assert!(!poll(reader), "the reader has no frame left");
+    assert!(!poll(reader, Waker::noop()), "the reader has no frame left");
 }
 
-/// One poll of `reader.next()`: `true` for a frame, `false` for `Pending`.
+/// One poll of `reader.next()` with `waker`: `true` for a frame, `false` for
+/// `Pending`.
 ///
 /// # Panics
 ///
 /// When the reader ends.
-fn poll(reader: &mut Reader) -> bool {
-    let mut cx = Context::from_waker(Waker::noop());
+fn poll(reader: &mut Reader, waker: &Waker) -> bool {
+    let mut cx = Context::from_waker(waker);
     match pin!(reader.next()).poll(&mut cx) {
         Poll::Ready(Ok(_)) => true,
         Poll::Ready(Err(ended)) => panic!("the reader ended: {ended:?}"),
         Poll::Pending => false,
     }
-}
-
-/// The ns that `f` takes, and the allocations it makes.
-fn timed(f: impl FnOnce()) -> (u64, u64) {
-    let (((), span), counted) = ALLOCATOR.count(|| clocked(f));
-    (span, counted)
-}
-
-/// The result of `f`, and the ns it takes.
-#[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
-fn clocked<T>(f: impl FnOnce() -> T) -> (T, u64) {
-    let start = Instant::now();
-    let value = f();
-    (value, nanos(Instant::now().duration_since(start)))
-}
-
-fn nanos(span: Duration) -> u64 {
-    u64::try_from(span.as_nanos()).expect("a poll takes under 2^64 ns")
-}
-
-#[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
-fn print(lines: &[Line]) {
-    println!("ns per call over {ROUNDS} rounds of {FRAMES} frames");
-    println!("pN: the round at percentile N");
-    println!(
-        "{:<14} {:>9} {:>9} {:>9} {:>9} {:>13}",
-        "line", "p10", "p50", "p90", "net", "allocs/call"
-    );
-    let floor = lines[0].at(50);
-    for line in lines {
-        let allocations = per(line.allocations) / per(ROUNDS) / per(line.calls);
-        println!(
-            "{:<14} {:>9} {:>9} {:>9} {:>9} {allocations:>13.2}",
-            line.name,
-            line.at(10),
-            line.at(50),
-            line.at(90),
-            line.at(50).saturating_sub(floor)
-        );
-    }
-}
-
-/// `value` as a float, exact below 2^53.
-#[expect(
-    clippy::cast_precision_loss,
-    clippy::as_conversions,
-    reason = "a printed figure loses no digit it shows"
-)]
-fn per(value: impl TryInto<u64, Error: std::fmt::Debug>) -> f64 {
-    value.try_into().expect("fits 64 bits") as f64
 }
