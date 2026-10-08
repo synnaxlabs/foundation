@@ -9,7 +9,8 @@ use serde_json::Value;
 
 use crate::files;
 
-const URL: &str = "https://github.com/open62541/open62541.git";
+/// The upstream repository.
+pub(crate) const URL: &str = "https://github.com/open62541/open62541.git";
 
 /// The `cmake` options of our build: no architecture, so the event loop and the clock
 /// are ours, and no feature the connector does not use.
@@ -27,12 +28,13 @@ const OPTIONS: [&str; 11] = [
     "-DUA_ENABLE_DETERMINISTIC_RNG=ON",
 ];
 
-/// Options that change only the objects that [`clock_calls`] reads: no inlining and no
-/// LTO, so each call keeps the function that holds it in the source.
+/// Options that change only the objects that [`clock_calls`] reads: no inlining, no
+/// folding of identical functions, and no LTO, so each call keeps the function that
+/// holds it in the source.
 const ANALYSIS: [&str; 4] = [
     "-DCMAKE_BUILD_TYPE=Release",
     "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
-    "-DCMAKE_C_FLAGS=-fno-inline",
+    "-DCMAKE_C_FLAGS=-fno-inline -fno-ipa-icf",
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 ];
 
@@ -61,8 +63,8 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
-/// Clones `tag` into `target/open62541/<tag>/`, builds it with [`OPTIONS`], and
-/// replaces `patches/open62541/` with its compiled sources, their headers,
+/// Clones `tag` of `url` into `target/open62541/<tag>/`, builds it with [`OPTIONS`],
+/// and replaces `patches/open62541/` with its compiled sources, their headers,
 /// `LICENSE`, `sources.txt` (each `.c` file), and `VERSION` (tag and commit). Needs
 /// `git`, `cmake`, Python 3, a C compiler, and GNU `objdump`.
 ///
@@ -70,35 +72,55 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
 ///
 /// A step that fails, a header outside the source and build trees, or a call of a
 /// clock function that [`CLOCK_CALLS`] does not list, or an entry it lists that no
-/// call matches.
-pub(crate) fn run(root: &Path, tag: &str) -> Result<(), Vec<String>> {
+/// call matches. On an error, `patches/open62541/` does not change.
+pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
     let work = root.join("target/open62541").join(tag);
     let (src, build) = (work.join("src"), work.join("build"));
-    remove(&work).map_err(|e| vec![e])?;
-    let clone = ["clone", "-q", "--depth", "1", "--branch", tag, URL];
-    let mut git = Command::new("git");
-    git.args(clone).arg(&src);
-    exec(&mut git).map_err(|e| vec![e])?;
-    let mut cmake = Command::new("cmake");
-    cmake.arg("-S").arg(&src).arg("-B").arg(&build);
-    exec(cmake.args(OPTIONS).args(ANALYSIS)).map_err(|e| vec![e])?;
-    let mut make = Command::new("cmake");
-    make.arg("--build").arg(&build);
-    exec(make.args(["--target", "open62541", "--parallel"])).map_err(|e| vec![e])?;
-    let commands = std::fs::read_to_string(build.join("compile_commands.json"))
-        .map_err(|e| vec![format!("compile_commands.json: {e}")])?;
-    let objects = objects(&commands, &build).map_err(|e| vec![e])?;
     let trees = Trees {
         src: &src,
         build: &build,
     };
+    let commit = compile(&work, &trees, url, tag).map_err(|e| vec![e])?;
+    let copy = collect(&trees)?;
+    write(root, &src, &copy, &format!("{tag}\n{commit}")).map_err(|e| vec![e])
+}
+
+/// Clones and builds `tag` of `url` in `work`, and gives its commit.
+fn compile(
+    work: &Path,
+    trees: &Trees<'_>,
+    url: &str,
+    tag: &str,
+) -> Result<String, String> {
+    remove(work)?;
+    let clone = ["clone", "-q", "--depth", "1", "--branch", tag, url];
+    exec(Command::new("git").args(clone).arg(trees.src))?;
+    let mut cmake = Command::new("cmake");
+    cmake.arg("-S").arg(trees.src).arg("-B").arg(trees.build);
+    exec(cmake.args(OPTIONS).args(ANALYSIS))?;
+    let mut make = Command::new("cmake");
+    make.arg("--build").arg(trees.build);
+    exec(make.args(["--target", "open62541", "--parallel"]))?;
+    exec(
+        Command::new("git")
+            .arg("-C")
+            .arg(trees.src)
+            .args(["rev-parse", "HEAD"]),
+    )
+}
+
+/// Each (from, to) to copy from a built clone: each source of the library and each
+/// header that it includes, other than a system header.
+fn collect(trees: &Trees<'_>) -> Result<BTreeSet<(PathBuf, PathBuf)>, Vec<String>> {
+    let commands = std::fs::read_to_string(trees.build.join("compile_commands.json"))
+        .map_err(|e| vec![format!("compile_commands.json: {e}")])?;
     let mut found = BTreeSet::new();
     let mut copy = BTreeSet::new();
     let mut problems = Vec::new();
-    for (source, object) in &objects {
-        let file = trees.relative(source).map_err(|e| vec![e])?;
+    for (source, object) in objects(&commands, trees.build).map_err(|e| vec![e])? {
+        let file = trees.relative(&source).map_err(|e| vec![e])?;
         let mut objdump = Command::new("objdump");
-        let text = exec(objdump.arg("-dr").arg(object)).map_err(|e| vec![e])?;
+        let text = exec(objdump.arg("-dr").arg(&object)).map_err(|e| vec![e])?;
         for function in clock_calls(&text) {
             found.insert((file.display().to_string(), function));
         }
@@ -113,20 +135,14 @@ pub(crate) fn run(root: &Path, tag: &str) -> Result<(), Vec<String>> {
                 Err(e) => problems.push(e),
             }
         }
-        copy.insert((source.clone(), file));
+        copy.insert((source, file));
     }
     problems.extend(unlisted(&found));
-    if !problems.is_empty() {
-        return Err(problems);
+    if problems.is_empty() {
+        Ok(copy)
+    } else {
+        Err(problems)
     }
-    let commit = exec(
-        Command::new("git")
-            .arg("-C")
-            .arg(&src)
-            .args(["rev-parse", "HEAD"]),
-    )
-    .map_err(|e| vec![e])?;
-    write(root, &src, &copy, &format!("{tag}\n{commit}")).map_err(|e| vec![e])
 }
 
 /// The source and build trees of one clone.
@@ -375,11 +391,195 @@ Disassembly of section .text.setDefaultConfig:
         assert_eq!(
             unlisted(&found),
             [
-                "src/ua_types.c: `UA_new` calls a global clock function. Find whether a \
-                 node runs it; if not, add it to CLOCK_CALLS with the reason",
-                "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove it \
-                 from CLOCK_CALLS",
+                "src/ua_types.c: `UA_new` calls a global clock function. Find whether \
+                 a node runs it; if not, add it to CLOCK_CALLS with the reason",
+                "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove \
+                 it from CLOCK_CALLS",
             ]
         );
+    }
+
+    /// A directory of the test `name`, empty, in the temporary directory.
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("xtask-open62541-{name}-{}", std::process::id()));
+        remove(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Writes each (path, text) of `files` under `dir`.
+    fn create_files(dir: &Path, files: &[(&str, &str)]) {
+        for (path, text) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+    }
+
+    /// Commits each file in `repo` and tags the commit `tag`.
+    fn tag(repo: &Path, tag: &str) {
+        let git = |args: &[&str]| {
+            let mut git = Command::new("git");
+            git.arg("-C")
+                .arg(repo)
+                .args(["-c", "user.name=x", "-c", "user.email=x@x"]);
+            exec(git.args(args)).unwrap()
+        };
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", tag]);
+        git(&["tag", tag]);
+    }
+
+    /// A project with the layout of open62541: the `open62541` library from two
+    /// object libraries, with a call of a clock function at each place that
+    /// [`CLOCK_CALLS`] lists, a generated header, and a system header.
+    fn create_project(repo: &Path) {
+        exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
+        let call = |functions: &[&str]| {
+            let body = "(void) { return UA_DateTime_now(); }\n";
+            let mut text = "#include <stdio.h>\n#include \"clock.h\"\n".to_owned();
+            for function in functions {
+                text = text + "long long " + function + body;
+            }
+            text
+        };
+        let util =
+            "#include \"open62541/config.h\"\n".to_owned() + &call(&["UA_random_seed"]);
+        create_files(
+            repo,
+            &[
+                ("LICENSE", "license\n"),
+                (
+                    "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.20)\nproject(fixture C)\n\
+                     configure_file(config.h.in src_generated/open62541/config.h)\n\
+                     file(WRITE ${CMAKE_BINARY_DIR}/other.h \"\")\n\
+                     include_directories(include ${CMAKE_BINARY_DIR}/src_generated \
+                     ${CMAKE_BINARY_DIR})\n\
+                     file(GLOB more src/more/*.c)\n\
+                     add_library(open62541-object OBJECT src/util/ua_util.c \
+                     src/util/ua_encryptedsecret.c ${more})\n\
+                     add_library(open62541-plugins OBJECT plugins/ua_config_default.c \
+                     plugins/ua_log_stdout.c)\n\
+                     add_library(open62541 STATIC $<TARGET_OBJECTS:open62541-object> \
+                     $<TARGET_OBJECTS:open62541-plugins>)\n\
+                     add_executable(tool tools/tool.c)\n",
+                ),
+                ("config.h.in", "#define CONFIG 1\n"),
+                ("include/clock.h", "long long UA_DateTime_now(void);\n"),
+                ("src/util/ua_util.c", &util),
+                (
+                    "src/util/ua_encryptedsecret.c",
+                    &call(&["encryptUserIdentityTokenEcc"]),
+                ),
+                (
+                    "plugins/ua_config_default.c",
+                    &call(&["setDefaultConfig", "interruptServer"]),
+                ),
+                ("plugins/ua_log_stdout.c", &call(&["UA_Log_Stdout_log"])),
+                ("tools/tool.c", "int main(void) { return 0; }\n"),
+            ],
+        );
+    }
+
+    #[test]
+    fn run_copies_each_compiled_source_and_its_headers() {
+        let (root, repo) = (temp("copies-root"), temp("copies-repo"));
+        create_project(&repo);
+        tag(&repo, "v1");
+        create_files(&root, &[("patches/open62541/stale.c", "")]);
+        let url = format!("file://{}", repo.display());
+        assert_eq!(run(&root, &url, "v1"), Ok(()));
+        let dest = root.join("patches/open62541");
+        let mut copied: Vec<_> = walk(&dest)
+            .iter()
+            .map(|path| path.strip_prefix(&dest).unwrap().display().to_string())
+            .collect();
+        copied.sort();
+        assert_eq!(
+            copied,
+            [
+                "LICENSE",
+                "VERSION",
+                "include/clock.h",
+                "plugins/ua_config_default.c",
+                "plugins/ua_log_stdout.c",
+                "sources.txt",
+                "src/util/ua_encryptedsecret.c",
+                "src/util/ua_util.c",
+                "src_generated/open62541/config.h",
+            ]
+        );
+        let read = |path| std::fs::read_to_string(dest.join(path)).unwrap();
+        assert_eq!(
+            read("sources.txt"),
+            "plugins/ua_config_default.c\nplugins/ua_log_stdout.c\n\
+             src/util/ua_encryptedsecret.c\nsrc/util/ua_util.c\n"
+        );
+        let mut git = Command::new("git");
+        let commit = exec(git.arg("-C").arg(&repo).args(["rev-parse", "v1"])).unwrap();
+        assert_eq!(read("VERSION"), format!("v1\n{commit}\n"));
+        assert_eq!(
+            read("src/util/ua_util.c"),
+            std::fs::read_to_string(repo.join("src/util/ua_util.c")).unwrap()
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    fn run_refuses_a_new_clock_call_and_a_header_outside_the_clone() {
+        let (root, repo) = (temp("refuses-root"), temp("refuses-repo"));
+        create_project(&repo);
+        create_files(
+            &repo,
+            &[(
+                "src/more/ua_types.c",
+                "#include \"clock.h\"\n#include \"other.h\"\n\
+                     long long UA_new(void) { return UA_DateTime_now(); }\n",
+            )],
+        );
+        tag(&repo, "v2");
+        create_files(&root, &[("patches/open62541/kept.c", "")]);
+        let url = format!("file://{}", repo.display());
+        let build = root.join("target/open62541/v2/build");
+        assert_eq!(
+            run(&root, &url, "v2"),
+            Err(vec![
+                format!("{} is outside the clone", build.join("other.h").display()),
+                "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
+                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                    .to_owned(),
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    fn remove_fails_on_an_error_other_than_a_missing_directory() {
+        let dir = temp("remove");
+        std::fs::write(dir.join("file"), "").unwrap();
+        let path = dir.join("file/child");
+        assert_eq!(remove(&dir.join("missing")), Ok(()));
+        assert_eq!(
+            remove(&path),
+            Err(format!("{}: Not a directory (os error 20)", path.display()))
+        );
+        remove(&dir).unwrap();
+    }
+
+    /// Each file under `dir`.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
     }
 }
