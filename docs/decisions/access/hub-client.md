@@ -14,11 +14,11 @@
   response begins or the stream ends, because the node holds it open until then.
   `Config` holds its own `pool`, which a program may share with the transport. The
   stream holds each block of a body until the node has it, so a request needs room for
-  the bytes that the session holds in flight, up to the node's
-  `transport::Config::window_bytes`, plus the next chunk of the body, which takes its
-  block before it waits for the window, and the blocks of the header and the request.
-  A chunk is at most `block::Pool::largest`. A request gives `Error::Pool` when the
-  pool has no room.
+  the blocks that the session holds in flight, whose bytes reach the node's
+  `transport::Config::window_bytes`, plus the block of the next chunk of the body,
+  which it takes before it waits for the window. Each block counts at its
+  `block::footprint`. A chunk is at most `block::Pool::largest`. A request gives
+  `Error::Pool` when the pool has no room.
   `Client` is `Clone`, and a clone is the same session. When the last clone drops, the
   client closes the session with `Code(0)`. A node's stop and close with a code are one
   error: `Error::Refused(wire::hub::client::Refusal)`, a closed set in `wire` with
@@ -45,8 +45,9 @@
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069553753). It
   approved the retry, the `MALFORMED` close, and the room of the pool at 22:04:03Z
   (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069924128). It
-  approved the pool sentence at e7a48c81, and gave the reason against
-  `tokio::sync::Semaphore`, at 22:15:33Z
-  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889).
+  gave the reason against `tokio::sync::Semaphore` at 22:15:33Z
+  (https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6070115889). The
+  pool sentence, which adds the block of the next chunk and counts each block at its
+  footprint, is owed its approval.
   Supersedes the sentence "Any pool works" of
   https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6069455056.

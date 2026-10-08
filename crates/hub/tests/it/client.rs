@@ -949,12 +949,13 @@ fn gives_a_reset_and_a_close_as_one_refusal() {
     assert_eq!(Error::from(reset.clone()), Error::Transport(reset));
 }
 
-/// A pool with room for the node's window, one more chunk of the body, and the blocks
-/// of the header and the request sends a body at the cap; one byte less gives
+/// A pool with room for the blocks of the node's window and the block of one more
+/// chunk, each at its footprint, sends a body at the cap; one byte less gives
 /// `Error::Pool`.
 #[test]
 fn sends_a_body_at_the_cap_from_the_smallest_pool_with_room() {
-    let smallest = (1 << 20) + (1 << 16) + 1088;
+    // 16 chunks of 64 KiB fill the window of 1 MiB, and the 17th waits for room.
+    let smallest = 17 * block::footprint(1 << 16);
     for (budget, expected) in [
         (smallest, Ok(())),
         (
