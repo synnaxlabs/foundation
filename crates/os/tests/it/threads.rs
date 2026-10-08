@@ -279,12 +279,20 @@ fn a_panic_in_the_poll_of_a_tokio_task_gives_ok() {
 #[test]
 fn a_panic_in_the_drop_of_a_tokio_task_gives_ok() {
     let body = || {
-        drop(tokio::spawn(async {
-            let _bomb = Bomb;
-            pending::<()>().await;
-        }));
+        // The payload of the panic, `Relay(0)`, does not panic in its drop.
+        drop(tokio::spawn(Stuck(0)));
         ready(())
     };
     let handle = threads().start("thread-13", body).unwrap();
     assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_a_tokio_task_gives_panicked() {
+    let body = || async {
+        drop(tokio::spawn(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = threads().start("thread-14", body).unwrap();
+    assert_joins(handle, panicked("thread-14"));
 }
