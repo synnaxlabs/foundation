@@ -970,10 +970,17 @@ impl Future for End {
             return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
         }
         let key = self.key;
-        match state.ending.iter_mut().find(|(held, _)| *held == key) {
-            Some((_, waker)) => waker.clone_from(cx.waker()),
-            None => state.ending.push((key, cx.waker().clone())),
-        }
+        let replaced = match state.ending.iter_mut().find(|(held, _)| *held == key) {
+            Some((_, waker)) if waker.will_wake(cx.waker()) => None,
+            Some((_, waker)) => Some(mem::replace(waker, cx.waker().clone())),
+            None => {
+                state.ending.push((key, cx.waker().clone()));
+                None
+            }
+        };
+        // A waker's drop can drop another `End`, which borrows the state.
+        drop(state);
+        drop(replaced);
         Poll::Pending
     }
 }
@@ -981,7 +988,11 @@ impl Future for End {
 impl Drop for End {
     fn drop(&mut self) {
         let mut state = self.shared.state.borrow_mut();
-        state.ending.retain(|(key, _)| *key != self.key);
+        let held = state.ending.iter().position(|(key, _)| *key == self.key);
+        let held = held.map(|at| state.ending.swap_remove(at));
+        // A waker's drop can drop another `End`, which borrows the state.
+        drop(state);
+        drop(held);
     }
 }
 
