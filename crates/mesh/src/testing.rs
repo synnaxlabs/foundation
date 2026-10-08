@@ -175,8 +175,9 @@ mod tests {
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
     }
 
-    // Each decodes as the input before the homes does with the count added, which the
-    // tests above check.
+    // Each decodes as its input before the homes does with the count added, which
+    // `each_spec_change_input_is_what_its_name_says` and
+    // `each_holder_bound_input_is_what_its_name_says` check.
     #[test]
     fn each_input_with_a_count_of_0_homes_is_its_input_before_the_homes_with_it() {
         let before = inputs!(
