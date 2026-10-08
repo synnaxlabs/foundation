@@ -175,10 +175,9 @@ impl Mesh {
     async fn start(config: Config) -> Result<Self, Error> {
         let state =
             region::State::new(config.region, config.members).map_err(Error::Member)?;
-        let signer = Signer::new(config.key, &config.private_key);
         match state.member(config.key) {
             None => return Err(Error::NotMember(config.key)),
-            Some(own) if !signer.owns(own.public_key()) => {
+            Some(own) if own.public_key() != config.private_key.public() => {
                 return Err(Error::WrongKey);
             }
             Some(_) => {}
@@ -187,6 +186,7 @@ impl Mesh {
         if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
             return Err(Error::NotMember(key));
         }
+        let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
         let unapplied = written(&stored.entries).collect();
