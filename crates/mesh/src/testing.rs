@@ -64,6 +64,7 @@ mod tests {
     use spec::Pointer;
 
     use super::*;
+    use types::channel;
     use types::digest::Digest;
 
     use crate::bytes::{put_change, put_position};
@@ -259,6 +260,70 @@ mod tests {
             length: homed.len(),
         };
         assert_eq!(Change::decode(&homed), Err(body));
+    }
+
+    #[test]
+    fn each_homed_spec_change_input_is_what_its_name_says() {
+        let inputs = inputs!(
+            "mesh_change": "spec_held",
+            "spec_homed",
+            "spec_homes_512",
+            "spec_homes_513",
+            "spec_homes_equal",
+            "spec_homes_falling",
+        );
+        // The byte form of `spec_held` with each home of `homes`, in order.
+        let homed = |homes: &[(u128, u128)]| {
+            let mut bytes = inputs["spec_held"].to_vec();
+            bytes.extend(u16::try_from(homes.len()).unwrap().to_le_bytes());
+            for (index, home) in homes {
+                bytes.extend(index.to_le_bytes());
+                bytes.extend(home.to_le_bytes());
+            }
+            bytes
+        };
+        let change = |homes: &[(u128, u128)]| Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks: [Digest([4; 32]), Digest([5; 32])].into(),
+            holders: [key(1)].into(),
+            homes: homes
+                .iter()
+                .map(|&(index, home)| {
+                    (
+                        channel::Key::from_u128(index),
+                        key(u8::try_from(home).unwrap()),
+                    )
+                })
+                .collect(),
+        };
+        let at_bound: Vec<_> = (1..=512).map(|index| (index, 2)).collect();
+        for (name, homes) in
+            [("spec_homed", &[(5, 3)][..]), ("spec_homes_512", &at_bound)]
+        {
+            let bytes = homed(homes);
+            assert_eq!(inputs[name], bytes, "{name}");
+            assert_eq!(Change::decode(&bytes), Ok(change(homes)), "{name}");
+            assert_eq!(round_trip_change(&bytes), Some(bytes), "{name}");
+        }
+        let over: Vec<_> = (1..=513).map(|index| (index, 2)).collect();
+        for (name, homes) in [
+            ("spec_homes_513", &over[..]),
+            ("spec_homes_equal", &[(5, 2), (5, 3)]),
+            ("spec_homes_falling", &[(9, 2), (5, 3)]),
+        ] {
+            let bytes = homed(homes);
+            assert_eq!(inputs[name], bytes, "{name}");
+            let body = Malformed::Body {
+                kind: 4,
+                length: bytes.len(),
+            };
+            assert_eq!(Change::decode(&bytes), Err(body), "{name}");
+            assert_eq!(round_trip_change(&bytes), None, "{name}");
+        }
     }
 
     // The byte form of a spec change with no home, before the homes: with no count of
