@@ -208,17 +208,19 @@ budget, its limits, and step 3. Step 4 checks each by its instance, because they
   builder adds the ruling to `docs/decisions.md` in the code PR, so the record and the
   code merge together. Public surfaces (`public-api.txt`) need the architect's approval,
   not the person's. Only four things go to the person: a change to a decision the person
-  made, the next milestone, new spend, and a security or license risk. The coordinator
-  sends them in one batch a day, except one that blocks the critical path.
+  made, the next milestone, new spend, and a security or license risk. `laptop.monitor`
+  takes them to the person in one batch a day, except one that blocks the critical
+  path.
 - **A stuck session tells the coordinator at once.** When a permission check refuses
-  a call, or work waits on the person, send `coordinator` the refused command, the
-  reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
-  person. Never try to get around a refusal.
-- **A question for the person** states the problem, the fix, its cost, and a
-  recommendation. For each option, it says whether it is a patch or the long-term
-  path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
-  "whenever you present thes, you need to tell me hwether its a patch and not a long
-  term fix or the long term path".
+  a call, send `coordinator` the refused command, the reason text, and the issue or PR.
+  Then stop and wait. Never try to get around a refusal.
+- **A question for the person goes to `laptop.monitor`.** Write it on the issue or PR,
+  then send `laptop.monitor` the link to that comment at once. A comment alone reaches
+  no one. The question states the problem, the fix, its cost, and a recommendation.
+  For each option, it says whether it is a patch or the long-term path; for a patch, it
+  names the long-term fix. The person decided on 2026-10-05: "whenever you present
+  thes, you need to tell me hwether its a patch and not a long term fix or the long
+  term path".
 
 ## Before a session stops
 

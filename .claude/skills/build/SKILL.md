@@ -110,7 +110,8 @@ cargo mutants --in-diff "$p" --jobs 4
 ## Night lane
 
 Never change a public surface, a decision, or another crate. When the work needs a
-person or a decision, ask on the issue, add `blocked`, and take the next `night` issue.
+person or a decision, ask on the issue and send the link (Rules), add `blocked`, and
+take the next `night` issue.
 A PR that needs the person (`oracles/`, `.github/`, `.claude/`) waits for the morning;
 take the next issue meanwhile.
 
@@ -126,6 +127,9 @@ take the next issue meanwhile.
   make it pass.
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
+- Ask the person in a comment on the issue or PR, then send `laptop.monitor` the link
+  to that comment at once (`docs/coordination.md`, "Messages"). A comment alone reaches
+  no one.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
   to the crate's architect (`docs/factory.md`).
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling
