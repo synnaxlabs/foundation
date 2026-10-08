@@ -327,6 +327,9 @@ checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 name = "config"
 version = "0.0.0"
 dependencies = [
+ "config-hcl",
+ "connector",
+ "connector-influx",
  "document",
  "proptest",
  "spec",
@@ -367,6 +370,7 @@ dependencies = [
  "bytes",
  "connector",
  "counting",
+ "document",
  "env",
  "http",
  "influxdb-line-protocol",

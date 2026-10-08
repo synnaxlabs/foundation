@@ -92,7 +92,7 @@ fn action(value: &Value) -> Result<Action, Diagnostic> {
         .iter()
         .find(|(known, _)| *known == word)
         .map(|(_, action)| *action)
-        .ok_or_else(|| refuse(format!("`{word}` is not an action")))
+        .ok_or_else(|| refuse(format!("{word:?} is not an action")))
 }
 
 fn authority(value: &Value) -> Result<Authority, Diagnostic> {

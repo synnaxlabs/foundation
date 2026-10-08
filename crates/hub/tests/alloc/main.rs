@@ -20,6 +20,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use common::{SETTLE, hub};
+use home::reader::Next;
 use hub::Hub;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
@@ -158,7 +159,7 @@ fn woken_of_a_reader_that_takes_each_frame() {
         for n in 0..20 {
             calls.push(commit(&mut woken).await);
             assert!(
-                woken.shard.take(woken.readers[0]).is_some(),
+                matches!(woken.shard.take(woken.readers[0]), Next::Frame(_)),
                 "frame {n} waits for the reader"
             );
         }
@@ -187,7 +188,12 @@ fn woken_of_a_reader_that_falls_behind_again() {
                 calls.push(commit(&mut woken).await);
             }
             let reader = woken.readers[0];
-            let taken = std::iter::from_fn(|| woken.shard.take(reader)).count();
+            let taken = std::iter::from_fn(|| match woken.shard.take(reader) {
+                Next::Frame(frame) => Some(frame),
+                Next::Empty => None,
+                Next::Behind => panic!("lag {lag}: the reader is behind"),
+            })
+            .count();
             assert_eq!(taken, DEPTH, "lag {lag}");
             lags.push(calls);
         }

@@ -66,7 +66,8 @@ use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::PublicKey;
+use types::node::PrivateKey;
 use types::time::Span;
 
 pub use address::Address;
@@ -129,7 +130,7 @@ impl Transport {
     /// The public key that this transport proves to each peer.
     ///
     /// ```
-    /// fn key(transport: &transport::Transport) -> types::node::PublicKey {
+    /// fn key(transport: &transport::Transport) -> types::ed25519::PublicKey {
     ///     transport.public_key()
     /// }
     /// ```
@@ -156,7 +157,7 @@ impl Transport {
     /// use std::net::SocketAddr;
     ///
     /// use transport::{Address, Error, Session, Transport};
-    /// use types::node::PublicKey;
+    /// use types::ed25519::PublicKey;
     ///
     /// async fn dial(t: &Transport, peer: PublicKey, at: SocketAddr)
     /// -> Result<Session, Error> {

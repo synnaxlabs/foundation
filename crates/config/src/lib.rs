@@ -3,12 +3,14 @@
 
 mod access;
 mod channel;
+mod connector;
 mod node_settings;
 mod placement;
 mod retention;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
+use ::connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
@@ -26,9 +28,10 @@ const LONG_NAME: Code = Code::new("config.long-name");
 type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
-const KINDS: [(Kind, Check); 5] = [
+const KINDS: [(Kind, Check); 6] = [
     (Kind::Access, access::check),
     (Kind::Channel, channel::check),
+    (Kind::Connector, connector::check),
     (Kind::NodeSettings, node_settings::check),
     (Kind::Placement, placement::check),
     (Kind::Retention, retention::check),
@@ -56,8 +59,10 @@ pub struct Entry {
 }
 
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
-/// gives each by its tree key: a channel's name, or `<label>.@<kind>` for a policy.
-/// Each order of `documents` gives the same entries, or each gives problems.
+/// gives each by its tree key: the name of a channel or a connector, or
+/// `<label>.@<kind>` for a policy. The kind in `kinds` that a `connector` block names
+/// checks its config. Each order of `documents` gives the same entries, or each gives
+/// problems.
 ///
 /// # Errors
 ///
@@ -67,17 +72,25 @@ pub struct Entry {
 /// whole (a policy's budgets, for example) only when each of its attributes is known
 /// and reads, and the ones it needs are there. A block inside a policy does not stop
 /// that check: a policy holds no block, so each block inside one is a separate problem.
-pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+/// A bad `kind` of channel hides the problems of each other attribute that a kind of
+/// channel knows.
+pub fn check(
+    documents: &[Document],
+    kinds: &Table,
+) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut found = Found {
+        entries: BTreeMap::new(),
+        diagnostics: Vec::new(),
+        labels: BTreeMap::new(),
         channels: channels(documents),
-        ..Found::default()
+        kinds,
     };
-    let kinds = KINDS.map(|(kind, _)| kind.as_str());
+    let keywords = KINDS.map(|(kind, _)| kind.as_str());
     for document in documents {
         let start = found.diagnostics.len();
         found
             .diagnostics
-            .extend(read::unknown(document, "a file", &[], &kinds));
+            .extend(read::unknown(document, "a file", &[], &keywords));
         for block in &document.blocks {
             let Some((kind, check_block)) = KINDS
                 .iter()
@@ -128,16 +141,19 @@ fn written(value: &Value) -> Option<&str> {
     }
 }
 
-/// The channel names of the Documents, and what `check` has found so far.
-#[derive(Debug, Default)]
+/// The channel names of the Documents, the connector kinds, and what `check` has
+/// found so far.
+#[derive(Debug)]
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// The label of each tree key so far, by the key in lowercase, so that keys that
-    /// differ only in case collide.
-    labels: BTreeMap<Box<str>, &'a Label>,
+    /// The label of each tree key so far and the kind of its block, by the key in
+    /// lowercase, so that keys that differ only in case collide.
+    labels: BTreeMap<Box<str>, (&'a Label, Kind)>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
+    /// The kinds that check each `connector` block's config.
+    kinds: &'a Table,
 }
 
 /// A problem that is already in the diagnostics.
@@ -183,23 +199,28 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        let first = match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
-            btree_map::Entry::Occupied(first) => *first.get(),
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert(label);
-                return Some((key, label.span));
-            }
+        let (first, earlier) =
+            match self.labels.entry(key.as_str().to_ascii_lowercase().into()) {
+                btree_map::Entry::Occupied(first) => *first.get(),
+                btree_map::Entry::Vacant(entry) => {
+                    entry.insert((label, kind));
+                    return Some((key, label.span));
+                }
+            };
+        let earlier = earlier.as_str();
+        let blocks = if earlier == keyword {
+            format!("`{keyword}`")
+        } else {
+            format!("`{earlier}` and `{keyword}`")
         };
         let mut diagnostic = Diagnostic::new(
             DUPLICATE_NAME,
             label.span,
             format!(
-                "the name {:?} repeats the earlier `{keyword}` name {:?}",
+                "the name {:?} repeats the earlier `{earlier}` name {:?}",
                 label.text, first.text
             ),
-            format!(
-                "Give each `{keyword}` block a name that differs by more than case"
-            ),
+            format!("Give each {blocks} block a name that differs by more than case"),
         );
         diagnostic.notes.extend(first.span.map(|span| Note {
             span,
@@ -318,6 +339,11 @@ mod tests {
     use types::byte;
 
     use super::*;
+
+    /// Checks `documents` with no connector kinds.
+    fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
+        super::check(documents, &Table::new())
+    }
 
     /// The position at `offset`, in a file of lines that are 100 bytes long.
     fn position(offset: u32) -> Position {
@@ -518,8 +544,8 @@ mod tests {
                 "document.unknown-block",
                 at(0, 0),
                 "a file cannot hold the `nodes` block",
-                "Use `access`, `channel`, `node_settings`, `placement`, or \
-                 `retention`, or remove it",
+                "Use `access`, `channel`, `connector`, `node_settings`, `placement`, \
+                 or `retention`, or remove it",
             )])
         );
     }
@@ -544,8 +570,8 @@ mod tests {
                 "document.unknown-attribute",
                 at(0, 3),
                 "`disk` is not an attribute of a file",
-                "Move it into the `access`, `channel`, `node_settings`, `placement`, \
-                 or `retention` block that it sets, or remove it",
+                "Move it into the `access`, `channel`, `connector`, `node_settings`, \
+                 `placement`, or `retention` block that it sets, or remove it",
             )])
         );
     }
@@ -1775,7 +1801,20 @@ mod tests {
                 Err(vec![refused(
                     "config.bad-action",
                     at(0, 15),
-                    "`erase` is not an action",
+                    "\"erase\" is not an action",
+                    ACTION_FIX,
+                )])
+            );
+        }
+
+        #[test]
+        fn quotes_a_word_that_is_not_an_action_so_that_it_cannot_name_another() {
+            assert_eq!(
+                check(&access(&attributes(string("x` or `read"), None))),
+                Err(vec![refused(
+                    "config.bad-action",
+                    at(0, 15),
+                    "\"x` or `read\" is not an action",
                     ACTION_FIX,
                 )])
             );
@@ -1784,17 +1823,17 @@ mod tests {
         #[test]
         fn refuses_a_word_that_is_not_an_action() {
             let cases = [
-                (string("erase"), at(0, 15), "`erase` is not an action"),
-                (reference("Read"), at(0, 15), "`Read` is not an action"),
+                (string("erase"), at(0, 15), "\"erase\" is not an action"),
+                (reference("Read"), at(0, 15), "\"Read\" is not an action"),
                 (
                     reference("site_a.read"),
                     at(0, 15),
-                    "`site_a.read` is not an action",
+                    "\"site_a.read\" is not an action",
                 ),
                 (
                     list(vec![string("read"), string("erase")]),
                     at(0, 51),
-                    "`erase` is not an action",
+                    "\"erase\" is not an action",
                 ),
                 (
                     list(vec![Kind::Integer(1), string("erase")]),
@@ -2373,7 +2412,41 @@ mod tests {
         }
 
         #[test]
-        fn checks_only_the_edges_after_a_kind_that_is_not_a_kind_of_channel() {
+        fn refuses_an_edge_that_is_not_a_name() {
+            let documents =
+                value(&[("index", Kind::Integer(7)), ("data_type", string("f64"))]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 111),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn refuses_an_error_edge_of_an_index_that_is_not_a_name() {
+            let time = channel(
+                0,
+                0,
+                "edge.time",
+                &[("kind", string("index")), ("error", Kind::Integer(7))],
+            );
+            assert_eq!(
+                check(&[document(vec![time])]),
+                Err(vec![refused(
+                    "document.bad-name",
+                    at(0, 13),
+                    "a name is a string or a reference, not an integer",
+                    "Write a name such as \"site_a.node_1\"",
+                )])
+            );
+        }
+
+        #[test]
+        fn leaves_the_edges_after_a_bad_kind() {
             let documents = value(&[
                 ("kind", string("stream")),
                 ("other", string("x")),
@@ -2391,23 +2464,32 @@ mod tests {
                         "\"stream\" is not a kind of channel",
                         "Write \"index\" or \"data\"",
                     ),
-                    unknown(
-                        at(0, 115),
-                        "no `channel` block defines the index channel `edge.tim`",
-                    ),
-                    unknown(
-                        at(0, 117),
-                        "no `channel` block defines the quality channel `edge.q`",
-                    ),
-                    unknown(
-                        at(0, 119),
-                        "no `channel` block defines the error channel `edge.e`",
-                    ),
-                    unknown(
-                        at(0, 121),
-                        "no `channel` block defines the control channel `edge.c`",
+                    refused(
+                        "document.unknown-attribute",
+                        at(0, 112),
+                        "`other` is not an attribute of the `channel` block",
+                        "Use `control`, `data_type`, `error`, `index`, `kind`, \
+                         `quality`, or `unit`, or remove it",
                     ),
                 ])
+            );
+        }
+
+        #[test]
+        fn leaves_an_attribute_that_a_kind_knows_after_a_bad_kind() {
+            let documents = value(&[
+                ("kind", string("stream")),
+                ("data_type", string("f65")),
+                ("control", Kind::Integer(7)),
+            ]);
+            assert_eq!(
+                check(&documents),
+                Err(vec![refused(
+                    "config.bad-channel-kind",
+                    at(0, 111),
+                    "\"stream\" is not a kind of channel",
+                    "Write \"index\" or \"data\"",
+                ),])
             );
         }
 

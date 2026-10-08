@@ -20,7 +20,8 @@ use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName,
     ServerConfig, SignatureScheme,
 };
-use types::node::{PrivateKey, PublicKey};
+use types::ed25519::PublicKey;
+use types::node::PrivateKey;
 
 use crate::session::Peer;
 

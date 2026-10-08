@@ -1,6 +1,6 @@
 use std::fmt;
 
-use types::node::PublicKey;
+use types::ed25519::PublicKey;
 
 use crate::address::Address;
 use crate::code::Code;

@@ -26,6 +26,8 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("connector-ni", "daqmx-stub"),
     ("hub", "buffer"),
     ("access", "document"),
+    ("config", "config-hcl"),
+    ("config", "connector-influx"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.
