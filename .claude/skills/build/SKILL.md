@@ -128,8 +128,7 @@ take the next `night` issue. A PR that needs the person (`oracles/`, `.github/`,
   `docs/dependencies.md`.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
   link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
-  reaches no one. On the night lane, do not stop and wait: add `blocked` and take the
-  next `night` issue.
+  reaches no one.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
   to the crate's architect (`docs/factory.md`).
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling

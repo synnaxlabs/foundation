@@ -212,8 +212,9 @@ budget, its limits, and step 3. Step 4 checks each by its instance, because they
   sends them in one batch a day, except one that blocks the critical path.
 - **A stuck session tells the coordinator at once.** When a permission check refuses
   a call, or work waits on the person, send `coordinator` the refused command, the
-  reason text, and the issue or PR. Then stop and wait. The coordinator takes it to the
-  person. Never try to get around a refusal.
+  reason text, and the issue or PR. Then stop the work that waits on it, and take other
+  work meanwhile. The coordinator takes it to the person. Never try to get around a
+  refusal.
 - **A question for the person** states the problem, the fix, its cost, and a
   recommendation. For each option, it says whether it is a patch or the long-term
   path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
