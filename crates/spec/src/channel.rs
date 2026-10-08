@@ -9,7 +9,7 @@ use crate::unit::Unit;
 
 mod check;
 
-pub use check::{Edge, Problem, check};
+pub use check::{Problem, check};
 
 /// A channel. Its name is the tree key, so it is not part of the definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +33,31 @@ pub enum Kind<R = channel::Key> {
     },
     /// A data channel.
     Data(Data<R>),
+}
+
+/// An edge from one channel to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// From a data channel to the index channel that times it.
+    Index,
+    /// From a data channel to the channel that holds its quality.
+    Quality,
+    /// From an index channel to the channel that holds its clock error bound.
+    Error,
+    /// From an index channel to the channel that holds its control handoffs, which is
+    /// on another index.
+    Control,
+}
+
+impl fmt::Display for Edge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Index => "index channel",
+            Self::Quality => "quality channel",
+            Self::Error => "error channel",
+            Self::Control => "control channel",
+        })
+    }
 }
 
 impl<R> Kind<R> {

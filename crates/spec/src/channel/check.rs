@@ -6,7 +6,7 @@ use std::fmt;
 use types::channel;
 use types::name::Name;
 
-use super::{Channel, DataType, Kind};
+use super::{Channel, DataType, Edge, Kind};
 
 /// Checks the edges between `channels`: a data channel's index is an index channel,
 /// its quality is a data channel of type quality, an index's error channel is a data
@@ -99,20 +99,6 @@ impl fmt::Display for Problem {
     }
 }
 
-/// An edge from one channel to another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Edge {
-    /// From a data channel to the index channel that times it.
-    Index,
-    /// From a data channel to the channel that holds its quality.
-    Quality,
-    /// From an index channel to the channel that holds its clock error bound.
-    Error,
-    /// From an index channel to the channel that holds its control handoffs, which is
-    /// on another index.
-    Control,
-}
-
 impl Edge {
     /// Reports whether the edge from the channel `from` can point at a channel of
     /// `kind`.
@@ -141,17 +127,6 @@ impl Edge {
                 "Point it at a data channel on another index",
             ),
         }
-    }
-}
-
-impl fmt::Display for Edge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Index => "index channel",
-            Self::Quality => "quality channel",
-            Self::Error => "error channel",
-            Self::Control => "control channel",
-        })
     }
 }
 

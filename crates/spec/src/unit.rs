@@ -127,7 +127,7 @@ impl Error {
     pub const fn fix(&self) -> &'static str {
         match self {
             Self::Empty => "Write a unit such as kPa, or remove the unit",
-            Self::Long { .. } => "Use a unit of at most 32 bytes",
+            Self::Long { .. } => "Use a shorter unit, such as kPa",
             Self::Character { .. } => {
                 "Use only printable ASCII characters with no space, such as m/s2"
             }

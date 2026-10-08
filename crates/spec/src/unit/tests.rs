@@ -10,7 +10,7 @@ fn unit(text: &str) -> Unit {
 fn gives_the_fix_of_each_error() {
     for (error, fix) in [
         (Error::Empty, "Write a unit such as kPa, or remove the unit"),
-        (Error::Long { len: 33 }, "Use a unit of at most 32 bytes"),
+        (Error::Long { len: 33 }, "Use a shorter unit, such as kPa"),
         (
             Error::Character { at: 1, found: ' ' },
             "Use only printable ASCII characters with no space, such as m/s2",
