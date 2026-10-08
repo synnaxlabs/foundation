@@ -106,9 +106,8 @@ fn valid(
         return false;
     }
     while let Some(decoded) = ends.next(&mut ends_out) {
-        for end in decoded.as_chunks::<4>().0 {
-            let end = usize::try_from(u32::from_le_bytes(*end))
-                .expect("invariant: a usize holds a u32");
+        for end in past(decoded, from).1 {
+            let end = value(*end);
             while let Some(at) = end.checked_sub(start) {
                 if let Some(byte) = piece.get(at) {
                     if byte & 0xc0 == 0x80 {
@@ -134,10 +133,6 @@ fn valid(
 /// Checks each sample that the `ends` cut from the elements, given that each element
 /// before `from` is ASCII, `piece` holds the elements from `from` on, and `rest` gives
 /// the elements after `piece`.
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "each expect is an invariant that the caller checked"
-)]
 fn check(
     mut ends: Pieces<'_>,
     from: usize,
@@ -150,9 +145,10 @@ fn check(
     let mut piece = piece;
     let mut start = from;
     while let Some(decoded) = ends.next(&mut ends_out) {
-        for end in decoded.as_chunks::<4>().0 {
-            let end = usize::try_from(u32::from_le_bytes(*end))
-                .expect("invariant: a usize holds a u32");
+        let (before, past) = past(decoded, from);
+        text.sample = text.sample.strict_add(before);
+        for end in past {
+            let end = value(*end);
             // An ASCII prefix does not change whether the rest of a sample is UTF-8.
             let mut left = end.saturating_sub(start);
             while left > 0 {
@@ -171,6 +167,19 @@ fn check(
         }
     }
     Ok(())
+}
+
+/// Splits the raw `ends`, which do not decrease, at the first end past `from`. Returns
+/// how many come before it, and the ends from it on.
+fn past(ends: &[u8], from: usize) -> (usize, &[[u8; 4]]) {
+    let ends = ends.as_chunks::<4>().0;
+    let before = ends.partition_point(|end| value(*end) <= from);
+    (before, ends.split_at(before).1)
+}
+
+/// The value of a raw end.
+fn value(end: [u8; 4]) -> usize {
+    usize::try_from(u32::from_le_bytes(end)).expect("invariant: a usize holds a u32")
 }
 
 /// Raw bytes, or encoded vectors of them, a piece at a time.
