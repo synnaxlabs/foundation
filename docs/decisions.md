@@ -3913,8 +3913,10 @@ How to read this record:
   Supersedes "`performance` is never required" of
   https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989. The end
   lines are the last paragraph of the comment, in that order, as `/review`, "Round
-  comment", writes them. Each may wrap onto the lines after it, and a paragraph after
-  them fails.
+  comment", writes them, each at the start of its line, so an indented quote of them
+  is not them. Each may wrap onto the lines after it, and a paragraph after them fails.
+  The first word of a value, with backticks and a final comma or period removed, is
+  the word that is checked.
   The last round finds none and ends at the head, or at a commit that reaches the head
   through clean merges of the base (`git merge-tree`). A merge of the base is not clean
   when the base moves a path that the PR changed since their merge base, and that is not

@@ -221,8 +221,9 @@ fn approval(record: &Record, head: &str) -> Option<String> {
 /// The fields are the first paragraph after that line, so the findings text cannot
 /// set them. The last paragraph is the end lines ([`END`]).
 fn round(body: &str) -> Option<Result<Round, String>> {
-    let mut lines = body.lines().map(str::trim);
-    let number = lines.find_map(|l| l.strip_prefix("## Review round "))?;
+    // Only the end lines keep their indent: an indented one is a quote, not a line.
+    let mut lines = body.lines().map(str::trim_end);
+    let number = lines.find_map(|l| l.trim_start().strip_prefix("## Review round "))?;
     let paragraphs: Vec<Vec<&str>> = lines
         .collect::<Vec<_>>()
         .split(|l| l.is_empty())
@@ -231,7 +232,12 @@ fn round(body: &str) -> Option<Result<Round, String>> {
         .collect();
     let (mut reviewers, mut range, mut findings) = (None, None, None);
     let mut breakerless = false;
-    for line in paragraphs.first().into_iter().flatten() {
+    for line in paragraphs
+        .first()
+        .into_iter()
+        .flatten()
+        .map(|l| l.trim_start())
+    {
         breakerless |= line.starts_with("Breaker: skipped");
         if let Some(value) = line.strip_prefix("Reviewers: ") {
             reviewers.get_or_insert(value);
@@ -286,7 +292,8 @@ fn round(body: &str) -> Option<Result<Round, String>> {
 
 /// Whether the end lines `paragraph` of round `number` name a hot path: the first
 /// word of its `Hot path:` value is not `none`. The paragraph must be the [`END`]
-/// lines in order, each of which may wrap onto the lines after it.
+/// lines in order, each at the start of its line, and each of which may wrap onto the
+/// lines after it.
 fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
     let mut values: Vec<(&str, String)> = Vec::new();
     for line in paragraph {
@@ -295,7 +302,9 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
             .find(|name| line.starts_with(&format!("{name}:")));
         match (name, values.last_mut()) {
             (Some(name), _) => values.push((*name, line[name.len() + 1..].to_string())),
-            (None, Some((_, value))) => *value = format!("{value} {line}"),
+            (None, Some((_, value))) => {
+                *value = format!("{value} {}", line.trim_start());
+            }
             (None, None) => break,
         }
     }
@@ -315,7 +324,7 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
         ));
     }
     let first = values[2].1.split_whitespace().next().unwrap_or_default();
-    Ok(first.trim_matches(|c: char| !c.is_alphanumeric() && c != '_') != "none")
+    Ok(first.trim_matches(['`', ',', '.', ';']) != "none")
 }
 
 /// Reads the record of PR `pr` with `gh`, in the repository that `gh` resolves.

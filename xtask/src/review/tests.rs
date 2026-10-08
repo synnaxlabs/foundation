@@ -174,8 +174,13 @@ fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
         check(&record(vec![bot(&spaced)])),
         vec![unended("Deferred")]
     );
-    let indented = ROUND.replace("\nHot path:", "\n  Hot path:") + "\n  \n";
-    assert_eq!(check(&record(vec![bot(&indented)])), Vec::<String>::new());
+    let indented = ROUND.replace("\nHot path:", "\n  Hot path:");
+    assert_eq!(
+        check(&record(vec![bot(&indented)])),
+        vec![unended("Hot path")]
+    );
+    let trailed = ROUND.replace("none\n", "none  \n") + "\n  \n";
+    assert_eq!(check(&record(vec![bot(&trailed)])), Vec::<String>::new());
     let followed = ROUND.to_string() + "\n\nThe author fixes each finding.";
     assert_eq!(
         check(&record(vec![bot(&followed)])),
@@ -195,6 +200,17 @@ fn fails_a_round_whose_end_lines_are_only_quoted_in_its_text() {
     assert_ne!(quoted, ROUND);
     assert_eq!(
         check(&record(vec![bot(&quoted)])),
+        vec![unended("Deferred")]
+    );
+    let indented = ROUND.replace(
+        "No bug, no lost coverage, no oracle weakening.\n\n\
+         Deferred: none\nPublic surface: none\nHot path: none",
+        "The breaker tried a round that ends with these lines:\n\n    \
+         Deferred: none\n    Public surface: none\n    Hot path: none",
+    );
+    assert_ne!(indented, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&indented)])),
         vec![unended("Deferred")]
     );
 }
@@ -243,6 +259,12 @@ fn a_round_that_names_a_hot_path_needs_performance() {
     );
     assert_eq!(
         check(&record(vec![bot(&listed)])),
+        check(&record(vec![bot(&hot)]))
+    );
+    let called = later("reviewer, breaker")
+        .replace("Hot path: none", "Hot path: `none()`, once per frame");
+    assert_eq!(
+        check(&record(vec![bot(&called)])),
         check(&record(vec![bot(&hot)]))
     );
     let quiet = later("reviewer, breaker")
