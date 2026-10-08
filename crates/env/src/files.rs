@@ -259,8 +259,9 @@ pub enum Mode {
 
 /// One open file. Its length does not change, and every read and write stays inside
 /// it. A failed or dropped [`File::sync`], or a dropped [`File::rename`], poisons the
-/// file: every later call fails with [`Error::Poisoned`], because a second sync can
-/// report success for lost data. Close the file, then reopen it and recover.
+/// file: every later call fails with [`Error::Poisoned`]. After a failed sync, a second
+/// sync can report success for lost data; after a dropped rename, the path of the
+/// handle may be stale. Close the file, then reopen it and recover.
 ///
 /// Calls may overlap in time. A [`File::sync`] covers the writes that ended before it
 /// started. Where the ranges of calls in flight at the same time overlap, the bytes
@@ -316,7 +317,7 @@ impl File {
     ///
     /// # Errors
     ///
-    /// - [`Error::Poisoned`] after a failed or dropped sync.
+    /// - [`Error::Poisoned`] after a failed or dropped sync, or a dropped rename.
     /// - [`Error::Full`] when the disk has no room for the bytes.
     /// - [`Error::Io`] for other failures.
     ///
@@ -352,8 +353,8 @@ impl File {
     ///
     /// # Errors
     ///
-    /// [`Error::Poisoned`] after a failed or dropped sync, and [`Error::Io`] for other
-    /// failures. `into` returns to its pool.
+    /// [`Error::Poisoned`] after a failed or dropped sync, or a dropped rename, and
+    /// [`Error::Io`] for other failures. `into` returns to its pool.
     ///
     /// # Panics
     ///
@@ -378,9 +379,9 @@ impl File {
     ///
     /// # Errors
     ///
-    /// [`Error::Poisoned`] after a failed or dropped sync, and [`Error::Io`] when the
-    /// sync fails. Both poison the file, and so does a drop of the future before it
-    /// ends.
+    /// [`Error::Poisoned`] after a failed or dropped sync, or a dropped rename, and
+    /// [`Error::Io`] when the sync fails. Both poison the file, and so does a drop of
+    /// the future before it ends.
     ///
     /// ```
     /// async fn commit(file: &env::files::File) -> Result<(), env::files::Error> {
