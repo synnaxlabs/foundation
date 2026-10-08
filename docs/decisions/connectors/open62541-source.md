@@ -154,8 +154,8 @@
   `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
   So our change of `src_generated/open62541/config.h` moves its thread-local block out
   of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
-  control, and the test of the archives fails on each `pthread_mutex_*` symbol, since
-  the closed list holds none. Decided by `laptop.architect-2`
+  control, and the test of the archives fails on each `pthread_mutex_*` symbol: the
+  closed list holds none. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
   2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
   0 is the fix, as its own change" of
