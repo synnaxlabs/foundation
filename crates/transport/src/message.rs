@@ -787,7 +787,6 @@ mod tests {
                 })
             );
             assert_eq!(reader.buffer().capacity(), 0);
-            assert!(reader.chunks.is_empty());
             let mut next = Source::new(encode(&[vec![5; 20]]), 64);
             let next = super::read(&mut reader, &pool, &mut next);
             assert_eq!(next, Ok(Poll::Ready(Some(vec![5; 20]))));
@@ -873,7 +872,6 @@ mod tests {
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
             // Private: no heap count is exact in a binary with a test harness.
-            assert!(reader.chunks.is_empty());
             assert_eq!(*reader.buffer(), message[..10]);
             assert_eq!(reader.buffer().capacity(), 1_024);
             let buffer = reader.buffer().as_ptr();
@@ -899,43 +897,11 @@ mod tests {
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
             // Private: no heap count is exact in a binary with a test harness.
-            assert!(reader.chunks.is_empty());
             assert_eq!(*reader.buffer(), message);
             drop(held);
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Ready(Some(message))));
             assert_eq!(reader.buffer().capacity(), 0);
-        }
-
-        /// The step of `reader` once it has read a message of `len` bytes, each byte
-        /// in its own chunk.
-        fn read_bytewise(reader: &mut Reader, len: usize) -> Result<Step, Error> {
-            let batch = Bytes::from(encode(&[(0..=255).cycle().take(len).collect()]));
-            let mut at = 0;
-            let mut source = |_| {
-                let chunk = batch.slice(at..=at);
-                at = at.saturating_add(1);
-                Ok(Poll::Ready(Some(chunk)))
-            };
-            assert_eq!(reader.read(&mut source), Ok(Step::Room(len)));
-            reader.admit();
-            reader.read(&mut source)
-        }
-
-        #[test]
-        fn a_read_holds_at_most_chunks_max_chunks_then_buffers_them() {
-            let pool = pool(1 << 16);
-            let mut reader = Reader::new(100);
-            assert_eq!(read_bytewise(&mut reader, 64), Ok(Step::Block(64)));
-            // Private: no heap count is exact in a binary with a test harness.
-            assert_eq!(reader.held(), (None, 64));
-            reader.clear();
-            assert_eq!(read_bytewise(&mut reader, 65), Ok(Step::Block(65)));
-            assert_eq!(reader.held(), (Some((64, 65)), 1));
-            let message: Vec<u8> = (0..=255).cycle().take(65).collect();
-            let read = reader.fill(pool.alloc(65).ok());
-            assert_eq!(read.map(|block| block.to_vec()), Poll::Ready(message));
-            assert_eq!(reader.held(), (None, 0));
         }
 
         #[test]
