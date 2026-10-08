@@ -2007,11 +2007,19 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
   `types::node::PrivateKey::public` is the one place that derives a node's public key
   from its private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
-  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Lost: a
-  `pub fn` in `transport`, a pass-through for a thing that is not transport; and the
-  copies, which grow with each crate that needs the key. Decided by
-  `laptop.architect` (2026-10-07T14:16:15Z):
+  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Cost: each
+  build of `types`, the Rust SDK too, compiles aws-lc. Lost: a `pub fn` in
+  `transport`, a pass-through for a thing that is not transport; and the copies, which
+  grow with each crate that needs the key. Decided by `laptop.architect`
+  (2026-10-07T14:16:15Z):
   https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
+  `types::ed25519::PublicKey::verify` is the one Ed25519 verify, and gives
+  `BadSignature` for a signature that is not of the message by the key. A verify on
+  `PublicKey` uses a key that is not of small order by construction. `mesh` and
+  `access::admit` call it. Lost: a `bool`, which a caller can invert or drop with no
+  word from the compiler; a `Signature` type, as `[u8; 64]` already fixes the length;
+  and a copy in `access`. Decided by `laptop.architect` at 2026-10-08T05:45:46Z
+  (https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6053244858).
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -5704,7 +5712,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public keys with the derive and the verify, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
