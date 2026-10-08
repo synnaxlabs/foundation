@@ -865,6 +865,10 @@ fn wait((name, child): (String, Child)) -> Result<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// The signal number of `SIGABRT` on Linux.
+    const SIGABRT: i32 = 6;
 
     #[test]
     fn clock_calls_names_each_function_that_refers_to_a_clock() {
@@ -1897,7 +1901,7 @@ End of search list.
 
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC")]
-    fn each_thread_of_the_committed_copy_draws_from_its_own_random_state() {
+    fn each_thread_of_the_committed_copy_draws_from_its_own_random_state_or_aborts() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let (copy, out) = (root.join(DEST), temp("rng"));
         let read = |name| std::fs::read_to_string(copy.join(name)).unwrap();
@@ -1918,10 +1922,21 @@ End of search list.
         exec(&mut cc).unwrap();
         let from_1 = "3795398737 17903413 3545275701 194195274 2326030198 2354257974 \
                       2697798104 3102124240";
-        assert_eq!(
-            exec(&mut Command::new(&driver)),
-            Ok(format!("after another thread: {from_1}\nalone: {from_1}"))
-        );
+        for draw in ["UA_UInt32_random", "UA_Guid_random"] {
+            let output = Command::new(&driver).arg(draw).output().unwrap();
+            assert_eq!(
+                (
+                    String::from_utf8(output.stdout).unwrap(),
+                    String::from_utf8(output.stderr).unwrap(),
+                    output.status.signal(),
+                ),
+                (
+                    format!("after another thread: {from_1}\nalone: {from_1}\n"),
+                    format!("{draw}: no start value on this thread\n"),
+                    Some(SIGABRT),
+                )
+            );
+        }
         remove(&out).unwrap();
     }
 

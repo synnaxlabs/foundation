@@ -7,22 +7,25 @@ names rule N in `docs/research/r16-rust-guides.md`.
 
 Every component gets clock, network, disk, and randomness as inputs (`env`). Production
 passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
-clock, the network, the disk, or a random source directly. Clippy's
-`disallowed-methods` list in `clippy.toml` enforces this. Only `os` implements the
-`env` seams and calls the OS, sockets included.
+clock, the network, the disk, or a random source directly. Clippy's `disallowed-methods`
+list in `clippy.toml` enforces this. Only `os` implements the `env` seams and calls the
+OS, sockets included. Some tests must reach the OS, such as a test of `os`, a process
+test (Process tests), and a test that bounds its own run time or reads a file of the
+repository. Each call of such a test that the list bans carries
+`#[expect(clippy::disallowed_methods, reason = "...")]` with its reason.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
 behavior. Never print a pointer. No `thread_local!` state. Four exceptions: TLS draws
-its own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions.md`). `sim::Sim::new`
-reads `Instant::now` once as the epoch of the run, and only differences from it are
-read. The `hyper` server of HTTP SIM SERVER reads OS time into a `thread_local!` on each
-poll, only for the `date` header, which is off. It gets no `timer`, so no read changes
-what it does (the person,
+its own randomness from aws-lc (TLS RANDOMNESS in
+`docs/decisions/transport/tls-randomness.md`). `sim::Sim::new` reads `Instant::now` once
+as the epoch of the run, and only differences from it are read. The `hyper` server of
+HTTP SIM SERVER reads OS time into a `thread_local!` on each poll, only for the `date`
+header, which is off. It gets no `timer`, so no read changes what it does (the person,
 https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
 2026-10-07T17:04:29Z). The random state `UA_rng` of the open62541 copy is one per
 thread, so `connector-opcua` sets its start value on each thread that calls open62541
-(OPEN62541 SOURCE in `docs/decisions.md`).
+(OPEN62541 SOURCE in `docs/decisions/connectors/open62541-source.md`).
 
 ## Layers
 
@@ -60,6 +63,25 @@ peer can see the mutant, or names the test that kills it in a job that the mutan
 does not see (Miri, loom, another OS). A mutant that a test could kill but none does
 links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
 `rust-toolchain-nightly`, that only those gates use.
+
+## Process tests
+
+A process test starts the `foundation` binary. It checks the wiring of the `os` seams
+and what a user sees (exit codes, standard output and error, `foundation status`), not
+logic that a simulated test can reach.
+
+- It lives in `crates/node/tests/it/`: Cargo sets `CARGO_BIN_EXE_foundation` only for
+  the integration tests and benchmarks of `node`.
+- It takes its clock from `os`, so the `disallowed-methods` list holds for it too.
+- A test that starts a node makes its own temporary data directory with `std::fs`, as
+  the tests of `os` do, and removes it at the end.
+- Each listener of the node binds port 0 on loopback, and the test reads the port it
+  got. No fixed port, and nothing outside loopback.
+- Each wait (for output, for an exit, for a condition) ends at a deadline, and a missed
+  deadline fails with the state it saw. Never a fixed sleep.
+- The test ends each process it starts, also when it fails.
+- A defect that a process test finds gets its regression test in simulation when the
+  seams of `sim` can make it happen.
 
 ## Fuzzing
 
