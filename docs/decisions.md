@@ -673,7 +673,13 @@ How to read this record:
   refuse a `String` sample that is not UTF-8 (`Error::Utf8`, #556), and accept the same
   samples, so no reader checks UTF-8 again (`laptop.architect`,
   https://github.com/synnaxlabs/foundation/issues/556#issuecomment-6055835549,
-  2026-10-08T08:23:59Z). Vector numbers in errors count across the ends and the
+  2026-10-08T08:23:59Z). The check is one `std::str::from_utf8` pass and a read of
+  each end. Not simdutf8 for now: it would be the first external runtime dependency
+  of `codec`, and it runs unsafe SIMD code on input from peers. Trigger: a profile of a
+  real or acceptance workload in which the UTF-8 check of `String` series takes more
+  than 5% of the CPU of a node (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/pull/1845#issuecomment-6058900102,
+  2026-10-08T11:31:12Z). Vector numbers in errors count across the ends and the
   elements.
   `Decoder` decodes a scalar series one vector at a time, so a reader of a series from
   a peer needs room for only 1024 samples, whatever the count (#416).
