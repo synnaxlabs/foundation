@@ -3954,7 +3954,10 @@ How to read this record:
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
-  `hub` field waits on #1941 (`laptop.architect`, 2026-10-08T17:50:53Z:
+  `hub` field lands after #1941 (`laptop.architect-2`, 2026-10-08T17:58:15Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789, item 4),
+  as the tests that need a hub wait on #1941 (`laptop.architect`,
+  2026-10-08T17:50:53Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
   `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
