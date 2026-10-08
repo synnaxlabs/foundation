@@ -33,7 +33,8 @@ pub enum Refusal {
     Expired,
     /// A stamp broke a rule.
     Order(order::Error),
-    /// A series that `codec` refuses at the group's count.
+    /// `codec` refused a series: its bytes are not a series of its channel's type
+    /// with the group's count.
     Codec {
         /// The series' channel.
         channel: channel::Key,
