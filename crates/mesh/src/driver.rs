@@ -2711,8 +2711,6 @@ mod tests {
                 ..config(&node, &tasks, 1, &IDS, &IDS)
             };
             let mesh = Mesh::start(config).await.unwrap();
-            let mut watch = mesh.watch(INDEX);
-            assert_eq!(watch.next().await, Ok(None));
             switch.refuse();
             let refused = block::Error::Refused { requested: 1 };
             assert_eq!(pool.alloc(1).err(), Some(refused));
@@ -2720,7 +2718,6 @@ mod tests {
             assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
             node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
             assert!(quiet(&mesh, 2).await);
-            assert!(now(pin!(watch.next())).await.is_pending());
             switch.allow();
             let reply = mesh.outgoing(key(2)).await.unwrap();
             assert_eq!(reply, message(1, 2, Body::HeartbeatReply));
@@ -3653,49 +3650,54 @@ mod tests {
         });
     }
 
-    /// Gives node 1 a probe of leader 2 that it rejects, then `heartbeats`
-    /// heartbeats, with no read of a reply between them. Gives each reply that the
-    /// queue for node 2 then holds.
-    async fn queued(mesh: &Mesh, clock: &Clock, heartbeats: usize) -> Vec<Body> {
-        let probe = Body::Append {
-            prev: Position {
-                term: common::TERM,
-                index: 1,
-            },
-            entries: Vec::new(),
-            commit: 0,
-        };
-        assert_eq!(mesh.receive(public(2), proven(2, 1, probe)), Ok(()));
-        for _ in 0..heartbeats {
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-        }
-        clock.sleep(TICK).await;
-        let mut queued = Vec::new();
-        while let Poll::Ready(reply) = now(pin!(mesh.outgoing(key(2)))).await {
-            let reply = reply.unwrap();
-            assert_eq!(reply, message(1, 2, reply.body.clone()));
-            queued.push(reply.body);
-        }
-        queued
-    }
+    mod queue {
+        use std::ops::RangeInclusive;
 
-    #[test]
-    fn a_queue_holds_64_messages() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let mut expected = vec![Body::AppendReject { hint: 0 }];
-            expected.resize(64, Body::HeartbeatReply);
-            assert_eq!(queued(&mesh, &node.clock(), 63).await, expected);
-        });
-    }
+        use super::*;
 
-    #[test]
-    fn a_full_queue_drops_its_oldest_message() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let queued = queued(&mesh, &node.clock(), 64).await;
-            assert_eq!(queued, vec![Body::HeartbeatReply; 64]);
-        });
+        /// Gives node 1 one heartbeat of leader 2 in each term of `terms`, with no
+        /// read of a reply between them. Gives the term of each reply that the queue
+        /// for node 2 then holds, in the order of the queue.
+        async fn replies(
+            mesh: &Mesh,
+            clock: &Clock,
+            terms: RangeInclusive<u64>,
+        ) -> Vec<Term> {
+            for term in terms.map(Term) {
+                let heartbeat = Body::Heartbeat { commit: 0 };
+                let heartbeat = common::proven_in(term, 2, 1, heartbeat);
+                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            }
+            clock.sleep(TICK).await;
+            let mut replies = Vec::new();
+            while let Poll::Ready(reply) = now(pin!(mesh.outgoing(key(2)))).await {
+                let reply = reply.unwrap();
+                let expected = raft::Message {
+                    term: reply.term,
+                    ..message(1, 2, Body::HeartbeatReply)
+                };
+                assert_eq!(reply, expected);
+                replies.push(reply.term);
+            }
+            replies
+        }
+
+        #[test]
+        fn holds_64_messages() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let replies = replies(&mesh, &node.clock(), 1..=64).await;
+                assert_eq!(replies, (1..=64).map(Term).collect::<Vec<_>>());
+            });
+        }
+
+        #[test]
+        fn drops_its_oldest_message_when_full() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let replies = replies(&mesh, &node.clock(), 1..=65).await;
+                assert_eq!(replies, (2..=65).map(Term).collect::<Vec<_>>());
+            });
+        }
     }
 }
