@@ -21,7 +21,7 @@ use wire::hub::client::STALE;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
 use crate::reader::{Credit, Ended, Session};
-use crate::{Located, State};
+use crate::{Away, State};
 
 pub use client::{Reply, Request};
 
@@ -136,6 +136,15 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(_) => Self::NotHome,
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
 
 impl From<wire::hub::Error> for Error {
     fn from(error: wire::hub::Error) -> Self {
@@ -320,9 +329,7 @@ async fn open(
     let Some((of, Some(index))) = index else {
         return Err(Error::NoIndex);
     };
-    if let Located::Remote(_) = crate::locate(state, of).await.map_err(Error::Mesh)? {
-        return Err(Error::NotHome);
-    }
+    crate::carry(state, of).await?;
     let slots: Box<[Slot]> = slots.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {

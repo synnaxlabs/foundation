@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::{Located, State};
+use crate::{Away, State};
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -67,6 +67,15 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(home) => Self::Remote { home },
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
@@ -112,10 +121,7 @@ impl Writer {
             }
         }
         for (index, _) in &groups {
-            match crate::locate(state, *index).await.map_err(Error::Mesh)? {
-                Located::Here => {}
-                Located::Remote(home) => return Err(Error::Remote { home }),
-            }
+            crate::carry(state, *index).await?;
         }
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;

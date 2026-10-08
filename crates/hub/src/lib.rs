@@ -103,7 +103,8 @@ impl Hub {
     /// of its sessions have dropped. Once the hub and each of its sessions drop, it
     /// holds no part of the home. So a `::home::Commit` taken before `new` and awaited
     /// after that drop resolves once the buffer's task ended, and when the caller holds
-    /// no other part of the home, the ring closes when that commit drops.
+    /// no other part of the home, the ring closes when that commit drops. It holds
+    /// `config.mesh` until the hub and each of its sessions drop.
     #[must_use]
     pub fn new(config: Config) -> Self {
         let Config {
@@ -268,21 +269,21 @@ impl State {
     }
 }
 
-/// Where the mesh puts the home of an index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Located {
-    /// This node, which carries the index.
-    Here,
-    /// Another node.
+/// Why the home did not carry an index for a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Away {
+    /// The mesh names this other node as the home.
     Remote(types::node::Key),
+    /// The mesh stopped.
+    Mesh(::mesh::Stopped),
 }
 
-/// Waits until the mesh names a home for `index`, and carries `index` when the home
-/// is this node. With no mesh, this node is the home.
-async fn locate(
+/// Waits until the mesh names a home for `index`, then carries `index` at the home,
+/// once, when the home is this node. With no mesh, this node is the home.
+async fn carry(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
-) -> Result<Located, ::mesh::Stopped> {
+) -> Result<(), Away> {
     let (watch, node) = {
         let state = state.borrow();
         (
@@ -292,13 +293,13 @@ async fn locate(
     };
     if let Some(mut watch) = watch {
         loop {
-            match watch.next().await? {
+            match watch.next().await.map_err(Away::Mesh)? {
                 Some(home) if home == node => break,
-                Some(home) => return Ok(Located::Remote(home)),
+                Some(home) => return Err(Away::Remote(home)),
                 None => {}
             }
         }
     }
     state.borrow_mut().carry(index);
-    Ok(Located::Here)
+    Ok(())
 }

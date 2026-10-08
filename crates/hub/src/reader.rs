@@ -13,7 +13,7 @@ use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
-use crate::{Located, State};
+use crate::{Away, State};
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -107,6 +107,15 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(home) => Self::Remote { home },
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
+
 /// A reader session through the reader's channels. Dropping it closes the session;
 /// frames that wait do not go out.
 #[derive(Debug)]
@@ -142,10 +151,7 @@ impl Reader {
             }
             index.ok_or(Error::Empty)?
         };
-        match crate::locate(state, index).await.map_err(Error::Mesh)? {
-            Located::Here => {}
-            Located::Remote(home) => return Err(Error::Remote { home }),
-        }
+        crate::carry(state, index).await?;
         let (mut slots, slot) = {
             let mut borrowed = state.borrow_mut();
             let assigned = borrowed.interner.slots();
