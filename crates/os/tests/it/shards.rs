@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use env::shards::{Config, Shards};
 use env::tasks::Tasks;
+use tokio::sync::oneshot;
 use tokio::task::yield_now;
 
 use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
@@ -355,4 +356,30 @@ fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_ends_the_shard
     };
     let handle = shards().start(config("shard-12"), main).unwrap();
     assert_joins(handle, panicked("shard-12"));
+}
+
+#[test]
+fn a_panic_in_the_poll_of_a_tokio_task_does_not_end_the_shard() {
+    let main = |_: Tasks| async {
+        let (sender, dropped) = oneshot::channel::<()>();
+        drop(tokio::task::spawn_local(async move {
+            let _sender = sender;
+            panic!("tokio task");
+        }));
+        dropped.await.expect_err("the panic drops the sender");
+    };
+    let handle = shards().start(config("shard-9"), main).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_tokio_task_does_not_end_the_shard() {
+    let main = |_: Tasks| async {
+        drop(tokio::task::spawn_local(async {
+            let _bomb = Bomb;
+            pending::<()>().await;
+        }));
+    };
+    let handle = shards().start(config("shard-10"), main).unwrap();
+    assert_joins(handle, Ok(()));
 }

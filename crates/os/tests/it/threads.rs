@@ -1,6 +1,6 @@
 //! Dedicated threads on real threads: their body, their blocking, and their panics.
 
-use std::future::{Ready, poll_fn, ready};
+use std::future::{Ready, pending, poll_fn, ready};
 use std::panic::panic_any;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +9,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use env::threads::Threads;
+use tokio::sync::oneshot;
 use tokio::task::yield_now;
 
 use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
@@ -259,4 +260,31 @@ fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_gives_panicked
     };
     let handle = threads().start("thread-11", body).unwrap();
     assert_joins(handle, panicked("thread-11"));
+}
+
+#[test]
+fn a_panic_in_the_poll_of_a_tokio_task_gives_ok() {
+    let body = || async {
+        let (sender, dropped) = oneshot::channel::<()>();
+        drop(tokio::spawn(async move {
+            let _sender = sender;
+            panic!("tokio task");
+        }));
+        dropped.await.expect_err("the panic drops the sender");
+    };
+    let handle = threads().start("thread-12", body).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_tokio_task_gives_ok() {
+    let body = || {
+        drop(tokio::spawn(async {
+            let _bomb = Bomb;
+            pending::<()>().await;
+        }));
+        ready(())
+    };
+    let handle = threads().start("thread-13", body).unwrap();
+    assert_joins(handle, Ok(()));
 }

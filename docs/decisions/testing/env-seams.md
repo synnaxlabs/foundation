@@ -19,10 +19,20 @@
   task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
-  (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392).
+  scheduler runs them. No other crate calls Tokio's timers or spawn. Amended
+  (2026-10-08, #871): on `os`, Tokio catches a panic in the poll or the drop of a task
+  that Tokio spawns directly, not through `Tasks`, on a shard or a dedicated thread,
+  and the shard or thread runs on. A release build aborts at any panic, and only `os`
+  depends on Tokio, so only vendor code can spawn such a task. Lost: Tokio's
+  `unhandled_panic` setting. It needs `--cfg tokio_unstable` in every build, and a
+  `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` value, as the loom job and the cfg runs of
+  `cargo xtask` set, replaces the flags of `.cargo/config.toml`. Decided by
+  `laptop.architect-2` (2026-10-08 23:08 UTC, #871,
+  https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264).
+  `env::files` (#37) gives files under one data directory, with owned blocks and a
+  sync that poisons the file on failure (S4). One handle at a time holds a file open
+  to write, until it drops and its calls end; another write open fails with `Busy`
+  (#392).
   `File::close` ends after the calls of its handle end; a drop closes without a wait
   (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
   sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and

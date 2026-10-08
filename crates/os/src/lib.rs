@@ -82,7 +82,9 @@ pub fn entropy() -> env::entropy::Entropy {
 /// Linux can pin: elsewhere [`env::shards::Shards::pinnable`] is `false`.
 ///
 /// A panic ends the shard only where panics unwind, as in tests. A release build
-/// aborts the process at a panic.
+/// aborts the process at a panic. Tokio catches a panic in the poll or the drop of a
+/// task that it spawns directly, not through [`env::tasks::Tasks`], and the shard
+/// runs on.
 ///
 /// # Errors
 ///
@@ -99,7 +101,8 @@ pub fn shards() -> Result<env::shards::Shards, Error> {
 /// The body runs in the context of the runtime but outside its `block_on`, so it may
 /// start and block on a Tokio runtime of its own. A panic of a body, in its call, its
 /// poll, or its drop, makes its join give [`env::thread::Panicked`], where panics
-/// unwind.
+/// unwind. Tokio catches a panic in the poll or the drop of a task that the body
+/// spawns on the runtime, and the thread runs on.
 ///
 /// # Errors
 ///
