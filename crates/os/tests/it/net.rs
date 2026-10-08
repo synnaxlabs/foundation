@@ -1,5 +1,5 @@
 //! TCP streams and listeners on the loopback of the real network: bytes, FIN, resets,
-//! errors, addresses, wakeups, and the thread rules.
+//! errors, addresses, wakeups, and the thread rules. Name lookups of this machine.
 
 use std::future::poll_fn;
 use std::io::IoSlice;
@@ -880,9 +880,125 @@ fn a_name_with_a_nul_byte_is_not_found() {
 }
 
 #[test]
-fn a_lookup_needs_no_io_driver() {
-    let found = runtime_with_no_io().block_on(net().resolve("localhost", 4433));
+fn a_lookup_keeps_the_scope_of_an_ipv6_address() {
+    let ip = "fe80::1".parse().unwrap();
+    let address = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 1));
+    assert_eq!(resolve("fe80::1%1"), Ok(vec![address]));
+}
+
+#[test]
+fn a_lookup_needs_no_runtime() {
+    let counted = Arc::new(Counted {
+        wakes: AtomicUsize::new(0),
+        woken: Notify::new(),
+    });
+    let waker = Waker::from(Arc::clone(&counted));
+    let mut cx = Context::from_waker(&waker);
+    let net = net();
+    let mut lookup = pin!(net.resolve("localhost", 4433));
+    assert!(lookup.as_mut().poll(&mut cx).is_pending());
+    let woken =
+        runtime().block_on(async { timeout(BOUND, counted.woken.notified()).await });
+    woken.expect("the answer wakes the lookup");
+    let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) else {
+        panic!("a woken lookup is ready");
+    };
     assert!(found.is_ok_and(|found| !found.is_empty()));
+}
+
+/// The descriptor limit of a child that [`alone`] starts, which also marks it.
+#[cfg(target_os = "linux")]
+const CHILD_DESCRIPTORS: u64 = 64;
+
+/// Runs the current test again, alone in a child process with a limit of
+/// [`CHILD_DESCRIPTORS`]. Gives `true` in the child, and `false` in the parent after
+/// the child passed.
+#[cfg(target_os = "linux")]
+fn alone() -> bool {
+    use rustix::process::{Resource, getrlimit};
+    if getrlimit(Resource::Nofile).current == Some(CHILD_DESCRIPTORS) {
+        return true;
+    }
+    let thread = std::thread::current();
+    let test = thread.name().expect("invariant: libtest names the thread");
+    let script = r#"ulimit -n "$0" && exec "$1" --exact "$2""#;
+    let status = std::process::Command::new("sh")
+        .args(["-c", script])
+        .arg(CHILD_DESCRIPTORS.to_string())
+        .arg(std::env::current_exe().unwrap())
+        .arg(test)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+    false
+}
+
+/// Whether a thread of this process has the name of a lookup thread.
+#[cfg(target_os = "linux")]
+fn resolving() -> bool {
+    let tasks = std::fs::read_dir("/proc/self/task").unwrap();
+    tasks.map(Result::unwrap).any(|task| {
+        let name = std::fs::read_to_string(task.path().join("comm"));
+        name.is_ok_and(|name| name == "resolve\n")
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dropped_lookup_ends_its_thread_with_no_panic() {
+    if !alone() {
+        return;
+    }
+    // libtest sees a panic only on the test thread.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report(info);
+        std::process::abort();
+    }));
+    let net = net();
+    let mut lookup = Box::pin(net.resolve("localhost", 4433));
+    let pending = lookup
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    assert!(pending.is_pending());
+    assert!(resolving());
+    drop(lookup);
+    let ended = runtime().block_on(async {
+        timeout(BOUND, async {
+            while resolving() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+    });
+    ended.expect("the lookup thread ends");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lookup_with_no_free_descriptor_is_io() {
+    use rustix::fs::{Mode, OFlags, open};
+    use rustix::io::Errno;
+    // glibc loads its name service modules at the first lookup of a process, and gives
+    // `EAI_NONAME` when it cannot.
+    if !alone() {
+        return;
+    }
+    let runtime = runtime_with_no_io();
+    let starved = |runtime: &tokio::runtime::Runtime| {
+        let mut held = Vec::new();
+        while let Ok(fd) = open("/dev/null", OFlags::RDONLY, Mode::empty()) {
+            held.push(fd);
+        }
+        runtime.block_on(net().resolve("localhost", 4433))
+    };
+    let io = Err(Error::Io {
+        code: Errno::MFILE.raw_os_error(),
+    });
+    assert_eq!(starved(&runtime), io);
+    let found = runtime.block_on(net().resolve("localhost", 4433));
+    assert!(found.is_ok_and(|found| !found.is_empty()));
+    assert_eq!(starved(&runtime), io, "with the modules loaded");
 }
 
 #[test]

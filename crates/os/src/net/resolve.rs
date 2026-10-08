@@ -18,26 +18,21 @@ pub(super) async fn lookup(host: &str, port: u16) -> Result<Vec<SocketAddr>, Err
     let name =
         CString::new(host).map_err(|_nul| Error::NotFound { host: host.into() })?;
     let (sender, answer) = oneshot::channel();
-    start(move || {
-        // The future dropped when the send fails, so no one reads the answer.
-        sender.send(getaddrinfo(&name, port)).unwrap_or_else(drop);
-    })
-    .map_err(|e| super::io_error(super::errno(&e)))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "os starts threads; a lookup blocks the thread it runs on"
+    )]
+    let started = thread::Builder::new()
+        .name("resolve".into())
+        .spawn(move || {
+            // The future dropped when the send fails, so no one reads the answer.
+            sender.send(getaddrinfo(&name, port)).unwrap_or_else(drop);
+        });
+    started.map_err(|e| super::io_error(super::errno(&e)))?;
     answer
         .await
         .expect("invariant: the resolve thread answers")
-        .map_err(|Failure { code, errno }| failure(code, errno, host))
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "os starts threads; a lookup blocks the thread it runs on"
-)]
-fn start(lookup: impl FnOnce() + Send + 'static) -> io::Result<()> {
-    thread::Builder::new()
-        .name("resolve".into())
-        .spawn(lookup)
-        .map(drop)
+        .map_err(|failure| failure.error(host))
 }
 
 /// A failed `getaddrinfo`: its code, and `errno` as it was after the call.
@@ -45,6 +40,25 @@ fn start(lookup: impl FnOnce() + Send + 'static) -> io::Result<()> {
 struct Failure {
     code: c_int,
     errno: Errno,
+}
+
+impl Failure {
+    /// The error of a lookup of `host` that failed so. The code of [`Error::Io`] is
+    /// always an errno: EAI codes differ between systems.
+    fn error(self, host: &str) -> Error {
+        let errno = match (self.code, self.errno) {
+            // glibc gives `EAI_NONAME` when it cannot load its name service modules.
+            (libc::EAI_SYSTEM, errno)
+            | (libc::EAI_NONAME, errno @ (Errno::MFILE | Errno::NFILE)) => errno,
+            (libc::EAI_NONAME | libc::EAI_NODATA, _) => {
+                return Error::NotFound { host: host.into() };
+            }
+            (libc::EAI_AGAIN, _) => Errno::AGAIN,
+            (libc::EAI_MEMORY, _) => Errno::NOMEM,
+            _ => Errno::IO,
+        };
+        super::io_error(errno)
+    }
 }
 
 /// Looks up `name` and gives each of its addresses, at least one, with `port`.
@@ -86,7 +100,7 @@ impl List {
         while let Some(info) = unsafe { entry.as_ref() } {
             #[expect(
                 clippy::cast_ptr_alignment,
-                reason = "`SocketAddrAny::read` copies `ai_addrlen` bytes, at any alignment"
+                reason = "`SocketAddrAny::read` copies the bytes at any alignment"
             )]
             let storage = info.ai_addr.cast::<SocketAddrStorage>().cast_const();
             // SAFETY: `ai_addr` points at `ai_addrlen` bytes of one socket address.
@@ -108,28 +122,15 @@ impl Drop for List {
     }
 }
 
-/// The error of a lookup of `host` that failed with `code` and `errno`. The code of
-/// [`Error::Io`] is always an errno: EAI codes differ between systems.
-fn failure(code: c_int, errno: Errno, host: &str) -> Error {
-    let errno = match code {
-        libc::EAI_NONAME | libc::EAI_NODATA => {
-            return Error::NotFound { host: host.into() };
-        }
-        libc::EAI_SYSTEM => errno,
-        libc::EAI_AGAIN => Errno::AGAIN,
-        libc::EAI_MEMORY => Errno::NOMEM,
-        _ => Errno::IO,
-    };
-    super::io_error(errno)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    mod failure {
+    mod error {
         use super::*;
 
+        /// Through a private call: no input makes `getaddrinfo` give `EAI_AGAIN` or
+        /// `EAI_MEMORY` on demand.
         #[test]
         fn maps_each_code_to_its_error() {
             let host = "pump.local";
@@ -138,48 +139,20 @@ mod tests {
                 code: errno.raw_os_error(),
             };
             let cases = [
-                (libc::EAI_NONAME, not_found.clone()),
-                (libc::EAI_NODATA, not_found),
-                (libc::EAI_SYSTEM, io(Errno::MFILE)),
-                (libc::EAI_AGAIN, io(Errno::AGAIN)),
-                (libc::EAI_MEMORY, io(Errno::NOMEM)),
-                (libc::EAI_FAIL, io(Errno::IO)),
-                (libc::EAI_SERVICE, io(Errno::IO)),
+                (libc::EAI_NONAME, Errno::NOENT, not_found.clone()),
+                (libc::EAI_NONAME, Errno::MFILE, io(Errno::MFILE)),
+                (libc::EAI_NONAME, Errno::NFILE, io(Errno::NFILE)),
+                (libc::EAI_NODATA, Errno::MFILE, not_found),
+                (libc::EAI_SYSTEM, Errno::MFILE, io(Errno::MFILE)),
+                (libc::EAI_AGAIN, Errno::MFILE, io(Errno::AGAIN)),
+                (libc::EAI_MEMORY, Errno::MFILE, io(Errno::NOMEM)),
+                (libc::EAI_FAIL, Errno::MFILE, io(Errno::IO)),
+                (libc::EAI_SERVICE, Errno::MFILE, io(Errno::IO)),
             ];
-            for (code, expected) in cases {
-                assert_eq!(failure(code, Errno::MFILE, host), expected, "{code}");
+            for (code, errno, expected) in cases {
+                let failure = Failure { code, errno };
+                assert_eq!(failure.error(host), expected, "{code} {errno:?}");
             }
-        }
-    }
-
-    mod getaddrinfo {
-        use std::net::SocketAddrV6;
-
-        use super::*;
-
-        fn lookup(host: &str) -> Vec<SocketAddr> {
-            let name = CString::new(host).unwrap();
-            getaddrinfo(&name, 4433).unwrap()
-        }
-
-        #[test]
-        fn gives_an_ipv4_address_with_the_port() {
-            let address = SocketAddr::new([192, 0, 2, 7].into(), 4433);
-            assert_eq!(lookup("192.0.2.7"), [address]);
-        }
-
-        #[test]
-        fn keeps_the_scope_of_an_ipv6_address() {
-            let ip = "fe80::1".parse().unwrap();
-            let address = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 1));
-            assert_eq!(lookup("fe80::1%1"), [address]);
-        }
-
-        #[test]
-        fn gives_the_code_of_a_failure() {
-            let name = CString::new("foundation.invalid").unwrap();
-            let failed = getaddrinfo(&name, 4433).unwrap_err();
-            assert_eq!(failed.code, libc::EAI_NONAME);
         }
     }
 }

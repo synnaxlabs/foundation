@@ -112,6 +112,7 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 /// The network of this machine. A stream or listener registers at its first poll
 /// with the I/O driver of the Tokio runtime current on that thread. Each thread that
 /// `os` starts has one.
+///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
 ///
