@@ -11,12 +11,31 @@ use types::name::{Name, Prefix};
 use types::node;
 
 use raft::Voters;
+use spec::definition::Definition;
 
 use crate::card;
 use crate::change::{Change, Join, Malformed};
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
+
+/// The region before the first entry of its log: its prefix, its founding members and
+/// voters, and its spec before the first change. It is the same at each member and at
+/// each open. A founding node builds it from its config. A node that joins takes it
+/// whole from its join answer, and is not one of its members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Founding {
+    /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
+    pub prefix: Prefix,
+    /// Each founding member of the region, one record for each node. A member's peer
+    /// proves the public key of its card, and that key signs the member's claims.
+    pub members: Vec<Member>,
+    /// The voters before the first entry of the log. Each is a member. A node with no
+    /// voter takes no request.
+    pub voters: BTreeSet<node::Key>,
+    /// The definitions of the region before the first change of its spec, by tree key.
+    pub definitions: BTreeMap<Name, Definition>,
+}
 
 /// The region state that this node holds: its members, its tickets, the homes that it
 /// applied, and its spec pointer.
@@ -40,8 +59,8 @@ pub(crate) struct State {
 
 impl State {
     /// The state of the region with prefix `region`, with `members`, each under the key
-    /// of its card, no ticket or home, the spec at version 0 with root `founding`, and
-    /// the founding `voters`.
+    /// of its card, no ticket or home, the spec at version 0 with root `root`, and the
+    /// founding `voters`.
     ///
     /// # Errors
     ///
@@ -50,7 +69,7 @@ impl State {
     pub(crate) fn new(
         region: Prefix,
         members: Vec<Member>,
-        founding: Digest,
+        root: Digest,
         voters: BTreeSet<node::Key>,
     ) -> Result<Self, Unfit> {
         let mut state = Self {
@@ -58,10 +77,7 @@ impl State {
             members: BTreeMap::new(),
             tickets: BTreeMap::new(),
             homes: BTreeMap::new(),
-            pointer: Pointer {
-                version: 0,
-                root: founding,
-            },
+            pointer: Pointer { version: 0, root },
             voters: Voters {
                 incoming: voters,
                 outgoing: BTreeSet::new(),
