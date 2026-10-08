@@ -4087,7 +4087,13 @@ How to read this record:
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
   2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and each thread with none draws the same fixed values. So
+  production. A second change of `src/util/ua_util.c` keeps a flag for each thread,
+  which `UA_random_seed` and `UA_random_seed_deterministic` set, and
+  `UA_UInt32_random` and `UA_Guid_random` print their name and abort on a thread
+  with no start value. The C driver then calls each of the two draws on a thread with
+  none, and the test asserts the abort and its exact output. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117). So
   `connector-opcua` (PR 4 of #435) sets the start value with
   `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
   `UA_random_seed`, which reads the clock. It does so on each thread before that
