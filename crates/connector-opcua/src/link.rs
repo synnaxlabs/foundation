@@ -2,51 +2,23 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
-use std::ffi::{CStr, c_char, c_void};
-
-unsafe extern "C" {
-    fn UA_StatusCode_name(code: u32) -> *const c_char;
-    fn UA_DateTime_now() -> i64;
-    fn UA_DateTime_nowMonotonic() -> i64;
-    fn UA_DateTime_localTimeUtcOffset() -> i64;
-}
-
-fn name(code: u32) -> &'static str {
-    // SAFETY: `UA_StatusCode_name` takes any code and gives a static C string.
-    let name = unsafe { UA_StatusCode_name(code) };
-    // SAFETY: the string is static, and ends with a NUL.
-    unsafe { CStr::from_ptr(name) }.to_str().unwrap()
-}
+use crate::ffi::{self, Bytes, Status};
 
 #[test]
 fn the_copy_names_a_status_code() {
-    assert_eq!(name(0), "Good");
-    assert_eq!(name(0x8034_0000), "BadNodeIdUnknown");
+    assert_eq!(Status(0).name(), "Good");
+    assert_eq!(Status(0x8034_0000).name(), "BadNodeIdUnknown");
 }
 
 #[test]
 fn the_global_clocks_give_a_fixed_time() {
     // SAFETY: each takes no argument and reads no state.
-    let now = unsafe { UA_DateTime_now() };
+    let now = unsafe { ffi::UA_DateTime_now() };
     // SAFETY: as above.
-    let monotonic = unsafe { UA_DateTime_nowMonotonic() };
+    let monotonic = unsafe { ffi::UA_DateTime_nowMonotonic() };
     // SAFETY: as above.
-    let offset = unsafe { UA_DateTime_localTimeUtcOffset() };
+    let offset = unsafe { ffi::UA_DateTime_localTimeUtcOffset() };
     assert_eq!((now, monotonic, offset), (0, 0, 0));
-}
-
-#[repr(C)]
-struct UaString {
-    length: usize,
-    data: *mut u8,
-}
-
-unsafe extern "C" {
-    fn UA_EventLoop_new_POSIX(logger: *const c_void) -> *mut c_void;
-    fn UA_ConnectionManager_new_POSIX_TCP(name: UaString) -> *mut c_void;
-    fn UA_ConnectionManager_new_POSIX_UDP(name: UaString) -> *mut c_void;
-    fn UA_ConnectionManager_new_POSIX_Ethernet(name: UaString) -> *mut c_void;
-    fn UA_InterruptManager_new_POSIX(name: UaString) -> *mut c_void;
 }
 
 /// The constructors that abort.
@@ -72,28 +44,30 @@ fn call_refused() {
     let Ok(name) = std::env::var(CHILD) else {
         return;
     };
-    let empty = || UaString {
+    let empty = || Bytes {
         length: 0,
         data: std::ptr::null_mut(),
     };
     match name.as_str() {
         // SAFETY: it aborts before it reads its argument.
-        "UA_EventLoop_new_POSIX" => unsafe { UA_EventLoop_new_POSIX(std::ptr::null()) },
+        "UA_EventLoop_new_POSIX" => unsafe {
+            ffi::UA_EventLoop_new_POSIX(std::ptr::null())
+        },
         // SAFETY: as above.
         "UA_ConnectionManager_new_POSIX_TCP" => unsafe {
-            UA_ConnectionManager_new_POSIX_TCP(empty())
+            ffi::UA_ConnectionManager_new_POSIX_TCP(empty())
         },
         // SAFETY: as above.
         "UA_ConnectionManager_new_POSIX_UDP" => unsafe {
-            UA_ConnectionManager_new_POSIX_UDP(empty())
+            ffi::UA_ConnectionManager_new_POSIX_UDP(empty())
         },
         // SAFETY: as above.
         "UA_ConnectionManager_new_POSIX_Ethernet" => unsafe {
-            UA_ConnectionManager_new_POSIX_Ethernet(empty())
+            ffi::UA_ConnectionManager_new_POSIX_Ethernet(empty())
         },
         // SAFETY: as above.
         "UA_InterruptManager_new_POSIX" => unsafe {
-            UA_InterruptManager_new_POSIX(empty())
+            ffi::UA_InterruptManager_new_POSIX(empty())
         },
         _ => panic!("no POSIX constructor is named {name}"),
     };
@@ -118,12 +92,156 @@ fn each_posix_constructor_prints_its_name_and_aborts() {
     }
 }
 
+/// The directory of this crate.
+const ROOT: &str = env!("CARGO_MANIFEST_DIR");
+
+/// The compiler of the build of the shim, at `-O3`, the release level, where GCC gives
+/// the most warnings. A warning is an error in the shim.
+fn shim_compiler() -> cc::Tool {
+    let copy = std::path::Path::new(ROOT).join("../../patches/open62541");
+    let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
+    let target = env!("CONNECTOR_OPCUA_TARGET");
+    let mut shim = crate::compiler::builds(&copy, &flags, "").shim;
+    shim.target(target)
+        .host(target)
+        .opt_level(3)
+        .cargo_metadata(false)
+        .cargo_warnings(false)
+        .get_compiler()
+}
+
+/// Gives each pragma of `shim.c` after the preprocessor, which joins split lines and
+/// expands `_Pragma`.
+fn shim_pragmas() -> Vec<String> {
+    let path = std::path::Path::new(ROOT).join("src/shim.c");
+    let output = shim_compiler()
+        .to_command()
+        .arg("-E")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let mut in_shim = false;
+    let mut pragmas = Vec::new();
+    for line in String::from_utf8(output.stdout).unwrap().lines() {
+        // A line marker, `# <line> "<file>" <flags>`, names the file of the next lines.
+        if let Some(marker) = line.strip_prefix("# ") {
+            in_shim = marker.contains(&format!("\"{}\"", path.display()));
+        } else if in_shim && line.trim_start().starts_with("#pragma") {
+            pragmas.push(line.trim().to_owned());
+        }
+    }
+    pragmas
+}
+
+/// Compiles `shim.c` with `line` added after the line `after`, with `shim_compiler`.
+/// Gives the compiler's errors, which are empty when it compiles.
+fn check_shim(after: &str, line: &str) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let tool = shim_compiler();
+    let text =
+        std::fs::read_to_string(std::path::Path::new(ROOT).join("src/shim.c")).unwrap();
+    let (at, _) = text
+        .match_indices(after)
+        .next()
+        .expect("shim.c holds the line");
+    let at = at + after.len();
+    let source = format!("{}\n{line}{}", &text[..at], &text[at..]);
+    let mut child = tool
+        .to_command()
+        .args(["-c", "-o", "/dev/null", "-x", "c", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(source.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let errors = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.success(), errors.is_empty(), "{errors}");
+    errors
+}
+
+#[test]
+fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
+    // `cc` reads C flags from the environment, and `-w` there hides each warning.
+    if !crate::child::running() {
+        let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
+        crate::child::run(name, None);
+        return;
+    }
+    assert_eq!(
+        shim_pragmas(),
+        [
+            "#pragma GCC diagnostic push",
+            "#pragma GCC diagnostic ignored \"-Wunused-parameter\"",
+            "#pragma GCC diagnostic pop",
+        ]
+    );
+    let headers = "#include <open62541/types.h>";
+    assert_eq!(check_shim(headers, ""), "");
+    let parameter = "int in_the_headers(int unused) { return 0; }";
+    assert_eq!(check_shim(headers, parameter), "");
+    let variable = check_shim(
+        headers,
+        "int in_the_headers(void) { int unused; return 0; }",
+    );
+    assert!(variable.contains("unused variable 'unused'"), "{variable}");
+    // GCC gives this one only when it compiles, not with `-fsyntax-only`.
+    let function = check_shim(headers, "static int in_the_headers(void) { return 0; }");
+    assert!(function.contains("unused-function"), "{function}");
+    // GCC gives this one only when it optimizes.
+    let bounds = "int in_the_headers(void) { int a[2] = {0, 0}; return a[3]; }";
+    let bounds = check_shim(headers, bounds);
+    assert!(bounds.contains("array-bounds"), "{bounds}");
+    let body = check_shim(
+        "#include <stdlib.h>",
+        "int in_the_body(int unused) { return 0; }",
+    );
+    assert!(body.contains("unused parameter 'unused'"), "{body}");
+}
+
+#[test]
+fn the_shim_check_ignores_the_environment_of_cc() {
+    let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env("CC", "cc -w")
+        .env("CFLAGS", "-w")
+        .env("CRATE_CC_NO_DEFAULTS", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn the_shim_check_uses_the_compiler_of_cc() {
+    let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env("CC", "/missing/gcc")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("No such file or directory"), "{stdout}");
+}
+
 unsafe extern "C" {
-    fn UA_Timer_init(timer: *mut c_void);
-    fn UA_Timer_next(timer: *mut c_void) -> i64;
-    fn UA_Timer_process(timer: *mut c_void, now: i64) -> i64;
-    fn UA_Timer_remove(timer: *mut c_void, key: u64);
-    fn UA_Timer_clear(timer: *mut c_void);
+    fn UA_Timer_init(timer: *mut std::ffi::c_void);
+    fn UA_Timer_next(timer: *mut std::ffi::c_void) -> i64;
+    fn UA_Timer_process(timer: *mut std::ffi::c_void, now: i64) -> i64;
+    fn UA_Timer_remove(timer: *mut std::ffi::c_void, key: u64);
+    fn UA_Timer_clear(timer: *mut std::ffi::c_void);
 }
 
 /// The library does not compile `timer.c`, and the archive drops an object that

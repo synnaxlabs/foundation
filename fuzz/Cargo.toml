@@ -13,6 +13,7 @@ cargo-fuzz = true
 # The local patches of the root `Cargo.toml`: docs/dependencies.md.
 [patch.crates-io]
 noq-proto = { path = "../patches/noq-proto" }
+noq-udp = { path = "../patches/noq-udp" }
 
 [dependencies]
 block = { path = "../crates/block" }
@@ -65,8 +66,29 @@ doc = false
 bench = false
 
 [[bin]]
+name = "codec_shape"
+path = "fuzz_targets/codec_shape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_shape_encoder"
+path = "fuzz_targets/codec_shape_encoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "config_check"
 path = "fuzz_targets/config_check.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_plan"
+path = "fuzz_targets/config_plan.rs"
 test = false
 doc = false
 bench = false

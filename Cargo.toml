@@ -141,3 +141,4 @@ debug = "line-tables-only"
 # Local patches: docs/dependencies.md.
 [patch.crates-io]
 noq-proto = { path = "patches/noq-proto" }
+noq-udp = { path = "patches/noq-udp" }
