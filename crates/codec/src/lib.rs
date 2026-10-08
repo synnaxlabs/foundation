@@ -111,9 +111,10 @@ impl Encoder {
 /// # Errors
 ///
 /// Returns [`Error::Overflow`] when the samples take more than `usize::MAX` bytes, the
-/// error of the first vector whose header or length is not valid, [`Error::Ends`] or
-/// [`Error::Long`] for the first end that is not valid, [`Error::Utf8`] for the first
-/// `String` sample that is not UTF-8, or [`Error::Trailing`], in that order.
+/// error of the first vector whose header or length is not valid, or [`Error::Ends`]
+/// or [`Error::Long`] for the first end that is not valid. After those, it returns
+/// [`Error::Utf8`] for the first `String` sample that is not UTF-8, then
+/// [`Error::Trailing`].
 #[inline]
 pub fn validate(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, Error> {
     let Type::Scalar(scalar) = data_type else {
@@ -140,13 +141,14 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
         Shape::Variable { element, max, utf8 } => {
             let front = element.front(count)?;
             let (elements, rest) = ends(count, bytes, max, None)?;
+            let len = front.raw_len(elements)?;
             let after = element.check(elements, rest, vectors(count))?;
             if utf8 {
                 let ends = bytes.split_at(bytes.len().strict_sub(rest.len())).0;
                 let vectors = rest.split_at(rest.len().strict_sub(after.len())).0;
                 text::encoded(count, ends, elements, vectors)?;
             }
-            (front.raw_len(elements)?, after)
+            (len, after)
         }
     };
     trailing(rest)?;
