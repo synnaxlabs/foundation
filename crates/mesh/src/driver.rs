@@ -133,13 +133,17 @@ impl fmt::Debug for Mesh {
 
 impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
-    /// its task on `config.tasks`. Homes are known again when this node applies the
-    /// log, after it hears the leader. It puts each chunk of the founding tree in
+    /// its task on `config.tasks`. It puts each chunk of the founding tree in
     /// `config.store`. It reads the spec of the newest pointer that a file in
     /// `<config.dir>/spec` names, or the founding spec when there is no file, and
     /// removes the file of each older pointer. A spec that does not read or has
     /// problems is not an error: the node then uses no spec, and [`Mesh::spec`] gives
     /// the cause in `behind`.
+    ///
+    /// At each open, its state starts at the founding: `pointer` gives version 0, and a
+    /// watch gives each home of `config.founding.homes`. The state moves on when this
+    /// node applies the log, after it hears the leader. Until then, a watch can give a
+    /// founding home that the log moved, as at a follower behind the leader.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the
@@ -193,10 +197,12 @@ impl Mesh {
             members,
             voters,
             definitions,
+            homes,
         } = config.founding;
         let tree = spec::region::tree(&mut chunks, &definitions);
-        let state = region::State::new(prefix, members, tree.root, voters.clone())
-            .map_err(Error::Member)?;
+        let state =
+            region::State::new(prefix, members, tree.root, voters.clone(), homes)
+                .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
@@ -214,21 +220,7 @@ impl Mesh {
         })
         .await?;
         let unapplied = written(&stored.entries).collect();
-        let start = Start {
-            hard: stored.hard,
-            voters: Voters {
-                incoming: voters,
-                outgoing: BTreeSet::new(),
-            },
-            entries: stored.entries,
-            applied: 0,
-        };
-        let fixed = raft::Config {
-            key: config.key,
-            election_ticks: ELECTION_TICKS,
-            heartbeat_ticks: HEARTBEAT_TICKS,
-        };
-        let raft = Raft::new(fixed, start)?;
+        let raft = follower(config.key, stored, voters)?;
         let group = Group::new(raft, state, unapplied, used);
         let group = Rc::new(RefCell::new(group));
         let weak = Rc::downgrade(&group);
@@ -255,12 +247,6 @@ impl Mesh {
             clock: config.clock,
             entropy: config.entropy,
         })
-    }
-
-    /// This node: [`Config::key`].
-    #[must_use]
-    pub fn key(&self) -> node::Key {
-        self.group.borrow().raft.key()
     }
 
     /// Gives a future that resolves once each task of the mesh has ended: the group's
@@ -597,9 +583,9 @@ impl fmt::Debug for Watch {
 impl Watch {
     /// The first call returns the home of the index at once. Each later call waits
     /// until the home differs from the one it last returned, and returns the newest:
-    /// two changes between calls give one result. `None` means that no applied entry
-    /// set a home for the index. It is never `None` after a home, because no change
-    /// clears a home.
+    /// two changes between calls give one result. `None` means that the index has no
+    /// home in this node's state: no founding home and no applied entry gives one. It
+    /// is never `None` after a home, because no change clears a home.
     ///
     /// # Errors
     ///
@@ -976,6 +962,29 @@ enum Written {
     Join(node::Key, PublicKey),
     // The nodes in the incoming half of a configuration entry.
     Named(BTreeSet<node::Key>),
+}
+
+// Starts the group as a follower on the log that `stored` holds, with `voters`.
+fn follower(
+    key: node::Key,
+    stored: log::Stored,
+    voters: BTreeSet<node::Key>,
+) -> Result<Raft, Error> {
+    let start = Start {
+        hard: stored.hard,
+        voters: Voters {
+            incoming: voters,
+            outgoing: BTreeSet::new(),
+        },
+        entries: stored.entries,
+        applied: 0,
+    };
+    let fixed = raft::Config {
+        key,
+        election_ticks: ELECTION_TICKS,
+        heartbeat_ticks: HEARTBEAT_TICKS,
+    };
+    Ok(Raft::new(fixed, start)?)
 }
 
 // Each join and configuration entry of `entries`, with its index.
@@ -1356,6 +1365,7 @@ mod tests {
                 members: common::create_members(members),
                 voters: voters.iter().map(|&id| key(id)).collect(),
                 definitions: BTreeMap::new(),
+                homes: BTreeMap::new(),
             },
             files: node.files(),
             dir: PathBuf::new(),
@@ -5336,46 +5346,6 @@ mod tests {
                 node.files().list(Path::new("")).await,
                 Ok(vec![BLOB.into()])
             );
-        });
-    }
-
-    #[test]
-    fn key_gives_this_node_while_another_node_leads() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-            let leader = Some(key(2));
-            let follows = Error::Raft(raft::Error::NotLeader { leader });
-            assert_eq!(mesh.propose(home(3)).await, Err(follows));
-            assert_eq!(mesh.key(), key(1));
-        });
-    }
-
-    #[test]
-    fn key_gives_this_node_after_it_votes_for_another_node() {
-        solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let grant = common::signature(3, Grant::PreVote, 2);
-            let proof = Proof {
-                grant: Grant::PreVote,
-                candidate: key(2),
-                voters: [(key(2), None), (key(3), Some(grant))].into(),
-            };
-            let last = Position::default();
-            let mut ready = Ready {
-                messages: vec![raft::Message {
-                    proof: Some(proof),
-                    ..message(2, 1, Body::Vote { last })
-                }],
-                ..Ready::default()
-            };
-            common::signer(2).sign(&mut ready);
-            let vote = ready.messages.remove(0);
-            assert_eq!(mesh.receive(public(2), vote), Ok(()));
-            let granted = common::granted(1, Grant::Vote, 2);
-            assert_eq!(mesh.outgoing(key(2)).await, Ok(granted));
-            assert_eq!(mesh.key(), key(1));
         });
     }
 

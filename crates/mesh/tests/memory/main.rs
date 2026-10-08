@@ -246,6 +246,7 @@ async fn create_config(node: &Node, tasks: &Tasks) -> Config {
             members: vec![member],
             voters: [KEY].into(),
             definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
         },
         files: node.files(),
         dir: PathBuf::new(),

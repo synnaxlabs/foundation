@@ -1,7 +1,9 @@
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
-  `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
-  the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
-  differ (#1664). Approved by `laptop.architect`, 2026-10-07T23:31:29Z:
+  `Watch::next`, and `Mesh::member` (#562). `mesh` gives no `Mesh::key`: a crate that
+  holds a `Mesh` reads this node's key from its own config, as the hub reads
+  `hub::Config::node` (`laptop.architect`, 2026-10-08T18:42:42Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
+  Supersedes the approval of `Mesh::key` in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `next`
   gives `Stopped`, which holds the cause types `log::Error` and `change::Unknown`, each
   public in its own module, so a caller can match the exact cause. `next` gives
@@ -33,13 +35,28 @@
   `env::files::Files`, `env::clock::Clock`, `env::entropy::Entropy`,
   `env::tasks::Tasks`, `block::Pool`, `transport::Transport`,
   `transport::stream::Incoming`, `types::name::Prefix`, and
-  `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`,
-  and `transport` in its line of the crate map. `Config::founding` is a
-  `region::Founding`: the prefix, the founding members and voters, and the founding
-  definitions, the same at each member and at each open. A founding node builds it from
-  its config, and a node that joins takes it whole from its join answer. It derives
-  `PartialEq` and `Eq` and has no constructor: `Mesh::open` stays its one check.
-  `Start` lost, because `driver.rs` holds `raft::Start`, which changes at each open
+  `types::ed25519::PrivateKey`. So a crate that opens a region has `env`, `block`, and
+  `transport` in its line of the crate map. `Config::founding` is a `region::Founding`:
+  the prefix, the founding members and voters, the founding definitions, and the home of
+  each founding index by channel key and node key, the same at each member and at each
+  open. `State::new` takes the homes, so the first state holds them. An index with no
+  entry has no home until a spec change gives one (#1931; `laptop.architect`,
+  2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). At
+  each open, the state starts at the founding, so until the replay a watch can give a
+  founding home that the log moved, as at a follower behind the leader. A home that
+  the mesh names is never the authority to write. Trigger: before a production path
+  moves a home, the home takes a write only while it holds its node lease, so a node
+  whose state is old takes no write as a home that it lost (`laptop.architect`,
+  2026-10-08T19:28:51Z:
+  https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6067470813). A
+  founding node builds it from its config, and a node that joins takes it whole from its
+  join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
+  stays its one check, of the members and voters. It checks no definition or home. The
+  node that founds the region checks the definitions (SPEC CHANGE). Nothing checks the
+  homes (`laptop.architect`, 2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). `Start`
+  lost, because `driver.rs` holds `raft::Start`, which changes at each open
   (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
   `Founding::definitions` adds

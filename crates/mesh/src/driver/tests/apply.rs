@@ -844,6 +844,45 @@ fn create_homes(count: u128, node: &str) -> BTreeMap<Name, Name> {
     (0..count).map(home).collect()
 }
 
+/// The mesh of node `id` in a region of members 1 and 2 and voter 1. Its founding spec
+/// holds the index `plant.i0` with its home at node 1, and `plant.i1` with no home.
+async fn open_founded(node: &sim::node::Node, tasks: &Tasks, id: u8) -> Mesh {
+    let mut config = config(node, tasks, id, &[1, 2], &[1]).await;
+    config.founding.definitions = create_indexes(2);
+    config.founding.homes = BTreeMap::from([(INDEX, key(1))]);
+    Mesh::start(config).await.unwrap()
+}
+
+#[test]
+fn each_member_holds_the_founding_homes_at_each_open() {
+    for id in [1, 2] {
+        solo(move |node, tasks| async move {
+            let mesh = open_founded(&node, &tasks, id).await;
+            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+            assert_eq!(mesh.watch(SECOND).next().await, Ok(None));
+            drop(mesh);
+            node.clock().sleep(Span::MILLISECOND).await;
+            let mesh = open_founded(&node, &tasks, id).await;
+            assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+            assert_eq!(mesh.watch(SECOND).next().await, Ok(None));
+        });
+    }
+}
+
+#[test]
+fn a_spec_change_keeps_a_founding_home_and_gives_a_founding_index_with_none_its_home() {
+    solo(|node, tasks| async move {
+        let mesh = open_founded(&node, &tasks, 1).await;
+        let founded = pointer(0, &create_indexes(2));
+        let definitions = create_indexes(3);
+        let moved = pointer(1, &definitions);
+        let homes = create_homes(3, "plant.node2");
+        assert_eq!(mesh.apply(founded, definitions, homes).await, Ok(moved));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+    });
+}
+
 #[test]
 fn apply_gives_each_listed_index_the_member_of_its_name_as_its_home() {
     solo(|node, tasks| async move {
