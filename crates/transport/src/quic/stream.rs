@@ -7,11 +7,11 @@ use std::collections::VecDeque;
 use std::mem;
 use std::ops::Range;
 use std::rc::Rc;
-use std::slice;
 use std::task::Poll;
+use std::{iter, slice};
 
 use block::{Block, Unique};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use noq_proto::{
     ClosedStream, Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId,
     VarInt, WriteError,
@@ -59,8 +59,14 @@ struct Half {
     header: [u8; 1 + varint::BYTES_MAX],
     /// The bytes of `header` that the stream has not taken.
     unsent: Range<usize>,
+    /// The block of the message in hand.
+    block: Bytes,
+    /// The parts of the message in hand that the stream has not taken all of, the
+    /// first one cut at the first byte it has not taken. Empty during the write that
+    /// gives the message, which reads the caller's parts. It keeps its capacity.
+    parts: Vec<Part>,
     /// The bytes of the message in hand that the stream has not taken.
-    body: Chunks,
+    body: usize,
     /// The send budget of the message in hand.
     claim: Claim,
     /// Who writes the rest of the message in hand.
@@ -308,7 +314,9 @@ impl Half {
             started: true,
             header: [0; 1 + varint::BYTES_MAX],
             unsent: 0..0,
-            body: Chunks::default(),
+            block: Bytes::new(),
+            parts: Vec::new(),
+            body: 0,
             claim: Claim::new(class),
             rest: Rest::Caller,
             waiting: false,
@@ -317,13 +325,14 @@ impl Half {
         }
     }
 
-    /// Takes `parts` of `block` as the message in hand, after its header, with `rest`
-    /// to write what the stream does not take now. The half holds no part of a
-    /// message.
-    fn load(&mut self, block: Block, parts: &[Part], rest: Rest) {
+    /// Takes `block` as the block of the message in hand, a message of `bytes`, after
+    /// its header, with `rest` to write what the stream does not take now. The next
+    /// write gives the message's parts. The half holds no part of a message.
+    fn load(&mut self, block: Block, bytes: usize, rest: Rest) {
         self.rest = rest;
-        self.body.load(block, parts);
-        let prefix = message::prefix(self.body.len());
+        self.block = Bytes::from_owner(Body(block));
+        self.body = bytes;
+        let prefix = message::prefix(bytes);
         let start = usize::from(self.started);
         self.started = true;
         self.header[1..=prefix.len()].copy_from_slice(&prefix);
@@ -351,11 +360,13 @@ impl Half {
     /// The bytes of the message in hand, with its header, that the stream has not
     /// taken.
     fn left(&self) -> usize {
-        self.unsent.len() + self.body.len()
+        self.unsent.len() + self.body
     }
 
-    /// Writes what the half holds to `send` until it holds nothing. It checks
-    /// neither the send budget nor the turn.
+    /// Writes what the half holds to `send` until it holds nothing, with `given` the
+    /// parts of the message in hand when the caller's write gives them, else `None`.
+    /// Then keeps the parts it did not take. It checks neither the send budget nor
+    /// the turn.
     ///
     /// # Errors
     ///
@@ -364,15 +375,67 @@ impl Half {
         &mut self,
         send: &mut SendStream<'_>,
         buffer: &mut Vec<u8>,
+        given: Option<&[Part]>,
     ) -> Result<(), WriteError> {
+        let parts = mem::take(&mut self.parts);
+        let mut at = Cursor::default();
+        let written = self.write_from(send, buffer, given.unwrap_or(&parts), &mut at);
+        self.parts = parts;
+        self.keep(given, at);
+        written
+    }
+
+    /// Keeps the parts of the message in hand from `at` on: of `given` when the
+    /// caller's write gives them, else of the parts the half kept.
+    fn keep(&mut self, given: Option<&[Part]>, at: Cursor) {
+        if self.body == 0 {
+            self.parts.clear();
+        } else {
+            keep(&mut self.parts, given, at);
+        }
+    }
+
+    /// Writes the header, then `parts` of the block from `at` on, until `send` takes
+    /// no more, and moves `at` past what it took: each run over [`COPIED_MAX`] bytes
+    /// as a slice of the block, and each stretch of shorter runs and zeros between
+    /// them in one write, through `buffer` when it has more than one source.
+    ///
+    /// # Errors
+    ///
+    /// The error of the write that took nothing.
+    fn write_from(
+        &mut self,
+        send: &mut SendStream<'_>,
+        buffer: &mut Vec<u8>,
+        parts: &[Part],
+        at: &mut Cursor,
+    ) -> Result<(), WriteError> {
+        while !self.unsent.is_empty() {
+            self.unsent.start += send.write(&self.header[self.unsent.clone()])?;
+        }
         loop {
-            if !self.unsent.is_empty() {
-                self.unsent.start += send.write(&self.header[self.unsent.clone()])?;
-            } else if !self.body.is_empty() {
-                self.body.write(send, buffer)?;
-            } else {
-                return Ok(());
-            }
+            let mut sources = Sources { parts, at: *at };
+            let written = match sources.next() {
+                None => return Ok(()),
+                Some(Source::Run(range)) if range.len() > COPIED_MAX => {
+                    let mut run = self.block.slice(range);
+                    send.write_chunks(&mut slice::from_mut(&mut run))?
+                }
+                Some(first) => {
+                    let mut rest = sources.take_while(|next| !next.long()).peekable();
+                    if rest.peek().is_none() {
+                        send.write(first.bytes(&self.block))?
+                    } else {
+                        buffer.clear();
+                        for source in iter::once(first).chain(rest) {
+                            buffer.extend_from_slice(source.bytes(&self.block));
+                        }
+                        send.write(buffer)?
+                    }
+                }
+            };
+            self.body -= written;
+            at.advance(parts, written);
         }
     }
 }
@@ -384,195 +447,106 @@ const ZEROS: &[u8; 255] = &[0; 255];
 /// chunk until the ACK.
 const COPIED_MAX: usize = 1452;
 
-/// The bytes of a message in hand that the stream has not taken: a slice of its block
-/// for each run of adjacent ranges over [`COPIED_MAX`] bytes, and a stretch for the
-/// shorter runs and zeros between them, which a write copies.
-#[derive(Debug, Default)]
-struct Chunks {
-    /// The message, when it is one range with no zeros.
-    whole: Bytes,
-    /// The block, while a stretch needs it.
-    block: Bytes,
-    /// The slices of the long runs.
-    slices: Vec<Bytes>,
-    /// The short runs and zeros of every stretch.
-    parts: Vec<Part>,
-    /// From `next` on, in message order. The lists keep their capacity, so a message
-    /// allocates none.
-    pieces: Vec<Piece>,
-    /// The first piece that the stream has not taken all of.
-    next: usize,
-    /// The bytes from `next` on.
-    len: usize,
+/// A place in a message of parts: the first part that a write did not take all of,
+/// and the bytes of it, range then zeros, that the write took.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Cursor {
+    part: usize,
+    taken: usize,
 }
 
-#[derive(Debug)]
-enum Piece {
-    /// The slices in this range of `Chunks::slices` that the stream has not taken.
-    Slices(Range<usize>),
-    /// The bytes of the parts in this range of `Chunks::parts`, `len` in all, of
-    /// which the stream took `taken`.
-    Stretch {
-        parts: Range<usize>,
-        len: usize,
-        taken: usize,
-    },
-}
-
-impl Chunks {
-    /// Takes `parts` of `block`. Holds nothing before.
-    fn load(&mut self, block: Block, parts: &[Part]) {
-        if let [Part { range, zeros: 0 }] = parts {
-            let mut whole = Bytes::from_owner(Body(block));
-            whole.truncate(range.end);
-            whole.advance(range.start);
-            self.len = whole.len();
-            self.whole = whole;
-            return;
-        }
-        self.block = Bytes::from_owner(Body(block));
-        self.parts.extend_from_slice(parts);
-        // The open stretch: its first part, and its bytes.
-        let (mut open, mut bytes) = (0, 0);
-        let mut index = 0;
-        while index < self.parts.len() {
-            let first = index;
-            let Range { start, mut end } = self.parts[index].range;
-            bytes += end - start;
-            while self.parts[index].zeros == 0 {
-                match self.parts.get(index + 1) {
-                    Some(next) if next.range.start == end || next.range.is_empty() => {
-                        end += next.range.len();
-                        bytes += next.range.len();
-                        index += 1;
-                    }
-                    _ => break,
-                }
+impl Cursor {
+    /// Moves past `bytes` more bytes of `parts`.
+    fn advance(&mut self, parts: &[Part], mut bytes: usize) {
+        while bytes > 0 {
+            let part = &parts[self.part];
+            let left = part.range.len() + usize::from(part.zeros) - self.taken;
+            if bytes < left {
+                self.taken += bytes;
+                return;
             }
-            let zeros = self.parts[index].zeros;
-            bytes += usize::from(zeros);
-            index += 1;
-            if end - start <= COPIED_MAX {
-                continue;
-            }
-            self.push_stretch(open..first, bytes - (end - start) - usize::from(zeros));
-            self.push_slice(self.block.slice(start..end));
-            // The zeros of the run's last part open the next stretch.
-            self.parts[index - 1].range = end..end;
-            (open, bytes) = (index - usize::from(zeros > 0), usize::from(zeros));
-        }
-        self.push_stretch(open..self.parts.len(), bytes);
-        if !self
-            .pieces
-            .iter()
-            .any(|piece| matches!(piece, Piece::Stretch { .. }))
-        {
-            self.block = Bytes::new();
-        }
-    }
-
-    fn push_slice(&mut self, slice: Bytes) {
-        self.len += slice.len();
-        self.slices.push(slice);
-        let end = self.slices.len();
-        match self.pieces.last_mut() {
-            Some(Piece::Slices(slices)) => slices.end = end,
-            _ => self.pieces.push(Piece::Slices(end - 1..end)),
-        }
-    }
-
-    /// Adds the stretch of `parts`, `len` bytes in all, unless it is empty.
-    fn push_stretch(&mut self, parts: Range<usize>, len: usize) {
-        if len > 0 {
-            self.len += len;
-            self.pieces.push(Piece::Stretch {
-                parts,
-                len,
+            bytes -= left;
+            *self = Self {
+                part: self.part + 1,
                 taken: 0,
-            });
+            };
         }
     }
+}
 
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Writes the next piece to `send`, as far as it takes it. A stretch of more
-    /// than one source goes through `buffer`, in one write.
-    ///
-    /// # Errors
-    ///
-    /// The error of a write that took nothing.
-    fn write(
-        &mut self,
-        send: &mut SendStream<'_>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), WriteError> {
-        if !self.whole.is_empty() {
-            self.len -= send.write_chunks(&mut slice::from_mut(&mut self.whole))?;
-            return Ok(());
+/// Makes `kept` the parts from `at` on, the first one cut at `at`: of `given` when
+/// `Some`, which `kept` must then be empty for, else of `kept`.
+fn keep(kept: &mut Vec<Part>, given: Option<&[Part]>, at: Cursor) {
+    match given {
+        Some(given) => kept.extend_from_slice(&given[at.part..]),
+        None => {
+            kept.drain(..at.part);
         }
-        let piece = &mut self.pieces[self.next];
-        let (written, done) = match piece {
-            Piece::Slices(slices) => {
-                let mut rest = &mut self.slices[slices.clone()];
-                let before = rest.len();
-                let written = send.write_chunks(&mut rest);
-                slices.start += before - rest.len();
-                (written?, slices.start == slices.end)
+    }
+    if let Some(Part { range, zeros }) = kept.first_mut() {
+        let cut = at.taken.min(range.len());
+        range.start += cut;
+        *zeros -= u8::try_from(at.taken - cut).expect("a part has at most 255 zeros");
+    }
+}
+
+/// The bytes of a message of parts, as runs of the block and zeros.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Source {
+    /// Bytes of the block: the ranges of adjacent parts with no zeros between them.
+    Run(Range<usize>),
+    Zeros(usize),
+}
+
+impl Source {
+    /// A run that a write gives to noq-proto as a slice of the block.
+    fn long(&self) -> bool {
+        matches!(self, Self::Run(range) if range.len() > COPIED_MAX)
+    }
+
+    fn bytes<'a>(&self, block: &'a [u8]) -> &'a [u8] {
+        match self {
+            Self::Run(range) => &block[range.clone()],
+            Self::Zeros(count) => &ZEROS[..*count],
+        }
+    }
+}
+
+/// The sources of `parts` from `at` on, in order.
+struct Sources<'a> {
+    parts: &'a [Part],
+    at: Cursor,
+}
+
+impl Iterator for Sources<'_> {
+    type Item = Source;
+
+    fn next(&mut self) -> Option<Source> {
+        loop {
+            let part = self.parts.get(self.at.part)?;
+            if self.at.taken < part.range.len() {
+                let start = part.range.start + self.at.taken;
+                let mut end = part.range.end;
+                while self.parts[self.at.part].zeros == 0 {
+                    match self.parts.get(self.at.part + 1) {
+                        Some(next) if next.range.start == end => end = next.range.end,
+                        Some(next) if next.range.is_empty() => {}
+                        _ => break,
+                    }
+                    self.at.part += 1;
+                }
+                self.at.taken = self.parts[self.at.part].range.len();
+                return Some(Source::Run(start..end));
             }
-            Piece::Stretch { parts, len, taken } => {
-                let bytes: &[u8] = match &self.parts[parts.clone()] {
-                    [Part { range, zeros: 0 }] => {
-                        &self.block[range.start + *taken..range.end]
-                    }
-                    [Part { range, zeros }] if range.is_empty() => {
-                        &ZEROS[*taken..usize::from(*zeros)]
-                    }
-                    stretch => {
-                        buffer.clear();
-                        let mut skip = *taken;
-                        for Part { range, zeros } in stretch {
-                            let mut add = |source: &[u8]| {
-                                let from = skip.min(source.len());
-                                skip -= from;
-                                buffer.extend_from_slice(&source[from..]);
-                            };
-                            add(&self.block[range.clone()]);
-                            if *zeros > 0 {
-                                add(&ZEROS[..usize::from(*zeros)]);
-                            }
-                        }
-                        buffer
-                    }
-                };
-                let written = send.write(bytes)?;
-                *taken += written;
-                (written, *taken == *len)
+            let zeros = part.range.len() + usize::from(part.zeros) - self.at.taken;
+            self.at = Cursor {
+                part: self.at.part + 1,
+                taken: 0,
+            };
+            if zeros > 0 {
+                return Some(Source::Zeros(zeros));
             }
-        };
-        self.len -= written;
-        if done {
-            self.next += 1;
         }
-        if self.len == 0 {
-            self.clear();
-        }
-        Ok(())
-    }
-
-    /// Drops what it holds.
-    fn clear(&mut self) {
-        self.whole = Bytes::new();
-        self.block = Bytes::new();
-        self.slices.clear();
-        self.parts.clear();
-        self.pieces.clear();
-        (self.next, self.len) = (0, 0);
     }
 }
 
@@ -921,10 +895,11 @@ impl Sending {
         &mut self,
         inner: &mut noq_proto::Connection,
         half: &mut Half,
+        given: Option<&[Part]>,
     ) -> Poll<()> {
         // A write can change the turn order, so the first stream is read before it.
         let first = self.first();
-        let pushed = self.push(inner, half);
+        let pushed = self.push(inner, half, given);
         if pushed.is_ready() {
             self.end_after(half, first);
         } else if self.first() != Some(half.key) {
@@ -949,23 +924,28 @@ impl Sending {
         let half = halves.get_mut(&id).expect(HALF);
         half.notified = false;
         half.check()?;
-        if half.holds() && self.write(inner, half).is_pending() {
+        if half.holds() && self.write(inner, half, None).is_pending() {
             return Ok(None);
         }
         Ok(Some(half))
     }
 
-    fn push(&mut self, inner: &mut noq_proto::Connection, half: &mut Half) -> Poll<()> {
+    fn push(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        half: &mut Half,
+        given: Option<&[Part]>,
+    ) -> Poll<()> {
         let order = self.share.order();
-        let bytes = half.body.len();
         // A message that waits for room does not hold back a write.
-        if !self.budget.charge(half.key, bytes, &mut half.claim, order) {
+        if !self.budget.charge(half.key, half.body, &mut half.claim, order) {
+            half.keep(given, Cursor::default());
             return Poll::Pending;
         }
         if self.turns.allows(half, order) {
             let left = half.left();
             let send = &mut inner.send_stream(half.key.id);
-            let written = half.write(send, &mut self.buffer);
+            let written = half.write(send, &mut self.buffer, given);
             let paired = self.paired();
             self.share
                 .took(half.claim.class, left - half.left(), paired);
@@ -975,6 +955,8 @@ impl Sending {
                 Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
                 Err(WriteError::ClosedStream) => panic!("{OPEN}"),
             }
+        } else {
+            half.keep(given, Cursor::default());
         }
         self.turns.join(half);
         Poll::Pending
@@ -991,8 +973,8 @@ impl Sending {
     /// [`Sending::end`], with `first` the first stream in turn before the caller
     /// wrote `half`.
     fn end_after(&mut self, half: &mut Half, first: Option<Key>) {
-        half.unsent = 0..0;
-        half.body.clear();
+        (half.unsent, half.block, half.body) = (0..0, Bytes::new(), 0);
+        half.parts.clear();
         let room = self.share.room(half.claim.class, &self.budget);
         let woken = &mut self.woken;
         let wake = |stream: Key| woken.push_back(stream.id);
@@ -1258,8 +1240,8 @@ impl Streams {
     }
 
     /// Writes the rest of the message that `sender`'s stream of `inner` holds, then
-    /// puts `parts` of `message`, when `Some`, on the stream after it, and takes the
-    /// block. Leaves it while the stream holds part of an earlier message. `Ready`
+    /// puts `parts` of `message`, when `Some`, a message of `bytes`, on the stream
+    /// after it, and takes the block. Leaves it while the stream holds part of an earlier message. `Ready`
     /// when the stream holds no message: it took all of `message`, or with `None`,
     /// all of the one before. `Pending` while it holds one, and [`Event::Writable`]
     /// follows when a later write can take more.
@@ -1273,6 +1255,7 @@ impl Streams {
         sender: &Sender,
         message: &mut Option<Block>,
         parts: &[Part],
+        bytes: usize,
     ) -> Result<Poll<()>, Error> {
         let resumed = self
             .sending
@@ -1283,8 +1266,8 @@ impl Streams {
         let Some(message) = message.take() else {
             return Ok(Poll::Ready(()));
         };
-        half.load(message, parts, Rest::Caller);
-        Ok(self.sending.write(inner, half))
+        half.load(message, bytes, Rest::Caller);
+        Ok(self.sending.write(inner, half, Some(parts)))
     }
 
     /// Writes the rest of the message that `sender`'s stream of `inner` holds, then
@@ -1323,8 +1306,8 @@ impl Streams {
         let admitted =
             |_: &mut Block| allowed && budget.admit(bytes, &mut half.claim, order);
         if let Some(taken) = message.take_if(admitted) {
-            half.load(taken, parts, Rest::Pump);
-            _ = self.sending.write(inner, half);
+            half.load(taken, bytes, Rest::Pump);
+            _ = self.sending.write(inner, half, Some(parts));
         }
         Ok(())
     }
@@ -1348,7 +1331,7 @@ impl Streams {
                 continue;
             }
             let caller = half.rest == Rest::Caller;
-            if !caller && self.sending.write(inner, half).is_pending() {
+            if !caller && self.sending.write(inner, half, None).is_pending() {
                 continue;
             }
             if half.rest == Rest::Finish {
@@ -1379,7 +1362,7 @@ impl Streams {
         half.check()?;
         if half.holds() {
             half.rest = Rest::Finish;
-            if self.sending.write(inner, half).is_pending() {
+            if self.sending.write(inner, half, None).is_pending() {
                 return Ok(());
             }
         }
@@ -2904,7 +2887,7 @@ mod tests {
             assert_eq!(lengths, sent);
             // The stream sends the rest only at the caller's next write.
             let held = half(&mut pair.client, &sender);
-            assert_eq!((held.unsent.is_empty(), held.body.len()), (true, 100));
+            assert_eq!((held.unsent.is_empty(), held.body), (true, 100));
             pair.client.endpoint.cancel(now, &sender);
             let reset = Error::Reset { code: Code(0) };
             let message = shard.block(b"d");
@@ -4582,79 +4565,90 @@ mod tests {
         }
     }
 
-    /// Each slice that `chunks` holds, and the bytes of each stretch.
-    fn pieces(chunks: &Chunks) -> Vec<(&'static str, Vec<u8>)> {
-        let mut pieces = Vec::new();
-        for piece in &chunks.pieces {
-            match piece {
-                Piece::Slices(slices) => {
-                    for slice in &chunks.slices[slices.clone()] {
-                        pieces.push(("slice", slice.to_vec()));
-                    }
-                }
-                Piece::Stretch { parts, .. } => {
-                    let stretch = chunks.parts[parts.clone()].iter().flat_map(|part| {
-                        let zeros = &ZEROS[..usize::from(part.zeros)];
-                        [&chunks.block[part.range.clone()], zeros].concat()
-                    });
-                    pieces.push(("stretch", stretch.collect()));
+    #[test]
+    fn the_sources_of_parts_join_adjacent_ranges_and_end_at_zeros() {
+        let part = |range: Range<usize>, zeros| Part { range, zeros };
+        let parts = [
+            part(0..1000, 0),
+            part(9..9, 0),
+            part(1000..2000, 0),
+            part(2100..2108, 2),
+            part(2200..2210, 0),
+            part(2300..2300 + COPIED_MAX, 0),
+            part(2300 + COPIED_MAX..3753, 0),
+            part(3800..3801, 0),
+            part(3900..3900 + COPIED_MAX + 1, 0),
+            part(4000..4000 + COPIED_MAX, 0),
+            part(0..0, 3),
+        ];
+        let sources: Vec<_> = Sources {
+            parts: &parts,
+            at: Cursor::default(),
+        }
+        .map(|source| (source.long(), source))
+        .collect();
+        let sent = [
+            (true, Source::Run(0..2000)),
+            (false, Source::Run(2100..2108)),
+            (false, Source::Zeros(2)),
+            (false, Source::Run(2200..2210)),
+            (true, Source::Run(2300..3753)),
+            (false, Source::Run(3800..3801)),
+            (true, Source::Run(3900..3900 + COPIED_MAX + 1)),
+            (false, Source::Run(4000..4000 + COPIED_MAX)),
+            (false, Source::Zeros(3)),
+        ];
+        assert_eq!(sources, sent);
+        let at = Cursor { part: 3, taken: 9 };
+        let rest: Vec<_> = Sources { parts: &parts, at }.take(2).collect();
+        assert_eq!(rest, [Source::Zeros(1), Source::Run(2200..2210)]);
+    }
+
+    mod resume {
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// The bytes of a block.
+        const BLOCK: usize = 64;
+
+        /// The bytes of `parts` of `block`.
+        fn bytes(block: &[u8], parts: &[Part]) -> Vec<u8> {
+            let sources = Sources {
+                parts,
+                at: Cursor::default(),
+            };
+            sources.flat_map(|source| source.bytes(block).to_vec()).collect()
+        }
+
+        proptest! {
+            #[test]
+            fn the_kept_parts_hold_each_byte_not_taken_in_order(
+                drawn in vec((0..BLOCK, 0..BLOCK, 0..4_u8), 0..12),
+                takes in vec(0..40_usize, 1..12),
+            ) {
+                let block: Vec<u8> = (1..=u8::MAX).take(BLOCK).collect();
+                let parts: Vec<_> = drawn
+                    .into_iter()
+                    .map(|(a, b, zeros)| Part { range: a.min(b)..a.max(b), zeros })
+                    .collect();
+                let all = bytes(&block, &parts);
+                let mut kept = Vec::new();
+                let mut taken = 0;
+                for (write, take) in takes.into_iter().enumerate() {
+                    let source = if write == 0 { &parts } else { &kept };
+                    let left = bytes(&block, source).len();
+                    let take = take.min(left);
+                    let mut at = Cursor::default();
+                    at.advance(source, take);
+                    let given = (write == 0).then_some(parts.as_slice());
+                    keep(&mut kept, given, at);
+                    taken += take;
+                    prop_assert_eq!(bytes(&block, &kept), &all[taken..]);
                 }
             }
         }
-        pieces
-    }
-
-    #[test]
-    fn a_message_of_parts_slices_each_long_run_and_joins_the_rest_in_stretches() {
-        testing::run(1, |shard| {
-            let body: Vec<u8> = (0..6000u32).map(|at| at.to_le_bytes()[0]).collect();
-            let part = |range: Range<usize>, zeros| Part { range, zeros };
-            let parts = [
-                part(0..1000, 0),
-                part(9..9, 0),
-                part(1000..2000, 0),
-                part(2100..2108, 2),
-                part(2200..2210, 0),
-                part(2300..2300 + COPIED_MAX, 0),
-                part(2300 + COPIED_MAX..3753, 0),
-                part(3800..3801, 0),
-                part(3900..3900 + COPIED_MAX + 1, 0),
-                part(0..0, 3),
-            ];
-            let mut chunks = Chunks::default();
-            chunks.load(shard.block(&body), &parts);
-            let stretch = [&body[2100..2108], &[0; 2], &body[2200..2210]].concat();
-            let sent = [
-                ("slice", body[..2000].to_vec()),
-                ("stretch", stretch),
-                ("slice", body[2300..3753].to_vec()),
-                ("stretch", body[3800..3801].to_vec()),
-                ("slice", body[3900..=3900 + COPIED_MAX].to_vec()),
-                ("stretch", vec![0; 3]),
-            ];
-            assert_eq!(pieces(&chunks), sent);
-            let len = sent.iter().map(|(_, bytes)| bytes.len()).sum();
-            assert_eq!(chunks.len(), len);
-        });
-    }
-
-    #[test]
-    fn a_message_of_one_range_holds_only_its_bytes() {
-        testing::run(1, |shard| {
-            let body: Vec<u8> = (0..4000u32).map(|at| at.to_le_bytes()[0]).collect();
-            let mut chunks = Chunks::default();
-            for range in [1..COPIED_MAX + 2, 5..10] {
-                let part = Part {
-                    range: range.clone(),
-                    zeros: 0,
-                };
-                chunks.load(shard.block(&body), &[part]);
-                assert_eq!(chunks.whole, body[range.clone()]);
-                assert_eq!(chunks.len(), range.len());
-                assert!(chunks.block.is_empty() && chunks.pieces.is_empty());
-                chunks.clear();
-            }
-        });
     }
 
     #[test]

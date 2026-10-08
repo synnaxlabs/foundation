@@ -356,17 +356,15 @@ impl Endpoint {
     ) -> Result<Poll<()>, Error> {
         let bytes = message
             .as_ref()
-            .map(|block| stream::size(parts, block.len()));
+            .map_or(0, |block| stream::size(parts, block.len()));
         sender.check_open();
-        if let Some(bytes) = bytes {
-            stream::check_size(bytes, sender.bytes_max())?;
-        }
+        stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
         self.streams(
             now,
             key,
             sender.closed().cloned(),
-            |streams, inner, _, _| streams.write(inner, sender, message, parts),
+            |streams, inner, _, _| streams.write(inner, sender, message, parts, bytes),
         )
     }
 
