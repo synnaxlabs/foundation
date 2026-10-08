@@ -436,7 +436,8 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
 
 /// The OS drops each datagram that the receive buffer has no room for. A receiver
 /// with the default buffer of Linux holds about 90 of these. macOS delivers on the
-/// loopback from a queue, so the receive waits until the queue is empty.
+/// loopback from a queue, so the receive waits until the queue is empty: a receive
+/// before that makes room for more.
 #[test]
 fn a_small_receive_buffer_holds_few_datagrams() {
     on_thread("udp-buffer", || async {
@@ -452,7 +453,7 @@ fn a_small_receive_buffer_holds_few_datagrams() {
             assert_eq!(send(&mut sender, &to).await, Ok(()));
         }
         tokio::time::sleep(SILENCE).await;
-        let mut held = 0;
+        let mut held = receive(&mut receiver, 1).await.len();
         while let Ok(datagrams) = timeout(SILENCE, receive(&mut receiver, 1)).await {
             held += datagrams.len();
         }
