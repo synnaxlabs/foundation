@@ -186,7 +186,11 @@ How to read this record:
   `T[rows][columns]` (A13), row-major, with the bytes of an array of `rows * columns`
   elements. Its fields are public: no `u16` pair overflows `width`, so no format needs a
   check. Its text is `f32[2][3]`; a length over 65535 is `Error::Matrix`, and more than
-  two lengths is `Error::Lengths`. The spec's data type code of a matrix is `MATRIX` 6,
+  two lengths is `Error::Lengths`. Each fault of a side (not digits, a leading zero, or
+  over 65535) is `Error::Matrix`, as only it states the range of a side; `Error::Count`
+  covers only an array length and a list maximum. Decided by `laptop.architect`
+  (2026-10-08T01:01:30Z,
+  https://github.com/synnaxlabs/foundation/pull/1535#issuecomment-6049989554). The spec's data type code of a matrix is `MATRIX` 6,
   then the element code, `rows: u16`, and `columns: u16`. A matrix of a number can have
   a unit, by the element's rule, as an array. Decided by `laptop.architect`
   (2026-10-07T17:30:55Z):

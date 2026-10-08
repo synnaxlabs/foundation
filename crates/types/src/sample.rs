@@ -224,24 +224,26 @@ fn element(text: &str) -> Result<Scalar, Error> {
     }
 }
 
-/// The count that `text` writes in ASCII digits with no leading zero.
+/// The array length or list maximum that `text` writes in ASCII digits with no
+/// leading zero.
 fn count(text: &str) -> Result<u32, Error> {
-    digits(text)?.parse().map_err(|_over_u32| Error::Count)
+    digits(text)
+        .and_then(|digits| digits.parse().ok())
+        .ok_or(Error::Count)
 }
 
-/// The length of a matrix side that `text` writes as a [`count`]. A count over 65535,
-/// of any size, is [`Error::Matrix`].
+/// The length of a matrix side that `text` writes in ASCII digits with no leading
+/// zero.
 fn side(text: &str) -> Result<u16, Error> {
-    digits(text)?.parse().map_err(|_over_u16| Error::Matrix)
+    digits(text)
+        .and_then(|digits| digits.parse().ok())
+        .ok_or(Error::Matrix)
 }
 
 /// `text` when it is one or more ASCII digits with no leading zero.
-fn digits(text: &str) -> Result<&str, Error> {
+fn digits(text: &str) -> Option<&str> {
     let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    if !digits || (text.len() > 1 && text.starts_with('0')) {
-        return Err(Error::Count);
-    }
-    Ok(text)
+    (digits && (text.len() == 1 || !text.starts_with('0'))).then_some(text)
 }
 
 /// Why a text is not a sample type. `Display` gives the message: a lower-case clause
@@ -255,13 +257,13 @@ pub enum Error {
     /// The element of an array, a matrix, or a list is not a scalar, as in `string[3]`
     /// or `list<f32[2], 4>`.
     Element,
-    /// A length or a maximum is not ASCII digits with no leading zero, or an array
-    /// length or a list maximum is over 4294967295, as in `f32[]`, `f32[03]`, or
-    /// `f32[-1]`.
+    /// An array length or a list maximum is not ASCII digits with no leading zero, or
+    /// is over 4294967295, as in `f32[]`, `f32[03]`, or `f32[-1]`.
     Count,
     /// An array has more than two lengths, as in `u8[1][1][1]`.
     Lengths,
-    /// A matrix has a length over 65535, as in `f32[70000][3]`.
+    /// A matrix length is not ASCII digits with no leading zero, or is over 65535, as
+    /// in `f32[2][]`, `f32[2][x]`, or `f32[70000][3]`.
     Matrix,
 }
 
@@ -281,7 +283,10 @@ impl Error {
             Self::Lengths => {
                 "Use one or two array lengths, such as f32[3] or f32[2][3]"
             }
-            Self::Matrix => "Use at most 65535 rows and 65535 columns, or an array",
+            Self::Matrix => {
+                "Write each matrix length in plain digits up to 65535, such as \
+                 f32[2][3], or use an array"
+            }
         }
     }
 }
@@ -307,7 +312,9 @@ impl fmt::Display for Error {
             }
             Self::Count => "expected a count of 0 to 4294967295, with no leading zero",
             Self::Lengths => "expected one or two array lengths",
-            Self::Matrix => "expected each matrix length from 0 to 65535",
+            Self::Matrix => {
+                "expected each matrix length of 0 to 65535, with no leading zero"
+            }
         })
     }
 }
@@ -434,9 +441,11 @@ mod tests {
             ("f32[4294967296]", Error::Count),
             ("list<u8, 016>", Error::Count),
             ("list<u8,  16>", Error::Count),
-            ("f32[2][]", Error::Count),
-            ("f32[2][03]", Error::Count),
-            ("f32[2]][3]", Error::Count),
+            ("f32[2][]", Error::Matrix),
+            ("f32[2][03]", Error::Matrix),
+            ("f32[2]][3]", Error::Matrix),
+            ("f32[x][3]", Error::Matrix),
+            ("f32[03][3]", Error::Matrix),
             ("f32[2] [3]", Error::Count),
             ("f32[2][4294967296]", Error::Matrix),
             ("f32[2][3", Error::Syntax),
@@ -510,8 +519,9 @@ mod tests {
             ),
             (
                 Error::Matrix,
-                "expected each matrix length from 0 to 65535",
-                "Use at most 65535 rows and 65535 columns, or an array",
+                "expected each matrix length of 0 to 65535, with no leading zero",
+                "Write each matrix length in plain digits up to 65535, such as \
+                 f32[2][3], or use an array",
             ),
         ];
         for (error, message, fix) in cases {
