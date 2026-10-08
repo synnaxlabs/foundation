@@ -304,8 +304,7 @@ state on `main`.
 - The random generator of the open62541 copy is PCG32
   (`UA_ENABLE_DETERMINISTIC_RNG`), which a peer can predict. So no nonce, key, or
   session token may come from `UA_UInt32_random` or `UA_Guid_random`. A security
-  policy that encrypts, and an OPC UA server of Foundation, are not built. Each takes
-  its nonces and tokens from aws-lc.
+  policy that encrypts, and an OPC UA server of Foundation, are not built.
 
 ### Encoded series
 
@@ -393,7 +392,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
-| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Build the C code with `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`, or libFuzzer sees none of it |
+| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Until #435 is fixed, an encoding that does not decode is decoded again with zeros after it. Build the C code with `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`, or libFuzzer sees none of it |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |

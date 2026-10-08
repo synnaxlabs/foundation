@@ -14,6 +14,7 @@ fn main() {
     the_count_holds_the_allocations_of_c();
     a_run_allocates_nothing();
     the_drop_frees_the_client();
+    the_fuzz_round_trip_allocates_for_each_step();
 }
 
 fn sim() -> (Sim, env::clock::Clock) {
@@ -58,4 +59,12 @@ fn the_drop_frees_the_client() {
     let client = Client::new(clock, 0);
     let ((), freed) = ALLOCATOR.freed_holding(URI, || drop(client));
     assert_eq!(freed, 1, "the drop freed the URI of the client");
+}
+
+/// A `Variant` of 7 `ExtensionObject` values, then the zeros that #435 needs.
+fn the_fuzz_round_trip_allocates_for_each_step() {
+    let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
+    data.resize(data.len() + 7 * 4, 0);
+    let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&data));
+    assert_eq!(count, 11, "the round trip of a Variant");
 }

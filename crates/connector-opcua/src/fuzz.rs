@@ -238,6 +238,8 @@ mod tests {
     fn decode_round_trips_variant_extension_objects() {
         let mut data = vec![u8::try_from(VARIANT).unwrap(), 0];
         data.extend(extension_objects());
+        // The input decodes only with the 4 bytes for each value that #435 needs.
+        data.extend([0; 7]);
         decode(&data);
     }
 

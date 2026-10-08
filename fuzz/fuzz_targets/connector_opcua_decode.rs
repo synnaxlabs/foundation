@@ -1,6 +1,7 @@
 //! open62541 decodes any input as each of its built-in types with no memory fault or
 //! leak, and the encoding of each value that it decodes decodes to a value with the
-//! same encoding.
+//! same encoding. Until #435 is fixed, an encoding that does not decode is decoded
+//! again with zeros after it.
 //!
 //! Input: two bytes that pick the type, then the encoded value
 //! (`connector_opcua::fuzz::decode`). A new open62541 copy can change the type of an
