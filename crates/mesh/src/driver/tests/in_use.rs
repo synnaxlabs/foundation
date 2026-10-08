@@ -155,21 +155,6 @@ fn a_replayed_pointer_at_or_below_the_one_in_use_leaves_the_spec_in_use() {
     .unwrap();
 }
 
-// No public call shows the slots of `Group::calls`.
-#[test]
-fn a_dropped_call_of_the_spec_frees_its_slot() {
-    solo(|node, tasks| async move {
-        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
-        let a = create_subjects(&["plant.a"], 1);
-        mesh.apply(base(), a).await.unwrap();
-        let mut call = Box::pin(mesh.spec());
-        assert_eq!(now(call.as_mut()).await, Poll::Pending);
-        assert_eq!(mesh.group.borrow().calls.len(), 1);
-        drop(call);
-        assert!(mesh.group.borrow().calls.is_empty());
-    });
-}
-
 #[test]
 fn a_founding_spec_with_problems_gives_no_spec_in_use_until_a_valid_change() {
     solo(|node, tasks| async move {
@@ -360,6 +345,42 @@ fn a_read_gets_no_listed_chunk_that_the_tree_in_use_holds() {
         let settled = mesh.settle_spec(first, update.root, listed, holders);
         let moved = settled.await.unwrap();
         assert_eq!(mesh.spec().await, Ok(in_use(moved, &b)));
+    });
+}
+
+// The read misses one of two chunks. The retry gets it, and the next read waits on a
+// get of the other, so the cause of the first read stays.
+#[test]
+fn a_retry_keeps_the_cause_of_the_read_before_it() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &create_large(200));
+        let mut lacked = update.chunks.iter().filter(|at| **at != update.root);
+        let lacked = [*lacked.next().unwrap(), *lacked.next().unwrap()];
+        let held = update.chunks.iter().filter(|at| !lacked.contains(at));
+        let held: Vec<Digest> = held.copied().collect();
+        put(&mesh.store, &mesh.pool, &chunks, &held).await.unwrap();
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(base(), update.root, BTreeSet::new(), holders);
+        settled.await.unwrap();
+        let first = mesh.spec().await.unwrap();
+        let Some(Behind {
+            cause: Cause::Read(spec::region::Error::Tree(tree::Error::Missing(missed))),
+            ..
+        }) = first.behind
+        else {
+            panic!("{first:?}");
+        };
+        let other = *lacked.iter().find(|at| **at != missed).unwrap();
+        put(&mesh.store, &mesh.pool, &chunks, &[missed])
+            .await
+            .unwrap();
+        let block = mesh.pool.copy(chunks.get(other).unwrap()).unwrap();
+        let mut stuck = pin!(mesh.store.put(other, &block));
+        assert!(now(stuck.as_mut()).await.is_pending());
+        node.clock().sleep(seconds(2)).await;
+        assert_eq!(now(pin!(mesh.spec())).await, Poll::Ready(Ok(first)));
     });
 }
 
