@@ -95,14 +95,15 @@ const PARTS_SENDS: usize = 16;
 const WARMUP: usize = 50;
 /// Timed rounds per scenario.
 const ROUNDS: usize = 500;
-/// Sends per round of a `Premise::Competes` scenario: each `Complete` burst is 64
-/// windows of `TIGHT`, so one window of credit moves its share by under 2%.
-const SHARE_SENDS: usize = 4 * 342;
+/// Sends per round of a `Premise::Competes` scenario: 64 windows of `TIGHT` in
+/// messages of 1 KiB on each of its two streams, so one window of credit moves the
+/// share of `Complete` by under 2%.
+const SHARE_SENDS: usize = 2 * 64 * TIGHT.window_bytes / 1024;
 /// Rounds of a `Premise::Competes` scenario before its timed rounds.
 const SHARE_WARMUP: usize = 2;
 /// Timed rounds of a `Premise::Competes` scenario, which take about as long as
 /// `ROUNDS` of `SENDS`.
-const SHARE_ROUNDS: usize = 24;
+const SHARE_ROUNDS: usize = 16;
 /// The sim time between rounds, in which the peer reads and acknowledges a round.
 const PAUSE: Span = Span::from_nanos(100_000_000);
 /// How the session ends.
@@ -224,12 +225,7 @@ const WAITING: [(Scenario, Premise); 2] = [
     (
         Scenario {
             name: "latest and complete 1 KiB waiting",
-            load: Load::Streams(&[
-                Class::Latest,
-                Class::Complete,
-                Class::Complete,
-                Class::Complete,
-            ]),
+            load: Load::Streams(&[Class::Latest, Class::Complete]),
             bytes: 1024,
         },
         Premise::Competes,
