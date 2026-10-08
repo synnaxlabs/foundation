@@ -99,8 +99,8 @@ impl Places {
             let (_, descriptors, body) = parts(&frame.0);
             return charge(descriptors.len(), body.len());
         }
-        // Block payloads step by 64 bytes, so padding the last series too, which a
-        // frame does not, leaves the charge as it is.
+        // Block payloads are multiples of 64 bytes, so padding the last series too,
+        // which a frame does not, leaves the charge as it is.
         let (mut series, mut body) = (0, 0);
         each(held, frame, |_, bounds| {
             series += 1;
