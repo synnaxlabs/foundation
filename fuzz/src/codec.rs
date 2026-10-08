@@ -3,10 +3,10 @@
 use codec::{Encoder, Error};
 use types::sample::{Scalar, Sides, Type};
 
-// Never reorder: a byte of each input in `oracles/fuzz/codec_series`,
+// Never reorder: a byte of each input that has a scalar in `oracles/fuzz/codec_series`,
 // `oracles/fuzz/codec_encoder`, `oracles/fuzz/codec_shape`, and
-// `oracles/fuzz/codec_shape_encoder` picks a scalar by its remainder by the table
-// length. A new scalar changes the scalar of each input whose byte is 14 or more.
+// `oracles/fuzz/codec_shape_encoder` picks it by its remainder by the table length. A
+// new scalar can change the scalar of an input whose byte is 14 or more.
 const SCALARS: [Scalar; 14] = [
     Scalar::Bool,
     Scalar::I8,
@@ -73,7 +73,7 @@ pub enum Shape {
 
 // Never reorder: the first byte of each input in `oracles/fuzz/codec_shape` and
 // `oracles/fuzz/codec_shape_encoder` picks a kind by its remainder by `KINDS`. A new
-// kind changes the kind of each input whose first byte is `KINDS` or more.
+// kind can change the kind of an input whose first byte is `KINDS` or more.
 const KINDS: u8 = 5;
 
 /// The sample type other than a scalar that the front of a codec input picks, its
