@@ -1,6 +1,8 @@
 //! Tests of `Mesh::apply` on one node, and of its spec change on a cluster of three
 //! voters, where each voter holds the chunks.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use spec::channel::Channel;
 use spec::definition::Kind;
 use spec::region::Problem;
@@ -797,9 +799,41 @@ fn apply_gives_each_listed_index_the_member_of_its_name_as_its_home() {
         let moved = pointer(1, &definitions);
         let applied = mesh.apply(base(), definitions, homes.into()).await;
         assert_eq!(applied, Ok(moved));
-        let state = mesh.group.borrow().state.clone();
-        assert_eq!(state.home(INDEX), None);
-        assert_eq!(state.home(channel::Key::from_u128(8)), Some(key(2)));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(None));
+        let second = channel::Key::from_u128(8);
+        assert_eq!(mesh.watch(second).next().await, Ok(Some(key(2))));
+    });
+}
+
+/// A waker that counts its wakes.
+struct Counted(AtomicUsize);
+
+impl Wake for Counted {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// Each wake of a watch takes its waker, so a pending watch counts one wake at most.
+#[test]
+fn a_spec_change_wakes_the_watches_only_when_it_gives_a_home() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home(1)).await;
+        let counted = Arc::new(Counted(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counted));
+        let mut cx = Context::from_waker(&waker);
+        let mut watch = mesh.watch(INDEX);
+        assert_eq!(watch.next().await, Ok(Some(key(1))));
+        let mut next = Box::pin(watch.next());
+        assert!(next.as_mut().poll(&mut cx).is_pending());
+        let a = create_indexes(1);
+        let moved = mesh.apply(base(), a, BTreeMap::new()).await.unwrap();
+        assert_eq!(counted.0.load(Ordering::Relaxed), 0);
+        let homes = [(Kind::Channel.key("plant.i1").unwrap(), name("plant.node2"))];
+        let b = create_indexes(2);
+        mesh.apply(moved, b, homes.into()).await.unwrap();
+        assert_eq!(counted.0.load(Ordering::Relaxed), 1);
     });
 }
 
@@ -863,6 +897,40 @@ fn apply_refuses_more_homes_than_one_change_gives_before_no_vote() {
         let applied = mesh.apply(base(), create_indexes(most), homes).await;
         assert_eq!(applied, Err(Error::NoVote));
     });
+}
+
+#[test]
+fn apply_gives_homes_before_a_failed_read_of_the_base_tree() {
+    let first = create_subjects(&["plant.a"], 1);
+    let moved = pointer(1, &first);
+    solo_stored(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert_eq!(mesh.apply(base(), first, BTreeMap::new()).await, Ok(moved));
+        let path = Path::new(BLOB).join(moved.root.to_string());
+        node.fail_file(&path, Operation::Open);
+        let over = u128::try_from(HOMES_MAX).unwrap() + 1;
+        let homes = create_homes(over, "plant.node1");
+        let applied = mesh.apply(moved, create_indexes(over), homes).await;
+        let error = Error::Homes {
+            homes: 513,
+            most: 512,
+        };
+        assert_eq!(applied, Err(error));
+    });
+}
+
+#[test]
+fn apply_gives_unknown_node_before_quorum_and_puts_nothing() {
+    let entries = solo_stored(|node, tasks| async move {
+        let (mesh, store) = open_kept(&node, &tasks, &IDS).await;
+        let definitions = create_indexes(1);
+        let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
+        let homes = create_homes(1, "plant.node9");
+        let applied = mesh.apply(base(), definitions, homes).await;
+        assert_eq!(applied, Err(Error::UnknownNode(name("plant.node9"))));
+        assert!(store.get(root).await.unwrap().is_none());
+    });
+    assert_eq!(specs(&entries), []);
 }
 
 #[test]
