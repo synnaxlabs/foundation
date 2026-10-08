@@ -485,6 +485,30 @@ How to read this record:
   record panics. Decided by the architect (#1345,
   https://github.com/synnaxlabs/foundation/issues/1345#issuecomment-6036930649,
   2026-10-07T11:26:39Z).
+- **WAL BENCH (#324, 2026-10-08)** The cargo feature `sim` of `buffer`, off by default
+  (`buffer`'s dev-dependency on itself turns it on for the bench), adds
+  `#[doc(hidden)] pub mod bench` with `Ring { new, commit }` over `wal::Writer`, as
+  STORED BENCH does for `home`. Only the bench `benches/wal.rs` (`test = true`) uses it.
+  `commit` appends its records, takes `trimmed`, syncs each record, and releases to the
+  trimmed tail, so a time holds the writer's cost for each commit. The bench runs
+  commits of 1 and 8 records, in rings of 64 and 4096 blocks: 1 record gives the cost
+  for each commit (`trimmed`, `release`), 8 the cost for each record (`append`,
+  `synced`). Lost: a copy of `wal.rs` in the bench through `#[path]`, which needs
+  `entry`, `record`, and `crc32c` copied too and the workspace lints off; a time of
+  `Buffer::append` and `committed` on a simulated file system, whose file writes hide
+  the cost of the writer; and a control bench of code that a PR does not change, since
+  the bench host gives A/A. It lands before the next PR after #1698 that changes
+  `Writer::append`, `synced`, `release`, or `trimmed`. Decided by `laptop.architect`
+  (2026-10-08T01:37:51Z):
+  https://github.com/synnaxlabs/foundation/issues/324#issuecomment-6050388456. Its
+  baseline is a quiet-host run of this bench at the head of #1729, not the #1698 rerun,
+  whose scratch bench had no warm-up. The run makes two passes of one binary, and each
+  median agrees within 3%. If one does not, a `crate:buffer` issue follows, and there is
+  no baseline until it is fixed. Decided by `laptop.architect` (2026-10-08T03:12:46Z):
+  https://github.com/synnaxlabs/foundation/pull/1729#issuecomment-6051403457.
+  Supersedes "Its head numbers are the baseline of the `wal` benchmark" in
+  https://github.com/synnaxlabs/foundation/pull/1698#issuecomment-6050306136. The
+  #1698 numbers stay the record of the P1 judgment of #1698 only.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -522,11 +546,13 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6049045510. The
   `hash::Map` of those states adds about 0.3 ns per place to `release` at 100k places
   (+10%); laptop.architect accepted it on 2026-10-07T23:32:22Z:
-  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185. One layout
-  type for this charge and the frame that `serve` sends, and the two `Places` costs at
-  100k places, are #1648; laptop.architect gave the OK to defer them on
-  2026-10-07T23:22:03Z:
-  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864. The
+  https://github.com/synnaxlabs/foundation/pull/1655#issuecomment-6048971185.
+  `types::frame::Places` holds this charge and the layout of the frame that `serve`
+  sends (HUB WIRE, #1648), with laptop.architect's OK on 2026-10-07T23:22:03Z to move
+  it out of #1655:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048849864, and
+  its surface approved on 2026-10-07T23:34:09Z:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122. The
   charge is part of the wire contract: a change to `block`'s header or size classes
   needs a new wire version (C9d). The classes changed to four per
   doubling under wire version 1 (#188), because no release carries that version. The
@@ -1540,9 +1566,14 @@ How to read this record:
   the ends, so the reader holds no more ends than it has places. The ends and the body
   are in place order: the home writes the series of each place it has, from 0, each from
   the frame's block as a slice, with ends it computes in that order. It cuts each series
-  from `Frame::body` by `View::bounds` (the architect, 2026-10-07T22:35:41Z,
+  from `Frame::body` by `frame::Places::lay`, which finds them with `View::bounds`
+  (the architect, 2026-10-07T22:35:41Z,
   https://github.com/synnaxlabs/foundation/issues/1639#issuecomment-6048265226; lost:
-  `View::ends`, which gives no start, and `Frame::bounds`, a search for each place). At
+  `View::ends`, which gives no start, and `Frame::bounds`, a search for each place).
+  `View::bounds` is crate-private, as no crate outside `types` calls it (the architect,
+  2026-10-08T00:49:22Z,
+  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049855032; lost: a
+  public `bounds`, a second way to lay a reader's frame beside `Places`). At
   the open it makes the list of each place and its home entry, sorted by place, and
   writes each ends message from it with `wire::hub::ends::encode`, which sizes the
   message by its buffer, so no scratch buffer holds the ends (the architect, #1146,
@@ -1623,6 +1654,41 @@ How to read this record:
   of this session yet, so its series count has no session to break. Lost: `Places`
   first. Decided by the architect
   (https://github.com/synnaxlabs/foundation/issues/1455#issuecomment-6040654132).
+  Amended (2026-10-07T23:34:09Z, #1648): `types::frame::Places` holds the layout of a
+  remote reader's frame for `delivery` and `serve`. `Places::lay` gives each series in
+  place order, with its bounds in the home's `Frame::body` and its end in the reader's
+  frame; `Places::charge` is the `Frame::charge` of that frame, in O(1) when the places
+  name each entry of the key set, in any order: each block payload is a multiple of 8
+  bytes, so the padding of the last series does not change the footprint (the architect,
+  2026-10-08T00:25:50Z,
+  https://github.com/synnaxlabs/foundation/pull/1668#issuecomment-6049589885. Supersedes
+  "in entry order" in
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122). Lost: a
+  free function that lays one frame, with each caller keeping its own state for each key
+  set, so `delivery` and `serve` each repeat it. Also lost: one `Places` for each remote
+  session, whose layout `release` keeps with each frame for `serve`: each frame in the
+  queue would hold its layout. So a remote session holds two. Decided by
+  laptop.architect:
+  https://github.com/synnaxlabs/foundation/issues/1648#issuecomment-6048992122.
+  Supersedes: "At the open it makes the list of each place and its home entry, sorted by
+  place" above; `Places` makes it at the first frame of each key set. `lay` walks the
+  places for a frame with at least one series at the places for each 8 entries that
+  they name, and sorts the series of a sparser frame. Lost: walk only (10 series of 100k
+  places took 140 to 420 µs, not 0.5 to 0.7 µs), and sort only (a scattered frame of
+  100k series took 3.9 to 6.0 ms, not 1.6 to 1.7 ms). The architect accepted the cost of
+  the dense walk against 1e658b7a, up to the head numbers of #1695 (laptop.architect,
+  2026-10-08T01:36:39Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050376022). The cut
+  counts only the series at the places, and is 8. Lost: a count of each series of the
+  frame (`outside_lay` 56 to 69 µs, not 0.1 µs), and a cut of 16 (a frame just over it
+  cost 148 to 255 µs more than one just under). The architect also accepted
+  `narrow_lay` at +3 to +4 ns per frame (laptop.architect, 2026-10-08T02:33:03Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6050982066). Each
+  dense frame first pushes ceil(m/8) series, for the m entries that the places name,
+  then moves them into the walk: the architect accepted +5.6% at `cut_lay` 12,500 and
+  +1.3% at `reversed_lay` 100k for -21.7% at `cut_lay` 12,499 (laptop.architect,
+  2026-10-08T03:07:31Z,
+  https://github.com/synnaxlabs/foundation/pull/1695#issuecomment-6051347440).
   Amended (#1631): after `Behind`, each message gives `Ended`, before the three steps
   and whatever its bytes, since the home sends nothing after `Behind`. Step 3 also
   gives `Latest` for a `Behind` in a latest session, since only a complete session
@@ -3273,16 +3339,25 @@ How to read this record:
   that InfluxDB 1, 2, and 3 each store as written, in each part (measurement name, tag
   key, tag value, field key). It refuses the rest at construction, so the error
   reaches the config diagnostic in place of a partial write that InfluxDB answers with
-  204 or drops. One set of refused characters holds for every part. Today the set is a
-  backslash, a newline, a carriage return, a tab, and NUL. #1098 will widen it to what
-  InfluxDB 1 and 2 with `validate-keys` drop, and its PR updates this list. NUL in a
-  tag value is refused, though InfluxDB 3 keeps it. No user needs it, and a user learns
-  one rule, not four. Foundation names hold only ASCII letters, digits, `_`, `-`, `.`,
-  and `@`, so the rule applies only to text that a user writes in the connector's
-  config. Lost: a rule for each part. It keeps NUL in tags for no caller, and the set
-  a user may write then depends on the part.
+  204 or drops. One set of refused characters holds for every part: a backslash, a
+  newline, a carriage return, a tab, NUL, U+FFFD, and each character outside the
+  general categories L, M, N, P, and S other than U+0020. The last two are what
+  InfluxDB 1 and 2 with `validate-keys` drop (`unicode.IsPrint` false, or
+  `unicode.ReplacementChar`). The categories come from `unicode-properties` at Unicode
+  17.0.0, which a test pins. InfluxDB reads them from the Unicode tables of the Go
+  release that built each server (Unicode 15.0.0 for Go 1.26 today), so a code point
+  assigned after that version passes here and that server drops it. No client closes
+  this gap exactly. NUL in a tag value is refused, though InfluxDB 3 keeps it. No user
+  needs it, and a user learns one rule, not four. Foundation names hold only ASCII
+  letters, digits, `_`, `-`, `.`, and `@`, so the rule applies only to text that a user
+  writes in the connector's config. Lost: a rule for each part. It keeps NUL in tags
+  for no caller, and the set a user may write then depends on the part.
   Decided by the architect (`laptop.architect-2`) on 2026-10-07T06:26:41Z
-  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177).
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6032314177); the
+  class by the architect on 2026-10-07T20:31:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6046284871), and
+  the crate by the person on 2026-10-08T01:48:32Z
+  (https://github.com/synnaxlabs/foundation/issues/1098#issuecomment-6050501586).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
