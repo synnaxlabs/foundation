@@ -254,8 +254,23 @@ impl Reader {
             spill(buffer, &mut self.chunks, *len);
             return Poll::Pending;
         };
-        assert_eq!(block.len(), *len, "the block is the message's length");
-        let (buffered, mut rest) = block.split_at_mut(buffer.len());
+        self.copy(&mut block);
+        Poll::Ready(block.freeze())
+    }
+
+    /// Copies the whole message that [`Step::Block`] gave into `into`, so that the
+    /// next read starts the next message.
+    ///
+    /// # Panics
+    ///
+    /// When the reader has no whole message, or `into` is not its length.
+    pub(crate) fn copy(&mut self, into: &mut [u8]) {
+        let State::Body { len, have, buffer } = &self.state else {
+            panic!("a reader copies only a whole message");
+        };
+        assert!(have == len, "a reader copies only a whole message");
+        assert_eq!(into.len(), *len, "the copy is the message's length");
+        let (buffered, mut rest) = into.split_at_mut(buffer.len());
         buffered.copy_from_slice(buffer);
         for chunk in self.chunks.drain(..) {
             let (bytes, after) = mem::take(&mut rest).split_at_mut(chunk.len());
@@ -263,7 +278,6 @@ impl Reader {
             rest = after;
         }
         self.state = START;
-        Poll::Ready(block.freeze())
     }
 
     /// Drops the message in hand, so that the reader holds no bytes of it. For a
