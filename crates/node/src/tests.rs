@@ -2758,6 +2758,38 @@ mod port {
             assert_eq!(read, Some((vec![stamp], vec![7])));
         }
 
+        /// A founding that `spec::region::check` refuses, here a data channel whose
+        /// index the spec does not hold, fails the node at its first open.
+        #[test]
+        fn a_founding_with_a_dangling_index_fails_the_node() {
+            use super::super::hub::{I64, data};
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            let mut founding = region(&[member(OWN, &KEY, &host)]);
+            let name = "plant.value".parse().unwrap();
+            let channel = Definition::Channel(data(2, I64, 1));
+            founding.definitions.insert(name, channel);
+            let node = start(&host, (OWN, KEY), founding);
+            let index = types::channel::Key::from_u128(1);
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: "shard-0".into(),
+                    message: format!(
+                        "the index {index} of channel plant.value is not a known index"
+                    ),
+                    seed: 0,
+                })
+            );
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(
+                node.join(),
+                Err(Error::Panicked(thread::Panicked {
+                    name: "shard-0".into()
+                }))
+            );
+        }
+
         /// The node defines the founding channels at each open, not only at the
         /// first.
         #[test]

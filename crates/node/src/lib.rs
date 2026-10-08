@@ -84,7 +84,10 @@ pub struct Config<M> {
     /// copy of it, and until the mesh stores it (#1209), a log opened with another
     /// value checks proofs against the wrong voters and starts at another spec. A
     /// patch until the node keeps its region in its data directory when it founds or
-    /// joins one, and reads it at each start (#1660, #1744).
+    /// joins one, and reads it at each start (#1660, #1744). The hub of each task knows
+    /// each channel of its `definitions`. Give only a founding that
+    /// `spec::region::check` accepts: else shard 0 panics, and [`Node::join`] gives
+    /// [`Error::Panicked`].
     pub region: Option<mesh::region::Founding>,
 }
 
