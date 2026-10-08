@@ -515,10 +515,10 @@ fn ends_with_the_error_of_the_stream_when_the_peer_resets_it_while_the_open_wait
     assert_eq!(served, Some(Err(serve::Error::Stream(reset))));
 }
 
-/// The credit that the peer sends while the open waits for a home raises the grant
-/// of 0 once the session opens, so the session gets the frame written after it.
+/// The highest credit that the peer sends while the open waits for a home raises the
+/// grant of 0 once the session opens, so the session gets the frame written after it.
 #[test]
-fn keeps_a_credit_sent_while_the_open_waits_for_a_home() {
+fn keeps_the_highest_credit_sent_while_the_open_waits_for_a_home() {
     let home = |test: Test, link: Link, incoming| async move {
         let test = Rc::new(test);
         let writing = Rc::clone(&test);
@@ -542,6 +542,7 @@ fn keeps_a_credit_sent_while_the_open_waits_for_a_home() {
             let mode = Mode::Complete { limit_bytes: 0 };
             peer.open(mode, &[2, 1]).await;
             peer.credit(1 << 20).await.expect("sends the credit");
+            peer.credit(0).await.expect("sends the credit");
             let mut reader = Reader::new(&Open { mode, channels: 2 });
             let opened = peer.recv().await.expect("receives").expect("a message");
             assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));

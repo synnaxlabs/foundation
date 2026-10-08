@@ -1537,9 +1537,11 @@ mod tests {
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let latest = shard.open_latest(Slot::new(0));
             shard.carry(Slot::new(0));
             let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
             assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
+            assert_eq!(taken(&mut shard, latest, 0), [Range { seq: 1, count: 1 }]);
         });
     }
 
