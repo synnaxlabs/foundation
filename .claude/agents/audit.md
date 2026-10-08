@@ -5,7 +5,7 @@ description:
   review trail, design, performance, and defects. Use from the direct skill on each
   merged code PR.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: opus
 effort: high
 isolation: worktree
 ---
@@ -46,8 +46,9 @@ Check, with file and line at the merge commit:
 2. **Review trail.** List each round: its reviewers, its range, and its end time. Each
    round ended before the merge. The trail meets "Done" in
    `.claude/skills/review/SKILL.md`. Each finding was fixed, or answered or deferred
-   with each link that "Findings" step 3 asks for: give each link. An approval that
-   came before the text it approves changed does not count.
+   with each link that "Findings" step 3 asks for: give each link. Each ruling in the
+   merged code links the architect's approval of that meaning: give the link. An
+   approval that came before the text it approves changed does not count.
 3. **Design.** It fits the decisions section. Each new public item has a caller on
    record. No patch hides a cause, and no second guard covers a bug that one fix
    closes. A deeper option (fewer items, caller steps pulled inside) that serves each
