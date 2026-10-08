@@ -100,6 +100,13 @@ coordinator admits them. Any builder takes any crate. One task is in progress pe
   director's rule PR, `laptop.monitor` marks it ready and queues it (`docs/factory.md`,
   "Merge path").
 - **Merge:** `gh pr merge <n> --auto` puts it in the merge queue (`docs/factory.md`).
+- **Handover:** while the person is away, when a session waits at a prompt that only the
+  person can answer, the coordinator tells `laptop.monitor`, which tells the person.
+  When a PR on the milestone plan would then wait for hours, the coordinator gives that
+  PR to a free session. The coordinator closes the old PR at once
+  (`gh pr close <old> --comment "Replaced by the handover: <link>"`), moves the owner
+  label, and tells both owners. The new owner branches from the old head and opens a new
+  PR.
 
 ## Small changes
 
@@ -125,8 +132,10 @@ queue. So a small change goes into a larger PR, never a PR of its own (SMALL CHA
 - **Records:** each architect, red-team, and `laptop.monitor` keeps one PR open for its
   own small changes (decisions, threat model notes, fuzz inputs, factory docs), and
   sends it to review at most once a day, or at once when other work waits on it. A
-  ruling that a code PR needs ships in that PR (`docs/factory.md`, "GitHub is the
-  record"). The director's rule PR keeps its own pace (`/direct`, "The bar").
+  records PR that does a part of an open issue links the issue in its body and comments
+  on it with that part. A ruling that a code PR needs ships in that PR
+  (`docs/factory.md`, "GitHub is the record"). The director's rule PR keeps its own pace
+  (`/direct`, "The bar").
 
 ## Interface changes
 

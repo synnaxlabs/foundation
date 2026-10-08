@@ -144,9 +144,8 @@ pub(crate) struct Note {
 /// scalar values, as rustc does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Place {
-    /// The path of the file, as the user or a directory listing gave it, as
-    /// `Path::display` writes it: each part that is not UTF-8 is U+FFFD, so two paths
-    /// can give one text.
+    /// The exact path, as the user or a directory listing gave it. A path that is not
+    /// UTF-8 gives `ops.path-not-utf8` instead.
     pub(crate) file: String,
     /// The line, from 1.
     pub(crate) line: u32,

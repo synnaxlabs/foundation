@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::slice;
 
-use config::{Definition, Entry, Plan};
+use config::plan::Plan;
+use config::{Definition, Entry};
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Kind, Table};
 use document::diagnostic::Diagnostic;
@@ -18,6 +19,8 @@ use types::channel::Key;
 use types::digest::Digest;
 use types::ed25519::PrivateKey;
 use types::name::{Name, Selector};
+
+mod codec;
 
 const EDGE: &str = include_str!("../../../acceptance/tests/it/fixtures/edge.hcl");
 const INFLUX: &str = include_str!("../../../acceptance/tests/it/fixtures/influx.hcl");
@@ -96,7 +99,7 @@ impl Spec {
     fn plan(&self, texts: &[&str], members: &[&str]) -> Result<Plan, Vec<Diagnostic>> {
         let members = members.iter().map(|member| name(member)).collect();
         let applied = self.definitions();
-        config::plan(
+        config::plan::plan(
             &documents(texts),
             self.pointer,
             &applied,
@@ -140,27 +143,26 @@ impl Spec {
                 keys.insert(name, channel.key);
             }
         }
-        for change in &plan.changes {
+        for (name, change) in &plan.changes {
             let channel = change.new.as_ref().is_some_and(|entry| {
                 matches!(entry.definition, Definition::Channel(_))
             });
             if !channel {
-                keys.remove(&change.name);
-            } else if change.old.is_none() || !keys.contains_key(&change.name) {
+                keys.remove(name);
+            } else if change.old.is_none() || !keys.contains_key(name) {
                 self.made += 1;
                 // Version 7, as each stored key is.
-                keys.insert(change.name.clone(), Key::from_u128((7 << 76) | self.made));
+                keys.insert(name.clone(), Key::from_u128((7 << 76) | self.made));
             }
         }
         let changes: Vec<_> = plan
             .changes
             .iter()
-            .map(|change| match &change.new {
-                None => tree::Change::Delete(change.name.clone()),
-                Some(entry) => tree::Change::Set(
-                    change.name.clone(),
-                    encode(&change.name, entry, &keys),
-                ),
+            .map(|(name, change)| match &change.new {
+                None => tree::Change::Delete(name.clone()),
+                Some(entry) => {
+                    tree::Change::Set(name.clone(), encode(name, entry, &keys))
+                }
             })
             .collect();
         self.set(changes);
@@ -181,6 +183,39 @@ fn encode(name: &Name, entry: &Entry, keys: &BTreeMap<Name, Key>) -> Vec<u8> {
     }
 }
 
+/// A kind whose one attribute, `writes`, names the channels that it reads from the mesh
+/// and writes to its device.
+struct Commander;
+
+impl Kind for Commander {
+    type Config = Vec<Name>;
+
+    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
+        Writer.parse(config)
+    }
+
+    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
+        Ok(Channels {
+            reads: writes.clone(),
+            writes: Vec::new(),
+        })
+    }
+
+    fn discover(
+        &self,
+        _: &cancel::Token,
+    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn run(
+        &self,
+        _: Context<Vec<Name>>,
+    ) -> impl Future<Output = Result<(), kind::Error>> {
+        std::future::ready(Ok(()))
+    }
+}
+
 fn read(source: u32, text: &str) -> Document {
     config_hcl::read(Source(source), text).expect("the text is HCL")
 }
@@ -198,6 +233,7 @@ fn kinds() -> Table {
     Table::new()
         .with("influx", connector_influx::Kind::default())
         .with("writer", Writer)
+        .with("commander", Commander)
 }
 
 fn name(text: &str) -> Name {
@@ -208,7 +244,7 @@ fn name(text: &str) -> Name {
 fn changes(plan: &Plan) -> Vec<(&Name, Option<Digest>, Option<&Entry>)> {
     let changes = plan.changes.iter();
     changes
-        .map(|change| (&change.name, change.old, change.new.as_ref()))
+        .map(|(name, change)| (name, change.old, change.new.as_ref()))
         .collect()
 }
 
@@ -265,7 +301,11 @@ fn adds_each_definition_of_the_fixtures_to_the_empty_spec() {
         .map(|(key, entry)| (key, None, Some(entry)))
         .collect();
     assert_eq!(changes(&plan), added);
-    let influx = plan.changes.last().and_then(|change| change.new.as_ref());
+    let influx = plan
+        .changes
+        .values()
+        .last()
+        .and_then(|change| change.new.as_ref());
     let influx = influx.and_then(|entry| entry.label_span);
     assert_eq!(influx.map(document::Span::source), Some(Source(1)));
     assert_eq!(
@@ -335,12 +375,8 @@ fn changes_each_channel_on_a_renamed_index() {
     let found: Vec<_> = plan
         .changes
         .iter()
-        .map(|change| {
-            (
-                change.name.as_str(),
-                change.old.is_some(),
-                change.new.is_some(),
-            )
+        .map(|(name, change)| {
+            (name.as_str(), change.old.is_some(), change.new.is_some())
         })
         .collect();
     let expected = [
@@ -379,7 +415,7 @@ placement \"b\" {
     let found: Vec<_> = plan
         .changes
         .iter()
-        .map(|change| (change.name.as_str(), change.old))
+        .map(|(name, change)| (name.as_str(), change.old))
         .collect();
     let added = ["a.@placement", "a.time", "a.value", "b.@placement"];
     assert_eq!(found, added.map(|name| (name, None)));
@@ -409,11 +445,7 @@ fn leaves_out_the_founding_definitions() {
     let plan = spec.plan(&[], &[]).expect("no problems");
     assert_eq!(changes(&plan), []);
     let plan = spec.plan(&[PLANT], &["n"]).expect("no problems");
-    let keys: Vec<_> = plan
-        .changes
-        .iter()
-        .map(|change| change.name.as_str())
-        .collect();
+    let keys: Vec<_> = plan.changes.keys().map(Name::as_str).collect();
     assert_eq!(keys, ["a.@placement", "a.time", "a.value"]);
 }
 
@@ -441,11 +473,7 @@ fn places_a_data_channel_that_becomes_an_index() {
         "kind = \"index\"",
     );
     let plan = spec.plan(&[&text], &["n"]).expect("no problems");
-    let keys: Vec<_> = plan
-        .changes
-        .iter()
-        .map(|change| change.name.as_str())
-        .collect();
+    let keys: Vec<_> = plan.changes.keys().map(Name::as_str).collect();
     assert_eq!(keys, ["a.value"]);
     assert_eq!(plan.homes, BTreeMap::from([(name("a.value"), name("n"))]));
 }
@@ -475,6 +503,28 @@ connector \"w2\" {
         .plan(&[text], &["w"])
         .expect("no problems");
     assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("w"))]));
+}
+
+#[test]
+fn makes_no_writer_of_a_connector_that_writes_to_its_device() {
+    let text = format!(
+        "{PLANT}\
+connector \"c1\" {{
+  kind = \"commander\"
+  node = \"n1\"
+  writes = [\"a.value\"]
+}}
+connector \"c2\" {{
+  kind = \"commander\"
+  node = \"n2\"
+  writes = [\"a.value\"]
+}}
+"
+    );
+    let plan = Spec::create_empty()
+        .plan(&[&text], &["n", "n1", "n2"])
+        .expect("no problems");
+    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
 }
 
 /// The fix of `config.unplaced` when the node of a connector has a second role in the
@@ -2068,7 +2118,7 @@ connector \"w2\" {
     )];
     let mut documents = [read(0, &first), read(1, second)];
     for _ in 0..2 {
-        let result = config::plan(
+        let result = config::plan::plan(
             &documents,
             spec.pointer,
             &spec.definitions(),
@@ -2108,7 +2158,7 @@ channel \"a.other\" {
     let documents = [read(1, channels), read(0, placement)];
     let members = BTreeSet::from([name("n")]);
     let spec = Spec::create_empty();
-    let result = config::plan(
+    let result = config::plan::plan(
         &documents,
         spec.pointer,
         &spec.definitions(),
