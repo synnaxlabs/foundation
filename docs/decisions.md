@@ -166,7 +166,10 @@ How to read this record:
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6036793927).
   `Kind::edges` gives each edge and the channel it points at, in this order: the error
   then the control channel of an index, or the index then the quality channel of a
-  data channel. `check` reads the edges through it, and `config` will too. Each user
+  data channel. `check` reads the edges through it. `config` reads each edge from its
+  attribute, so that another bad attribute does not hide an unknown edge
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1685#issuecomment-6050335562). Each user
   error has a fix: `unit::Error::fix`, and `document::value::Kind::noun` names a value
   that has the wrong kind (`laptop.architect-2`, 2026-10-08T00:51:39Z,
   https://github.com/synnaxlabs/foundation/issues/1152#issuecomment-6049880294).
