@@ -1,5 +1,5 @@
-//! The names in the data directory: the lock, the record of the shard count, and
-//! the directory of each shard's ring.
+//! The names in the data directory: the lock, the record of the shard count, the
+//! directory of each shard's ring, and the mesh's directory.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,8 @@ const LOCK: &str = "lock";
 const RECORD: &str = "shards-";
 /// The prefix of the directory of each shard's ring.
 const SHARD: &str = "shard-";
+/// The directory of the mesh of the node's region.
+pub(crate) const MESH: &str = "mesh";
 
 /// The directory of the ring of the shard on `core`.
 pub(crate) fn shard(core: usize) -> PathBuf {

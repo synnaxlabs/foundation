@@ -2609,6 +2609,9 @@ mod port {
             (types::node::Key::from_u128(2), PrivateKey([3; 32]));
         const INDEX: channel::Key = channel::Key::from_u128(7);
 
+        /// The first file of the mesh's log.
+        const LOG: &str = "mesh/log/log-0";
+
         type Home = Arc<Mutex<Option<Result<Option<types::node::Key>, Stopped>>>>;
 
         /// The public half of `private_key`, from a transport made with it.
@@ -2783,12 +2786,12 @@ mod port {
         fn a_mesh_that_does_not_open_stops_the_node() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
-            host.fail_file(Path::new("log/log-0"), env::files::Operation::Open);
+            host.fail_file(Path::new(LOG), env::files::Operation::Open);
             let node = start_alone(&host);
             assert_eq!(sim.run(), Ok(()));
             let error =
                 ::mesh::Error::Log(::mesh::log::Error::Files(env::files::Error::Io {
-                    path: PathBuf::from("log/log-0"),
+                    path: PathBuf::from(LOG),
                     operation: env::files::Operation::Open,
                     code: 5,
                 }));
@@ -2799,32 +2802,39 @@ mod port {
             );
         }
 
-        /// A node that starts again with its region opens the log it left: the home
-        /// it set before is back, and no one sets it again.
+        /// A node that starts again with its region, at once after a stop or a power
+        /// cut, opens the log it left: the home it set before is back, and no one sets
+        /// it again.
         #[test]
         fn a_restart_opens_the_log_of_the_last_run() {
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            let node = start_alone(&host);
-            let set = Arc::new(Mutex::new(None));
-            let out = Arc::clone(&set);
-            node.spawn_input(move |input| async move {
-                let mesh = input.mesh.expect("a mesh");
-                *out.lock().unwrap() = Some(mesh.set_home(INDEX, OWN).await);
-            });
-            let ten = Span::from_nanos(10 * Span::SECOND.nanos());
-            assert_eq!(sim.run_for(ten), Ok(()));
-            assert_eq!(*set.lock().unwrap(), Some(Ok(())));
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
-            let node = start_alone(&host);
-            let home = watch(&node);
-            assert_eq!(sim.run_for(ten), Ok(()));
-            assert_eq!(*home.lock().unwrap(), Some(Ok(Some(OWN))));
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
+            for cut in [false, true] {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let host = host(&mut sim, 2);
+                let node = start_alone(&host);
+                let set = Arc::new(Mutex::new(None));
+                let out = Arc::clone(&set);
+                node.spawn_input(move |input| async move {
+                    let mesh = input.mesh.expect("a mesh");
+                    *out.lock().unwrap() = Some(mesh.set_home(INDEX, OWN).await);
+                });
+                let ten = Span::from_nanos(10 * Span::SECOND.nanos());
+                assert_eq!(sim.run_for(ten), Ok(()), "cut {cut}");
+                assert_eq!(*set.lock().unwrap(), Some(Ok(())), "cut {cut}");
+                if cut {
+                    sim.crash(&host, sim::Crash::Power);
+                } else {
+                    node.stop();
+                    assert_eq!(sim.run(), Ok(()));
+                    assert_eq!(node.join(), Ok(()));
+                }
+                let node = start_alone(&host);
+                let home = watch(&node);
+                assert_eq!(sim.run_for(ten), Ok(()), "cut {cut}");
+                assert_eq!(*home.lock().unwrap(), Some(Ok(Some(OWN))), "cut {cut}");
+                node.stop();
+                assert_eq!(sim.run(), Ok(()), "cut {cut}");
+                assert_eq!(node.join(), Ok(()), "cut {cut}");
+            }
         }
     }
 }

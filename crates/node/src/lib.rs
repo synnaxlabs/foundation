@@ -663,9 +663,10 @@ impl Serve {
     /// `guard` completes or the transport stops. A transport that stops goes into
     /// `failed` before any task drops. Then drops the tasks, the hub, `home`, and
     /// `guard`. Each session and the transport drop after `guard` when `guard`
-    /// completes, and before the tasks when the transport stops. Runs no task and
-    /// takes no session when a shard did not open, or when the mesh did not open,
-    /// which goes into `failed`.
+    /// completes, and before the tasks when the transport stops. Then waits for each
+    /// task of the mesh to end, so the mesh's log closes before it returns. Runs no
+    /// task and takes no session when a shard did not open, or when the mesh did not
+    /// open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -692,6 +693,7 @@ impl Serve {
                     members: region.members,
                     voters: region.voters,
                     files,
+                    dir: directory::MESH.into(),
                     clock,
                     entropy,
                     tasks: tasks.clone(),
@@ -715,25 +717,33 @@ impl Serve {
             interner,
             tasks: tasks.clone(),
         });
+        let ended = mesh.as_ref().map(mesh::Mesh::ended);
         let input = task::Input {
             hub,
             mesh: mesh.clone(),
         };
-        let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
-        let mut guard = pin!(guard);
-        let stop = poll_fn(|cx| {
-            if guard.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(());
-            }
-            // Set before the tasks drop, so that `join` ranks it above a panic in a
-            // task's drop.
-            port.as_mut().poll(cx).map(|error| {
-                failed.set(Error::Transport(error)).expect(
-                    "invariant: shard 0 serves only once its claim and open succeed",
-                );
-            })
-        });
-        self.inbox.serve(input, tasks, stop).await;
+        // The port's future holds a clone of the mesh, so it drops before the wait.
+        {
+            let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
+            let mut guard = pin!(guard);
+            let stop = poll_fn(|cx| {
+                if guard.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(());
+                }
+                // Set before the tasks drop, so that `join` ranks it above a panic in
+                // a task's drop.
+                port.as_mut().poll(cx).map(|error| {
+                    failed.set(Error::Transport(error)).expect(
+                        "invariant: shard 0 serves only once its claim and open \
+                         succeed",
+                    );
+                })
+            });
+            self.inbox.serve(input, tasks, stop).await;
+        }
+        if let Some(ended) = ended {
+            ended.await;
+        }
     }
 }
 
