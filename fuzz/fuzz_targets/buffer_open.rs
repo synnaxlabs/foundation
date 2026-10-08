@@ -204,21 +204,26 @@ fn apply(image: &mut [u8], edit: &Edit) {
             image[at..at + 4].copy_from_slice(&crc.to_le_bytes());
         }
         Edit::SealRecord { block } => {
+            let crc = seal(image, *block);
             let start = block * BLOCK;
-            let chain = chain_before(image, *block);
-            let (len, rest) = image[start..]
-                .split_first_chunk::<4>()
-                .expect("invariant: a block holds a record header");
-            let claimed = u32::from_le_bytes(*len);
-            let body = usize::try_from(claimed)
-                .expect("invariant: a u32 fits in usize")
-                .min(rest.len() - 5);
-            let mut crc = crc32c::crc32c_append(chain, len);
-            crc = crc32c::crc32c_append(crc, &rest[4..5]);
-            crc = crc32c::crc32c_append(crc, &rest[5..5 + body]);
             image[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
         }
     }
+}
+
+/// The CRC that the record at `block` must hold to continue the chain.
+fn seal(image: &[u8], block: usize) -> u32 {
+    let chain = chain_before(image, block);
+    let (len, rest) = image[block * BLOCK..]
+        .split_first_chunk::<4>()
+        .expect("invariant: a block holds a record header");
+    let claimed = u32::from_le_bytes(*len);
+    let body = usize::try_from(claimed)
+        .expect("invariant: a u32 fits in usize")
+        .min(rest.len() - 5);
+    let mut crc = crc32c::crc32c_append(chain, len);
+    crc = crc32c::crc32c_append(crc, &rest[4..5]);
+    crc32c::crc32c_append(crc, &rest[5..5 + body])
 }
 
 /// The chain value a record at `block` must continue from.
@@ -463,7 +468,8 @@ fn tails(buffer: &Buffer, slots: &[Slot]) -> Vec<Tail> {
 }
 
 /// Applies the edits to the ring file. Returns whether a block of the area then
-/// holds a carry record: each record starts a block.
+/// holds a carry record that continues the chain of the block before it: each
+/// record starts a block.
 async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) -> bool {
     let mut image = Vec::with_capacity(FILE_LEN);
     for block in 0..FILE_LEN / BLOCK {
@@ -494,7 +500,11 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) -> bool {
         .collect();
     file.write_at(0, &blocks).await.expect("the ring writes");
     file.sync().await.expect("the ring syncs");
-    (2..2 + BLOCKS).any(|block| image[block * BLOCK + 8] == CARRY)
+    (2..2 + BLOCKS).any(|block| {
+        let start = block * BLOCK;
+        image[start + 8] == CARRY
+            && image[start + 4..start + 8] == seal(&image, block).to_le_bytes()
+    })
 }
 
 /// Opens the changed ring. With no edits, it must open, give the tails and the
@@ -502,7 +512,8 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) -> bool {
 /// opens, each path must read, and one commit on it must survive a reopen and read
 /// back the same before and after.
 ///
-/// `carried` says whether a block of the ring holds a carry record.
+/// `carried` says whether a block of the ring holds a carry record that continues
+/// the chain.
 ///
 /// The commit is one entry of `CHECK_PART` bytes at each tail. A record edit can put a
 /// tail at `u64::MAX`, a precondition of `append`, so such a ring is not checked.
