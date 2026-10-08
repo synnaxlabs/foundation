@@ -4729,15 +4729,18 @@ mod tests {
                 None => {
                     let sum = parts.iter().map(|part| part.range.len()).sum::<usize>();
                     let zeros = parts.iter().map(|part| usize::from(part.zeros));
-                    proptest::prop_assert_eq!(sized.ok(), Some(sum + zeros.sum::<usize>()));
+                    let zeros = zeros.sum::<usize>();
+                    proptest::prop_assert_eq!(sized.ok(), Some(sum + zeros));
                 }
                 Some(part) => {
                     let Range { start, end } = part.range;
                     let message = format!(
-                        "the range {start}..{end} of a part is not in a block of 16 bytes"
+                        "the range {start}..{end} of a part is not in a block of 16 \
+                         bytes"
                     );
                     let given = sized.expect_err("a panic");
-                    proptest::prop_assert_eq!(given.downcast_ref::<String>(), Some(&message));
+                    let given = given.downcast_ref::<String>();
+                    proptest::prop_assert_eq!(given, Some(&message));
                 }
             }
         }
