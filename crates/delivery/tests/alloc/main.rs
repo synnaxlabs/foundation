@@ -2,9 +2,9 @@
 //! and none after a later open. For complete sessions, a queue, a release, and a take
 //! make none once each session got a frame, also for sessions charged by their places.
 //! A release in which sessions start to wait for credit makes none, nor one in which
-//! they miss. An ack makes none, and no call on a closed key
-//! of either mode makes one. This binary has no test harness: the count covers each
-//! thread, and a harness allocates on its own thread at any time.
+//! they miss. An ack makes none, and no call on a closed key of either mode makes one.
+//! This binary has no test harness: the count covers each thread, and a harness
+//! allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 

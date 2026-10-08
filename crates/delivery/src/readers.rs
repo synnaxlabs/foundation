@@ -3347,11 +3347,11 @@ pub(super) mod tests {
         /// Checks the live path against a model of the rules: a session gets each
         /// released frame with a sample at or past its position, in seq order, while it
         /// has credit. A frame with no credit, and each after it, waits for a grant,
-        /// and one that still waits at the next release that gives a frame is a miss. A session that
-        /// starts at or below a sample no longer in memory gets none, and nothing is
-        /// kept with no session open. A named reader that resumes starts where its
-        /// last session stopped. A release wakes each session that had no frame
-        /// waiting and now has one or missed one.
+        /// and one that still waits at the next release that gives a frame is a miss. A
+        /// session that starts at or below a sample no longer in memory gets none, and
+        /// nothing is kept with no session open. A named reader that resumes starts
+        /// where its last session stopped. A release wakes each session that had no
+        /// frame waiting and now has one or missed one.
         ///
         /// The `n`th open takes `limits[n]`, or 0 past the end of `limits`.
         fn check_live(steps: Vec<Live>, limits: &[u64]) {
