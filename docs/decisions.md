@@ -4095,11 +4095,12 @@ How to read this record:
   and the test asserts its exact output. The end-to-end check of PR 4 of #435 covers
   the production build. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6059441203,
-  2026-10-08 12:03 UTC). Nothing in the library sets a start value, also in
-  production, and each thread with none draws the same fixed values. So
-  `connector-opcua` (PR 4 of #435) sets the start value with
-  `UA_random_seed_deterministic`, taken from the randomness of `env`, and never calls
-  `UA_random_seed`, which reads the clock. It does so on each thread before that
+  2026-10-08 12:03 UTC). A draw on a thread with no start value aborts
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Nothing in the library sets a start value, also in
+  production. So `connector-opcua` (PR 4 of #435) sets the start value
+  with `UA_random_seed_deterministic`, taken from the randomness of `env`, and never
+  calls `UA_random_seed`, which reads the clock. It does so on each thread before that
   thread calls open62541, and runs each server and each client on one thread. Its
   test server sets the start value of the test at start, and its end-to-end check
   asserts the same run for the same value. A state for each `UA_Server` and
@@ -4108,6 +4109,21 @@ How to read this record:
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  A second change of `src/util/ua_util.c` keeps a flag for each thread, which
+  `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
+  `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
+  calls each of the two draws on a thread with none, and the test asserts the abort
+  and its exact output. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1909#issuecomment-6064798117,
+  2026-10-08 16:51 UTC). Supersedes the record text "each thread with none draws the
+  same fixed values", which cited
+  https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059. The
+  line of `UA_random_seed` that sets the flag has no test: no path of our build
+  reaches it, and a test needs a driver whose clock does not abort. Approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6065760073,
+  2026-10-08 17:47 UTC). This change and its driver test ship in a PR of their own,
+  apart from the connector code (same comment).
   The feature `open62541` of `connector-opcua` compiles the copy and `src/shim.c`
   with `cc`. `shim.c` defines the 8 symbols that the copy leaves undefined: the 3
   clock functions give 0, and the 5 POSIX constructors print their name and abort,
