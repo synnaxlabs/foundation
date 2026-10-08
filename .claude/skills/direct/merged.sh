@@ -12,12 +12,14 @@ list() {
     --jq '.[] | "#\(.number) +\(.additions) -\(.deletions) \(.title)"'
 }
 seen=$(mktemp)
-# macOS grep prints nothing for an empty pattern file, so start with a key no PR has.
+# awk reads the seen keys only from a file that is not empty, so start with a key that
+# no PR has.
 { echo '#0'; list | cut -d' ' -f1; } > "$seen"
 while :; do
   sleep 90
   now=$(list 2>/dev/null) || continue
   [ -n "$now" ] || continue
-  echo "$now" | grep -v -F -w -f "$seen" || true
+  # Compare only the first field: a title can name a PR that merged before.
+  echo "$now" | awk 'NR==FNR { s[$1]; next } !($1 in s)' "$seen" -
   echo "$now" | cut -d' ' -f1 >> "$seen"
 done

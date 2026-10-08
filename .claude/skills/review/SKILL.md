@@ -199,5 +199,6 @@ closing, also in a sentence about the past, such as "#1228 closed #1197" in the 
 #1185. A pushed commit stays as it is (`CLAUDE.md`, Git rule 3). So when the message of
 a pushed commit names an issue that the PR does not finish, a new PR replaces the PR
 (Round 1). Each decision or public doc that Round 1 sends to `laptop.architect` also
-has the link to its approval on the PR. Only then is the PR marked ready: by its author,
-or by `laptop.monitor` for a red-team or rule PR.
+has the link to its approval on the PR, at a SHA after which no commit changes what the
+text states. Only then is the PR marked ready: by its author, or by `laptop.monitor` for
+a red-team or rule PR.
