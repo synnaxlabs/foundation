@@ -1,7 +1,8 @@
-//! After a read that gives a whole long message, in one poll or over many, the
-//! receiver keeps a list of at most 64 chunks, not one sized by the message, both
-//! before and after it reads the end of the stream. The count covers each thread, so
-//! this binary has no test harness. The sim runs on one thread, so the count is exact.
+//! After a read that gives a whole long message, in one poll or over many, also one
+//! that waits for a block, the receiver keeps a list of at most 64 chunks, not one
+//! sized by the message, both before and after it reads the end of the stream. The
+//! count covers each thread, so this binary has no test harness. The sim runs on one
+//! thread, so the count is exact.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -49,6 +50,9 @@ enum Reading {
     Whole,
     /// Each millisecond from when the stream comes, until the message is in.
     Parts,
+    /// Each millisecond once the message is in, with a full pool, until the read
+    /// waits for a block. The pool then frees its blocks, and the read goes on.
+    Waited,
 }
 
 /// How the client ends the stream after its message.
@@ -69,6 +73,8 @@ struct Out {
     len: Option<usize>,
     /// The polls of the read that give `Pending`.
     pending: usize,
+    /// Whether the read waited for a block.
+    waited: bool,
     /// Whether the server read the end of the stream after the message.
     ended: bool,
     /// The net heap bytes that the drop of the receiver then gives back.
@@ -76,7 +82,7 @@ struct Out {
 }
 
 fn main() {
-    for reading in [Reading::Whole, Reading::Parts] {
+    for reading in [Reading::Whole, Reading::Parts, Reading::Waited] {
         for (len, end) in [100_000, 240_000, 1 << 18]
             .into_iter()
             .flat_map(|len| [(len, End::Finish), (len, End::Reset)])
@@ -85,9 +91,14 @@ fn main() {
             assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
             assert_eq!(
                 out.pending > 0,
-                matches!(reading, Reading::Parts),
+                !matches!(reading, Reading::Whole),
                 "{reading:?}, {len} bytes: the read gives `Pending` {} times",
                 out.pending
+            );
+            assert_eq!(
+                out.waited,
+                matches!(reading, Reading::Waited),
+                "{reading:?}, {len} bytes: the read waits for a block"
             );
             assert_eq!(
                 out.ended,
@@ -112,7 +123,7 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
     let server = sim.node(sim::node::Config::default());
     let address = SocketAddr::new(server.addresses()[0], PORT);
     let out = Arc::new(Mutex::new(Out::default()));
-    serve(&server, reading, end, Arc::clone(&out));
+    serve(&server, reading, len, end, Arc::clone(&out));
     sim.run_on(&client, move |node, tasks| async move {
         let config = config(&node, tasks, CLIENT);
         let pool = Rc::clone(&config.pool);
@@ -139,10 +150,10 @@ fn run(reading: Reading, len: usize, end: End) -> Out {
     *out.lock().expect("not poisoned")
 }
 
-/// Starts the server on `node`. It reads the message in the way of `reading`, then,
-/// as `end` says, the end once it comes or nothing until the reset. It then drops the
-/// receiver and puts the [`Out`] in `out`.
-fn serve(node: &Node, reading: Reading, end: End, out: Arc<Mutex<Out>>) {
+/// Starts the server on `node`. It reads the message of `len` bytes in the way of
+/// `reading`, then, as `end` says, the end once it comes or nothing until the reset.
+/// It then drops the receiver and puts the [`Out`] in `out`.
+fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out>>) {
     let own = node.clone();
     let shard = env::shards::Config {
         name: "server".into(),
@@ -150,17 +161,29 @@ fn serve(node: &Node, reading: Reading, end: End, out: Arc<Mutex<Out>>) {
     };
     let started = node.shards().start(shard, move |tasks| async move {
         let config = config(&own, tasks, SERVER);
+        let mut full = match reading {
+            Reading::Waited => fill(&config.pool, len),
+            Reading::Whole | Reading::Parts => Vec::new(),
+        };
         let transport = Transport::new(config, part(&own, PORT)).expect("a transport");
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         let clock = own.clock();
-        if let Reading::Whole = reading {
+        if !matches!(reading, Reading::Parts) {
             clock.sleep(READ).await;
         }
-        let (read, pending) = next(&mut receiver, &clock).await;
+        let (read, pending) = next(&mut receiver, &clock, || {
+            if transport.status().waited > Span::ZERO {
+                full.clear();
+            }
+        })
+        .await;
+        let waited = transport.status().waited > Span::ZERO;
         let len = read.ok().flatten().map(|block| block.len());
         let ended = match end {
-            End::Finish => matches!(next(&mut receiver, &clock).await.0, Ok(None)),
+            End::Finish => {
+                matches!(next(&mut receiver, &clock, || ()).await.0, Ok(None))
+            }
             End::Reset => {
                 clock.sleep(DROP).await;
                 false
@@ -172,6 +195,7 @@ fn serve(node: &Node, reading: Reading, end: End, out: Arc<Mutex<Out>>) {
         *out.lock().expect("not poisoned") = Out {
             len,
             pending,
+            waited,
             ended,
             kept,
         };
@@ -179,11 +203,13 @@ fn serve(node: &Node, reading: Reading, end: End, out: Arc<Mutex<Out>>) {
     drop(started.expect("a shard"));
 }
 
-/// Polls one `receiver.recv()` each millisecond until it is ready. Gives the read and
-/// the polls that gave `Pending`.
+/// Polls one `receiver.recv()` each millisecond until it is ready, and calls
+/// `on_pending` after each poll that gives `Pending`. Gives the read and the count of
+/// those polls.
 async fn next(
     receiver: &mut Receiver,
     clock: &Clock,
+    mut on_pending: impl FnMut(),
 ) -> (Result<Option<Block>, Error>, usize) {
     let mut recv = pin!(receiver.recv());
     let mut pending = 0;
@@ -194,8 +220,20 @@ async fn next(
             return (read, pending);
         }
         pending += 1;
+        on_pending();
         clock.sleep(Span::MILLISECOND).await;
     }
+}
+
+/// Takes every block of `pool` that could hold a message of `len` bytes.
+fn fill(pool: &Pool, len: usize) -> Vec<block::Unique> {
+    let mut full = Vec::new();
+    for len in [pool.largest(), len] {
+        while let Ok(block) = pool.alloc(len) {
+            full.push(block);
+        }
+    }
+    full
 }
 
 /// A block of `len` bytes from `pool`.
