@@ -607,7 +607,8 @@ fn clock_calls(text: &str) -> BTreeSet<String> {
 /// Each (section, clock function) in `relocations`, the output of `objdump -r`,
 /// where the section takes the address of a function of [`CLOCKS`]: any reference
 /// other than a call from a section that `disassembly`, the output of `objdump -dr`,
-/// shows.
+/// shows. Each pair comes once, also when one address takes two relocations, as
+/// `adrp` and `add` do on 64-bit Arm.
 fn clock_addresses(
     relocations: &str,
     disassembly: &str,
@@ -624,6 +625,7 @@ fn clock_addresses(
             section = name.trim_end_matches("]:");
         } else if let Some((kind, symbol)) = clock(line)
             && !(CALLS.contains(&kind) && code.contains(section))
+            && !found.contains(&(section.to_owned(), symbol))
         {
             found.push((section.to_owned(), symbol));
         }
@@ -811,6 +813,20 @@ Disassembly of section .text.log:
                 (".rodata".to_owned(), "UA_DateTime_localTimeUtcOffset"),
                 (".data.rel.ro".to_owned(), "UA_DateTime_now"),
             ]
+        );
+    }
+
+    #[test]
+    fn clock_addresses_names_an_address_in_two_relocations_once() {
+        let text = "\
+RELOCATION RECORDS FOR [.text]:
+OFFSET           TYPE              VALUE
+0000000000000008 R_AARCH64_ADR_PREL_PG_HI21  UA_DateTime_now
+000000000000000c R_AARCH64_ADD_ABS_LO12_NC  UA_DateTime_now
+";
+        assert_eq!(
+            clock_addresses(text, "Disassembly of section .text:\n"),
+            [(".text".to_owned(), "UA_DateTime_now")]
         );
     }
 
