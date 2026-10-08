@@ -33,7 +33,10 @@ const LEN: usize = 60_000;
 /// A message longer than 64 packets of 1472 bytes, so that a read of it in one poll
 /// copies a full list of chunks.
 const LONG: usize = 100_000;
-const MESSAGE_BYTES_MAX: usize = 1 << 17;
+/// A message longer than 128 packets of 1472 bytes, so that the read copies a full
+/// list twice before it holds the rest.
+const LONGER: usize = 250_000;
+const MESSAGE_BYTES_MAX: usize = 1 << 18;
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);
 /// When the client ends the stream or the session, after its send.
@@ -60,7 +63,8 @@ fn main() {
             Span::ZERO,
             Error::PeerClosed { code: Code(7) },
         ),
-        (End::Reset, LONG, WHOLE, reset),
+        (End::Reset, LONG, WHOLE, reset.clone()),
+        (End::Reset, LONGER, WHOLE, reset),
     ] {
         let (read, freed) = run(end, len, first);
         assert_eq!(
