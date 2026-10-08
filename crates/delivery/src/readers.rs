@@ -1889,6 +1889,20 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn gives_nothing_to_a_session_below_a_frame_that_waits_for_credit() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let first = opened(&mut readers, 0, 1);
+            readers.queue(&frames.frame(1), &frames.set, 0..2);
+            readers.queue(&frames.frame(2), &frames.set, 2..4);
+            readers.queue(&frames.frame(3), &frames.set, 4..6);
+            assert_eq!(released(&mut readers, 6), [first]);
+            let behind = opened(&mut readers, 5, 10);
+            assert_eq!(missed(&mut readers, behind), []);
+            assert_eq!(taken(&mut readers, first), [1]);
+        }
+
+        #[test]
         fn gives_nothing_below_the_live_seq_of_a_new_index() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(10);
@@ -2646,20 +2660,34 @@ pub(super) mod tests {
         fn gives_the_frames_that_wait_for_credit_across_a_change_of_key_set() {
             let sets = Sets::new();
             let mut readers = Readers::new(0);
-            let key = readers
-                .open(Reader::Unnamed, Start::At(live(0)), 1, Charge::Whole)
-                .key;
+            let mut open = |limit, charge| {
+                readers
+                    .open(Reader::Unnamed, Start::At(live(0)), limit, charge)
+                    .key
+            };
+            let slow = open(1, Charge::Whole);
+            // `view` gets the held frames at the release, and `owed` at its take.
+            let view = open(u64::MAX, Charge::Places([sets.slot(9)].into()));
+            let owed = open(1, Charge::Places([sets.slot(9)].into()));
             let narrow = sets.frame(&sets.narrow, &[(0, 8), (1, 8), (2, 8)]);
             readers.queue(&sets.full(), &sets.wide, 0..1);
             readers.queue(&sets.full(), &sets.wide, 1..2);
             readers.queue(&narrow, &sets.narrow, 2..3);
-            assert_eq!(readers.release(3), [key]);
-            assert_eq!(drain(&mut readers, key).0.len(), 1);
-            readers.grant(key, u64::MAX);
-            let (taken, end) = drain(&mut readers, key);
-            let keys: Vec<_> = taken.iter().map(Frame::key_set).collect();
-            assert_eq!(keys, [sets.wide.key(), sets.narrow.key()]);
+            assert_eq!(readers.release(3), [slow, view, owed]);
+            let key_sets = |taken: Vec<Frame>| -> Vec<_> {
+                taken.iter().map(Frame::key_set).collect()
+            };
+            let (wide, narrow) = (sets.wide.key(), sets.narrow.key());
+            let (taken, end) = drain(&mut readers, view);
+            assert_eq!(key_sets(taken), [wide, wide, narrow]);
             assert!(matches!(end, Next::Empty));
+            for key in [slow, owed] {
+                assert_eq!(drain(&mut readers, key).0.len(), 1);
+                readers.grant(key, u64::MAX);
+                let (taken, end) = drain(&mut readers, key);
+                assert_eq!(key_sets(taken), [wide, narrow]);
+                assert!(matches!(end, Next::Empty));
+            }
         }
 
         #[test]
