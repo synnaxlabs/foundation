@@ -6,20 +6,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-open62541 = ["dep:cc", "dep:env", "dep:types"]
-
-[dependencies]
-env = { path = "../env", optional = true }
-types = { path = "../types", optional = true }
+open62541 = ["dep:cc"]
 
 [build-dependencies]
 cc = { workspace = true, optional = true }
 
 [dev-dependencies]
 cc = { workspace = true }
-env = { path = "../env" }
-sim = { path = "../sim" }
-types = { path = "../types" }
 
 [lints]
 workspace = true
