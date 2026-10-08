@@ -29,16 +29,17 @@ topic, and `grep -rl` for each crate name), `docs/claude/testing.md`,
 `docs/claude/performance.md`, and `docs/claude/design.md`. For the review trail, use
 `gh pr view <n> --comments`, `gh pr diff <n>`, `gh api
 repos/synnaxlabs/foundation/pulls/<n>/reviews` and `.../pulls/<n>/comments`, and the
-linked issues. Judge each round by the rules on `main` when it started, and the rest
-of the PR (each "Done" item, each approval, the body, and the code) by the rules on
-`main` when its last round started. A round starts at the commit date of the head of
-its range. The rules on `main` at a time are those of the last commit of
+linked issues. Judge each round, and the code of its range, by the rules on `main` when
+it started, and the rest of the PR (each "Done" item, each approval, and the body) by
+the rules on `main` when its last round started. A round starts at the commit date of
+the head of its range. The rules on `main` at a time are those of the last commit of
 `git log --first-parent origin/main` whose PR merged before that time
 (`gh api repos/synnaxlabs/foundation/commits/<sha>/pulls --jq '.[0].merged_at'`), read
 with `git show <sha>:<path>`. Never date a commit of `main` by its commit date: the
-merge queue sets it when it builds a batch. A breach of a rule that came into `main`
-later is not a finding. Report a gap in a rule only when the rule on `main` today still
-lets it through.
+merge queue sets it when it builds a batch. A rule that came into `main` later makes no
+breach of the review. What a rule on `main` at the merge finds in the code is still a
+defect: report it. Report a gap in a rule only when the rule on `main` today still lets
+it through.
 
 Check, with file and line at the merge commit:
 

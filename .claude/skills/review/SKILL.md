@@ -37,14 +37,16 @@ its doc, and any change from a surface or text that the architect approved. A `p
 of a crate that is not in the crate map (`fuzz`, `xtask`, `bench/*`) is not a public
 surface: no crate depends on it. Its doc, when it states what a crate does, still
 follows the next sentence. When the PR adds or changes a decision or a public doc that
-states what a crate does, and that crate, the crate whose section or doc holds the text,
-and the crates that the PR changes are not all on one architect's list, also send it to
-`laptop.architect`, which owns each contract between the two lists (`docs/factory.md`),
-and link its approval. When the PR changes a file in `docs/claude/` or another rule that
-`laptop.director` owns (`/direct`, "The bar"), and `laptop.director` is not its author,
-also send it to `laptop.director`, and link its approval on the `Public surface:` line.
-When the author of the PR is the crate's architect, the other architect gives each
-approval, OK, and ruling that this skill asks of the crate's architect.
+states what a crate does, and that crate, each other crate that the text names, the
+crate whose public doc holds it, and the crates that the PR changes are not all on one
+architect's list (a folder of `docs/decisions/` is a topic, not a crate), also send it
+to `laptop.architect`, which owns each contract between the two lists
+(`docs/factory.md`), and link its approval. When the PR changes a file in `docs/claude/`
+or another rule that `laptop.director` owns (`/direct`, "The bar"), and
+`laptop.director` is not its author, also send it to `laptop.director`, and link its
+approval on the `Public surface:` line. When the author of the PR is the crate's
+architect, the other architect gives each approval, OK, and ruling that this skill asks
+of the crate's architect.
 
 A PR that adds or changes code for an OS that CI does not run (LINUX CI in
 `docs/decisions/testing/linux-ci.md`), or states what its code does on that OS, links a
