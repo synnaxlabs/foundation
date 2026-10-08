@@ -2093,7 +2093,8 @@ How to read this record:
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
   founding definitions, 2026-10-08T06:12:36Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
-  kind, its byte form, `CHUNKS_MAX`, and `Refused::Stale`, 2026-10-08T08:22:08Z
+  kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
+  the trigger for `Pointer`, 2026-10-08T08:22:08Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
   check of the founding at open, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).
