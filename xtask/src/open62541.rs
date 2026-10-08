@@ -226,6 +226,12 @@ impl Trees<'_> {
         for argument in arguments {
             if let Some(dir) = argument.strip_prefix("-I") {
                 let dir = self.relative(Path::new(dir))?;
+                // A bare `-I` would take the next flag as its directory.
+                let dir = if dir.as_os_str().is_empty() {
+                    ".".into()
+                } else {
+                    dir
+                };
                 flags.push(format!("-I{}", dir.display()));
             } else if argument.starts_with("-D") || argument.starts_with("-std=") {
                 flags.push(argument.clone());
@@ -814,6 +820,7 @@ Disassembly of section .text.log:
                 ("copy/deps/d.h", ""),
                 ("out.h", ""),
                 ("sys/x/time.h", ""),
+                ("sys/sys/time.h", ""),
                 ("sys/stdio.h", ""),
                 ("sys/stdint.h", ""),
                 ("sys/openssl/ssl.h", ""),
@@ -833,6 +840,7 @@ Disassembly of section .text.log:
 #include <stdio.h>
 #include \"stdint.h\"
 #include <time.h>
+#include <sys/time.h>
 #include <openssl/ssl.h>
 #include UA_X
 #import <time.h>
@@ -850,21 +858,22 @@ Disassembly of section .text.log:
             out = out.display(),
         );
         let flags = "-DX\n-Iinclude\n-Ideps\n-std=c99\n";
+        let unlisted = |name| {
+            format!(
+                "includes the system header `{name}`, which SYSTEM_HEADERS does not \
+                 list"
+            )
+        };
         assert_eq!(
             includes(&preprocessed, &root.join("copy"), flags, &dirs),
             [
                 "includes <local.h>, which no include directory holds".to_owned(),
                 "includes src/../../out.h, which is outside the copy".to_owned(),
-                "includes the system header `time.h`, which SYSTEM_HEADERS does not \
-                 list"
-                    .to_owned(),
-                "includes the system header `openssl/ssl.h`, which SYSTEM_HEADERS \
-                 does not list"
-                    .to_owned(),
+                unlisted("time.h"),
+                unlisted("sys/time.h"),
+                unlisted("openssl/ssl.h"),
                 "includes UA_X, which is not a file name".to_owned(),
-                "includes the system header `time.h`, which SYSTEM_HEADERS does not \
-                 list"
-                    .to_owned(),
+                unlisted("time.h"),
                 "uses #include_next <stdio.h>, which the check cannot follow"
                     .to_owned(),
                 format!("includes {}, which is outside the copy", out.display()),
@@ -939,8 +948,8 @@ Disassembly of section .text.log:
         assert_eq!(
             check(&root),
             Err(vec![
-                "src/util/ua_util.c:1: holds a line directive, which moves the file that \
-                 the include check reads"
+                "src/util/ua_util.c:1: holds a line directive, which moves the file \
+                 that the include check reads"
                     .to_owned(),
             ])
         );
@@ -1065,6 +1074,7 @@ End of search list.
             "-DUA_X",
             "-I/w/src/include",
             "-I/w/build/src_generated",
+            "-I/w/src",
             "-std=c99",
             "-O3",
             "-o",
@@ -1073,9 +1083,11 @@ End of search list.
         .map(str::to_owned);
         assert_eq!(
             trees.flags(&arguments),
-            Ok(["-DUA_X", "-Iinclude", "-Isrc_generated", "-std=c99"]
-                .map(str::to_owned)
-                .to_vec())
+            Ok(
+                ["-DUA_X", "-Iinclude", "-Isrc_generated", "-I.", "-std=c99"]
+                    .map(str::to_owned)
+                    .to_vec()
+            )
         );
         assert_eq!(
             trees.flags(&["-I/w/build".to_owned()]),
@@ -1323,7 +1335,8 @@ End of search list.
                          long long setDefaultConfig(void) {\n\
                          UA_clockFn = UA_DateTime_now;\n\
                          return UA_DateTime_now();\n}\n\
-                         long long interruptServer(void) { return UA_DateTime_now(); }\n",
+                         long long interruptServer(void) {\n\
+                         return UA_DateTime_now();\n}\n",
                     ),
                     (
                         "src/more/ua_types.c",
@@ -1350,8 +1363,8 @@ End of search list.
         assert_eq!(
             result,
             Err(vec![
-                "src/more/ua_gen.c:1: holds a line directive, which moves the file that \
-                 the include check reads"
+                "src/more/ua_gen.c:1: holds a line directive, which moves the file \
+                 that the include check reads"
                     .to_owned(),
                 "plugins/ua_config_default.c: the section `.text` takes the address of \
                  `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
@@ -1526,8 +1539,8 @@ End of search list.
         assert_eq!(
             check(&root),
             Err(vec![
-                "plugins/ua_log_stdout.c: inlines `helper`, so a clock call in it hides \
-                 in its caller"
+                "plugins/ua_log_stdout.c: inlines `helper`, so a clock call in it \
+                 hides in its caller"
                     .to_owned(),
             ])
         );
