@@ -67,6 +67,18 @@ exclude_re = [
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
+  # macOS only, as above. `a_write_takes_at_most_the_unsent_bound` catches its
+  # mutants.
+  'crates/os/src/net/unsent\.rs:.*Bound::new',
+  # macOS only, as above. These tests in `crates/os/tests/it/net.rs` catch its
+  # mutants: `a_write_takes_at_most_the_unsent_bound`,
+  # `a_write_after_a_small_write_takes_the_rest_of_the_unsent_bound`,
+  # `a_vectored_write_across_the_unsent_bound_takes_the_whole_parts`,
+  # `whole_parts_that_fill_the_unsent_bound_go_in_one_write`,
+  # `small_writes_below_the_unsent_bound_wait_for_no_event`,
+  # `a_write_waits_at_the_unsent_bound_not_the_send_buffer`, and
+  # `a_full_send_buffer_below_the_bound_makes_a_write_wait`.
+  'crates/os/src/net/unsent\.rs:.*Bound::send',
   # No input makes `getaddrinfo` give `EAI_AGAIN` or `EAI_MEMORY` on demand. The test of
   # the map, through a private call, kills each.
   'crates/os/src/net/resolve\.rs:.*delete match arm \(libc::EAI_(AGAIN|MEMORY), _\)',
