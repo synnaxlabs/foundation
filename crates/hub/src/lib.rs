@@ -5,6 +5,7 @@ mod channel;
 mod commit;
 mod link;
 pub mod reader;
+mod region;
 pub mod serve;
 pub mod writer;
 
@@ -21,6 +22,7 @@ use types::sample::{Scalar, Type};
 use channel::Channel;
 pub use link::{Link, Served};
 use reader::Reader;
+use region::Homes;
 use writer::Writer;
 
 /// The `home` items that hub calls give, so that layer 3 names them through `hub`.
@@ -101,10 +103,7 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
-    region: Option<Region>,
-    /// The session to the home of each other node that a reader dialed, which each
-    /// later reader there shares.
-    sessions: hash::Map<types::node::Key, transport::Session>,
+    region: Option<Rc<Homes>>,
 }
 
 impl Hub {
@@ -138,8 +137,7 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
-            region,
-            sessions: hash::Map::default(),
+            region: region.map(|region| Rc::new(Homes::new(region))),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -184,10 +182,8 @@ impl Hub {
     }
 
     /// Opens a reader session on `channels`, which share one index. While the mesh
-    /// names no home for the index, it waits for one. At the home of another node, the
-    /// session is one hub stream to that home, on the one session that the hub holds
-    /// to it. It gets each frame of the index, as a view of only `channels` and their
-    /// index. A complete reader gets each live frame written after the returned future
+    /// names no home for the index, it waits for one. It gets each frame of the index,
+    /// as a view of only `channels` and their index. A complete reader gets each live frame written after the returned future
     /// resolves, until it misses one ([`reader::Mode::Complete`]).
     ///
     /// # Errors
@@ -252,6 +248,27 @@ impl State {
         self.channels.insert(name.clone(), channel);
     }
 
+    /// A block of `len` bytes from the home's pool.
+    ///
+    /// # Errors
+    ///
+    /// [`block::Error::Exhausted`] or [`block::Error::Refused`] when the pool has no
+    /// block for it now.
+    ///
+    /// # Panics
+    ///
+    /// When `len` is over the pool's largest block: each caller asks for at most that.
+    fn alloc(&self, len: usize) -> Result<block::Unique, block::Error> {
+        self.home.pool().alloc(len).map_err(|error| match error {
+            block::Error::TooLarge { .. } => {
+                unreachable!(
+                    "invariant: no caller asks for more than the largest block"
+                )
+            }
+            block::Error::Exhausted { .. } | block::Error::Refused { .. } => error,
+        })
+    }
+
     /// Carries `index` at the home. A later carry does nothing.
     fn carry(&mut self, index: types::channel::Key) {
         let slot = self.interner.slots().assign(index);
@@ -281,10 +298,10 @@ impl State {
 }
 
 /// Why the home did not carry an index for a session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Away {
     /// The mesh names this other node as the home.
-    Remote(types::node::Key),
+    Remote(types::node::Key, Rc<Homes>),
     /// The mesh stopped.
     Mesh(::mesh::Stopped),
 }
@@ -295,66 +312,20 @@ async fn carry(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
 ) -> Result<(), Away> {
-    let (watch, node) = {
+    let (homes, node) = {
         let state = state.borrow();
-        (
-            state.region.as_ref().map(|region| region.mesh.watch(index)),
-            state.node,
-        )
+        (state.region.clone(), state.node)
     };
-    if let Some(mut watch) = watch {
+    if let Some(homes) = homes {
+        let mut watch = homes.watch(index);
         loop {
             match watch.next().await.map_err(Away::Mesh)? {
                 Some(home) if home == node => break,
-                Some(home) => return Err(Away::Remote(home)),
+                Some(home) => return Err(Away::Remote(home, homes)),
                 None => {}
             }
         }
     }
     state.borrow_mut().carry(index);
     Ok(())
-}
-
-/// Opens a stream of `class` to `home`, another node, on the hub's session to it,
-/// which it dials first when the hub has none. Drops the session when the open fails,
-/// so the next open dials again.
-async fn stream(
-    state: &Rc<RefCell<State>>,
-    home: types::node::Key,
-    class: transport::Class,
-) -> Result<(transport::stream::Sender, transport::stream::Receiver), transport::Error>
-{
-    let held = state.borrow().sessions.get(&home).cloned();
-    let session = if let Some(session) = held {
-        session
-    } else {
-        let (member, transport) = {
-            let state = state.borrow();
-            let region = state
-                .region
-                .as_ref()
-                .expect("invariant: only a region names another home");
-            let member = region
-                .mesh
-                .member(home)
-                .expect("invariant: the mesh names only a member as a home");
-            (member, Rc::clone(&region.transport))
-        };
-        let card = member.card.card();
-        let session = transport
-            .dial(card.public_key, card.addresses.as_slice())
-            .await?;
-        // A concurrent open can dial first: keep its session.
-        state
-            .borrow_mut()
-            .sessions
-            .entry(home)
-            .or_insert(session)
-            .clone()
-    };
-    let opened = session.open(class).await;
-    if opened.is_err() {
-        state.borrow_mut().sessions.remove(&home);
-    }
-    opened
 }

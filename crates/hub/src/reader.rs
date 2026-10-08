@@ -81,12 +81,13 @@ impl fmt::Display for Ended {
                 "the reader missed a frame and gets no later one: open a new reader",
             ),
             Self::Stream(error) => write!(f, "the stream to the home broke: {error}"),
-            Self::Refused(code) => write!(
-                f,
-                "the home ended the session with code {}: {}",
-                code.0,
-                refusal(*code)
-            ),
+            Self::Refused(code) => {
+                write!(f, "the home ended the session with code {}", code.0)?;
+                match refusal(*code) {
+                    Some(meaning) => write!(f, ": {meaning}"),
+                    None => Ok(()),
+                }
+            }
             Self::Message(error) => {
                 write!(f, "a message from the home broke the hub protocol: {error}")
             }
@@ -100,16 +101,22 @@ impl fmt::Display for Ended {
     }
 }
 
-/// What the home of another node meant by `code`, a HUB WIRE code.
-fn refusal(code: transport::Code) -> &'static str {
-    match code.0 {
-        MALFORMED => "a message of this node broke the hub protocol",
-        UNKNOWN => "the home does not know a channel of the reader",
-        NOT_HOME => "the node is not the home of the index",
-        FAILED => "the home's buffer failed, or its mesh stopped",
-        BUSY => "the home had no memory for a reply",
-        _ => unreachable!("invariant: only a HUB WIRE code refuses a session"),
-    }
+/// Each HUB WIRE code that refuses or ends a session, and what the home meant by it.
+const REFUSALS: [(u32, &str); 5] = [
+    (MALFORMED, "a message of this node broke the hub protocol"),
+    (UNKNOWN, "the home does not know a channel of the reader"),
+    (NOT_HOME, "the node is not the home of the index"),
+    (FAILED, "the home's buffer failed, or its mesh stopped"),
+    (BUSY, "the home had no memory for a reply"),
+];
+
+/// What the home of another node meant by `code`, or `None` for a code that refuses
+/// no session.
+fn refusal(code: transport::Code) -> Option<&'static str> {
+    REFUSALS
+        .iter()
+        .find(|&&(refusal, _)| refusal == code.0)
+        .map(|&(_, meaning)| meaning)
 }
 
 impl std::error::Error for Ended {}
@@ -132,7 +139,8 @@ pub enum Error {
     /// The reply of the home of another node broke HUB WIRE. The reader stopped the
     /// stream with `MALFORMED`.
     Message(wire::hub::Error),
-    /// The shard's pool had no block for a message to the home of another node.
+    /// The shard's pool had no block for a message to the home of another node. The
+    /// reader stopped the stream with `BUSY`.
     Pool(block::Error),
 }
 
@@ -148,12 +156,13 @@ impl fmt::Display for Error {
             Self::Transport(error) => {
                 write!(f, "the transport to the home failed: {error}")
             }
-            Self::Refused(code) => write!(
-                f,
-                "the home refused the reader with code {}: {}",
-                code.0,
-                refusal(*code)
-            ),
+            Self::Refused(code) => {
+                write!(f, "the home refused the reader with code {}", code.0)?;
+                match refusal(*code) {
+                    Some(meaning) => write!(f, ": {meaning}"),
+                    None => Ok(()),
+                }
+            }
             Self::Message(error) => {
                 write!(f, "the reply of the home broke the hub protocol: {error}")
             }
@@ -178,14 +187,28 @@ pub struct Reader {
 /// Where a reader's frames come from.
 #[derive(Debug)]
 enum Source {
-    /// A session at this node's home, with the credit of a complete one and the charge
-    /// of each frame it took and gave back.
-    Local {
-        session: Session,
-        credit: Option<(Credit, u64)>,
-    },
+    /// A session at this node's home.
+    Local(Local),
     /// A session at the home of another node.
     Remote(Box<Remote>),
+}
+
+/// A reader session at this node's home, with the credit of a complete one and the
+/// charge of each frame it gave back.
+#[derive(Debug)]
+struct Local {
+    session: Session,
+    credit: Option<(Credit, u64)>,
+}
+
+impl Local {
+    /// Raises the grant by the charge of `frame`, which the reader gave back.
+    fn give_back(&mut self, frame: &Frame) {
+        if let Some((credit, taken_bytes)) = &mut self.credit {
+            *taken_bytes += frame.charge();
+            credit.grant(*taken_bytes + WINDOW);
+        }
+    }
 }
 
 impl Reader {
@@ -196,7 +219,6 @@ impl Reader {
         mode: Mode,
     ) -> Result<Self, Error> {
         let mut keys = Vec::with_capacity(channels.len());
-        let mut data = Vec::with_capacity(channels.len());
         let index = {
             let borrowed = state.borrow();
             let mut index = None;
@@ -208,34 +230,36 @@ impl Reader {
                 if *index.get_or_insert(channel.index) != channel.index {
                     return Err(Error::ManyIndexes);
                 }
-                keys.push(channel.key);
-                if channel.key != channel.index
-                    && !data.iter().any(|&(key, _)| key == channel.key)
-                {
-                    data.push((channel.key, channel.data_type));
-                }
+                keys.push((channel.key, channel.data_type));
             }
             index.ok_or(Error::Empty)?
         };
-        let home = match crate::carry(state, index).await {
-            Ok(()) => None,
-            Err(Away::Remote(home)) => Some(home),
+        match crate::carry(state, index).await {
+            Ok(()) => {}
+            Err(Away::Remote(home, homes)) => {
+                let mut data = Vec::with_capacity(keys.len());
+                for (key, data_type) in keys {
+                    if key != index && !data.iter().any(|&(held, _)| held == key) {
+                        data.push((key, data_type));
+                    }
+                }
+                let group = Group { index, data: &data };
+                let set = state.borrow_mut().interner.intern(&[group]);
+                let remote = Remote::open(state, &homes, home, set, mode).await?;
+                return Ok(Self {
+                    source: Source::Remote(Box::new(remote)),
+                    frame: None,
+                });
+            }
             Err(Away::Mesh(stopped)) => return Err(Error::Mesh(stopped)),
-        };
-        if let Some(home) = home {
-            let group = Group { index, data: &data };
-            let set = state.borrow_mut().interner.intern(&[group]);
-            let remote = Remote::open(state, home, set, mode).await?;
-            return Ok(Self {
-                source: Source::Remote(Box::new(remote)),
-                frame: None,
-            });
         }
         let (mut slots, slot) = {
             let mut borrowed = state.borrow_mut();
             let assigned = borrowed.interner.slots();
-            let slots: Vec<_> =
-                keys.into_iter().map(|key| assigned.assign(key)).collect();
+            let slots: Vec<_> = keys
+                .into_iter()
+                .map(|(key, _)| assigned.assign(key))
+                .collect();
             (slots, assigned.assign(index))
         };
         // A frame without the reader's channels still shows that time moved.
@@ -255,7 +279,7 @@ impl Reader {
             Mode::Latest => (Session::latest(state, slots, slot), None),
         };
         Ok(Self {
-            source: Source::Local { session, credit },
+            source: Source::Local(Local { session, credit }),
             frame: None,
         })
     }
@@ -276,20 +300,13 @@ impl Reader {
     pub fn next(&mut self) -> impl Future<Output = Result<Received<'_>, Ended>> {
         if let Some(frame) = self.frame.take() {
             match &mut self.source {
-                Source::Local {
-                    credit: Some((credit, taken_bytes)),
-                    ..
-                } => {
-                    *taken_bytes += frame.charge();
-                    credit.grant(*taken_bytes + WINDOW);
-                }
-                Source::Local { credit: None, .. } => {}
+                Source::Local(local) => local.give_back(&frame),
                 Source::Remote(remote) => remote.give_back(&frame),
             }
         }
         async move {
             let (frame, set, mask) = match &mut self.source {
-                Source::Local { session, .. } => session.take().await?,
+                Source::Local(local) => local.session.take().await?,
                 Source::Remote(remote) => remote.take().await?,
             };
             let frame = self.frame.insert(frame);
@@ -480,5 +497,17 @@ mod tests {
                 format!("the home ended the session with code {code}: {meaning}")
             );
         }
+    }
+
+    #[test]
+    fn names_only_the_number_of_a_code_outside_hub_wire() {
+        assert_eq!(
+            Error::Refused(Code(7)).to_string(),
+            "the home refused the reader with code 7"
+        );
+        assert_eq!(
+            Ended::Refused(Code(7)).to_string(),
+            "the home ended the session with code 7"
+        );
     }
 }

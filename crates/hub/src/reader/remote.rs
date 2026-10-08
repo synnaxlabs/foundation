@@ -1,8 +1,11 @@
 //! A reader session at another node's home: one hub stream to that home (HUB WIRE).
 
 use std::cell::RefCell;
+use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 
 use block::Block;
 use transport::stream::{Receiver, Sender};
@@ -11,13 +14,11 @@ use types::frame::key_set::KeySet;
 use types::frame::{Draft, Form, Frame, Layout, Mask};
 use wire::Protocol;
 use wire::header::MALFORMED;
-use wire::hub::{BUSY, Credit, FAILED, FromHome, Head, NOT_HOME, Open, UNKNOWN, keys};
+use wire::hub::{BUSY, Credit, FromHome, Head, Open, keys};
 
-use super::{Ended, Error, Mode, WINDOW};
+use super::{Ended, Error, Mode, STREAK, WINDOW, refusal};
 use crate::State;
-
-/// The stop and reset codes of HUB WIRE that refuse or end a session.
-const REFUSALS: [u32; 5] = [MALFORMED, UNKNOWN, NOT_HOME, FAILED, BUSY];
+use crate::region::Homes;
 
 /// A reader session on one stream to the home. Each partial frame lives in it, so a
 /// dropped [`Remote::take`] loses nothing.
@@ -39,6 +40,8 @@ pub(super) struct Remote {
     ends: Vec<(usize, usize)>,
     draft: Option<Draft>,
     ended: Option<Ended>,
+    /// Frames given in a row since `take` last waited.
+    streak: u32,
 }
 
 impl Remote {
@@ -46,6 +49,7 @@ impl Remote {
     /// home to open it.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
+        homes: &Homes,
         home: types::node::Key,
         set: Arc<KeySet>,
         mode: Mode,
@@ -65,41 +69,26 @@ impl Remote {
             channels: u32::try_from(set.entries().len())
                 .expect("invariant: a key set holds at most 2^32 entries"),
         };
-        let (mut sender, mut receiver) = crate::stream(state, home, class)
-            .await
-            .map_err(Error::Transport)?;
-        let header = wire::header::encode(Protocol::Hub);
-        send(state, &mut sender, header.len(), |out| {
-            out.copy_from_slice(&header);
-        })
-        .await?;
-        send(state, &mut sender, open.encoded_len(), |out| {
-            open.encode(out);
-        })
-        .await?;
-        let keys: Vec<_> = set.entries().iter().map(|entry| entry.key).collect();
-        for run in keys.chunks(sender.bytes_max() / keys::LEN) {
-            send(state, &mut sender, run.len() * keys::LEN, |out| {
-                keys::encode(run, out);
-            })
-            .await?;
-        }
+        let (mut sender, mut receiver) =
+            homes.open(home, class).await.map_err(Error::Transport)?;
         let mut decoder = wire::hub::Reader::new(&open);
-        let opened = match receiver.recv().await {
-            Ok(Some(message)) => match decoder.decode(&message) {
-                Ok(FromHome::Opened) => Ok(()),
-                Ok(_) => unreachable!("invariant: the decoder gives opened first"),
-                Err(error) => Err(Error::Message(error)),
-            },
-            Ok(None) => Err(Error::Message(wire::hub::Error::Unfinished { remain: 0 })),
-            Err(error) => {
-                Err(refused(error).map_or_else(Error::Transport, Error::Refused))
-            }
-        };
+        let opened = handshake(
+            state,
+            (&mut sender, &mut receiver),
+            &mut decoder,
+            &open,
+            &set,
+        )
+        .await;
         if let Err(error) = opened {
-            if let Error::Message(_) = error {
-                receiver.stop(Code(MALFORMED));
-                sender.reset(Code(MALFORMED));
+            let code = match error {
+                Error::Message(_) => Some(MALFORMED),
+                Error::Pool(_) => Some(BUSY),
+                _ => None,
+            };
+            if let Some(code) = code {
+                receiver.stop(Code(code));
+                sender.reset(Code(code));
             }
             return Err(error);
         }
@@ -115,6 +104,7 @@ impl Remote {
             ends: Vec::new(),
             draft: None,
             ended: None,
+            streak: 0,
         })
     }
 
@@ -125,7 +115,8 @@ impl Remote {
         }
     }
 
-    /// The next frame, its key set, and the mask of every entry in it.
+    /// The next frame, its key set, and the mask of every entry in it. After
+    /// [`STREAK`] frames in a row, it yields once.
     ///
     /// # Errors
     ///
@@ -134,7 +125,31 @@ impl Remote {
         if let Some(ended) = &self.ended {
             return Err(ended.clone());
         }
-        match self.next().await {
+        if self.streak == STREAK {
+            self.streak = 0;
+            let mut yielded = false;
+            poll_fn(|cx| {
+                if yielded {
+                    return Poll::Ready(());
+                }
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
+        }
+        let mut waited = false;
+        let next = {
+            let mut next = pin!(self.next());
+            poll_fn(|cx| {
+                let next = next.as_mut().poll(cx);
+                waited |= next.is_pending();
+                next
+            })
+            .await
+        };
+        self.streak = if waited { 0 } else { self.streak + 1 };
+        match next {
             Ok(frame) => Ok((frame, &self.set, &self.mask)),
             Err(ended) => {
                 if let Some((sender, receiver)) = self.stream.take()
@@ -168,7 +183,7 @@ impl Remote {
                         let message = recv(receiver).await?;
                         last(self.decoder.decode(&message))?
                     }
-                    Err(error) => return Err(stream(error)),
+                    Err(error) => return Err(ended(error)),
                 };
                 if last {
                     return Ok(self.freeze());
@@ -220,8 +235,6 @@ impl Remote {
         let mut block = self
             .state
             .borrow()
-            .home
-            .pool()
             .alloc(Credit::LEN)
             .map_err(Ended::Pool)?;
         Credit { limit_bytes }.encode(&mut block);
@@ -229,7 +242,7 @@ impl Remote {
             .stream
             .as_mut()
             .expect("invariant: a session holds its stream until it ends");
-        if sender.try_send(block.freeze()).map_err(stream)?.is_none() {
+        if sender.try_send(block.freeze()).map_err(ended)?.is_none() {
             *granted = limit_bytes;
         }
         Ok(())
@@ -245,6 +258,43 @@ impl Remote {
     }
 }
 
+/// Sends the header, `open`, and the keys of `set` on `sender`, and waits for the
+/// home's `Opened`.
+async fn handshake(
+    state: &RefCell<State>,
+    (sender, receiver): (&mut Sender, &mut Receiver),
+    decoder: &mut wire::hub::Reader,
+    open: &Open,
+    set: &KeySet,
+) -> Result<(), Error> {
+    let header = wire::header::encode(Protocol::Hub);
+    send(state, sender, header.len(), |out| {
+        out.copy_from_slice(&header);
+    })
+    .await?;
+    send(state, sender, open.encoded_len(), |out| {
+        open.encode(out);
+    })
+    .await?;
+    let keys: Vec<_> = set.entries().iter().map(|entry| entry.key).collect();
+    let most = sender.bytes_max().min(state.borrow().home.pool().largest());
+    for run in keys.chunks(most / keys::LEN) {
+        send(state, sender, run.len() * keys::LEN, |out| {
+            keys::encode(run, out);
+        })
+        .await?;
+    }
+    match receiver.recv().await {
+        Ok(Some(message)) => match decoder.decode(&message) {
+            Ok(FromHome::Opened) => Ok(()),
+            Ok(_) => unreachable!("invariant: the decoder gives opened first"),
+            Err(error) => Err(Error::Message(error)),
+        },
+        Ok(None) => Err(Error::Message(wire::hub::Error::Unfinished { remain: 0 })),
+        Err(error) => Err(refused(error).map_or_else(Error::Transport, Error::Refused)),
+    }
+}
+
 /// Sends a message of `len` bytes that `fill` writes, in a block of the home's pool.
 async fn send(
     state: &RefCell<State>,
@@ -252,7 +302,7 @@ async fn send(
     len: usize,
     fill: impl FnOnce(&mut [u8]),
 ) -> Result<(), Error> {
-    let mut block = state.borrow().home.pool().alloc(len).map_err(Error::Pool)?;
+    let mut block = state.borrow().alloc(len).map_err(Error::Pool)?;
     fill(&mut block);
     sender
         .send(block.freeze())
@@ -272,7 +322,7 @@ async fn recv(receiver: &mut Receiver) -> Result<Block, Ended> {
     match receiver.recv().await {
         Ok(Some(message)) => Ok(message),
         Ok(None) => Err(unfinished(0)),
-        Err(error) => Err(stream(error)),
+        Err(error) => Err(ended(error)),
     }
 }
 
@@ -280,7 +330,7 @@ async fn recv(receiver: &mut Receiver) -> Result<Block, Ended> {
 fn refused(error: transport::Error) -> Result<Code, transport::Error> {
     match error {
         transport::Error::Reset { code } | transport::Error::Stopped { code }
-            if REFUSALS.contains(&code.0) =>
+            if refusal(code).is_some() =>
         {
             Ok(code)
         }
@@ -288,7 +338,7 @@ fn refused(error: transport::Error) -> Result<Code, transport::Error> {
     }
 }
 
-fn stream(error: transport::Error) -> Ended {
+fn ended(error: transport::Error) -> Ended {
     refused(error).map_or_else(Ended::Stream, Ended::Refused)
 }
 

@@ -70,7 +70,7 @@ impl std::error::Error for Error {}
 impl From<Away> for Error {
     fn from(away: Away) -> Self {
         match away {
-            Away::Remote(home) => Self::Remote { home },
+            Away::Remote(home, _) => Self::Remote { home },
             Away::Mesh(stopped) => Self::Mesh(stopped),
         }
     }

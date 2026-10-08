@@ -708,3 +708,104 @@ fn a_reader_whose_stream_the_home_resets_with_a_code_outside_hub_wire_gets_trans
         },
     );
 }
+
+#[test]
+fn a_remote_reader_yields_once_after_a_streak_of_frames() {
+    const FRAMES: i64 = 300;
+    remote(
+        25,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                for n in 0..FRAMES {
+                    write(&mut writer, &[10 + n], &[n]);
+                }
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            let mut given = 0;
+            while given < FRAMES {
+                match super::poll_once(reader.next()) {
+                    Poll::Ready(received) => {
+                        received.expect("a frame");
+                        given += 1;
+                    }
+                    Poll::Pending => break,
+                }
+            }
+            assert_eq!(given, 128, "the reader yields after 128 frames in a row");
+        },
+    );
+}
+
+#[test]
+fn a_remote_reader_lets_other_tasks_run_while_frames_wait() {
+    const FRAMES: i64 = 1000;
+    remote(
+        26,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                for n in 0..FRAMES {
+                    write(&mut writer, &[10 + n], &[n]);
+                }
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            reader.next().await.expect("a frame");
+            let taken = Rc::new(std::cell::Cell::new(1));
+            let other = Rc::new(std::cell::Cell::new(None));
+            let (seen, ran) = (Rc::clone(&taken), Rc::clone(&other));
+            test.tasks.spawn(async move { ran.set(Some(seen.get())) });
+            for n in 1..FRAMES {
+                reader.next().await.expect("a frame");
+                taken.set(n + 1);
+            }
+            let other = other.get().expect("the other task ran");
+            assert!(other < FRAMES, "the other task ran after {other} frames");
+        },
+    );
+}
+
+#[test]
+fn a_reader_after_the_home_closed_the_held_session_dials_again() {
+    remote(
+        13,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let session = transport.accept().await.expect("a session");
+            session.accept().await.expect("a stream");
+            session.close(Code(0));
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| {
+                write_three(test, kept)
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let names = [name("value")];
+            let error = test
+                .hub
+                .reader(&names, Mode::Latest)
+                .await
+                .expect_err("the home closed the session");
+            let closed = transport::Error::PeerClosed { code: Code(0) };
+            assert_eq!(error, reader::Error::Transport(closed));
+            read_three(test, steps).await;
+        },
+    );
+}
