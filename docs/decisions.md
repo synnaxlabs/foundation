@@ -3361,9 +3361,11 @@ How to read this record:
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
 - **MESH SURFACE (#1051)** A crate outside `mesh` reads a region through `Mesh::watch`,
-  `Watch::next`, and `Mesh::member` (#562). `Mesh::key` gives this node, the `key` of
-  the `Config`, so a crate that holds a `Mesh` keeps no second copy of the key that can
-  differ (#1664). Approved by `laptop.architect`, 2026-10-07T23:31:29Z:
+  `Watch::next`, and `Mesh::member` (#562). `mesh` gives no `Mesh::key`: a crate that
+  holds a `Mesh` reads this node's key from its own config, as the hub reads
+  `hub::Config::node` (`laptop.architect`, 2026-10-08T18:42:42Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
+  Approved by `laptop.architect`, 2026-10-07T23:31:29Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511. `next`
   gives `Stopped`, which holds the cause types `log::Error` and `change::Unknown`, each
   public in its own module, so a caller can match the exact cause. `next` gives
