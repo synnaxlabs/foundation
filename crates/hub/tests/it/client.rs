@@ -113,18 +113,7 @@ where
             let serve = link.serve(incoming);
             let (kept, clock) = (Arc::clone(&kept), node.clock());
             tasks.spawn(async move {
-                let got = match serve.await {
-                    Ok(Served::Ended) => Ok(Got::Ended),
-                    Ok(Served::Request(request)) => {
-                        let subject = request.admitted.hello.subject.clone();
-                        let reply: Vec<u8> =
-                            request.body.iter().rev().copied().collect();
-                        clock.sleep(HOLD).await;
-                        request.reply.send(&reply).await.expect("sends the reply");
-                        Ok(Got::Request(subject, request.body))
-                    }
-                    Err(error) => Err(error),
-                };
+                let got = answer(serve, &clock).await;
                 kept.lock().expect("not poisoned").push(got);
             });
         }
@@ -139,33 +128,8 @@ where
     );
     let node = nodes[1].clone();
     let main = move |tasks: env::tasks::Tasks| async move {
-        let pool = own_pool();
-        let own = SocketAddr::new(node.addresses()[0], PORT);
-        let mut parts = Port::bind(&node.net(), own)
-            .expect("binds")
-            .split(NonZeroUsize::MIN);
-        let config = transport::client::Config {
-            clock: node.clock(),
-            entropy: node.entropy(),
-            tasks,
-            pool: std::rc::Rc::clone(&pool),
-        };
-        let client = transport::Client::new(config, parts.pop().expect("one part"))
-            .expect("a client");
-        let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
-        let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
-        let mut hello = Stream {
-            pool: std::rc::Rc::clone(&pool),
-            sender,
-            receiver,
-        };
-        hello.send(&wire::header::encode(Protocol::Hub)).await;
-        let agent = Agent {
-            node: node.clone(),
-            pool,
-            session: session.clone(),
-            hello,
-        };
+        let agent = Agent::dial(&node, tasks, at).await;
+        let session = agent.session.clone();
         program(agent).await;
         session.close(Code(0));
         node.clock().sleep(Span::MILLISECOND).await;
@@ -182,6 +146,24 @@ where
     Home {
         served,
         closed: closed.expect("the session closed"),
+    }
+}
+
+/// What `serve` gave for one stream, once it replied to a request with its body
+/// reversed after [`HOLD`].
+async fn answer(
+    serve: impl Future<Output = Result<Served, serve::Error>>,
+    clock: &env::clock::Clock,
+) -> Result<Got, serve::Error> {
+    match serve.await? {
+        Served::Ended => Ok(Got::Ended),
+        Served::Request(request) => {
+            let subject = request.admitted.hello.subject.clone();
+            let reply: Vec<u8> = request.body.iter().rev().copied().collect();
+            clock.sleep(HOLD).await;
+            request.reply.send(&reply).await.expect("sends the reply");
+            Ok(Got::Request(subject, request.body))
+        }
     }
 }
 
@@ -234,6 +216,41 @@ struct Agent {
 }
 
 impl Agent {
+    /// Dials the home at `at` from `node` as a program, and opens the hello stream.
+    async fn dial(
+        node: &sim::node::Node,
+        tasks: env::tasks::Tasks,
+        at: Address,
+    ) -> Self {
+        let pool = own_pool();
+        let own = SocketAddr::new(node.addresses()[0], PORT);
+        let mut parts = Port::bind(&node.net(), own)
+            .expect("binds")
+            .split(NonZeroUsize::MIN);
+        let config = transport::client::Config {
+            clock: node.clock(),
+            entropy: node.entropy(),
+            tasks,
+            pool: std::rc::Rc::clone(&pool),
+        };
+        let client = transport::Client::new(config, parts.pop().expect("one part"))
+            .expect("a client");
+        let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
+        let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
+        let mut hello = Stream {
+            pool: std::rc::Rc::clone(&pool),
+            sender,
+            receiver,
+        };
+        hello.send(&wire::header::encode(Protocol::Hub)).await;
+        Self {
+            node: node.clone(),
+            pool,
+            session,
+            hello,
+        }
+    }
+
     /// A hello of [`SUBJECT`] through [`NODE`] that echoes `challenge` and lives
     /// [`LIFE`] from the challenge's mesh time.
     fn hello(challenge: Challenge) -> Hello {
@@ -613,7 +630,7 @@ fn stops_a_request_whose_body_did_not_come() {
     assert_eq!(
         home.served,
         [
-            Err(serve::Error::Message(unfinished.clone())),
+            Err(serve::Error::Message(unfinished)),
             Err(serve::Error::Stream(closed_with(0))),
         ]
     );
