@@ -848,11 +848,29 @@ fn udp_panics() {
     drop(net().udp(&config));
 }
 
+/// Polls a lookup of `host` with a counted waker and no runtime, so a `spawn_blocking`
+/// panics and a lost wake fails the bound.
 fn resolve(host: &str) -> Result<Vec<SocketAddr>, Error> {
-    let found =
-        runtime().block_on(async { timeout(BOUND, net().resolve(host, 4433)).await });
-    let Ok(found) = found else {
-        panic!("the lookup of {host:?} did not end in {BOUND:?}");
+    let counted = Arc::new(Counted {
+        wakes: AtomicUsize::new(0),
+        woken: Notify::new(),
+    });
+    let waker = Waker::from(Arc::clone(&counted));
+    let mut cx = Context::from_waker(&waker);
+    let net = net();
+    let mut lookup = pin!(net.resolve(host, 4433));
+    // The answer can come before the first poll reads it.
+    if let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) {
+        return found;
+    }
+    let woken =
+        runtime().block_on(async { timeout(BOUND, counted.woken.notified()).await });
+    assert!(
+        woken.is_ok(),
+        "the lookup of {host:?} did not wake in {BOUND:?}"
+    );
+    let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) else {
+        panic!("the lookup of {host:?} is pending after its wake");
     };
     found
 }
@@ -884,29 +902,6 @@ fn a_lookup_keeps_the_scope_of_an_ipv6_address() {
     let ip = "fe80::1".parse().unwrap();
     let address = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 1));
     assert_eq!(resolve("fe80::1%1"), Ok(vec![address]));
-}
-
-#[test]
-fn a_lookup_needs_no_runtime() {
-    let counted = Arc::new(Counted {
-        wakes: AtomicUsize::new(0),
-        woken: Notify::new(),
-    });
-    let waker = Waker::from(Arc::clone(&counted));
-    let mut cx = Context::from_waker(&waker);
-    let net = net();
-    let mut lookup = pin!(net.resolve("localhost", 4433));
-    // The answer can come before the first poll reads it, so a poll may be `Ready`
-    // at once.
-    let found = loop {
-        if let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) {
-            break found;
-        }
-        let woken = runtime()
-            .block_on(async { timeout(BOUND, counted.woken.notified()).await });
-        woken.expect("the answer wakes a pending lookup");
-    };
-    assert!(found.is_ok_and(|found| !found.is_empty()));
 }
 
 #[test]
