@@ -1,13 +1,14 @@
 //! The client session of a program: it dials one node as a program, keeps its hello
 //! admitted, and sends signed requests.
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+mod turn;
+
+use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 
 use transport::stream::{Receiver, Sender};
 use transport::{Address, Class, Code};
@@ -21,6 +22,8 @@ use wire::header::MALFORMED;
 use wire::hub::client::{
     BODY_BYTES_MAX, Challenge, Refusal, Request, Response, Signed,
 };
+
+use turn::{Taken, Turn};
 
 /// How long each hello of a [`Client`] lives. The client renews it at half its life.
 pub const LIFE: Span = Span::from_nanos(10 * Span::MINUTE.nanos());
@@ -83,7 +86,7 @@ struct Shared {
     clock: env::clock::Clock,
     tasks: env::tasks::Tasks,
     pool: Rc<block::Pool>,
-    turn: Turn,
+    turn: Rc<Turn>,
     /// The error that ended the renewal.
     ended: RefCell<Option<Error>>,
 }
@@ -127,7 +130,7 @@ impl Client {
             clock,
             tasks: tasks.clone(),
             pool,
-            turn: Turn::default(),
+            turn: Rc::default(),
             ended: RefCell::new(None),
         });
         shared
@@ -159,7 +162,11 @@ impl Client {
             .ok()
             .filter(|&length| length <= BODY_BYTES_MAX)
             .ok_or(Error::Body { length: body.len() })?;
-        let mut held = Held::take(shared).await;
+        let mut held = Held {
+            taken: Some(shared.turn.take().await),
+            open: None,
+            tasks: &shared.tasks,
+        };
         if let Some(error) = shared.ended.borrow().clone() {
             return Err(error);
         }
@@ -279,115 +286,25 @@ async fn renew(
     shared.session.close(Code(code));
 }
 
-/// The turn of one request at a time, given in the order that requests ask for it.
-#[derive(Debug, Default)]
-struct Turn {
-    /// Stays true while waiters remain, as `give` hands the turn on directly.
-    taken: Cell<bool>,
-    waiters: RefCell<VecDeque<Rc<Waiter>>>,
-}
-
-#[derive(Debug, Default)]
-struct Waiter {
-    given: Cell<bool>,
-    waker: RefCell<Option<Waker>>,
-}
-
-impl Turn {
-    async fn take(&self) {
-        if !self.taken.replace(true) {
-            return;
-        }
-        let waiter = Rc::new(Waiter::default());
-        self.waiters.borrow_mut().push_back(Rc::clone(&waiter));
-        Wait {
-            turn: self,
-            waiter,
-            done: false,
-        }
-        .await;
-    }
-
-    fn give(&self) {
-        let next = self.waiters.borrow_mut().pop_front();
-        let Some(waiter) = next else {
-            self.taken.set(false);
-            return;
-        };
-        waiter.given.set(true);
-        if let Some(waker) = waiter.waker.take() {
-            waker.wake();
-        }
-    }
-}
-
-/// A place in the line for the turn. A drop leaves the line, or hands on a turn
-/// given to it.
-struct Wait<'a> {
-    turn: &'a Turn,
-    waiter: Rc<Waiter>,
-    done: bool,
-}
-
-impl Future for Wait<'_> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.waiter.given.get() {
-            self.done = true;
-            return Poll::Ready(());
-        }
-        *self.waiter.waker.borrow_mut() = Some(cx.waker().clone());
-        Poll::Pending
-    }
-}
-
-impl Drop for Wait<'_> {
-    fn drop(&mut self) {
-        if self.done {
-            return;
-        }
-        if self.waiter.given.get() {
-            self.turn.give();
-        } else {
-            let waiter = &self.waiter;
-            self.turn
-                .waiters
-                .borrow_mut()
-                .retain(|other| !Rc::ptr_eq(other, waiter));
-        }
-    }
-}
-
 /// Holds the turn for one request.
-struct Held {
-    shared: Rc<Shared>,
+struct Held<'a> {
+    taken: Option<Taken>,
     /// The receiver of a request whose response has not ended. The node holds the
     /// request open until its response begins, so a drop gives the turn only once
     /// the next message or the end of the stream comes.
     open: Option<Receiver>,
+    tasks: &'a env::tasks::Tasks,
 }
 
-impl Held {
-    async fn take(shared: &Rc<Shared>) -> Self {
-        shared.turn.take().await;
-        Self {
-            shared: Rc::clone(shared),
-            open: None,
-        }
-    }
-}
-
-impl Drop for Held {
+impl Drop for Held<'_> {
     fn drop(&mut self) {
-        let shared = Rc::clone(&self.shared);
-        let Some(mut receiver) = self.open.take() else {
-            shared.turn.give();
+        let (Some(taken), Some(mut receiver)) = (self.taken.take(), self.open.take())
+        else {
             return;
         };
-        self.shared.tasks.spawn(async move {
+        self.tasks.spawn(async move {
             drop(receiver.recv().await);
-            shared.turn.give();
+            drop(taken);
         });
     }
 }
