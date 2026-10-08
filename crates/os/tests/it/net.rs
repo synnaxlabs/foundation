@@ -921,6 +921,18 @@ fn a_write_of_no_bytes_on_a_second_thread_panics() {
 }
 
 #[test]
+fn a_first_write_of_no_bytes_needs_no_runtime() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, client, server) = create_pair(&net).await;
+        (client, server, listener)
+    });
+    let mut cx = Context::from_waker(Waker::noop());
+    let written = client.poll_write(&mut cx, &[]);
+    assert!(matches!(written, Poll::Ready(Ok(0))), "{written:?}");
+}
+
+#[test]
 #[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
 fn a_first_write_of_no_bytes_binds_the_thread() {
     let (mut client, _server, _listener) = on_thread("net-first", || async {
