@@ -80,11 +80,12 @@ How to read this record:
   writes. Each plan for one compares its options by the steps of each common task, the
   first use after a new install among them, and by the error and fix that each wrong
   step gives (C7). A step that Foundation can do itself is not a step for the user
-  (FIRST ADMIN). The person, on 2026-10-08: "when we're designing public APIs like
-  this, we really need to think about devx"
-  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981,
-  2026-10-08T02:43:43Z). The plan rule is decided by `laptop.architect-2` and
-  `laptop.architect` from those words.
+  (FIRST ADMIN). The person, relayed by `laptop.monitor`: "when we're designing public
+  APIs like this, we really need to think about devx" (2026-10-08T02:43:43Z,
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981). The
+  plan rule is decided by `laptop.architect-2` and `laptop.architect` from those words
+  (2026-10-08T02:46:51Z,
+  https://github.com/synnaxlabs/foundation/pull/1759#issuecomment-6051130026).
 - **Process** Each data structure and key decision is proposed with a sketch and
   locked only on agreement. RESCOPE: delivery and wire internals are tuned by
   benchmarks, not interviewed.
@@ -3789,16 +3790,18 @@ How to read this record:
   `mesh.changes` record, so every node checks its subject signature and the `secret`
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
-- **FIRST ADMIN (2026-10-08)** A new node has an empty spec, and under BQ12 only a key
-  that the spec names can sign an apply. So the first `foundation start` on an empty
-  data directory creates the spec with one admin subject, and writes the admin's
-  private key into the data directory, readable only by the user who started the
-  node. The CLI on the same host signs with that key, so the first `apply` needs no
-  key step. BQ12 holds as written: each apply, the first one too, is checked against
-  a key in the spec. Lost: the first apply from any local process (any local user
-  could then take the node), and an admin public key given before the first start (a
-  step before the first use). The #1744 plan names the subject, its access policy,
-  and the key file. Decided by the person ("Yes, I approve."), 2026-10-08T02:43:43Z:
+- **FIRST ADMIN (2026-10-08)** A node that starts a new mesh has an empty spec, and
+  under BQ12 only a key that the spec names can sign an apply. So the first
+  `foundation start` of that node, on an empty data directory, creates the spec with
+  one admin subject, and writes the admin's private key into the data directory,
+  readable only by the user who started the node. The CLI on the same host signs with
+  that key, so the first `apply` needs no key step. A node that joins by ticket
+  (BQ11a) joins a mesh that has a spec, so it creates none. BQ12 holds as written:
+  each apply, the first one too, is checked against a key in the spec. Lost: the first
+  apply from any local process (any local user could then take the node), and an
+  admin public key given before the first start (a step before the first use). The
+  #1744 plan names the subject, its access policy, and the key file. Decided by the
+  person ("Yes, I approve."), relayed by `laptop.monitor` at 2026-10-08T02:43:43Z:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981.
 
 ### 1.13 Operations, agents, and the factory
@@ -5602,10 +5605,10 @@ the system is solid.
 
 Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps
 priority. FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
-connectors. Supersedes, for ONE NODE work only, the sentence of this entry that access
-and config files wait until its acceptance scenario passes (#462). The person decided
-("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
-the internals while ONE NODE work should be focused on developer APIs and
+connectors. Supersedes, for ONE NODE work only, the order of this entry: features,
+access, and config files do not wait until its acceptance scenario passes (#462). The
+person decided ("Yes, that's fine. I really think that first slice should try to focus
+on the 'guts' the internals while ONE NODE work should be focused on developer APIs and
 connectors."), relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
 https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
