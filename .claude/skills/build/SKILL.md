@@ -17,7 +17,9 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
 
 1. `git fetch origin`. Work only in your own worktree.
 2. An open issue labeled `owner:$FACTORY_NAME` comes first: resume it from its last
-   state comment. Else take the oldest `ready` issue whose crates no other open issue
+   state comment. Skip one labeled `blocked` while an issue that it waits on is open or
+   a question on it has no answer. When neither holds, remove `blocked` and resume it.
+   With none to resume, take the oldest `ready` issue whose crates no other open issue
    with an `owner:` label holds: `gh issue list --label ready --search
    "sort:created-asc"`. On the night lane, take only issues that also have `night`.
 3. Claim it: `gh issue edit <n> --add-label "owner:$FACTORY_NAME" --remove-label ready`
@@ -110,7 +112,7 @@ cargo mutants --in-diff "$p" --jobs 4
 ## Night lane
 
 Never change a public surface, a decision, or another crate. When the work needs a
-person or a decision, ask on the issue, add `blocked`, and take the next `night` issue.
+person or a decision, ask on the issue, send the link, and add `blocked`, as Rules say.
 A PR that needs the person (`oracles/`, `.github/`, `.claude/`) waits for the morning;
 take the next issue meanwhile.
 
@@ -126,6 +128,10 @@ take the next issue meanwhile.
   make it pass.
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
+- Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
+  link to that comment at once (`docs/coordination.md`, "Messages"). A comment alone
+  reaches no one. When no part of the issue is left to build, add `blocked` and take
+  other work (Take an issue). Remove `blocked` when the answer comes.
 - A design choice that other crates need goes in the PR's Shape decisions; send the link
   to the crate's architect (`docs/factory.md`).
 - When the architect rules in a comment on your issue, act on it at once. Add the ruling

@@ -1,5 +1,5 @@
 //! TCP streams and listeners on the loopback of the real network: bytes, FIN, resets,
-//! errors, addresses, wakeups, and the thread rules.
+//! errors, addresses, wakeups, and the thread rules. Name lookups of this machine.
 
 use std::future::poll_fn;
 use std::io::IoSlice;
@@ -848,12 +848,60 @@ fn udp_panics() {
     drop(net().udp(&config));
 }
 
-#[test]
-#[should_panic(expected = "os::net has no resolver yet")]
-fn resolve_of_a_host_name_panics() {
-    runtime().block_on(async {
-        drop(net().resolve("localhost", 80).await);
+/// Polls a lookup of `host` with a counted waker and no runtime, so a `spawn_blocking`
+/// panics and a lost wake fails the bound.
+fn resolve(host: &str) -> Result<Vec<SocketAddr>, Error> {
+    let counted = Arc::new(Counted {
+        wakes: AtomicUsize::new(0),
+        woken: Notify::new(),
     });
+    let waker = Waker::from(Arc::clone(&counted));
+    let mut cx = Context::from_waker(&waker);
+    let net = net();
+    let mut lookup = pin!(net.resolve(host, 4433));
+    // The answer can come before the first poll reads it.
+    if let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) {
+        return found;
+    }
+    let woken =
+        runtime().block_on(async { timeout(BOUND, counted.woken.notified()).await });
+    assert!(
+        woken.is_ok(),
+        "the lookup of {host:?} did not wake in {BOUND:?}"
+    );
+    let Poll::Ready(found) = lookup.as_mut().poll(&mut cx) else {
+        panic!("the lookup of {host:?} is pending after its wake");
+    };
+    found
+}
+
+#[test]
+fn localhost_resolves_to_loopback_addresses() {
+    let found = resolve("localhost").expect("localhost has an address");
+    assert!(!found.is_empty());
+    for address in found {
+        assert!(address.ip().is_loopback(), "{address}");
+        assert_eq!(address.port(), 4433, "{address}");
+    }
+}
+
+#[test]
+fn a_name_under_invalid_is_not_found() {
+    let host = "foundation.invalid".to_owned();
+    assert_eq!(resolve(&host), Err(Error::NotFound { host }));
+}
+
+#[test]
+fn a_name_with_a_nul_byte_is_not_found() {
+    let host = "local\0host".to_owned();
+    assert_eq!(resolve(&host), Err(Error::NotFound { host }));
+}
+
+#[test]
+fn a_lookup_keeps_the_scope_of_an_ipv6_address() {
+    let ip = "fe80::1".parse().unwrap();
+    let address = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 1));
+    assert_eq!(resolve("fe80::1%1"), Ok(vec![address]));
 }
 
 #[test]
