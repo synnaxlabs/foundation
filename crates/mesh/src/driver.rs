@@ -2283,7 +2283,7 @@ mod tests {
                 let mut forged = heartbeat;
                 forged.chain[1].change.signature.as_mut().unwrap().0[63] ^= 1;
                 assert_eq!(mesh.receive(public(2), forged), Err(misrouted));
-                assert_eq!(term(&mesh), Term(0));
+                assert_eq!(pre_vote_term(&mesh, 2).await, Term(1));
             });
         }
 
