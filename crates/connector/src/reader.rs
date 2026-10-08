@@ -42,8 +42,8 @@ pub struct Settings {
 ///
 /// One diagnostic for each problem: an unknown key, no `select`, a value that does
 /// not read, a label, attribute, or block in `reader` that it does not take, each
-/// `reader` block after the first, a negative `hold`, and a `hold` in `latest` mode, since only a
-/// complete reader holds.
+/// `reader` block after the first, a negative `hold`, and a `hold` in `latest` mode,
+/// since only a complete reader holds.
 ///
 /// # Panics
 ///
