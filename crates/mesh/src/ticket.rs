@@ -2,9 +2,9 @@
 
 use std::fmt;
 
-use types::ed25519::{BadSignature, PublicKey};
+use types::ed25519::{BadSignature, PrivateKey, PublicKey};
 use types::name::{Name, Prefix};
-use types::node::{self, PrivateKey};
+use types::node;
 use types::time::{Span, Stamp};
 
 use crate::bytes::{

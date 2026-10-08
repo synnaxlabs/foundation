@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use env::thread;
 use sim::shard::Fault;
 use types::byte::Size;
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
 use crate::{Config, Error, Node};

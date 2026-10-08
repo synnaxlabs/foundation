@@ -27,7 +27,7 @@ use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
 use transport::{Address, Class, Code, Config, Error, Port, Transport};
-use types::node::PrivateKey;
+use types::ed25519::PrivateKey;
 use types::time::Span;
 
 #[global_allocator]
