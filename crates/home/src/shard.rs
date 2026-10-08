@@ -4205,12 +4205,12 @@ mod tests {
     }
 
     /// A monotonic clock that counts its reads.
-    struct Counted {
+    struct Counting {
         clock: Clock,
         reads: Arc<AtomicU64>,
     }
 
-    impl env::clock::Driver for Counted {
+    impl env::clock::Driver for Counting {
         fn now(&self) -> Monotonic {
             self.reads.fetch_add(1, Ordering::Relaxed);
             self.clock.now()
@@ -4225,7 +4225,7 @@ mod tests {
         }
     }
 
-    /// A timer of the clock that [`Counted`] reads.
+    /// A timer of the clock that [`Counting`] reads.
     struct Delegated(env::clock::Sleep);
 
     impl env::clock::Timer for Delegated {
@@ -4244,7 +4244,7 @@ mod tests {
     fn reads_the_clock_once_to_open_write_and_close() {
         run(120, |test| async move {
             let reads = Arc::new(AtomicU64::new(0));
-            let (clock, mesh) = clock::Clock::new(Clock::new(Counted {
+            let (clock, mesh) = clock::Clock::new(Clock::new(Counting {
                 clock: test.clock.clone(),
                 reads: Arc::clone(&reads),
             }));
@@ -4266,9 +4266,12 @@ mod tests {
             let key = shard.open_writer(writer("a", 1, &set)).expect("synced");
             assert_eq!(count() - from, 1, "open_writer");
 
+            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
             let from = count();
-            let write = frame(&test.pool, &set, &[(2, &[10])]);
-            assert_eq!(shard.write(key, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+            assert_eq!(
+                shard.write(key, LIVE, write),
+                Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..])
+            );
             assert_eq!(count() - from, 1, "write");
 
             let from = count();
