@@ -122,10 +122,11 @@ take the next issue meanwhile.
 - Never sit idle on a wait. When your work needs a PR that is in the merge queue,
   build on its head and rebase when it merges. While a ruling is pending, build the
   parts it does not touch.
-- In `acceptance`, a scenario that cannot run yet is `#[ignore = "waits on #<n>"]`,
-  and a `Lab` method that cannot is `todo!("waits on #<n>")`. The list names each open
-  issue that states a step it needs, and no other. Never delete or weaken a scenario to
-  make it pass.
+- In `acceptance`, and in a test of an acceptance scenario in `crates/node/tests/it/`
+  (`docs/claude/testing.md`, "No `#[ignore]`"), a scenario that cannot run yet is
+  `#[ignore = "waits on #<n>"]`, and a `Lab` method that cannot is
+  `todo!("waits on #<n>")`. The list names each open issue that states a step it needs,
+  and no other. Never delete or weaken a scenario to make it pass.
 - A new third-party dependency needs the person's approval and an entry in
   `docs/dependencies.md`.
 - Ask the person in a comment on the issue or PR, then send `laptop.coordinator` the
