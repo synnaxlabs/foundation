@@ -5062,7 +5062,9 @@ How to read this record:
   (`laptop.architect`,
   https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6063499704).
   A program sends its first request once the challenge after its hello comes, since
-  the node sends it only after it admits the hello. `Link` is not `Clone`. Lost: a
+  the node sends it only after it admits the hello. `Session::accept` gives streams
+  by class, not in open order, so this rule also makes the hello stream the first
+  that the node takes. `Link` is not `Clone`. Lost: a
   `Config::clock` beside `time`, with a loop in `hub` that knows the slew; more than
   one open request, which no wire needs now. Decided by `laptop.architect` at
   2026-10-08T11:24:07Z
