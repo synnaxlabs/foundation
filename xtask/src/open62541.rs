@@ -69,19 +69,15 @@ const CODE_FLAGS: [&str; 8] = [
     "-fno-math-errno",
 ];
 
-/// The flags of the upstream compile that `flags.txt` leaves out, each with its
-/// reason. A `-W` flag with no `,` is a warning, which `flags.txt` also leaves out.
-const LEFT_OUT: [(&str, &str); 4] = [
-    ("-pipe", "only the speed of the build"),
-    (
-        "-O3",
-        "the profile of `build.rs` gives the level, and the check needs -O0",
-    ),
-    (
-        "-flto=auto",
-        "objects of GCC's own form, which the Rust linker and objdump cannot read",
-    ),
-    ("-fno-fat-lto-objects", "a flag of -flto"),
+/// The flags of the upstream compile that `flags.txt` leaves out, other than warnings.
+const LEFT_OUT: [&str; 4] = [
+    // Only the speed of the build.
+    "-pipe",
+    // The profile of `build.rs` gives the level, and the check needs -O0.
+    "-O3",
+    // Objects of GCC's own form, which the Rust linker and objdump cannot read.
+    "-flto=auto",
+    "-fno-fat-lto-objects",
 ];
 
 /// The system headers that a file of the copy may include: the C standard library and
@@ -117,7 +113,7 @@ const SYSTEM_HEADERS: [&str; 18] = [
 ///
 /// # Errors
 ///
-/// A step that fails, a flag of a compile in neither [`CODE_FLAGS`] nor [`LEFT_OUT`],
+/// A step that fails, a flag of a compile that is neither [`kept`] nor [`left_out`],
 /// and each error of [`check`]. On an error,
 /// `patches/open62541/` does not change.
 pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
@@ -258,8 +254,8 @@ impl Trees<'_> {
     ///
     /// # Errors
     ///
-    /// An `-I` directory outside the clone, and a flag in neither [`CODE_FLAGS`] nor
-    /// [`LEFT_OUT`].
+    /// An `-I` directory outside the clone, and a flag that is neither [`kept`] nor
+    /// [`left_out`].
     fn flags(&self, arguments: &[String]) -> Result<Vec<String>, String> {
         let mut flags = Vec::new();
         let mut arguments = arguments.iter().skip(1);
@@ -286,9 +282,7 @@ impl Trees<'_> {
             };
             if kept(&flag) {
                 flags.push(flag);
-            } else if !((flag.starts_with("-W") && !flag.contains(','))
-                || LEFT_OUT.iter().any(|&(left, _)| left == flag))
-            {
+            } else if !left_out(&flag) {
                 return Err(format!(
                     "`{argument}` is in neither CODE_FLAGS nor LEFT_OUT"
                 ));
@@ -308,6 +302,13 @@ fn kept(flag: &str) -> bool {
             flag.strip_prefix(p)
                 .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
         })
+}
+
+/// Whether `flags.txt` leaves out `flag`: one of [`LEFT_OUT`], or a warning, which
+/// changes no code. A `-W` flag with a `,`, such as `-Wl,`, passes flags to another
+/// tool and is not a warning.
+fn left_out(flag: &str) -> bool {
+    LEFT_OUT.contains(&flag) || (flag.starts_with("-W") && !flag.contains(','))
 }
 
 /// One compile of the `open62541` library in `compile_commands.json`.
