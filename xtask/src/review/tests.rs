@@ -185,10 +185,8 @@ fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
         vec![unended("Deferred")]
     );
     let indented = ROUND.replace("\nHot path:", "\n  Hot path:");
-    assert_eq!(
-        check(&record(vec![bot(&indented)])),
-        vec![unended("Hot path")]
-    );
+    assert_ne!(indented, ROUND);
+    assert_eq!(check(&record(vec![bot(&indented)])), Vec::<String>::new());
     let trailed = ROUND.replace("none\n", "none  \n") + "\n  \n";
     assert_eq!(check(&record(vec![bot(&trailed)])), Vec::<String>::new());
     let followed = ROUND.to_string() + "\n\nThe author fixes each finding.";
@@ -1121,10 +1119,57 @@ fn a_lone_carriage_return_ends_a_line_of_an_approval() {
 }
 
 #[test]
-fn reads_a_fence_in_an_html_block_as_html() {
-    let html = ROUND.replace("weakening.\n\n", "weakening.\n\n<div>\n```\n</div>\n\n");
-    assert_ne!(html, ROUND);
-    assert_eq!(check(&record(vec![bot(&html)])), Vec::<String>::new());
+fn fails_a_round_with_raw_html() {
+    let raw = |line: &str| {
+        format!(
+            "review round 3 has raw HTML, which can hide text on GitHub, in the line \
+             `{line}`. Put code in a code span, in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+        )
+    };
+    let cases = [
+        ("<div>\n```\n</div>", "<div>"),
+        ("<!--\nHot path: none\n-->", "<!--"),
+        ("<div><!--", "<div><!--"),
+        ("<source\n***", "<source"),
+        ("- a\n  <source", "<source"),
+        ("A <details> b", "A <details> b"),
+        ("A `b`\nc <!-- d --> e", "c <!-- d --> e"),
+        ("</x>", "</x>"),
+        ("<?a ?>", "<?a ?>"),
+    ];
+    for (html, line) in cases {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{html}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![raw(line)],
+            "{html}"
+        );
+    }
+    let summary = format!("<b>\n\n{ROUND}");
+    assert_eq!(check(&record(vec![bot(&summary)])), vec![raw("<b>")]);
+    let shown = [
+        "<https://github.com>",
+        "\\<div>",
+        "`Vec<u8>`",
+        "```\n<div>\n```",
+        "    <div>",
+        "a < b, <1",
+    ];
+    for text in shown {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+    let old = old("## Review round 1\n\nNo fields.\n\n<div>");
+    assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
 }
 
 #[test]
@@ -1135,19 +1180,6 @@ fn fails_end_lines_that_a_fence_after_a_list_item_hides() {
          - ```\n  x\n  ```\n\n```\n\n",
     );
     assert_ne!(hidden, later("reviewer, breaker"));
-    assert_eq!(
-        check(&record(vec![bot(&hidden)])),
-        vec![unended("Deferred")]
-    );
-}
-
-#[test]
-fn fails_end_lines_in_an_html_comment() {
-    let hidden = later("reviewer, breaker").replace(
-        "weakening.\n\n",
-        "weakening.\n\nDeferred: none\nPublic surface: none\nHot path: `send`\n\n\
-             <!--\n\n",
-    ) + " -->";
     assert_eq!(
         check(&record(vec![bot(&hidden)])),
         vec![unended("Deferred")]

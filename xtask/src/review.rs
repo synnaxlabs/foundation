@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel::H2, Options, Parser, Tag, TagEnd};
 use serde_json::Value;
 
 use crate::field;
@@ -292,14 +292,9 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 /// `old`, posted before [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = unpadded(body);
-    let Shown {
-        number,
-        blocks,
-        text,
-    } = Shown::read(&body);
-    let number = number?;
-    // Only the end lines keep their indent: an indented one is a quote, not a line.
-    let lines = blocks.first().into_iter().flatten().map(|l| l.trim_start());
+    let shown = Shown::read(&body);
+    let (number, text) = (shown.number?, &shown.text);
+    let lines = shown.paragraph(shown.blocks.first()).iter().copied();
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
     let findings = field("Findings: ");
@@ -307,8 +302,8 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
     let performance = |reviewers: Option<&BTreeSet<String>>| {
         let performer =
-            reviewers.map_or_else(|| performer(&text), |r| r.contains("performance"));
-        (old && !performer && named(&text)).then(|| {
+            reviewers.map_or_else(|| performer(text), |r| r.contains("performance"));
+        (old && !performer && named(text)).then(|| {
             format!(
                 "review round {number} names no performance, which this round requires."
             )
@@ -342,9 +337,14 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         };
         let hot = if old {
             false
+        } else if let Some(line) = shown.html {
+            return Err(format!(
+                "review round {number} has raw HTML, which can hide text on GitHub, in \
+                 the line `{line}`. Put code in a code span, {FORMAT}"
+            ));
         } else {
-            let rest = blocks.get(1..).unwrap_or_default();
-            hot(rest.last().map_or(&[][..], Vec::as_slice), number)?
+            let end = shown.blocks.get(1..).and_then(<[_]>::last);
+            hot(shown.paragraph(end), number)?
         };
         Ok(Round {
             number,
@@ -420,23 +420,28 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
     (values, lines.len())
 }
 
-/// A comment from its round heading on, read as GitHub reads Markdown.
-#[derive(Debug)]
+/// A comment read as GitHub reads Markdown: its text from its round heading on, and its
+/// raw HTML.
+#[derive(Debug, Default)]
 struct Shown<'a> {
     /// The text after `## Review round ` in the heading, or `None` when the comment
     /// has no such heading at the top level.
     number: Option<&'a str>,
-    /// Each top-level block after the heading. A paragraph is its lines, each from the
-    /// start of its source line, so it keeps its indent. Any other block has no lines.
-    blocks: Vec<Vec<&'a str>>,
+    /// Each top-level block after the heading: the index in `text` of a paragraph, or
+    /// `None` for any other block.
+    blocks: Vec<Option<usize>>,
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
     /// shows them: without the indent or the marks of a list item or a quote.
     text: Vec<Vec<&'a str>>,
+    /// The first line of the comment with raw HTML: an HTML block, inline HTML, or a
+    /// line of text that starts with `<` and a letter, `!`, `/`, or `?`. GitHub can
+    /// read such a line in a different way, or hide the text after it.
+    html: Option<&'a str>,
 }
 
 impl<'a> Shown<'a> {
-    /// Reads `body` ([`unpadded`]) from its first top-level `## Review round `
-    /// heading on.
+    /// Reads `body` ([`unpadded`]). Its round heading is the first top-level
+    /// `## Review round ` heading.
     fn read(body: &'a str) -> Self {
         let options = Options::from_iter([
             Options::ENABLE_TABLES,
@@ -445,69 +450,76 @@ impl<'a> Shown<'a> {
             Options::ENABLE_TASKLISTS,
             Options::ENABLE_GFM,
         ]);
-        let mut number = None;
-        let (mut blocks, mut text) = (Vec::new(), Vec::new());
+        let mut shown = Self::default();
         // Each open block, with the index in `text` of a paragraph. A tight list item
         // holds the text of its paragraph with no paragraph event.
         let mut open: Vec<Option<usize>> = Vec::new();
         let mut fresh = true;
         for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
-            let top = open.is_empty();
+            let line = &body[range.start..line_end(body, range.start)];
+            let paragraph = open.last().copied().flatten().filter(|_| fresh);
+            let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
+            let raw = match &event {
+                Event::Html(_) | Event::InlineHtml(_) => true,
+                // The text of an escaped `<` starts after its backslash.
+                Event::Text(_) => {
+                    paragraph.is_some()
+                        && !body[..range.start].ends_with('\\')
+                        && line.strip_prefix('<').is_some_and(|l| l.starts_with(opens))
+                }
+                _ => false,
+            };
+            if raw && shown.html.is_none() {
+                let start =
+                    body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+                shown.html = Some(body[start..range.start + line.len()].trim());
+            }
             match event {
                 Event::Start(tag) if !inline(tag.to_end()) => {
-                    let heading = matches!(
-                        tag,
-                        Tag::Heading {
-                            level: HeadingLevel::H2,
-                            ..
-                        }
-                    );
-                    if top && number.is_some() {
-                        blocks.push(Vec::new());
-                    } else if top && heading {
-                        let line = &body[range.start..line_end(body, range.start)];
-                        number = line.strip_prefix("## Review round ");
-                    }
+                    let top = open.is_empty();
                     let paragraph = matches!(tag, Tag::Paragraph | Tag::Item);
-                    open.push((paragraph && number.is_some()).then(|| {
-                        text.push(Vec::new());
-                        text.len() - 1
-                    }));
+                    let index = paragraph.then_some(shown.text.len());
+                    if top && shown.number.is_some() {
+                        shown.blocks.push(index);
+                    } else if top && matches!(tag, Tag::Heading { level: H2, .. }) {
+                        shown.number = line.strip_prefix("## Review round ");
+                        shown.text.clear();
+                    }
+                    if paragraph {
+                        shown.text.push(Vec::new());
+                    }
+                    open.push(index);
                     fresh = true;
                 }
                 Event::End(tag) if !inline(tag) => {
                     open.pop();
                 }
                 Event::Rule => {
-                    if top && number.is_some() {
-                        blocks.push(Vec::new());
+                    if open.is_empty() && shown.number.is_some() {
+                        shown.blocks.push(None);
                     }
                     fresh = true;
                 }
                 Event::SoftBreak | Event::HardBreak => fresh = true,
                 Event::End(_) | Event::TaskListMarker(_) => {}
                 _ => {
-                    if let (true, Some(&Some(paragraph))) = (fresh, open.last()) {
-                        let end = line_end(body, range.start);
-                        text[paragraph].push(&body[range.start..end]);
-                        if open.len() == 1 {
-                            let from = body[..range.start]
-                                .rfind(['\n', '\r'])
-                                .map_or(0, |i| i + 1);
-                            let block: &mut Vec<_> =
-                                blocks.last_mut().expect("a block is open");
-                            block.push(&body[from..end]);
-                        }
+                    if let Some(paragraph) = paragraph {
+                        shown.text[paragraph].push(line);
                         fresh = false;
                     }
                 }
             }
         }
-        Self {
-            number,
-            blocks,
-            text,
-        }
+        shown
+    }
+
+    /// The lines of `block`, one of [`Shown::blocks`], or none when it is not a
+    /// paragraph.
+    fn paragraph(&self, block: Option<&Option<usize>>) -> &[&'a str] {
+        block
+            .copied()
+            .flatten()
+            .map_or(&[][..], |i| self.text[i].as_slice())
     }
 }
 
