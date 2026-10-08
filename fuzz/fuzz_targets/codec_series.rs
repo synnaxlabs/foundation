@@ -13,7 +13,7 @@ fuzz_target!(|bytes: &[u8]| {
     let [scalar, low, high, series @ ..] = bytes else {
         return;
     };
-    let scalar = fuzz::scalar(*scalar);
+    let scalar = fuzz::codec::scalar(*scalar);
     let count = usize::from(u16::from_le_bytes([*low, *high]));
     let data_type = Type::Scalar(scalar);
     let mut out = vec![0; count * scalar.width()];

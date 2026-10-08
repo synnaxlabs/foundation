@@ -271,6 +271,7 @@ impl Lab {
             voters: members.iter().map(|member| member.card.key()).collect(),
             members,
             definitions: spec::founding::create(ADMIN.public()),
+            homes: BTreeMap::new(),
         };
         for &node in nodes {
             self.members[node.0].region = Some(founding.clone());
