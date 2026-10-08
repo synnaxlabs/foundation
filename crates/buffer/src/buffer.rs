@@ -738,7 +738,7 @@ async fn walk(
             Step::Data(body) => {
                 recover(body, offset, pool.largest(), slots, &mut logs)?;
             }
-            Step::Carry(body) => carry(body, offset, slots, &mut logs)?,
+            Step::Carry(body) => recover_carried(body, offset, slots, &mut logs)?,
             Step::Moved | Step::More => {}
             Step::End => break,
         }
@@ -774,7 +774,7 @@ fn recover(
 }
 
 /// Feeds the logs the tails of a carry record body at `offset`.
-fn carry(
+fn recover_carried(
     body: &[u8],
     offset: u64,
     slots: &mut Slots,
