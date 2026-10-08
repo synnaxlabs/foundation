@@ -3810,11 +3810,13 @@ How to read this record:
   keep `name` and refuse a repeated reader name at plan, a new surface for a choice
   that nobody uses (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1807#issuecomment-6057222444,
-  2026-10-08T09:49:27Z). It supersedes the `Settings::name` of `None` for a reader with
-  no `name`, proposed on #1794
-  (https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089) and
-  approved in https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653
-  (2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
+  2026-10-08T09:49:27Z). Supersedes `name: Option<Name>` of `reader::Settings` in
+  https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152, and the
+  `Settings::name` of `None` for a reader with no `name` of
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6052681089
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1794#issuecomment-6053214653,
+  2026-10-08 05:43 UTC). Supersedes the ad hoc reader and `connector.unnamed-hold` of
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1736#issuecomment-6052555898, item
