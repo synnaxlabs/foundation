@@ -345,7 +345,8 @@ How to read this record:
   `max_age` (A20), not of retention. In `config`, `select` and `keep` are both required.
   `keep` reads with `document::read::span`, which refuses a negative span with
   `document.negative-span` at the `keep` value, as it does a reader `hold` (S10,
-  DOCUMENT KEYS).
+  DOCUMENT KEYS; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145). Supersedes: `config.negative-span` of #895.
   Ruling and answers:
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6032219156,
   https://github.com/synnaxlabs/foundation/issues/895#issuecomment-6037207886,
@@ -3387,7 +3388,9 @@ How to read this record:
   reader is complete, has the connector's name, and holds nothing. A second `reader`
   block is `document.repeated-block`, and `read` reads only the first, where a label is
   `document.label-count`. A negative `hold` is `document.negative-span` (READER RULES,
-  #94).
+  #94; `laptop.architect-2`, 2026-10-08T07:04:36Z,
+  https://github.com/synnaxlabs/foundation/issues/1785#issuecomment-6054474145). Supersedes: `config.repeated-block`, `config.label-count`, and
+  `config.negative-span` for the reader.
   A `hold` in `latest` mode is `connector.latest-hold`, since only a complete reader
   holds.
   `read(config, keys, blocks)` takes the kind's own attributes and blocks and gives
@@ -3855,6 +3858,7 @@ How to read this record:
   [ruling](https://github.com/synnaxlabs/foundation/issues/1150#issuecomment-6037095151)).
   `value::Kind::text` gives the text of a string or of a reference, so each place that
   reads the two as the same text matches them once (`laptop.architect-2`, #1702,
+  2026-10-08T06:05:28Z,
   [ruling](https://github.com/synnaxlabs/foundation/issues/1702#issuecomment-6053513102)).
   `export` and `discover` write every name as a string (`"site_a.pt_1"`): they need no
   HCL rule, and a generated file reads back as exactly the Document it came from. This
