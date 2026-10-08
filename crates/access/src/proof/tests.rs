@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use proptest::prelude::*;
+use spec::access::Action;
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use types::ed25519::{Pair, PrivateKey};
@@ -241,6 +242,18 @@ mod admit {
         let admitted = admit(&rules, NOW, hello.clone()).unwrap();
 
         assert_eq!(admitted.hello(), &hello);
+        let every = [
+            Action::Read,
+            Action::Write,
+            Action::Plan,
+            Action::Apply,
+            Action::Secret,
+            Action::Admin,
+        ];
+        for on in ["plant.pt_1", "@admin.@subject"] {
+            let grant = rules.grant(&hello.subject, &name(on));
+            assert_eq!(grant.actions(), every.into_iter().collect(), "{on}");
+        }
     }
 
     #[test]
