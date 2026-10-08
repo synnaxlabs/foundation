@@ -110,19 +110,23 @@ fn main() {
             assert_eq!(
                 out.short,
                 Some(SHORT),
-                "{reading:?}, {len} bytes: the first read"
+                "{reading:?}, {len} bytes, {end:?}: the first read"
             );
-            assert_eq!(out.len, Some(len), "{reading:?}, {len} bytes: the read");
+            assert_eq!(
+                out.len,
+                Some(len),
+                "{reading:?}, {len} bytes, {end:?}: the read"
+            );
             assert_eq!(
                 out.pending > 0,
                 !matches!(reading, Reading::Whole),
-                "{reading:?}, {len} bytes: the read gives `Pending` {} times",
+                "{reading:?}, {len} bytes, {end:?}: the read gives `Pending` {} times",
                 out.pending
             );
             assert_eq!(
                 out.waited,
                 matches!(reading, Reading::Waited),
-                "{reading:?}, {len} bytes: the read waits for a block"
+                "{reading:?}, {len} bytes, {end:?}: the read waits for a block"
             );
             assert_eq!(
                 out.ended,
@@ -137,7 +141,7 @@ fn main() {
             assert_eq!(
                 out.ending > 0,
                 !matches!(end, End::Reset),
-                "{reading:?}, {len} bytes, {end:?}: the read of the end gives \
+                "{reading:?}, {len} bytes, {end:?}: the read after the message gives \
                  `Pending` {} times",
                 out.ending
             );

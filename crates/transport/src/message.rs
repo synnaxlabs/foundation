@@ -756,6 +756,19 @@ mod tests {
             assert_eq!(live.load(Ordering::Relaxed), 0);
         }
 
+        /// The receiver of an opened stream reads with `Reader::new`, which no public
+        /// test of the bound reaches with a long message.
+        #[test]
+        fn a_new_reader_keeps_a_list_of_chunks_max_slots_after_a_long_message() {
+            let pool = pool(1 << 20);
+            let message = vec![7; 1 << 18];
+            let mut source = Source::new(encode(slice::from_ref(&message)), 1200);
+            let mut reader = Reader::new(message.len());
+            let read = read(&mut reader, &pool, &mut source);
+            assert_eq!(read, Ok(Poll::Ready(Some(message))));
+            assert_eq!(reader.held.chunks.capacity(), CHUNKS_MAX);
+        }
+
         #[test]
         #[should_panic(expected = "the source gives at least one byte")]
         fn when_source_gives_no_bytes_it_panics() {
