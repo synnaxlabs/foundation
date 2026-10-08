@@ -1021,3 +1021,43 @@ fn a_lone_carriage_return_ends_a_line() {
     let cr = ROUND.replace('\n', "\r");
     assert_eq!(check(&record(vec![bot(&cr)])), Vec::<String>::new());
 }
+
+#[test]
+fn an_indented_reviewers_line_of_a_parsed_old_round_names_no_performance() {
+    // The first paragraph is an indented code block on GitHub.
+    let indented = ROUND
+        .replace(
+            "\nReviewers: reviewer\n",
+            "\n    Reviewers: reviewer, performance\n",
+        )
+        .replace("\nBreaker:", "\n    Breaker:")
+        .replace("\nRange:", "\n    Range:")
+        .replace("\nFindings:", "\n    Findings:")
+        .replace("Hot path: none", "Hot path: `send`");
+    assert_ne!(indented, ROUND);
+    assert_eq!(
+        check(&record(vec![old(&indented)])),
+        vec![
+            "review round 3 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_parsed_old_round_reads_performance_from_any_reviewers_line() {
+    let named = ROUND
+        .replace(
+            "weakening.\n\n",
+            "weakening.\n\nReviewers: reviewer, performance\n\n",
+        )
+        .replace("Hot path: none", "Hot path: `send`");
+    assert_ne!(named, ROUND);
+    assert_eq!(check(&record(vec![old(&named)])), Vec::<String>::new());
+}
+
+#[test]
+fn a_lone_carriage_return_ends_a_line_of_an_approval() {
+    let head = "Quality: 8/10\rGood.\r\rDirector: approved at `c77c67d7`.";
+    assert_eq!(check(&red(&[head])), Vec::<String>::new());
+}

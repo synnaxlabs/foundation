@@ -63,7 +63,8 @@ struct Round {
     from: String,
     end: String,
     findings: u32,
-    /// The `Hot path:` line names a function, so the round requires `performance`.
+    /// The `Hot path:` end line names a function, so the round requires
+    /// `performance`. Always `false` for an old round, which [`Parsed`] checks.
     hot: bool,
 }
 
@@ -73,9 +74,15 @@ struct Malformed {
     /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form.
     fixed: bool,
     problem: String,
-    /// The problem of an old round that names a hot path ([`named`]) and that no
-    /// `Reviewers:` line names `performance` in ([`performer`]).
-    hot: Option<String>,
+}
+
+/// A comment with a `## Review round <n>` line.
+#[derive(Debug)]
+struct Parsed {
+    round: Result<Round, Malformed>,
+    /// The problem of an old round, parsed or not, that names a hot path ([`named`])
+    /// and that no `Reviewers:` line names `performance` in ([`performer`]).
+    performance: Option<String>,
 }
 
 /// Checks that the review of PR `pr` is done at commit `head`: its last round
@@ -145,9 +152,9 @@ fn problems(
              {FORMAT}"
         ));
     }
-    for (i, (old, round)) in rounds.iter().enumerate() {
+    for (i, (old, parsed)) in rounds.iter().enumerate() {
         let last = i + 1 == rounds.len();
-        match round {
+        match &parsed.round {
             Ok(round) => {
                 problems.extend(unnamed(round, &record.files, last, code_change)?);
             }
@@ -155,11 +162,17 @@ fn problems(
                 if !*old || last || e.fixed {
                     problems.push(e.problem.clone());
                 }
-                problems.extend(e.hot.clone());
             }
         }
+        problems.extend(parsed.performance.clone());
     }
-    if let Some((_, Ok(round))) = rounds.last() {
+    if let Some((
+        _,
+        Parsed {
+            round: Ok(round), ..
+        },
+    )) = rounds.last()
+    {
         if round.findings > 0 {
             problems.push(format!(
                 "review round {} has findings ({}). Fix or answer them, then run \
@@ -245,7 +258,7 @@ fn approval(record: &Record, head: &str) -> Option<String> {
         .comments
         .iter()
         .filter(|c| c.author == BOT)
-        .flat_map(|c| c.body.lines())
+        .flat_map(|c| lines(&c.body))
         .filter_map(|l| l.trim().strip_prefix("Director: approved at "))
         .map(|sha| sha.trim_matches(['`', '.']))
         .any(|sha| sha.len() >= 7 && head.starts_with(sha));
@@ -279,12 +292,10 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 /// The fields are the first paragraph after that line, so the findings text cannot
 /// set them. The last paragraph is the end lines ([`END`]), unless the comment is
 /// `old`, posted before [`CUTOFF`].
-fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
-    // A lone `\r` ends a line, as in CommonMark.
-    let body = body.replace("\r\n", "\n").replace('\r', "\n");
+fn round(body: &str, old: bool) -> Option<Parsed> {
     // Only the end lines keep their indent: an indented one is a quote, not a line.
     // Only spaces and tabs may end a closing fence.
-    let mut lines = body.lines().map(|l| l.trim_end_matches([' ', '\t']));
+    let mut lines = lines(body).map(|l| l.trim_end_matches([' ', '\t']));
     let number = lines.find_map(|l| l.trim_start().strip_prefix("## Review round "))?;
     let paragraphs = paragraphs(lines);
     let lines = paragraphs
@@ -297,18 +308,18 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
     let findings = field("Findings: ");
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
     let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
-    let named = old && named(&paragraphs);
-    let performance = (named && !performer(&paragraphs)).then(|| {
-        format!(
-            "review round {number} names no performance, which this round requires."
-        )
-    });
+    let performance =
+        (old && named(&paragraphs) && !performer(&paragraphs)).then(|| {
+            format!(
+                "review round {number} names no performance, which this round requires."
+            )
+        });
     let Ok(number) = number.parse::<u32>() else {
-        return Some(Err(Malformed {
-            fixed,
-            problem: format!("`## Review round {number}` has no round number"),
-            hot: performance,
-        }));
+        let problem = format!("`## Review round {number}` has no round number");
+        return Some(Parsed {
+            round: Err(Malformed { fixed, problem }),
+            performance,
+        });
     };
     let missing = |name| {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
@@ -330,7 +341,7 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
             })?,
         };
         let hot = if old {
-            named
+            false
         } else {
             let rest = paragraphs.get(1..).unwrap_or_default();
             hot(rest.last().map_or(&[][..], Vec::as_slice), number)?
@@ -345,11 +356,16 @@ fn round(body: &str, old: bool) -> Option<Result<Round, Malformed>> {
             hot,
         })
     };
-    Some(fields().map_err(|problem| Malformed {
-        fixed,
-        problem,
-        hot: performance,
-    }))
+    Some(Parsed {
+        round: fields().map_err(|problem| Malformed { fixed, problem }),
+        performance,
+    })
+}
+
+/// The lines of `text`, each ended by `\n`, `\r\n`, or a lone `\r`, as GitHub reads them.
+fn lines(text: &str) -> impl Iterator<Item = &str> + Clone {
+    text.split('\n')
+        .flat_map(|l| l.strip_suffix('\r').unwrap_or(l).split('\r'))
 }
 
 /// The paragraphs of `lines`, split at blank lines. Each line of a code block, blank
