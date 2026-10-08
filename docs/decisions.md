@@ -3793,14 +3793,14 @@ How to read this record:
 - **FIRST ADMIN (2026-10-08)** A node that starts a new mesh has an empty spec, and
   under BQ12 only a key that the spec names can sign an apply. So the first
   `foundation start` of that node, on an empty data directory, creates the spec with
-  one admin subject, and writes the admin's private key into the data directory,
-  readable only by the user who started the node. The CLI on the same host signs with
-  that key, so the first `apply` needs no key step. A node that joins by ticket
+  one admin subject. It writes the admin's private key into the data directory, and
+  only the user who started the node can read the key. The CLI on the same host signs
+  with that key, so the first `apply` needs no key step. A node that joins by ticket
   (BQ11a) joins a mesh that has a spec, so it creates none. BQ12 holds as written:
-  each apply, the first one too, is checked against a key in the spec. Lost: the first
-  apply from any local process (any local user could then take the node), and an
-  admin public key given before the first start (a step before the first use). Decided
-  by the person ("Yes, I approve."), relayed by `laptop.monitor` at
+  each node checks each apply, the first one too, against a key in the spec. Lost: the
+  first apply from any local process, since any local user could then take the node.
+  Also lost: an admin public key given before the first start, a step before the first
+  use. Decided by the person ("Yes, I approve."), relayed by `laptop.monitor` at
   2026-10-08T02:43:43Z:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
   #1744 plan names the subject, its access policy, and the key file, as
