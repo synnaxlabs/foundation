@@ -701,11 +701,7 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let (key, clock, entropy) = (
-            self.endpoint.key,
-            self.endpoint.clock.clone(),
-            self.endpoint.entropy.clone(),
-        );
+        let (key, entropy) = (self.endpoint.key, self.endpoint.entropy.clone());
         let (transport, mesh) =
             match self.endpoint.open(files, pool, tasks.clone()).await {
                 Ok(opened) => opened,
@@ -717,7 +713,6 @@ impl Serve {
             tasks: tasks.clone(),
             node: key,
             time: self.time,
-            clock,
             entropy,
         });
         let ended = mesh.as_ref().map(mesh::Mesh::ended);

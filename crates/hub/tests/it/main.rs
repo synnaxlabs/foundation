@@ -127,7 +127,6 @@ impl Test {
             }),
             node: NODE,
             time: mesh.clone(),
-            clock: node.clock(),
             entropy: node.entropy(),
         });
         for (key, channel, data_type, index) in CHANNELS {

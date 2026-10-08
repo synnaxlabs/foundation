@@ -24,7 +24,6 @@ pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         tasks,
         node: types::node::Key::from_u128(1),
         time,
-        clock: node.clock(),
         entropy: node.entropy(),
     });
     for (key, channel, scalar) in

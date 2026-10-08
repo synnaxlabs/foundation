@@ -6,10 +6,9 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use access::proof::{CAP, Error as Refusal};
+use access::proof::Error as Refusal;
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
-use types::time::{Interval, Span, Stamp};
 use wire::hub::client::{
     CAPPED, CHANGED, Challenge, EXPIRED, FromProgram, Gateway, REFUSED, Response,
     Signed, UNSYNCED, VIA,
@@ -191,7 +190,7 @@ async fn challenge(shared: &Shared, sender: &mut Sender) -> Result<[u8; 16], Err
 /// Waits until the hello that the link holds expires, and gives the refusal.
 async fn expiry(shared: &Shared) -> Error {
     loop {
-        let sleep = {
+        let wait = {
             let state = shared.state.borrow();
             let admitted = shared.admitted.borrow();
             let (admitted, _) = admitted
@@ -203,25 +202,16 @@ async fn expiry(shared: &Shared) -> Error {
                 .now()
                 .mesh
                 .expect("invariant: mesh time stays once the clock has synced");
-            match gap(expires, now) {
-                Some(gap) => state.clock.sleep(gap),
-                None => {
-                    return Error::Access(Refusal::Expired {
-                        expires,
-                        now: now.latest,
-                    });
-                }
+            if now.latest >= expires {
+                return Error::Access(Refusal::Expired {
+                    expires,
+                    now: now.latest,
+                });
             }
+            state.time.reach(expires)
         };
-        sleep.await;
+        wait.await;
     }
-}
-
-/// The span until the latest edge of `now` reaches `expires`, or `None` once it has.
-/// A slew can move that edge slower than the monotonic clock, so the caller reads
-/// mesh time again after it sleeps.
-fn gap(expires: Stamp, now: Interval) -> Option<Span> {
-    (now.latest < expires).then(|| expires.checked_since(now.latest).unwrap_or(CAP))
 }
 
 /// Serves a request stream of `shared`: reads and verifies the request.
@@ -325,37 +315,9 @@ async fn respond(
 
 #[cfg(test)]
 mod tests {
+    use types::time::Stamp;
+
     use super::*;
-
-    fn at(earliest: i64, latest: i64) -> Interval {
-        Interval {
-            earliest: Stamp::from_nanos(earliest),
-            latest: Stamp::from_nanos(latest),
-        }
-    }
-
-    #[test]
-    fn gap_is_the_span_from_the_latest_edge_to_the_expiry() {
-        assert_eq!(
-            gap(Stamp::from_nanos(100), at(10, 40)),
-            Some(Span::from_nanos(60))
-        );
-        assert_eq!(
-            gap(Stamp::from_nanos(41), at(10, 40)),
-            Some(Span::from_nanos(1))
-        );
-    }
-
-    #[test]
-    fn a_hello_has_expired_once_the_latest_edge_reaches_it() {
-        assert_eq!(gap(Stamp::from_nanos(40), at(10, 40)), None);
-        assert_eq!(gap(Stamp::from_nanos(39), at(10, 40)), None);
-    }
-
-    #[test]
-    fn a_gap_past_a_span_waits_for_the_cap() {
-        assert_eq!(gap(Stamp::from_nanos(i64::MAX), at(-10, -1)), Some(CAP));
-    }
 
     #[test]
     fn each_refusal_has_its_code() {

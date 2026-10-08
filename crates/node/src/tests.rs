@@ -2095,7 +2095,6 @@ mod hub {
                     tasks: spawn,
                     node: types::node::Key::from_u128(1),
                     time,
-                    clock: monotonic.clone(),
                     entropy,
                 });
                 define(&hub, 1, "time", STAMP, 1);

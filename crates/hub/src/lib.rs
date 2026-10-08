@@ -56,9 +56,6 @@ pub struct Config {
     pub node: types::node::Key,
     /// Mesh time, which the hub checks each hello and request against.
     pub time: clock::Reader,
-    /// The monotonic clock that `time` reads, on which the hub waits for a hello's
-    /// expiry.
-    pub clock: env::clock::Clock,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
 }
@@ -81,7 +78,6 @@ struct State {
     failed: Option<env::files::Error>,
     node: types::node::Key,
     time: clock::Reader,
-    clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::rules`] first runs.
     rules: access::Rules,
@@ -102,7 +98,6 @@ impl Hub {
             tasks,
             node,
             time,
-            clock,
             entropy,
         } = config;
         let state = Rc::new(RefCell::new(State {
@@ -116,7 +111,6 @@ impl Hub {
             failed: None,
             node,
             time,
-            clock,
             entropy,
             rules: access::Rules::new(std::iter::empty::<(
                 Prefix,

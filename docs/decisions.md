@@ -4559,9 +4559,9 @@ How to read this record:
   takes the role of the stream at the call: the first stream of a client session is
   its hello stream, and each later one a request stream. `hub::Config` gets `node`
   (the `via` that `admit` checks), `time` (`clock::Reader`), and `entropy` (the
-  nonces). The link waits for a hello's expiry through `clock`, which knows how mesh
-  time moves against the monotonic clock; `hub` gets no second clock unless the owner
-  of `clock` refuses that wait. A link has one open request: it frees the request when
+  nonces). The link waits for a hello's expiry with `clock::Reader::reach` (CLOCK
+  REACH), so `hub` knows nothing of how mesh time moves against the monotonic clock,
+  and gets no second clock. A link has one open request: it frees the request when
   `Reply::send` is called or the `Reply` drops, before the first byte of the response,
   so a client that sends its next request when a reply ends never gets `MALFORMED`.
   `Reply::send` panics on a body over `BODY_BYTES_MAX`, a precondition that the maker of
