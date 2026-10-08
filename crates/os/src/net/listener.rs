@@ -170,6 +170,8 @@ mod tests {
         let listener = Listener::listen(&config).unwrap();
         let _client = std::net::TcpStream::connect(listener.local).unwrap();
         let fd = listener.socket.fd().unwrap();
+        // macOS can queue the connection after `connect` returns.
+        rustix::fs::fcntl_setfl(fd, OFlags::empty()).unwrap();
         let accepted = rustix::net::accept(fd).unwrap();
         let kept = super::super::tests::kept;
         assert_eq!(
