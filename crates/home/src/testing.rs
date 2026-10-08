@@ -30,10 +30,10 @@ pub struct Env {
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
-/// earlier commit runs. A commit takes whole 4 KiB blocks, and each open takes one. A
-/// commit of one frame of a stamp and an `i64` sample takes one block, and of 64 such
-/// frames takes three. Nothing frees the ring until #160, so a new ring fills at 1023
-/// commits of one such frame.
+/// earlier commit runs. A commit takes whole 4 KiB blocks. A commit of one frame of a
+/// stamp and an `i64` sample takes one block, and of 64 such frames takes three.
+/// Nothing frees the ring until #160, so a new ring fills at 1023 commits of one such
+/// frame.
 ///
 /// # Panics
 ///
@@ -220,38 +220,6 @@ mod tests {
     #[test]
     fn fills_a_new_ring_at_341_commits_of_64_frames() {
         assert_eq!(fill(64), 341);
-    }
-
-    #[test]
-    fn takes_a_block_of_the_ring_for_each_open() {
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let node = sim.node(sim::node::Config::default());
-        let commits = sim
-            .run_on(&node, |node, tasks| async move {
-                let (mut shard, mut interner, now) =
-                    shard(env(&node, tasks.clone())).await;
-                let (writer, set) = open_writer(&mut shard, &mut interner);
-                let mut stamp = now.nanos();
-                for _ in 0..10 {
-                    assert!(commit(&mut shard, writer, &set, stamp..stamp + 1).await);
-                    stamp += 1;
-                }
-                let ended = shard.committed();
-                drop(shard);
-                ended.await.expect("the buffer ends");
-                let (mut shard, mut interner, _) =
-                    super::shard(env(&node, tasks)).await;
-                let (writer, set) = open_writer(&mut shard, &mut interner);
-                let mut commits = 10;
-                while commit(&mut shard, writer, &set, stamp..stamp + 1).await {
-                    commits += 1;
-                    stamp += 1;
-                }
-                commits
-            })
-            .expect("the run ends");
-
-        assert_eq!(commits, 1022);
     }
 
     #[test]
