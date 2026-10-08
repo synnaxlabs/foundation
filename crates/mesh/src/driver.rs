@@ -1778,7 +1778,8 @@ mod tests {
     }
 
     // Both proposals enter before the group's write, which then waits for a block.
-    // The group refuses a proposal that comes while it waits.
+    // The group refuses a proposal that comes while it waits. Each call then runs on
+    // its own task, so each needs its own wake.
     #[test]
     fn each_proposal_returns_after_the_write_of_its_entry() {
         for seed in 0..16 {
@@ -1791,15 +1792,25 @@ mod tests {
                 let mesh = Mesh::start(config).await.unwrap();
                 let first = lead(&mesh, &node.clock(), home(1)).await;
                 let held = fill(&pool);
-                let mut calls = [2, 3].map(|id| Box::pin(mesh.propose(home(id))));
+                let mut calls = [2, 3].map(|id| {
+                    let other = mesh.clone();
+                    Box::pin(async move { other.propose(home(id)).await })
+                });
                 assert_eq!(poll_each(&mut calls).await, [Poll::Pending, Poll::Pending]);
+                let results = Rc::new(RefCell::new([None, None]));
+                for (slot, call) in calls.into_iter().enumerate() {
+                    let given = Rc::clone(&results);
+                    tasks.spawn(async move {
+                        let result = call.await;
+                        given.borrow_mut()[slot] = Some(result);
+                    });
+                }
                 node.clock().sleep(Span::from_nanos(TICK.nanos() * 3)).await;
-                assert_eq!(poll_each(&mut calls).await, [Poll::Pending, Poll::Pending]);
+                assert_eq!(*results.borrow(), [None, None]);
                 drop(held);
                 node.clock().sleep(Span::from_nanos(TICK.nanos() * 2)).await;
-                let positions =
-                    [after(first, 1), after(first, 2)].map(Ok).map(Poll::Ready);
-                assert_eq!(poll_each(&mut calls).await, positions);
+                let positions = [after(first, 1), after(first, 2)].map(Ok).map(Some);
+                assert_eq!(*results.borrow(), positions);
             });
         }
     }
