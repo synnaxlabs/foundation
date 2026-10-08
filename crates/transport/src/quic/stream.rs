@@ -432,8 +432,8 @@ impl Half {
     }
 }
 
-/// The longest chunk that noq-proto copies into its own buffer. It keeps a longer
-/// chunk until the ACK.
+/// The longest chunk that noq-proto copies into its own buffer: `MAX_COMBINE` of its
+/// `send_buffer` in 1.3.0. It keeps a longer chunk until the ACK.
 const COPIED_MAX: usize = 1452;
 
 /// Makes `kept` the parts from the one that `head` cuts on, with `tail` parts after
