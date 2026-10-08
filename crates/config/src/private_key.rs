@@ -3,21 +3,31 @@ use document::value::{Kind, Value};
 use document::{Document, Map, Span};
 
 const PRIVATE_KEY: Code = Code::new("config.private-key");
-/// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, and a
-/// `.ppk` file of `PuTTYgen`.
-const MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
+/// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, a `.ppk`
+/// file of `PuTTYgen`, the base64 start of an OpenSSH body, and the base64 of the
+/// algorithm and key header (`30 05 06 03 2B 65 70 04 22 04 20`) of an Ed25519
+/// PKCS #8 body of any version, with no header lines. The length of the body moves
+/// that header, so it has one mark for each of its offsets modulo 3. Each base64 mark
+/// is whole 3-byte groups at an offset of whole groups, so the bytes around it do not
+/// change it.
+const MARKS: [&str; 6] = [
+    "PRIVATE KEY",
+    "PuTTY-User-Key-File",
+    "b3BlbnNzaC1rZXktdjEA",
+    "BQYDK2VwBCIE",
+    "MAUGAytlcAQi",
+    "BgMrZXAEIgQg",
+];
 
 /// `config.private-key` at each string of `documents` that holds a private key, in
-/// any block, label, key, or value at any depth. The alarms are in the order of
-/// `documents`, then in source order, and quote none of the text.
+/// any block, label, key, or value at any depth. The alarms are in the order of their
+/// [`document::Source`], then in source order, and quote none of the text.
 pub(crate) fn alarms(documents: &[Document]) -> Vec<Diagnostic> {
     let mut alarms = Vec::new();
     for document in documents {
-        let start = alarms.len();
         in_document(document, &mut alarms);
-        alarms[start..]
-            .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
+    crate::sort(&mut alarms);
     alarms
 }
 

@@ -77,6 +77,28 @@ impl<R> Kind<R> {
         };
         edges.into_iter().flatten()
     }
+
+    /// The same kind, with each edge mapped by `f`, in the order index, quality, error,
+    /// control. Units are not checked again.
+    pub fn map<S>(self, mut f: impl FnMut(R) -> S) -> Kind<S> {
+        match self {
+            Self::Index { error, control } => Kind::Index {
+                error: error.map(&mut f),
+                control: control.map(&mut f),
+            },
+            Self::Data(Data {
+                index,
+                quality,
+                data_type,
+                unit,
+            }) => Kind::Data(Data {
+                index: f(index),
+                quality: quality.map(f),
+                data_type,
+                unit,
+            }),
+        }
+    }
 }
 
 /// A data channel: what its values are, their unit, and the channels it points at.
@@ -262,6 +284,46 @@ mod tests {
                 let data = data(data_type.clone(), unit).unwrap();
                 assert_eq!(data.data_type(), &data_type);
             }
+        }
+    }
+
+    mod map {
+        use super::*;
+
+        /// Maps each edge in `kind` to upper case, and gives each edge it saw.
+        fn map(kind: Kind<&'static str>) -> (Kind<String>, Vec<&'static str>) {
+            let mut seen = Vec::new();
+            let mapped = kind.map(|to| {
+                seen.push(to);
+                to.to_uppercase()
+            });
+            (mapped, seen)
+        }
+
+        #[test]
+        fn maps_each_edge_in_edge_order_and_keeps_the_rest() {
+            let unit = || Some(Unit::new("kPa").unwrap());
+            let f64 = || DataType::Sample(sample::Type::Scalar(Scalar::F64));
+            let data = Data::new("t", Some("q"), f64(), unit()).unwrap();
+            let upper = Data::new("T".into(), Some("Q".into()), f64(), unit());
+            assert_eq!(
+                map(Kind::Data(data)),
+                (Kind::Data(upper.unwrap()), vec!["t", "q"])
+            );
+            let index = |error, control| Kind::Index { error, control };
+            let upper = |error: Option<&str>, control: Option<&str>| Kind::Index {
+                error: error.map(Into::into),
+                control: control.map(Into::into),
+            };
+            assert_eq!(
+                map(index(Some("e"), Some("c"))),
+                (upper(Some("E"), Some("C")), vec!["e", "c"])
+            );
+            assert_eq!(
+                map(index(None, Some("c"))),
+                (upper(None, Some("C")), vec!["c"])
+            );
+            assert_eq!(map(index(None, None)), (upper(None, None), vec![]));
         }
     }
 

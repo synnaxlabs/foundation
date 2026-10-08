@@ -318,6 +318,24 @@ fn keeps_each_policy_with_the_region_of_its_tree() {
     assert_eq!(grant(&rules, "ops.ana", "site_b.pt_1").actions(), plan);
 }
 
+fn subject() -> Definition {
+    Definition::Subject(Subject::new(vec![PublicKey::new([2; 32]).unwrap()]).unwrap())
+}
+
+#[test]
+#[should_panic(expected = "has a label at each subject key, not at ops.@x.@subject")]
+fn panics_at_a_subject_key_with_no_label() {
+    let tree = Tree::from([(name("ops.@x.@subject"), subject())]);
+    Rules::new([(name("ops").into(), &tree)]);
+}
+
+#[test]
+#[should_panic(expected = "has a label at each subject key, not at ops.ana")]
+fn panics_at_a_subject_definition_off_its_subject_key() {
+    let tree = Tree::from([(name("ops.ana"), subject())]);
+    Rules::new([(Prefix::ROOT, &tree)]);
+}
+
 fn arbitrary_policy() -> impl Strategy<Value = (&'static str, Policy)> {
     let regions = prop::sample::select(vec!["", "a", "a.b", "b"]);
     let selects = prop::sample::select(vec!["**", "a.**", "b.*", "a.b.**", "*.x"]);
