@@ -16,7 +16,7 @@ const PRIVATE_KEY: Code = Code::new("config.private-key");
 const NO_PUBLIC_KEYS: Code = Code::new("config.no-public-keys");
 const DUPLICATE_PUBLIC_KEY: Code = Code::new("config.duplicate-public-key");
 /// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, and a
-/// PuTTY `.ppk` file.
+/// `.ppk` file of `PuTTYgen`.
 const PRIVATE_MARKS: [&str; 2] = ["PRIVATE KEY", "PuTTY-User-Key-File"];
 const KEYS: [&str; 1] = ["keys"];
 const ALGORITHM: &str = "ssh-ed25519";
