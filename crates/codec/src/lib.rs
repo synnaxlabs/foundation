@@ -469,8 +469,9 @@ struct Text {
     held: usize,
     /// The bytes of the char in `char`.
     width: usize,
-    /// The first byte that UTF-8 cannot hold, once known.
-    invalid: Option<usize>,
+    /// The bytes before the first byte that UTF-8 cannot hold, or before the end once
+    /// finished, once known.
+    valid: Option<usize>,
 }
 
 impl Text {
@@ -478,7 +479,7 @@ impl Text {
     fn take(&mut self, piece: &[u8]) {
         let mut at = self.len;
         self.len = self.len.strict_add(piece.len());
-        if self.invalid.is_some() {
+        if self.valid.is_some() {
             return;
         }
         let mut piece = piece;
@@ -501,7 +502,7 @@ impl Text {
                     return;
                 }
                 Err(_) => {
-                    self.invalid = Some(at.strict_sub(self.held));
+                    self.valid = Some(at.strict_sub(self.held));
                     return;
                 }
             }
@@ -522,22 +523,20 @@ impl Text {
                     .expect("invariant: a char takes at most 4 bytes")
                     .copy_from_slice(tail);
             }
-            Err(error) => self.invalid = Some(at.strict_add(error.valid_up_to())),
+            Err(error) => self.valid = Some(at.strict_add(error.valid_up_to())),
         }
     }
 
     /// Ends the text.
     fn finish(&mut self) {
-        if self.held > 0 {
-            self.invalid.get_or_insert(self.len.strict_sub(self.held));
-        }
+        self.valid.get_or_insert(self.len.strict_sub(self.held));
     }
 
     /// Whether a UTF-8 sample may end at byte `end` of the text, given the byte there,
     /// or `None` at the end of the text, once each byte up to it is taken. Each sample
     /// is UTF-8 exactly when each may end at its end.
     fn splits(&self, end: usize, byte: Option<u8>) -> bool {
-        match self.invalid.map(|invalid| end.cmp(&invalid)) {
+        match self.valid.map(|valid| end.cmp(&valid)) {
             Some(Ordering::Greater) => false,
             Some(Ordering::Equal) => true,
             Some(Ordering::Less) | None => byte.is_none_or(|byte| byte & 0xc0 != 0x80),
@@ -2285,6 +2284,10 @@ mod tests {
             elements.extend("\u{20ac}".as_bytes());
             let ends = [1_024, 1_025];
             refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 0 });
+            let mut elements = vec![b'a'; 1_023];
+            elements.extend(b"\xf0\x9fA\x80\x80bb");
+            let ends = [1_025, 1_030];
+            refuses(Type::String, &ends, &elements, &Error::Utf8 { sample: 0 });
         }
 
         #[test]
@@ -2293,14 +2296,16 @@ mod tests {
             for byte in "\u{1f600}".bytes() {
                 text.take(&[byte]);
             }
-            assert_eq!(text.invalid, None);
+            assert_eq!(text.valid, None);
             assert!(text.splits(0, Some(0xf0)));
             assert!(!text.splits(1, Some(0x9f)));
-            for piece in [b"\xf0", b"\x9f", b"A", b"\xff"] {
+            for piece in [b"\xf0", b"\x9f", b"A"] {
                 text.take(piece);
             }
+            assert_eq!(text.valid, Some(4));
+            text.take(b"\xff");
             text.finish();
-            assert_eq!(text.invalid, Some(4));
+            assert_eq!(text.valid, Some(4));
             assert!(text.splits(4, Some(0xf0)));
             assert!(!text.splits(5, Some(0x9f)));
         }
@@ -2309,9 +2314,9 @@ mod tests {
         fn finds_a_char_that_the_text_ends_inside() {
             let mut text = Text::default();
             text.take(b"ab\xe2\x82");
-            assert_eq!(text.invalid, None);
+            assert_eq!(text.valid, None);
             text.finish();
-            assert_eq!(text.invalid, Some(2));
+            assert_eq!(text.valid, Some(2));
         }
 
         #[test]
