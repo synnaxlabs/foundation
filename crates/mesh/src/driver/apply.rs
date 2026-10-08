@@ -28,9 +28,9 @@ impl Mesh {
     /// committed and this node applied it. It tries again when a new leader replaces
     /// the entry, and after each tick while no leader takes it, as [`Mesh::set_home`]
     /// does. A call whose entry finds the pointer that the call makes, after a lost
-    /// answer or an equal change of another call, returns that pointer. A retry that
-    /// finds a later pointer gives `Stale`, even when an entry of this call applied
-    /// before it.
+    /// answer or an equal change of another call, returns that pointer when each index
+    /// of `homes` has its listed home, and else gives `Stale`. A retry that finds a
+    /// later pointer gives `Stale`, even when an entry of this call applied before it.
     ///
     /// # Errors
     ///
@@ -51,7 +51,7 @@ impl Mesh {
     /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
     ///   each half of the voters, before the proposal or at the apply.
     /// - [`Error::Stale`] when the pointer is not `base`, or the pointer this call
-    ///   makes, at the apply.
+    ///   makes with each home of `homes`, at the apply.
     ///
     /// # Panics
     ///
@@ -135,14 +135,15 @@ impl Mesh {
             root,
             chunks,
             holders,
-            homes,
+            homes: homes.clone(),
         };
         loop {
             match self.attempt()?.settle(change.clone()).await? {
                 Some(Ok(())) => return Ok(base.next(root)),
                 Some(Err(Refused::Stale { pointer, .. }))
                     if pointer.root == root
-                        && pointer.version.checked_sub(1) == Some(base.version) =>
+                        && pointer.version.checked_sub(1) == Some(base.version)
+                        && self.holds(&homes) =>
                 {
                     return Ok(pointer);
                 }
@@ -150,6 +151,14 @@ impl Mesh {
                 None => {}
             }
         }
+    }
+
+    // Whether each index of `homes` has its listed home, as this node applied.
+    fn holds(&self, homes: &BTreeMap<channel::Key, node::Key>) -> bool {
+        let group = self.group.borrow();
+        homes
+            .iter()
+            .all(|(&index, &home)| group.state.home(index) == Some(home))
     }
 
     // The chunks of the tree of `update` that the tree at `base` lacks, or each chunk

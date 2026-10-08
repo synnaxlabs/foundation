@@ -805,6 +805,28 @@ fn apply_gives_each_listed_index_the_member_of_its_name_as_its_home() {
     });
 }
 
+// An equal change of another call gives `Ok` only when each home it lists holds.
+#[test]
+fn an_equal_change_with_other_homes_gives_stale() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let definitions = create_indexes(1);
+        let moved = pointer(1, &definitions);
+        let first = create_homes(1, "plant.node1");
+        let applied = mesh.apply(base(), definitions.clone(), first.clone()).await;
+        assert_eq!(applied, Ok(moved));
+        let other = create_homes(1, "plant.node2");
+        let applied = mesh.apply(base(), definitions.clone(), other).await;
+        let stale = Error::Stale {
+            base: base(),
+            pointer: moved,
+        };
+        assert_eq!(applied, Err(stale));
+        assert_eq!(mesh.apply(base(), definitions, first).await, Ok(moved));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+    });
+}
+
 /// A waker that counts its wakes.
 struct Counted(AtomicUsize);
 
