@@ -59,6 +59,7 @@ impl Kind {
             Self::Placement => "placement",
             Self::Time => "time",
             Self::Retention => "retention",
+            Self::Subject => "subject",
         }
     }
 }
@@ -111,7 +112,7 @@ mod tests {
     use super::*;
 
     /// Each kind with a segment.
-    const KINDS: [(Kind, &str); 7] = [
+    const KINDS: [(Kind, &str); 8] = [
         (Kind::Access, "@access"),
         (Kind::Region, "@region"),
         (Kind::NodeSettings, "@node_settings"),
@@ -119,6 +120,7 @@ mod tests {
         (Kind::Placement, "@placement"),
         (Kind::Time, "@time"),
         (Kind::Retention, "@retention"),
+        (Kind::Subject, "@subject"),
     ];
 
     fn name(text: &str) -> Name {

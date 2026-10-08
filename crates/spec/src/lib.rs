@@ -14,6 +14,7 @@ pub mod placement;
 pub mod region;
 mod resolve;
 pub mod retention;
+pub mod subject;
 pub mod time;
 pub mod tree;
 pub mod unit;
