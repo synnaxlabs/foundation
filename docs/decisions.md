@@ -4654,12 +4654,15 @@ How to read this record:
   `Unplaced` is `config.unplaced` at the label of the connector. `config.connector-home`
   (X22) is at the `home` of a placement `p` that wins for a connector `a` on the node
   `n` and names another node. Its fix is "Name `n` as the `home`, and keep `n` out of
-  `standby` and `copies`" when `p` wins for no connector on another node, else "Exclude
-  the connector `a` and its indexes from the `select` of `p`, and select them with
-  another placement whose `home` is `n`", which changes no other connector of `p`, and
-  which lists with `p` each placement that wins for an index of `a`. The indexes of a
-  connector are those whose nearest connector it is, as `config.split-placement` reads
-  them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  `standby` and `copies`" when `p` wins for no connector on another node, and for no
+  index whose nearest connector is on another node, since a new `home` moves each index
+  that `p` wins (`laptop.architect`, 2026-10-08T16:22:59Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064298961). Else it
+  is "Exclude the connector `a` and its indexes from the `select` of `p`, and select
+  them with another placement whose `home` is `n`", which changes no other connector of
+  `p`, and which lists after `p` each placement that wins for an index of `a`. The
+  indexes of a connector are those whose nearest connector it is, as
+  `config.split-placement` reads them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
   2026-10-08T15:21:54Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, and
@@ -4672,19 +4675,21 @@ How to read this record:
   follows the connector `d.e`, not `d`: the indexes of BQ10 are the connector's own, the
   unit of failover (`laptop.director`, #1901, 2026-10-08T15:20:28Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459). Its fix
-  is "Make the placement `p` win for the connector `c` and the index `i`", where `p`
-  wins for `c`, or for `i` when no placement selects `c` (same comment of 15:21:54Z).
-  When no placement can win for `c` and each of its indexes at the node `n` of `c`, each
-  diagnostic of `c` gives one fix that names each winner, so one edit applies it. When
-  `t` wins for `c` and gets case 2 of `config.connector-home`, the fix is that of case
-  2: "Exclude the connector `c` and its indexes from the `select` of `t` and `r`, and
-  select them with another placement whose `home` is `n`", where `t` and `r` are each
-  placement that wins for `c` or an index of `c`. When no placement selects `c`, and
-  more than one placement wins for the indexes of `c` or one names a `home` that is not
-  `n`, the fix is "Exclude the indexes of the connector `c` from the `select` of `p`,
-  and select the connector and its indexes with another placement whose `home` is
-  `n`", where `p` is each placement that wins for an index of `c`. A list of winners is
-  "`p`", "`p` and `q`", or "`p`, `q`, and `r`", in tree key order. "Another" keeps a
+  is "Make the placement `p` win for the connector `c` and its indexes", where `p` wins
+  for `c`, or for the index when no placement selects `c` (same comment of 15:21:54Z,
+  and `laptop.architect`, 2026-10-08T16:22:59Z). It is the target state that each other
+  fix names, so each diagnostic of `c` gives one edit. When no placement can win for `c`
+  and each of its indexes at the node `n` of `c`, each diagnostic of `c` gives one fix
+  that names each winner, so one edit applies it. When `t` wins for `c` and gets case 2
+  of `config.connector-home`, the fix is that of case 2: "Exclude the connector `c` and
+  its indexes from the `select` of `t` and `r`, and select them with another placement
+  whose `home` is `n`", where `t` and `r` are each placement that wins for `c` or an
+  index of `c`. When no placement selects `c`, and more than one placement wins for the
+  indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the indexes
+  of the connector `c` from the `select` of `p`, and select the connector and its
+  indexes with another placement whose `home` is `n`", where `p` is each placement that
+  wins for an index of `c`. A list of winners is "`p`", "`p` and `q`", or "`p`, `q`, and
+  `r`": the winner of `c` first, then the others in tree key order. "Another" keeps a
   listed placement from being the new one, which its exclusion would empty
   (`laptop.architect`, 2026-10-08T15:46:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
@@ -4707,11 +4712,18 @@ How to read this record:
   name, and the `config.split-placement` fix "and each name under it", which also
   moves the indexes of a nested connector, and, when no placement can win for `c` and
   each of its indexes at `n`, a fix that names one placement, which moves the index `i`
-  alone or conflicts with the fix of another diagnostic of `c`.
+  alone or conflicts with the fix of another diagnostic of `c`, case 1 when `p` wins
+  for an index whose nearest connector is on another node, which moves that index away
+  from its connector, and the `config.split-placement` fix "and the index `i`", which
+  gives each split diagnostic of `c` another edit.
   Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, the
+  case 1 condition of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556, the
+  `config.split-placement` fix "and the index `i`" of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126, the
   check of an index against each connector above it of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063036478, case 2 of
   the `config.connector-home` fix of
