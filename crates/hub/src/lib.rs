@@ -71,7 +71,11 @@ struct State {
 
 impl Hub {
     /// A hub over `config.home` that knows no channel yet. Spawns a task on
-    /// `config.tasks` that runs until the shard stops.
+    /// `config.tasks` that ends when the home's buffer fails, or once the hub and each
+    /// of its sessions have dropped. Once the hub and each of its sessions drop, it
+    /// holds no part of the home. So a `::home::Commit` taken before `new` and awaited
+    /// after that drop resolves once the buffer's task ended, and when the caller holds
+    /// no other part of the home, the ring closes when that commit drops.
     #[must_use]
     pub fn new(config: Config) -> Self {
         let Config {
@@ -89,7 +93,7 @@ impl Hub {
             commit: commit::Signal::default(),
             failed: None,
         }));
-        tasks.spawn(commit::run(Rc::clone(&state)));
+        tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
     }
 

@@ -1,6 +1,6 @@
 //! Entry points for the fuzz targets. Needs the `sim` feature.
 
-use crate::region::Change;
+use crate::change::Change;
 
 /// The bytes that the change record in `bytes` encodes to, or `None` when `bytes` is
 /// not a change record.
