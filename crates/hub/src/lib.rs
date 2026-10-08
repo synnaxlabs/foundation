@@ -182,8 +182,11 @@ impl Hub {
     }
 
     /// Opens a reader session on `channels`, which share one index. While the mesh
-    /// names no home for the index, it waits for one. It gets each frame of the index,
-    /// as a view of only `channels` and their index. A complete reader gets each live frame written after the returned future
+    /// names no home for the index, it waits for one. At the home of another node,
+    /// each open reader holds one stream of the one session to it, so it also waits
+    /// while that home allows this node no more streams, until another reader there
+    /// drops. It gets each frame of the index, as a view of only `channels` and their
+    /// index. A complete reader gets each live frame written after the returned future
     /// resolves, until it misses one ([`reader::Mode::Complete`]).
     ///
     /// # Errors
