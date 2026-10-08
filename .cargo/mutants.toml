@@ -24,7 +24,6 @@ exclude_re = [
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes these lines.
   'crates/transport/src/datagram\.rs:',
-  'crates/transport/src/stream\.rs:.*Receiver::recv_into\b',
   'crates/transport/src/session\.rs:.*Session::datagrams\b',
   # Parts in the block reach the sum of the slow path of `size` only when (bytes +
   # 255) times the count of parts overflows `usize`, such as 2^33 parts of a block of
