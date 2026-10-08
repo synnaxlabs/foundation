@@ -182,7 +182,7 @@ mod tests {
     use super::*;
     use crate::frame::key_set::Group;
     use crate::frame::tests::{Case, cases, frame_of, interner, key, pool};
-    use crate::frame::{Draft, Form, Path, split};
+    use crate::frame::{Draft, Form, Path, SERIES_ALIGN, split};
     use crate::sample::{Scalar, Type};
 
     const F64: Type = Type::Scalar(Scalar::F64);
@@ -315,6 +315,27 @@ mod tests {
             bytes.fill(u8::try_from(entry + 1).unwrap());
         }
         draft.freeze(Path::Live)
+    }
+
+    /// `charge` pads the last series, which a frame does not, so each block class
+    /// must end at a series start.
+    #[test]
+    fn ends_each_block_class_at_a_series_start() {
+        let mut len = 0;
+        while block::footprint(len) != usize::MAX {
+            let class = block::footprint(len);
+            let (mut low, mut high) = (len, 2 * len + 1024);
+            while high - low > 1 {
+                let mid = low + (high - low) / 2;
+                if block::footprint(mid) == class {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            assert_eq!(low % SERIES_ALIGN, 0, "the class of {len} ends at {low}");
+            len = high;
+        }
     }
 
     #[test]
