@@ -92,7 +92,7 @@ pub(crate) fn unknown(
     Diagnostic::new(
         UNKNOWN_EXTENSION,
         None,
-        format!("no config syntax reads `{}`", path.display()),
+        format!("no config syntax reads {:?}", path.display().to_string()),
         format!("Use a file that ends in {extensions}"),
     )
 }

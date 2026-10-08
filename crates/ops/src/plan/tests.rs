@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Table};
-use document::diagnostic::Diagnostic;
+use document::diagnostic::{Code, Diagnostic};
 use document::{Document, Source};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
@@ -231,10 +231,10 @@ fn refuses_a_file_that_no_front_end_reads() {
     assert_eq!(
         problems.text(),
         "\
-error[ops.unknown-extension]: no config syntax reads `plant.yaml`
+error[ops.unknown-extension]: no config syntax reads \"plant.yaml\"
 fix: Use a file that ends in `.hcl`
 
-error[ops.unknown-extension]: no config syntax reads `plant`
+error[ops.unknown-extension]: no config syntax reads \"plant\"
 fix: Use a file that ends in `.hcl`
 "
     );
@@ -243,13 +243,13 @@ fix: Use a file that ends in `.hcl`
         serde_json::json!({ "errors": [
             {
                 "code": "ops.unknown-extension",
-                "message": "no config syntax reads `plant.yaml`",
+                "message": "no config syntax reads \"plant.yaml\"",
                 "fix": "Use a file that ends in `.hcl`",
                 "notes": [],
             },
             {
                 "code": "ops.unknown-extension",
-                "message": "no config syntax reads `plant`",
+                "message": "no config syntax reads \"plant\"",
                 "fix": "Use a file that ends in `.hcl`",
                 "notes": [],
             },
@@ -384,7 +384,7 @@ error[hcl.syntax]: the file needs a key, a block, or the end of the body here
   --> bad.hcl:2:1
 fix: Write it here, or correct the text here or before it
 
-error[ops.unknown-extension]: no config syntax reads `x.yaml`
+error[ops.unknown-extension]: no config syntax reads \"x.yaml\"
 fix: Use a file that ends in `.hcl`
 "
     );
@@ -454,15 +454,49 @@ fn names_one_problem_or_the_count_and_exits_with_2() {
     );
     assert_eq!(
         problems(&[("x.yaml", "")]).to_string(),
-        "no config syntax reads `x.yaml`"
+        "no config syntax reads \"x.yaml\""
     );
 }
 
 #[test]
 fn escapes_a_control_character_in_the_text_of_a_problem() {
+    let front_ends = BTreeMap::from([(
+        "hcl",
+        FrontEnd {
+            read: |_, _| {
+                Err(vec![Diagnostic::new(
+                    Code::new("test.raw"),
+                    None,
+                    "a\u{1b}[2J\nb\\n".to_owned(),
+                    "c\rd".to_owned(),
+                )])
+            },
+        },
+    )]);
+    let error = plan(
+        &files(&[("a.hcl", "")]),
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &front_ends,
+        &Table::new(),
+    )
+    .expect_err("problems");
     assert_eq!(
-        problems(&[("a\u{1b}[2J\n.yaml", "")]).text(),
-        "error[ops.unknown-extension]: no config syntax reads `a\\u{1b}[2J\\n.yaml`\n\
+        error.text(),
+        "error[test.raw]: a\\u{1b}[2J\\nb\\n\nfix: c\\rd\n"
+    );
+}
+
+#[test]
+fn gives_two_paths_that_differ_two_texts() {
+    let problems = problems(&[("a\\n.yaml", ""), ("a\n.yaml", "")]);
+    assert_eq!(
+        problems.text(),
+        "error[ops.unknown-extension]: no config syntax reads \"a\\\\n.yaml\"\n\
+         fix: Use a file that ends in `.hcl`\n\
+         \n\
+         error[ops.unknown-extension]: no config syntax reads \"a\\n.yaml\"\n\
          fix: Use a file that ends in `.hcl`\n"
     );
 }
