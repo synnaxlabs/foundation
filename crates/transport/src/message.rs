@@ -813,19 +813,24 @@ mod tests {
         #[test]
         fn when_stream_ends_inside_a_prefix_it_fails() {
             let pool = pool(1 << 16);
-            let mut source = Source::new(vec![0x40], 64);
-            let mut reader = Reader::new(16);
-            assert_eq!(
-                read_all(&mut reader, &pool, &mut source),
-                Err(Error::Broken {
-                    reason: "the stream ended inside a message".to_owned()
-                })
-            );
-            // Private: only a peer that misframes ends a stream inside a message, and
-            // no heap count is exact in a binary with a test harness.
-            assert_eq!(reader.held.buffer.capacity(), 0);
-            let slots = reader.held.chunks.capacity();
-            assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
+            for first in [0x40, 0x80, 0xC0] {
+                let cut = vec![first; varint::len(first) - 1];
+                let mut source = Source::new(cut, 64);
+                let mut reader = Reader::new(16);
+                assert_eq!(
+                    read_all(&mut reader, &pool, &mut source),
+                    Err(Error::Broken {
+                        reason: "the stream ended inside a message".to_owned()
+                    }),
+                    "a prefix that starts with {first:#x}"
+                );
+                // Private: only a peer that misframes ends a stream inside a
+                // message, and no heap count is exact in a binary with a test
+                // harness.
+                assert_eq!(reader.held.buffer.capacity(), 0);
+                let slots = reader.held.chunks.capacity();
+                assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
+            }
         }
 
         #[test]
