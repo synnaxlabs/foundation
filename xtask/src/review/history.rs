@@ -79,8 +79,8 @@ impl<'a> History<'a> {
     /// a removed one.
     ///
     /// `None` when no line is code. `from` and `end` are SHAs or prefixes of at least
-    /// 7 digits; text that names no single commit gives the phrase "has `<text>`,
-    /// which names no commit".
+    /// 7 digits, each with an optional final `^` for its first parent; text that names
+    /// no single commit gives the phrase "has `<text>`, which names no commit".
     ///
     /// # Errors
     ///
@@ -223,9 +223,23 @@ impl<'a> History<'a> {
     }
 
     /// The full SHA of the commit that `text` names when it is a SHA or a prefix of at
-    /// least 7 digits, or `None`. A ref is never read, so a tag named like a prefix
-    /// cannot take the commit's place.
+    /// least 7 digits, or `None`. One final `^` names the first parent of that commit,
+    /// as the form `<first-fix>^..<head>` of a later round needs. A ref is never read,
+    /// so a tag named like a prefix cannot take the commit's place.
     fn named(&self, text: &str) -> Result<Option<String>, String> {
+        if let Some(child) = text.strip_suffix('^') {
+            let Some(child) = self.sha(child)? else {
+                return Ok(None);
+            };
+            let line = self.git(&["rev-list", "--parents", "-n", "1", &child])?;
+            return Ok(line.split(' ').nth(1).map(str::to_string));
+        }
+        self.sha(text)
+    }
+
+    /// The full SHA of the commit that `text` names when it is a SHA or a prefix of at
+    /// least 7 digits, or `None`.
+    fn sha(&self, text: &str) -> Result<Option<String>, String> {
         if !(7..=40).contains(&text.len())
             || !text.bytes().all(|b| b.is_ascii_hexdigit())
         {
