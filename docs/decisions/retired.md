@@ -57,3 +57,4 @@
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
 | HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
+| "It is never less than the PTO base." of 6060065670 | PROBE GAP (6066780738): the client's probe in a dial with no data in flight keeps the release's rule |
