@@ -4,7 +4,7 @@
 //! make and drop a client, its loop, and 100 timers, each C allocation of which goes
 //! through the global allocator.
 
-use connector_opcua::bench::Iteration;
+use connector_opcua::bench::Client;
 use divan::Bencher;
 use sim::Sim;
 use types::time::Span;
@@ -29,15 +29,15 @@ fn advance(bencher: Bencher<'_, '_>) {
 #[divan::bench(args = [1, 100, 10_000])]
 fn run(bencher: Bencher<'_, '_>, timers: usize) {
     let (mut sim, clock) = sim();
-    let mut iteration = Iteration::new(clock, timers);
+    let mut client = Client::new(clock, timers);
     bencher.bench_local(|| {
         sim.run_for(Span::MILLISECOND).expect("the run has no task");
-        iteration.run();
+        client.run();
     });
 }
 
 #[divan::bench]
 fn new(bencher: Bencher<'_, '_>) {
     let (_sim, clock) = sim();
-    bencher.bench_local(|| Iteration::new(env::clock::Clock::clone(&clock), 100));
+    bencher.bench_local(|| Client::new(env::clock::Clock::clone(&clock), 100));
 }

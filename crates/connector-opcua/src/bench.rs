@@ -12,14 +12,14 @@ use env::rng::Rng;
 use crate::event::Loop;
 use crate::ffi::{self, Status};
 
-/// An event loop with the housekeeping timer of a client and a count of repeated
+/// A client of open62541 on its own event loop, which also runs a count of repeated
 /// timers that do nothing.
-pub struct Iteration {
-    client: NonNull<ffi::Client>,
+pub struct Client {
+    raw: NonNull<ffi::Client>,
     events: Loop,
 }
 
-impl Iteration {
+impl Client {
     /// Makes and starts a loop on `clock` with a client and `timers` repeated timers
     /// of 1 ms.
     ///
@@ -31,10 +31,10 @@ impl Iteration {
         let events = Loop::new(clock, &mut Rng::from_seed(0));
         // SAFETY: the loop outlives the client, which `drop` deletes first.
         let client = unsafe { ffi::shim_client_new(events.raw()) };
-        let client = NonNull::new(client).expect("open62541 refused the client");
-        let mut iteration = Self { client, events };
-        iteration.run();
-        let events = &iteration.events;
+        let raw = NonNull::new(client).expect("open62541 refused the client");
+        let mut client = Self { raw, events };
+        client.run();
+        let events = &client.events;
         for _ in 0..timers {
             // SAFETY: the member takes its own loop, and `idle` reads nothing.
             let status = Status(unsafe {
@@ -51,7 +51,7 @@ impl Iteration {
             });
             assert_eq!(status, Status::GOOD, "open62541 refused a timer");
         }
-        iteration
+        client
     }
 
     /// Runs the due timers and delayed callbacks once.
@@ -62,23 +62,23 @@ impl Iteration {
     pub fn run(&mut self) {
         // SAFETY: the client and its loop live.
         let status =
-            Status(unsafe { ffi::UA_Client_run_iterate(self.client.as_ptr(), 0) });
+            Status(unsafe { ffi::UA_Client_run_iterate(self.raw.as_ptr(), 0) });
         assert_eq!(status, Status::GOOD, "open62541 failed a run");
     }
 }
 
-impl std::fmt::Debug for Iteration {
+impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Iteration")
+        f.debug_struct("Client")
             .field("next", &self.events.next())
             .finish_non_exhaustive()
     }
 }
 
-impl Drop for Iteration {
+impl Drop for Client {
     fn drop(&mut self) {
         // SAFETY: the client lives, and its loop outlives it.
-        unsafe { ffi::UA_Client_delete(self.client.as_ptr()) };
+        unsafe { ffi::UA_Client_delete(self.raw.as_ptr()) };
     }
 }
 
@@ -89,20 +89,20 @@ unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
 mod tests {
     use types::time::Span;
 
-    use super::Iteration;
+    use super::Client;
 
     #[test]
     fn a_run_runs_the_due_timers() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let clock = sim.node(sim::node::Config::default()).clock();
-        let mut iteration = Iteration::new(clock, 1);
-        let first = iteration.events.next().expect("a timer waits");
+        let mut client = Client::new(clock, 1);
+        let first = client.events.next().expect("a timer waits");
         sim.run_for(Span::MILLISECOND).expect("the run has no task");
-        iteration.run();
+        client.run();
         assert_eq!(
-            iteration.events.next(),
+            client.events.next(),
             Some(first + Span::MILLISECOND),
-            "{iteration:?}"
+            "{client:?}"
         );
     }
 
@@ -110,10 +110,10 @@ mod tests {
     fn the_debug_gives_the_next_timer() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let clock = sim.node(sim::node::Config::default()).clock();
-        let iteration = Iteration::new(clock, 0);
+        let client = Client::new(clock, 0);
         assert_eq!(
-            format!("{iteration:?}"),
-            "Iteration { next: Some(Monotonic(3601000000000)), .. }"
+            format!("{client:?}"),
+            "Client { next: Some(Monotonic(3601000000000)), .. }"
         );
     }
 }
