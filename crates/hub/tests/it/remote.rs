@@ -1143,6 +1143,38 @@ fn a_reader_whose_home_finishes_the_stream_between_frames_stops_it_as_malformed(
 }
 
 #[test]
+fn a_complete_remote_reader_whose_home_stops_reading_credits_gets_its_frames_then_behind()
+ {
+    remote(
+        40,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                let now = test.now();
+                for n in 0..200 {
+                    write_wide(&mut writer, now, n);
+                }
+                test.clock.sleep(Span::from_nanos(200_000_000)).await;
+                write_wide(&mut writer, now, 200);
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            test.clock.sleep(Span::from_nanos(1_000_000_000)).await;
+            let (charges, ended) = super::take_all(&mut reader).await;
+            // The home sends the 128 frames that its grant of a window holds, then
+            // Behind, finishes, and drops its receiver, which stops the stream with 0.
+            assert_eq!((charges.len(), ended), (128, Ended::Behind));
+        },
+    );
+}
+
+#[test]
 fn a_reader_whose_pool_has_no_room_for_a_frame_stops_the_stream_with_busy() {
     remote(
         21,

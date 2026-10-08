@@ -161,9 +161,7 @@ impl Remote {
                 } = &mut *self;
                 let mut next = pin!(inbound.next());
                 poll_fn(|cx| {
-                    if let Err(ended) = poll_credit(out, credit, cx) {
-                        return Poll::Ready(Err(ended));
-                    }
+                    poll_credit(out, credit, cx);
                     let next = next.as_mut().poll(cx);
                     waited |= next.is_pending();
                     next
@@ -195,7 +193,9 @@ impl Remote {
 
     /// Sends the credit once the home's grant is half a window short of the frames
     /// given back plus a window, unless a credit is on its way. A credit that finds
-    /// no room goes on its way, and [`poll_credit`] sends it.
+    /// no room goes on its way, and [`poll_credit`] sends it. A send that fails sends
+    /// no more credits: the home stopped reading them, and the frames that it sent
+    /// still arrive.
     fn grant(&mut self) -> Result<(), Ended> {
         let Some((granted, taken)) = &mut self.credit else {
             return Ok(());
@@ -214,9 +214,16 @@ impl Remote {
             .alloc(Credit::LEN)
             .map_err(Ended::Pool)?;
         Credit { limit_bytes }.encode(&mut block);
-        let Some(block) = sender.try_send(block.freeze()).map_err(ended)? else {
-            *granted = limit_bytes;
-            return Ok(());
+        let block = match sender.try_send(block.freeze()) {
+            Ok(None) => {
+                *granted = limit_bytes;
+                return Ok(());
+            }
+            Ok(Some(block)) => block,
+            Err(_) => {
+                (self.out, self.credit) = (None, None);
+                return Ok(());
+            }
         };
         let Some(Out::Idle(mut sender)) = self.out.take() else {
             unreachable!("invariant: no credit is on its way");
@@ -321,26 +328,24 @@ impl fmt::Debug for Out {
 }
 
 /// Polls the credit that `out` has on its way, and raises the grant in `credit` once
-/// the stream holds it.
-///
-/// # Errors
-///
-/// The [`Ended`] of a send that failed.
+/// the stream holds it. A send that fails clears both, as [`Remote::grant`] says.
 fn poll_credit(
     out: &mut Option<Out>,
     credit: &mut Option<(u64, u64)>,
     cx: &mut Context<'_>,
-) -> Result<(), Ended> {
+) {
     if let Some(Out::Sending(sending)) = out
         && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
     {
+        if sent.is_err() {
+            (*out, *credit) = (None, None);
+            return;
+        }
         *out = Some(Out::Idle(sender));
-        sent.map_err(ended)?;
         if let Some((granted, _)) = credit {
             *granted = limit_bytes;
         }
     }
-    Ok(())
 }
 
 /// The session to `home`, another node, that the shard's transport holds or dials.
