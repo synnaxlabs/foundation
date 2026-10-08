@@ -142,8 +142,7 @@ again once to prove that the failure replays (r16 59).
   `tests/*.rs` files (r16 49).
   A counting allocator is global, so each type of it gets one more binary with no
   harness, for example `tests/alloc` (`counting::Allocator`) or `tests/memory`
-  (`counting::Bytes`). Helpers that binaries share go in
-  `tests/common/mod.rs`.
+  (`counting::Bytes`). Helpers that binaries share go in `tests/common/mod.rs`.
 
 ## Oracles
 
