@@ -1522,7 +1522,7 @@ mod tests {
     /// A pair whose client dialed the server and connected.
     fn connected(shard: &Shard) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-        pair.dial(tls::public(&pair::SERVER_KEY));
+        pair.dial(pair::SERVER_KEY.public());
         pair.run(RUN);
         pair
     }
@@ -1963,7 +1963,7 @@ mod tests {
             };
             pair.server.endpoint =
                 Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let mut sender = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
@@ -2005,7 +2005,7 @@ mod tests {
             };
             side.endpoint = Endpoint::new(&config, index, NonZeroUsize::MIN);
         }
-        pair.dial(tls::public(&pair::SERVER_KEY));
+        pair.dial(pair::SERVER_KEY.public());
         pair.run(RUN);
         pair
     }
@@ -2256,7 +2256,7 @@ mod tests {
             pair.server.endpoint =
                 Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
             pair.server.key = None;
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             prefixes(&mut pair, 2);
             let mut receivers = wait(&mut pair);
@@ -3387,7 +3387,7 @@ mod tests {
             };
             let shard_key = pair::SERVER_SHARD;
             pair.server.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let mut sender = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
@@ -3428,7 +3428,7 @@ mod tests {
             };
             let shard_key = pair::CLIENT_SHARD;
             pair.client.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let (now, key) = (pair.now(), key(&pair.client));
             let opened = pair.client.endpoint.open(now, key, Class::Command);
@@ -3499,7 +3499,7 @@ mod tests {
     fn before_the_connection_connects_open_none() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             let (now, key) = (pair.now(), key(&pair.client));
             let opened = pair.client.endpoint.open(now, key, Class::Command);
             assert!(opened.is_none(), "{opened:?}");
@@ -4586,7 +4586,7 @@ mod tests {
             };
             let shard_key = pair::SERVER_SHARD;
             pair.server.endpoint = Endpoint::new(&config, shard_key, NonZeroUsize::MIN);
-            pair.dial(tls::public(&pair::SERVER_KEY));
+            pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let first = open_sender(&mut pair, Class::Complete);
             let second = open_sender(&mut pair, Class::Latest);
@@ -6071,7 +6071,7 @@ mod tests {
         ) -> Pair {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             let mut foreign = Foreign::new(shard, change);
-            let peer = tls::public(&pair::SERVER_KEY);
+            let peer = pair::SERVER_KEY.public();
             foreign.dial(pair.now(), peer, pair::SERVER);
             pair.foreign = Some(foreign);
             pair.run(RUN);
@@ -6082,7 +6082,7 @@ mod tests {
         fn dial_foreign(shard: &Shard, foreign: Foreign) -> Pair {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.foreign = Some(foreign);
-            let (now, peer) = (pair.now(), tls::public(&pair::FOREIGN_KEY));
+            let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
             let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
             pair.client.key = Some(key);
             pair.run(RUN);
@@ -6099,7 +6099,7 @@ mod tests {
             let log = Arc::new(Log::default());
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             let mut foreign = Foreign::new(shard, |_| {});
-            let tls = log.client(tls::public(&pair::SERVER_KEY));
+            let tls = log.client(pair::SERVER_KEY.public());
             foreign.dial_with(pair.now(), tls, pair::SERVER);
             pair.foreign = Some(foreign);
             pair.run(RUN);
@@ -6250,7 +6250,7 @@ mod tests {
         fn leave_ahead_of_every_stream() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-                pair.dial(tls::public(&pair::SERVER_KEY));
+                pair.dial(pair::SERVER_KEY.public());
                 let now = pair.now();
                 // The handshake by hand, so the client writes before it sends its
                 // hello.
@@ -6429,7 +6429,7 @@ mod tests {
             let log = Arc::new(Log::default());
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             let mut peer = Foreign::new(shard, |_| {});
-            let tls = log.client(tls::public(&pair::SERVER_KEY));
+            let tls = log.client(pair::SERVER_KEY.public());
             peer.dial_with(pair.now(), tls, pair::SERVER);
             pair.foreign = Some(peer);
             let mut steps = 0;
@@ -6725,7 +6725,7 @@ mod tests {
             testing::run(1, |shard| {
                 let one = |config: &mut Config| config.streams_max = NonZeroU32::MIN;
                 let mut pair = Pair::with(shard, Span::SECOND, DELAY, one);
-                pair.dial(tls::public(&pair::SERVER_KEY));
+                pair.dial(pair::SERVER_KEY.public());
                 for _ in 0..100 {
                     if available(&pair.client) {
                         break;
@@ -6749,7 +6749,7 @@ mod tests {
                 kx_groups: vec![kx_group::MLKEM768, kx_group::X25519],
                 ..default_provider()
             };
-            tls::anonymous(provider, tls::public(&pair::SERVER_KEY))
+            tls::anonymous(provider, pair::SERVER_KEY.public())
         }
 
         #[test]

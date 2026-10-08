@@ -46,13 +46,11 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
 use transport::stream::Sender;
 use transport::{Address, Class, Code, Config, Error, Port, Session, Transport};
-use types::ed25519::PublicKey;
 use types::node::PrivateKey;
 use types::time::Span;
 
@@ -208,7 +206,7 @@ fn main() {
             let transport =
                 Transport::new(config, part(&node, 0)).expect("a transport");
             let session = transport
-                .dial(public(&SERVER), &[Address::Udp(at)])
+                .dial(SERVER.public(), &[Address::Udp(at)])
                 .await
                 .expect("a session");
             let clock = node.clock();
@@ -222,7 +220,7 @@ fn main() {
             }
             session.close(Code(0));
             let session = transport
-                .dial(public(&NARROW), &[Address::Udp(narrow_at)])
+                .dial(NARROW.public(), &[Address::Udp(narrow_at)])
                 .await
                 .expect("a session");
             for (scenario, premise) in WAITING {
@@ -680,13 +678,6 @@ fn part(node: &Node, port: u16) -> transport::port::Part {
     let at = SocketAddr::new(node.addresses()[0], port);
     let port = Port::bind(&node.net(), at).expect("a port");
     port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-/// The public key of `key`.
-fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }
 
 #[expect(clippy::print_stdout, reason = "a benchmark prints its results")]

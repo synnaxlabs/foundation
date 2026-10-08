@@ -19,7 +19,6 @@ use crate::bytes::{put_channel, put_count, put_name};
 use crate::card::{self, Card};
 use crate::change::{Change, Join};
 use crate::claim::Signer;
-use crate::ed25519;
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{Options, Ticket, Voter};
@@ -44,7 +43,7 @@ pub(crate) fn signer(id: u8) -> Signer {
 }
 
 pub(crate) fn public(id: u8) -> PublicKey {
-    ed25519::public(&ed25519::pair(&private(id)))
+    private(id).public()
 }
 
 /// The card of node `id` with `name`, which the node signed.

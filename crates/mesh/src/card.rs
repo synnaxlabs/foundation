@@ -80,7 +80,7 @@ impl Signed {
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
         let pair = ed25519::pair(private_key);
         assert!(
-            ed25519::public(&pair) == card.public_key,
+            private_key.public() == card.public_key,
             "the card's public key is not the public half of the private key"
         );
         let signature = ed25519::sign(&pair, &statement(TAG, key, &card));

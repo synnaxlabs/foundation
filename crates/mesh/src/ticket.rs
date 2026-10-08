@@ -93,7 +93,7 @@ impl Ticket {
     /// The public half of the key pair: the key of the ticket's record.
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
-        ed25519::public(&ed25519::pair(&self.private_key))
+        self.private_key.public()
     }
 
     /// The prefix of the ticket's region.

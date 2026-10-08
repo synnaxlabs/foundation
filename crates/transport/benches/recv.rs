@@ -23,12 +23,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::{Block, Heap, Pool};
 use sim::Sim;
 use sim::node::Node;
 use transport::{Address, Class, Code, Config, Error, Port, Transport};
-use types::ed25519::PublicKey;
 use types::node::PrivateKey;
 use types::time::Span;
 
@@ -63,7 +61,7 @@ fn main() {
         let pool = Rc::clone(&config.pool);
         let transport = Transport::new(config, part(&node, 0)).expect("a transport");
         let session = transport
-            .dial(public(&SERVER), &[Address::Udp(at)])
+            .dial(SERVER.public(), &[Address::Udp(at)])
             .await
             .expect("a session");
         let clock = node.clock();
@@ -204,10 +202,4 @@ fn part(node: &Node, port: u16) -> transport::port::Part {
     let at = SocketAddr::new(node.addresses()[0], port);
     let port = Port::bind(&node.net(), at).expect("a port");
     port.split(NonZeroUsize::MIN).pop().expect("one part")
-}
-
-fn public(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("32 bytes");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("aws-lc makes no key of small order")
 }

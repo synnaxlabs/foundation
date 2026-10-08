@@ -298,7 +298,7 @@ mod tests {
     use crate::quic::pair::{self, CLIENT_SHARD, Pair, SERVER_SHARD, Side};
     use crate::quic::{Endpoint, Event};
     use crate::testing;
-    use crate::{Class, Error, tls};
+    use crate::{Class, Error};
 
     /// The link delay each way in [`dial`].
     const DELAY: Duration = Duration::from_millis(10);
@@ -306,7 +306,7 @@ mod tests {
     /// A dial with an idle of 1 s, after `span`.
     fn dial(shard: &testing::Shard, span: Duration) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-        pair.dial(tls::public(&pair::SERVER_KEY));
+        pair.dial(pair::SERVER_KEY.public());
         pair.run(span);
         pair
     }
@@ -611,7 +611,7 @@ mod tests {
             let reason = testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 pair.server.silent = true;
-                pair.dial(tls::public(&pair::SERVER_KEY));
+                pair.dial(pair::SERVER_KEY.public());
                 pair.run(Duration::ZERO);
                 let (.., initial) = &pair.client.sent[0];
                 let (destination, Some(source)) = ids(initial) else {
@@ -695,7 +695,7 @@ mod tests {
             let sent = testing::run(1, |shard| {
                 let idle = Span::from_nanos(10 * Span::SECOND.nanos());
                 let mut pair = Pair::new(shard, idle, ROUND_TRIP / 2);
-                pair.dial(tls::public(&pair::SERVER_KEY));
+                pair.dial(pair::SERVER_KEY.public());
                 pair.run(Duration::from_secs(1));
                 let before = pair.client.sent.len();
                 pair.client.drops = 1;
@@ -734,7 +734,7 @@ mod tests {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 let client = &mut pair.client.endpoint.settings.transport;
                 Arc::make_mut(client).datagram_receive_buffer_size(None);
-                pair.dial(tls::public(&pair::SERVER_KEY));
+                pair.dial(pair::SERVER_KEY.public());
                 pair.run(Duration::from_millis(100));
                 let key = pair.server.key.expect("a connection");
                 let server = &mut pair.server.endpoint;
@@ -759,7 +759,7 @@ mod tests {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 let client = &mut pair.client.endpoint.settings.transport;
                 Arc::make_mut(client).datagram_receive_buffer_size(Some(500));
-                pair.dial(tls::public(&pair::SERVER_KEY));
+                pair.dial(pair::SERVER_KEY.public());
                 pair.run(Duration::from_millis(100));
                 let key = pair.server.key.expect("a connection");
                 let server = &mut pair.server.endpoint;
@@ -846,7 +846,7 @@ mod tests {
         /// a wrong key, and a new server endpoint with the same node key.
         fn stranger(shard: &testing::Shard) -> (Vec<u8>, Endpoint) {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial(tls::public(&PrivateKey([9; 32])));
+            pair.dial((PrivateKey([9; 32])).public());
             pair.run(Duration::from_secs(5));
             let (_, _, initial) = pair.server.sent.first().expect("a reply");
             let (_, Some(issued)) = ids(initial) else {
