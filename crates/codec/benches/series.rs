@@ -49,7 +49,7 @@ enum Create {
     Strings(fn() -> Vec<&'static str>),
 }
 
-const SHAPES: [Shape; 26] = [
+const SHAPES: [Shape; 30] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -73,10 +73,20 @@ const SHAPES: [Shape; 26] = [
     Shape::new("u64.ffor1", Scalar::U64, create_uniform::<1>, 56.6, FULL),
     Shape::new("u64.ffor32", Scalar::U64, create_uniform::<32>, 1.982, FULL),
     Shape::new("u64.ffor55", Scalar::U64, create_uniform::<55>, 1.155, FULL),
-    Shape::strings("str.state", create_state_names, 2.842, EVERY),
+    Shape::variable("str.state", Type::String, create_state_names, 2.842, EVERY),
+    Shape::variable("str.utf8", Type::String, create_utf8_names, 1.521, EVERY),
+    Shape::variable("str.last", Type::String, create_last_utf8, 2.841, FULL),
+    Shape::variable("bytes.state", Type::Bytes, create_state_names, 2.842, EVERY),
+    Shape::variable("list.state", LIST, create_state_names, 2.842, EVERY),
     Shape::imu("f32x6.imu", ARRAY),
     Shape::imu("f32x2x3.imu", MATRIX),
 ];
+
+/// A list of at most 16 `u8` elements.
+const LIST: Type = Type::List {
+    element: Scalar::U8,
+    max: 16,
+};
 
 /// Six `f32` elements as an array. It encodes as [`MATRIX`] does.
 const ARRAY: Type = Type::Array {
@@ -122,15 +132,16 @@ impl Shape {
         }
     }
 
-    const fn strings(
+    const fn variable(
         name: &'static str,
+        data_type: Type,
         create: fn() -> Vec<&'static str>,
         ratio: f64,
         lens: &'static [usize],
     ) -> Self {
         Self {
             name,
-            data_type: Type::String,
+            data_type,
             create: Create::Strings(create),
             ratio,
             lens,
@@ -338,6 +349,25 @@ fn create_state_names() -> Vec<&'static str> {
     create_state().into_iter().map(state).collect()
 }
 
+/// The name of each state of [`create_state`], in text that is not ASCII.
+fn create_utf8_names() -> Vec<&'static str> {
+    let names = [
+        "arr\u{ea}t",
+        "d\u{e9}marr\u{e9}",
+        "d\u{e9}faut",
+        "St\u{f6}rung",
+    ];
+    let state = |state: i64| names[usize::try_from(state).expect("a state")];
+    create_state().into_iter().map(state).collect()
+}
+
+/// The names of [`create_state_names`], with only the last sample not ASCII.
+fn create_last_utf8() -> Vec<&'static str> {
+    let mut names = create_state_names();
+    *names.last_mut().expect("a sample") = "d\u{e9}faut";
+    names
+}
+
 /// A timestamp every 1 ms.
 fn create_ts_fixed() -> Vec<i64> {
     (0..).take(LEN).map(|i| T0 + i * 1_000_000).collect()
@@ -451,4 +481,31 @@ fn decoder(bencher: Bencher<'_, '_>, case: Case) {
             divan::black_box_drop(vector);
         }
     });
+}
+
+/// Refuses a full `String` series of [`create_last_utf8`] whose last sample is not
+/// UTF-8.
+#[divan::bench(args = ["validate", "decode"], sample_count = 1000)]
+fn refuse(bencher: Bencher<'_, '_>, call: &str) {
+    let shape = SHAPES.iter().find(|shape| shape.name == "str.last");
+    let mut values = shape.expect("a shape").values(LEN);
+    *values.last_mut().expect("a sample") = 0xff;
+    let mut bytes = vec![0; max_len(Type::Bytes, values.len())];
+    let written = Encoder::new(Type::Bytes)
+        .encode(LEN, &values, &mut bytes)
+        .expect("the values fit the count");
+    bytes.truncate(written);
+    let mut out = vec![0; values.len()];
+    let mut refuse = || {
+        let len = divan::black_box(LEN);
+        let bytes = divan::black_box(&bytes);
+        match call {
+            "validate" => codec::validate(Type::String, len, bytes).err(),
+            "decode" => codec::decode(Type::String, len, bytes, &mut out).err(),
+            _ => panic!("invariant: {call} is a call"),
+        }
+    };
+    let refused = Some(codec::Error::Utf8 { sample: LEN - 1 });
+    assert_eq!(refuse(), refused, "{call}");
+    bencher.counter(ItemsCount::new(LEN)).bench_local(refuse);
 }
