@@ -27,9 +27,10 @@ impl Mesh {
     /// forwards the change to the leader. Returns the new pointer once its entry has
     /// committed and this node applied it. It tries again when a new leader replaces
     /// the entry, and after each tick while no leader takes it, as [`Mesh::set_home`]
-    /// does. A call whose entry finds the pointer that the call makes, after a lost
-    /// answer or an equal change of another call, returns that pointer when each index
-    /// of `homes` has its listed home, and else gives `Stale`. A retry that finds a
+    /// does. On `Ok`, the pointer is the one this call makes, and each index of `homes`
+    /// has a home, its listed one or the one it had. A call whose entry finds that
+    /// pointer, after a lost answer or an equal change of another call, returns it when
+    /// each index of `homes` has a home, and else gives `Stale`. A retry that finds a
     /// later pointer gives `Stale`, even when an entry of this call applied before it.
     ///
     /// # Errors
@@ -51,7 +52,7 @@ impl Mesh {
     /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
     ///   each half of the voters, before the proposal or at the apply.
     /// - [`Error::Stale`] when the pointer is not `base`, or the pointer this call
-    ///   makes with each home of `homes`, at the apply.
+    ///   makes, at the apply.
     ///
     /// # Panics
     ///
@@ -143,7 +144,7 @@ impl Mesh {
                 Some(Err(Refused::Stale { pointer, .. }))
                     if pointer.root == root
                         && pointer.version.checked_sub(1) == Some(base.version)
-                        && self.holds(&homes) =>
+                        && self.homed(&homes) =>
                 {
                     return Ok(pointer);
                 }
@@ -153,12 +154,10 @@ impl Mesh {
         }
     }
 
-    // Whether each index of `homes` has its listed home, as this node applied.
-    fn holds(&self, homes: &BTreeMap<channel::Key, node::Key>) -> bool {
+    // Whether each index of `homes` has a home, as this node applied.
+    fn homed(&self, homes: &BTreeMap<channel::Key, node::Key>) -> bool {
         let group = self.group.borrow();
-        homes
-            .iter()
-            .all(|(&index, &home)| group.state.home(index) == Some(home))
+        homes.keys().all(|&index| group.state.home(index).is_some())
     }
 
     // The chunks of the tree of `update` that the tree at `base` lacks, or each chunk

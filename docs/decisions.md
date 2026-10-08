@@ -2402,11 +2402,16 @@ How to read this record:
   by `laptop.architect`, 2026-10-08T10:19:54Z
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6057736427). The
   equal change of another call, 2026-10-08T11:46:44Z
-  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). Such a
-  call returns the pointer only when each home that it lists is the home of its index
-  in this node's state, and else gives `Stale`; after `Stale`, the caller reads the
-  homes from the state. Decided by `laptop.architect`, 2026-10-08T17:20:54Z
-  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958). The
+  (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A
+  listed home is a proposal: the entry gives it only to an index with none. On `Ok`,
+  the pointer is the call's and each listed index has a home in the state, the listed
+  one or the one it had. A call whose entry finds `base.next(root)` returns it when
+  each listed index has a home, and else gives `Stale`; the path of the call's own
+  entry checks nothing, so both paths give the same result. Decided by
+  `laptop.architect`, 2026-10-08T17:20:54Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065295958), and
+  changed by `laptop.architect` at 2026-10-08T17:34:20Z
+  (https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915). The
   build with `spec::region::tree`, and the build of the root of `Config::founding` with
   it in `Mesh::open`, decided by `laptop.architect`, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151).

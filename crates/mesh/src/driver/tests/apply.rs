@@ -805,26 +805,87 @@ fn apply_gives_each_listed_index_the_member_of_its_name_as_its_home() {
     });
 }
 
-// An equal change of another call gives `Ok` only when each home it lists holds.
+// A listed home is a proposal: the equal change of the first call gives each index a
+// home, so the second call gives `Ok`, and the homes of the first hold.
 #[test]
-fn an_equal_change_with_other_homes_gives_stale() {
+fn an_equal_change_with_other_homes_gives_ok_and_the_first_homes_hold() {
     solo(|node, tasks| async move {
         let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
         let definitions = create_indexes(1);
         let moved = pointer(1, &definitions);
         let first = create_homes(1, "plant.node1");
-        let applied = mesh.apply(base(), definitions.clone(), first.clone()).await;
+        let applied = mesh.apply(base(), definitions.clone(), first).await;
         assert_eq!(applied, Ok(moved));
         let other = create_homes(1, "plant.node2");
-        let applied = mesh.apply(base(), definitions.clone(), other).await;
+        assert_eq!(mesh.apply(base(), definitions, other).await, Ok(moved));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+    });
+}
+
+#[test]
+fn an_equal_change_with_fewer_homes_gives_stale() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let definitions = create_indexes(1);
+        let moved = pointer(1, &definitions);
+        let applied = mesh
+            .apply(base(), definitions.clone(), BTreeMap::new())
+            .await;
+        assert_eq!(applied, Ok(moved));
+        let homes = create_homes(1, "plant.node1");
         let stale = Error::Stale {
             base: base(),
             pointer: moved,
         };
-        assert_eq!(applied, Err(stale));
-        assert_eq!(mesh.apply(base(), definitions, first).await, Ok(moved));
+        assert_eq!(mesh.apply(base(), definitions, homes).await, Err(stale));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(None));
+    });
+}
+
+#[test]
+fn apply_gives_ok_when_a_listed_index_keeps_the_home_it_had() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        lead(&mesh, &node.clock(), home(1)).await;
+        let definitions = create_indexes(1);
+        let moved = pointer(1, &definitions);
+        let homes = create_homes(1, "plant.node2");
+        assert_eq!(mesh.apply(base(), definitions, homes).await, Ok(moved));
         assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
     });
+}
+
+// `INDEX` has the home node 1 before the call, which lists node 2. A cut drops the
+// answer to the follower, which then finds the pointer of its own entry.
+#[test]
+fn a_lost_answer_gives_the_result_of_a_call_with_a_home_kept() {
+    for cut in [false, true] {
+        let (mut cluster, _, follower, _) = Cluster::led(0);
+        let config = link::Config {
+            delay: Span::from_nanos(6 * TICK.nanos()),
+            ..link::Config::default()
+        };
+        for other in IDS.into_iter().filter(|&id| id != follower) {
+            let (a, b) = (cluster.node(follower).clone(), cluster.node(other).clone());
+            cluster.sim.link(&a, &b, config);
+            cluster.sim.link(&b, &a, config);
+        }
+        cluster.script(|_| home(1));
+        cluster.run(seconds(5));
+        let definitions = create_indexes(1);
+        let moved = pointer(1, &definitions);
+        let homes = BTreeMap::from([(INDEX, key(2))]);
+        cluster.apply_held(follower, base(), &definitions, IDS.into(), homes);
+        cluster.run(Span::from_nanos(3 * TICK.nanos()));
+        if cut {
+            cluster.link_each(follower, 1.0);
+            cluster.run(seconds(5));
+            cluster.link_each(follower, 0.0);
+        }
+        cluster.run(seconds(10));
+        let applied = [(follower, moved, Ok(moved))];
+        assert_eq!(cluster.board().applied, applied, "cut {cut}");
+    }
 }
 
 /// A waker that counts its wakes.
