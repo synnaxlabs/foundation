@@ -327,52 +327,6 @@ fn a_v6_socket_on_a_specific_address_cannot_reach_ipv4() {
     });
 }
 
-/// The length, stride, and ECN mark of the next batch that arrives.
-#[cfg(target_os = "linux")]
-async fn next_batch(receiver: &mut Receiver) -> (usize, usize, Option<Ecn>) {
-    let mut buffer = vec![0; receiver.batch_max().get() * DATAGRAM_BYTES_MAX];
-    let mut meta = [Meta::default()];
-    let batches = poll_fn(|cx| {
-        receiver.poll_recv(cx, &mut [IoSliceMut::new(&mut buffer)], &mut meta)
-    });
-    let batches = timeout(BOUND, batches).await.expect("the batch arrives");
-    assert_eq!(batches, Ok(1));
-    (meta[0].len, meta[0].stride, meta[0].ecn)
-}
-
-/// Each refusal stays with its transmit: a later batch still goes out in one call,
-/// with its ECN mark.
-#[test]
-#[cfg(target_os = "linux")]
-fn a_refused_transmit_leaves_later_batches_whole_and_marked() {
-    on_thread("udp-refused", || async {
-        let net = net();
-        let (mut sender, _) =
-            bind(&net, SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
-        let (_, mut receiver) = loopback(&net);
-        let contents = [7; 300];
-        let batch = Transmit {
-            ecn: Some(Ecn::Ce),
-            segment: NonZeroUsize::new(100),
-            ..transmit(receiver.local(), &contents)
-        };
-        let port_0 = Transmit {
-            destination: SocketAddr::new(LOCALHOST.into(), 0),
-            ..batch
-        };
-        let other_family = Transmit {
-            source: Some(Ipv6Addr::LOCALHOST.into()),
-            ..batch
-        };
-        let invalid = Err(Error::Io { code: 22 });
-        assert_eq!(send(&mut sender, &port_0).await, invalid);
-        let not_available = Err(Error::Io { code: 99 });
-        assert_eq!(send(&mut sender, &other_family).await, not_available);
-        assert_eq!(send(&mut sender, &batch).await, Ok(()));
-        assert_eq!(next_batch(&mut receiver).await, (300, 100, Some(Ecn::Ce)));
-    });
-}
-
 #[test]
 fn a_receive_with_no_datagram_is_pending_until_one_arrives() {
     on_thread("udp-pending", || async {

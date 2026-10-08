@@ -294,37 +294,24 @@ fn sent(outcome: io::Result<()>, remote: SocketAddr) -> Poll<Result<(), Error>> 
 ///
 /// # Errors
 ///
-/// - [`Error::Unreachable`] with the destination as given when the socket's family
-///   cannot reach it.
-/// - [`Error::Io`] with `EINVAL` for port 0, and with `EADDRNOTAVAIL` for a source
-///   of another family than the destination. The kernel would give `EINVAL` for
-///   each, which `noq-udp` takes as the OS's refusal of GSO and of the IPv4 ECN mark.
+/// [`Error::Unreachable`] with the destination as given when the socket's family
+/// cannot reach it.
 fn route(
     local: SocketAddr,
     transmit: &Transmit<'_>,
 ) -> Result<(SocketAddr, Option<IpAddr>), Error> {
     let remote = transmit.destination;
     let any = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
-    let canonical_ip = |ip: IpAddr| {
-        if local.is_ipv6() {
-            ip.to_canonical()
-        } else {
-            ip
-        }
+    let destination = if local.is_ipv6() {
+        canonical(remote)
+    } else {
+        remote
     };
-    let destination = SocketAddr::new(canonical_ip(remote.ip()), remote.port());
     if local.ip() != any && local.is_ipv4() != destination.is_ipv4() {
         return Err(Error::Unreachable { remote });
     }
-    if destination.port() == 0 {
-        return Err(io_error(Errno::INVAL));
-    }
-    let source = transmit.source.map(canonical_ip);
-    if source.is_some_and(|source| source.is_ipv4() != destination.is_ipv4()) {
-        return Err(io_error(Errno::ADDRNOTAVAIL));
-    }
     if local.is_ipv4() {
-        return Ok((remote, source));
+        return Ok((remote, transmit.source));
     }
     let mapped = |ip: IpAddr| match ip {
         IpAddr::V4(v4) => IpAddr::V6(v4.to_ipv6_mapped()),
@@ -334,7 +321,7 @@ fn route(
         SocketAddr::V4(v4) => SocketAddr::new(mapped(IpAddr::V4(*v4.ip())), v4.port()),
         SocketAddr::V6(_) => destination,
     };
-    Ok((destination, source.map(mapped)))
+    Ok((destination, transmit.source.map(mapped)))
 }
 
 fn to_codepoint(ecn: Ecn) -> EcnCodepoint {
@@ -484,41 +471,8 @@ mod tests {
             };
             let routed = super::route(any_v6(), &from(V4.into()));
             assert_eq!(routed, Ok((mapped(2), Some(V4.to_ipv6_mapped().into()))));
-        }
-
-        /// Each would reach the kernel as `EINVAL`, which `noq-udp` reads as the
-        /// OS's refusal of GSO or of the IPv4 ECN mark.
-        #[test]
-        fn refuses_port_0_and_a_source_of_the_other_family() {
-            let invalid = Err(Error::Io {
-                code: Errno::INVAL.raw_os_error(),
-            });
-            for local in [v4(1), v6(1), any_v6()] {
-                let remote = SocketAddr::new(local.ip(), 0);
-                assert_eq!(super::route(local, &transmit(remote, b"")), invalid);
-            }
-            let not_available = Err(Error::Io {
-                code: Errno::ADDRNOTAVAIL.raw_os_error(),
-            });
-            let v6_ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
-            let mapped_ip = IpAddr::V6(V4.to_ipv6_mapped());
-            let cases = [
-                (v4(1), v4(2), v6_ip),
-                (v4(1), v4(2), mapped_ip),
-                (v6(1), v6(2), V4.into()),
-                (v6(1), v6(2), mapped_ip),
-                (any_v6(), v4(2), v6_ip),
-                (any_v6(), v6(2), V4.into()),
-                (any_v6(), v6(2), mapped_ip),
-            ];
-            for (local, remote, source) in cases {
-                let from = Transmit {
-                    source: Some(source),
-                    ..transmit(remote, b"")
-                };
-                let routed = super::route(local, &from);
-                assert_eq!(routed, not_available, "{source} to {remote}");
-            }
+            let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+            assert_eq!(super::route(any_v6(), &from(v6)), Ok((mapped(2), Some(v6))));
         }
 
         #[test]
