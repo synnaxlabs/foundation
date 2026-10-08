@@ -3,6 +3,7 @@
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
 use std::ffi::{CStr, c_char, c_int, c_void};
+use std::mem::offset_of;
 
 /// An open62541 status code.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,8 +57,8 @@ pub(crate) struct DelayedCallback {
     pub(crate) context: *mut c_void,
 }
 
-/// `UA_EventLoop`. `shim.c` asserts its size. The shim sets each function but `lock`
-/// and `unlock`.
+/// `UA_EventLoop`. `shim.c` asserts its size and the same offsets. The shim sets each
+/// function but `lock` and `unlock`.
 #[repr(C)]
 pub(crate) struct EventLoop {
     pub(crate) logger: *const c_void,
@@ -103,10 +104,63 @@ pub(crate) struct EventLoop {
     pub(crate) unlock: Option<unsafe extern "C" fn(el: *mut EventLoop)>,
 }
 
-const _: () = assert!(
-    size_of::<EventLoop>() == 23 * size_of::<usize>(),
-    "UA_EventLoop changed"
-);
+/// Gives the offset of the word `word`, of the size of a pointer.
+const fn at(word: usize) -> usize {
+    word * size_of::<usize>()
+}
+
+const _: () = {
+    assert!(size_of::<EventLoop>() == at(23), "UA_EventLoop changed");
+    assert!(offset_of!(EventLoop, logger) == at(0), "logger moved");
+    assert!(offset_of!(EventLoop, params) == at(1), "params moved");
+    assert!(offset_of!(EventLoop, state) == at(3), "state moved");
+    assert!(offset_of!(EventLoop, start) == at(4), "start moved");
+    assert!(offset_of!(EventLoop, stop) == at(5), "stop moved");
+    assert!(offset_of!(EventLoop, free) == at(6), "free moved");
+    assert!(offset_of!(EventLoop, run) == at(7), "run moved");
+    assert!(offset_of!(EventLoop, cancel) == at(8), "cancel moved");
+    assert!(offset_of!(EventLoop, now) == at(9), "now moved");
+    assert!(
+        offset_of!(EventLoop, now_monotonic) == at(10),
+        "now_monotonic moved"
+    );
+    assert!(
+        offset_of!(EventLoop, utc_offset) == at(11),
+        "utc_offset moved"
+    );
+    assert!(
+        offset_of!(EventLoop, next_timer) == at(12),
+        "next_timer moved"
+    );
+    assert!(
+        offset_of!(EventLoop, add_timer) == at(13),
+        "add_timer moved"
+    );
+    assert!(
+        offset_of!(EventLoop, modify_timer) == at(14),
+        "modify_timer moved"
+    );
+    assert!(
+        offset_of!(EventLoop, remove_timer) == at(15),
+        "remove_timer moved"
+    );
+    assert!(
+        offset_of!(EventLoop, add_delayed) == at(16),
+        "add_delayed moved"
+    );
+    assert!(
+        offset_of!(EventLoop, remove_delayed) == at(17),
+        "remove_delayed moved"
+    );
+    assert!(offset_of!(EventLoop, sources) == at(18), "sources moved");
+    assert!(offset_of!(EventLoop, register) == at(19), "register moved");
+    assert!(
+        offset_of!(EventLoop, deregister) == at(20),
+        "deregister moved"
+    );
+    assert!(offset_of!(EventLoop, lock) == at(21), "lock moved");
+    assert!(offset_of!(EventLoop, unlock) == at(22), "unlock moved");
+};
 
 /// `UA_Client`, which Rust holds only by pointer.
 #[repr(C)]

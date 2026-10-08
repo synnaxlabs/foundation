@@ -11,6 +11,7 @@
 #include "timer.h"
 #pragma GCC diagnostic pop
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,8 +59,35 @@ UA_InterruptManager *UA_InterruptManager_new_POSIX(const UA_String name) {
     return NULL;
 }
 
-/* `src/ffi.rs` mirrors the struct, with 23 members of the size of a pointer. */
+/* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
+ * same offsets. */
 _Static_assert(sizeof(UA_EventLoop) == 23 * sizeof(void *), "UA_EventLoop changed");
+#define AT(member, word)                                                               \
+    _Static_assert(offsetof(UA_EventLoop, member) == (word) * sizeof(void *),         \
+                   "UA_EventLoop." #member " moved")
+AT(logger, 0);
+AT(params, 1);
+AT(state, 3);
+AT(start, 4);
+AT(stop, 5);
+AT(free, 6);
+AT(run, 7);
+AT(cancel, 8);
+AT(dateTime_now, 9);
+AT(dateTime_nowMonotonic, 10);
+AT(dateTime_localTimeUtcOffset, 11);
+AT(nextTimer, 12);
+AT(addTimer, 13);
+AT(modifyTimer, 14);
+AT(removeTimer, 15);
+AT(addDelayedCallback, 16);
+AT(removeDelayedCallback, 17);
+AT(eventSources, 18);
+AT(registerEventSource, 19);
+AT(deregisterEventSource, 20);
+AT(lock, 21);
+AT(unlock, 22);
+#undef AT
 
 /* Gives the monotonic time of `clock` in ticks of 100 ns. */
 typedef UA_DateTime (*shim_now)(void *clock);
