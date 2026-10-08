@@ -2005,6 +2005,13 @@ How to read this record:
   Ed25519 public key of a node and of a subject. Decided by `laptop.architect` at
   2026-10-08T04:03:21Z
   (https://github.com/synnaxlabs/foundation/issues/1755#issuecomment-6051941741).
+  `types::node::PrivateKey::public` is the one place that derives a node's public key
+  from its private key; `mesh`, `transport`, and `node` call it, and keep no copy. So
+  `types` depends on `aws-lc-rs`, as it owns the Ed25519 rule of the key. Lost: a
+  `pub fn` in `transport`, a pass-through for a thing that is not transport; and the
+  copies, which grow with each crate that needs the key. Decided by
+  `laptop.architect` (2026-10-07T14:16:15Z):
+  https://github.com/synnaxlabs/foundation/issues/1423#issuecomment-6039878050
 
 ### 1.8 Consensus, regions, and the spec
 
