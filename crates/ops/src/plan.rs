@@ -53,17 +53,9 @@ pub(crate) fn plan(
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
-    let count = |action| {
-        changes
-            .iter()
-            .filter(|change| change.action == action)
-            .count()
-    };
     let output = Output {
         base: Pointer::from(plan.base),
-        added: count(Action::Add),
-        changed: count(Action::Change),
-        removed: count(Action::Remove),
+        counts: Counts::of(changes.iter().map(|change| change.action)),
         homes: plan
             .homes
             .iter()
@@ -83,12 +75,8 @@ pub(crate) struct Output {
     pub(crate) changes: Vec<Change>,
     /// The home node of each index that has none before the apply, by index name.
     pub(crate) homes: BTreeMap<String, String>,
-    /// The count of changes with this action.
-    pub(crate) added: usize,
-    /// The count of changes with this action.
-    pub(crate) changed: usize,
-    /// The count of changes with this action.
-    pub(crate) removed: usize,
+    #[serde(flatten)]
+    pub(crate) counts: Counts,
 }
 
 impl Output {
@@ -111,10 +99,41 @@ impl Output {
         format!(
             "{}{} to add, {} to change, {} to remove.\n",
             lines.concat(),
-            self.added,
-            self.changed,
-            self.removed
+            self.counts.added,
+            self.counts.changed,
+            self.counts.removed
         )
+    }
+}
+
+/// The count of changes with each action.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Counts {
+    /// The count of new definitions.
+    pub(crate) added: usize,
+    /// The count of definitions that stay with a new value.
+    pub(crate) changed: usize,
+    /// The count of definitions that go.
+    pub(crate) removed: usize,
+}
+
+impl Counts {
+    /// The count of each action in `actions`.
+    pub(crate) fn of(actions: impl Iterator<Item = Action>) -> Self {
+        let mut counts = Self {
+            added: 0,
+            changed: 0,
+            removed: 0,
+        };
+        for action in actions {
+            let count = match action {
+                Action::Add => &mut counts.added,
+                Action::Change => &mut counts.changed,
+                Action::Remove => &mut counts.removed,
+            };
+            *count += 1;
+        }
+        counts
     }
 }
 

@@ -8,7 +8,7 @@ use types::channel;
 
 use crate::error::{self, Error};
 use crate::front_end;
-use crate::plan::{self, Action};
+use crate::plan::{self, Action, Counts};
 
 #[cfg(test)]
 mod tests;
@@ -53,18 +53,7 @@ pub(crate) async fn apply(
     let definitions = planned
         .definitions(&spec.definitions, key)
         .map_err(Error::Plan)?;
-    let count = |action| {
-        planned
-            .changes
-            .values()
-            .filter(|change| Action::of(change) == action)
-            .count()
-    };
-    let (added, changed, removed) = (
-        count(Action::Add),
-        count(Action::Change),
-        count(Action::Remove),
-    );
+    let counts = Counts::of(planned.changes.values().map(Action::of));
     let pointer = mesh
         .apply(planned.base, definitions, planned.homes)
         .await
@@ -78,9 +67,7 @@ pub(crate) async fn apply(
     Ok(Applied {
         file: file.to_owned(),
         pointer: plan::Pointer::from(pointer),
-        added,
-        changed,
-        removed,
+        counts,
     })
 }
 
@@ -91,12 +78,8 @@ pub(crate) struct Applied {
     pub(crate) file: String,
     /// The spec after the apply.
     pub(crate) pointer: plan::Pointer,
-    /// The count of changes with this action.
-    pub(crate) added: usize,
-    /// The count of changes with this action.
-    pub(crate) changed: usize,
-    /// The count of changes with this action.
-    pub(crate) removed: usize,
+    #[serde(flatten)]
+    pub(crate) counts: Counts,
 }
 
 impl Applied {
@@ -104,9 +87,9 @@ impl Applied {
     /// left out, or `no change` in place of the counts when each is 0.
     pub(crate) fn text(&self) -> String {
         let counts = [
-            (self.added, "added"),
-            (self.changed, "changed"),
-            (self.removed, "removed"),
+            (self.counts.added, "added"),
+            (self.counts.changed, "changed"),
+            (self.counts.removed, "removed"),
         ];
         let counts: Vec<String> = counts
             .iter()

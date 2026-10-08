@@ -533,7 +533,7 @@ fn gives_the_exact_path_in_the_json_of_a_place() {
 fn picks_the_front_end_by_the_text_after_the_last_dot() {
     let placed = placed_site();
     let planned = run(&[("site.v2.hcl", &placed)], &BTreeMap::new()).expect("a plan");
-    assert_eq!(planned.added, 3);
+    assert_eq!(planned.counts.added, 3);
 }
 
 #[test]

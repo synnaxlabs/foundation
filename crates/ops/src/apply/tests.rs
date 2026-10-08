@@ -32,7 +32,7 @@ use types::time::Span;
 use super::{Applied, apply};
 use crate::error::Error;
 use crate::plan::tests::{PLANT, Reader, files, front_ends, name, placed_site};
-use crate::plan::{self, Output, plan};
+use crate::plan::{self, Counts, Output, plan};
 
 const NODE: node::Key = node::Key::from_u128(1);
 const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
@@ -162,9 +162,11 @@ fn applies_a_plan_and_then_plans_no_change() {
             Applied {
                 file: "site.plan".to_owned(),
                 pointer: plan::Pointer::from(pointer),
-                added: 3,
-                changed: 0,
-                removed: 0,
+                counts: Counts {
+                    added: 3,
+                    changed: 0,
+                    removed: 0,
+                },
             }
         );
         assert_eq!(applied.text(), "Applied site.plan: 3 added.\n");
@@ -413,9 +415,11 @@ fn leaves_out_each_count_of_zero() {
         let applied = Applied {
             file: "a\n.plan".to_owned(),
             pointer: plan::Pointer::from(pointer),
-            added,
-            changed,
-            removed,
+            counts: Counts {
+                added,
+                changed,
+                removed,
+            },
         };
         applied.text()
     };
