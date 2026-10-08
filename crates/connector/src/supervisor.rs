@@ -1,10 +1,13 @@
 //! Runs connectors and restarts them after errors.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use document::Document;
 use env::clock::Clock;
 use env::entropy::Entropy;
+use env::net::Net;
+use env::tasks::Tasks;
 use types::name::Name;
 use types::time::Span;
 
@@ -20,23 +23,31 @@ const RESTART: retry::Config = retry::Config {
 /// A run at least this long starts the waits again from the first.
 const HEALTHY: Span = Span::MINUTE;
 
-/// Runs connectors of the kinds in a table, one `run` call at a time per connector.
+/// The inputs of a supervisor on one shard.
 #[derive(Debug)]
-pub struct Supervisor {
-    kinds: Arc<kind::Table>,
-    clock: Clock,
-    entropy: Entropy,
+pub struct Config {
+    /// The kinds this binary has.
+    pub kinds: Arc<kind::Table>,
+    /// The node's clock.
+    pub clock: Clock,
+    /// The source of each run's randomness.
+    pub entropy: Entropy,
+    /// The network that kinds connect through.
+    pub net: Net,
+    /// The shard's tasks.
+    pub tasks: Tasks,
 }
 
+/// Runs connectors of the kinds in a table, one `run` call at a time per connector.
+/// It is not `Send`: each shard makes its own.
+#[derive(Debug)]
+pub struct Supervisor(Rc<Config>);
+
 impl Supervisor {
-    /// Makes a supervisor for the kinds in `kinds`.
+    /// Makes a supervisor for one shard.
     #[must_use]
-    pub fn new(kinds: Arc<kind::Table>, clock: Clock, entropy: Entropy) -> Self {
-        Self {
-            kinds,
-            clock,
-            entropy,
-        }
+    pub fn new(config: Config) -> Self {
+        Self(Rc::new(config))
     }
 
     /// Runs one connector: parses its config, starts `run`, and restarts it with
@@ -58,28 +69,27 @@ impl Supervisor {
         config: &Document,
         cancel: &cancel::Token,
     ) -> Result<(), Error> {
-        let mut backoff = retry::Backoff::new(&self.clock, self.entropy.rng(), RESTART);
+        let Config {
+            kinds,
+            clock,
+            entropy,
+            ..
+        } = &*self.0;
+        let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while !cancel.cancelled() {
-            let ctx = Context::new(
-                name.clone(),
-                (),
-                cancel.child(),
-                self.clock.clone(),
-                self.entropy.clone(),
-            );
-            let start = self.clock.now();
-            match self
-                .kinds
-                .run(kind, config, ctx)
-                .map_err(Error::Config)?
-                .await
-            {
+            let token = Ended(cancel.child());
+            let ctx =
+                Context::new(name.clone(), (), token.0.clone(), Rc::clone(&self.0));
+            let start = clock.now();
+            let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
+            drop(token);
+            match end {
                 Ok(()) => return Ok(()),
                 Err(error @ Error::Config(_)) => return Err(error),
                 // These reach the connector's status in #420.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
-            if self.clock.now() - start >= HEALTHY {
+            if clock.now() - start >= HEALTHY {
                 backoff.reset();
             }
             backoff.wait(cancel).await;
@@ -88,10 +98,25 @@ impl Supervisor {
     }
 }
 
+/// A run's token, cancelled when the run returned or its future dropped.
+struct Ended(cancel::Token);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::future::poll_fn;
+    use std::io::IoSlice;
+    use std::net::SocketAddr;
+    use std::pin::pin;
     use std::sync::Mutex;
+
+    use env::net::tcp;
 
     use document::diagnostic::{Code, Diagnostic};
     use document::value::{self, Value};
@@ -100,7 +125,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::run;
+    use crate::common::{inputs, run_on};
     use crate::kind::{Channels, Kind, Table};
 
     const BAD: Code = Code::new("test.bad");
@@ -225,14 +250,15 @@ mod tests {
         config: Document,
         cancel: Option<Span>,
     ) -> Outcome {
-        run(move |clock, tasks, entropy| async move {
+        run_on(move |node, tasks| async move {
             let script = Script {
                 steps: Mutex::new(steps.into()),
                 ..Script::default()
             };
             let runs = Arc::clone(&script.runs);
-            let kinds = Arc::new(Table::new().with("script", script));
-            let supervisor = Supervisor::new(kinds, clock.clone(), entropy);
+            let kinds = Table::new().with("script", script);
+            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let clock = node.clock();
             let token = Token::new();
             if cancel == Some(Span::ZERO) {
                 token.cancel();
@@ -400,5 +426,216 @@ mod tests {
         // reset, each would be up to a minute.
         let gap = between(first, last);
         assert!(gap <= ms(15_000), "{gap:?}");
+    }
+
+    const OPTIONS: tcp::Options = tcp::Options {
+        send_buffer_bytes: 1 << 12,
+        recv_buffer_bytes: 1 << 12,
+        unsent_bytes_max: 1 << 10,
+        delayed: false,
+    };
+
+    /// A kind that connects to `remote` through its context and reads the stream to
+    /// its end in a task that it spawns through its context. It returns at the cancel.
+    struct Dial {
+        remote: SocketAddr,
+        read: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Kind for Dial {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels::default())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let config = tcp::Config {
+                remote: self.remote,
+                options: OPTIONS,
+            };
+            let mut tcp = ctx.net().connect(&config).await.expect("it listens");
+            let read = Arc::clone(&self.read);
+            ctx.tasks().spawn(async move {
+                let mut buffer = [0; 16];
+                loop {
+                    let n = poll_fn(|cx| tcp.poll_read(cx, &mut buffer))
+                        .await
+                        .expect("the read works");
+                    let Some(bytes) = buffer.get(..n).filter(|_| n > 0) else {
+                        break;
+                    };
+                    read.lock()
+                        .expect("no panic under the lock")
+                        .extend_from_slice(bytes);
+                }
+            });
+            ctx.cancel().wait().await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn gives_a_kind_the_network_and_the_tasks_of_its_shard() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let (client, server) = (
+            sim.node(sim::node::Config::default()),
+            sim.node(sim::node::Config::default()),
+        );
+        let remote = SocketAddr::new(server.addresses()[0], 4840);
+        let listen = tcp::Listen {
+            local: remote,
+            backlog: 1,
+            options: OPTIONS,
+        };
+        let mut listener = server.net().listen(&listen).expect("the port is free");
+        let shard = env::shards::Config {
+            name: "server".into(),
+            core: Some(0),
+        };
+        let server = server.shards().start(shard, move |_| async move {
+            let mut tcp = poll_fn(|cx| listener.poll_accept(cx))
+                .await
+                .expect("a stream comes");
+            let hello = [IoSlice::new(b"hello")];
+            let n = poll_fn(|cx| tcp.poll_write(cx, &hello))
+                .await
+                .expect("the write works");
+            assert_eq!(n, 5);
+            poll_fn(|cx| tcp.poll_close(cx)).await.expect("it closes");
+        });
+        let _server = server.expect("the shard starts");
+        let read = Arc::new(Mutex::new(Vec::new()));
+        let dial = Dial {
+            remote,
+            read: Arc::clone(&read),
+        };
+        let result = sim
+            .run_on(&client, move |node, tasks| async move {
+                let kinds = Table::new().with("dial", dial);
+                let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+                let token = Token::new();
+                let canceller = token.clone();
+                let clock = node.clock();
+                tasks.spawn(async move {
+                    clock.sleep(Span::SECOND).await;
+                    canceller.cancel();
+                });
+                let name = "plant.dial".parse().expect("a valid name");
+                supervisor.run("dial", name, &config(), &token).await
+            })
+            .expect("the run ends");
+        result.expect("ok after the cancel");
+        assert_eq!(*read.lock().expect("no panic under the lock"), b"hello");
+    }
+
+    /// A kind whose run spawns one task through its context. The task holds the
+    /// device until the run's cancel. The first run fails with a device error; each
+    /// run records how many tasks of earlier runs still hold the device at its start.
+    #[derive(Default)]
+    struct Spawner {
+        live: Arc<Mutex<u32>>,
+        seen: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl Kind for Spawner {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels::default())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let n = *self.live.lock().expect("no panic");
+            let first = {
+                let mut seen = self.seen.lock().expect("no panic");
+                seen.push(n);
+                seen.len() == 1
+            };
+            *self.live.lock().expect("no panic") += 1;
+            let live = Arc::clone(&self.live);
+            let token = ctx.cancel().clone();
+            ctx.tasks().spawn(async move {
+                token.wait().await;
+                *live.lock().expect("no panic") -= 1;
+            });
+            if first {
+                return Err(Error::Device("no reply".into()));
+            }
+            ctx.cancel().wait().await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stops_the_tasks_of_a_run_before_the_next_run() {
+        let seen = run_on(|node, tasks| async move {
+            let kind = Spawner::default();
+            let seen = Arc::clone(&kind.seen);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let token = Token::new();
+            let canceller = token.clone();
+            let clock = node.clock();
+            tasks.spawn(async move {
+                clock.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let name = "plant.spawner".parse().expect("a valid name");
+            supervisor
+                .run("spawner", name, &config(), &token)
+                .await
+                .expect("ok after the cancel");
+            seen.lock().expect("no panic").clone()
+        });
+        assert_eq!(seen, vec![0, 0], "the first run's task still runs");
+    }
+
+    #[test]
+    fn stops_the_tasks_of_a_run_when_its_future_drops() {
+        let live = run_on(|node, tasks| async move {
+            let kind = Spawner::default();
+            let live = Arc::clone(&kind.live);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let token = Token::new();
+            let name = "plant.spawner".parse().expect("a valid name");
+            let config = config();
+            let mut run = Box::pin(supervisor.run("spawner", name, &config, &token));
+            let clock = node.clock();
+            let mut later = pin!(clock.sleep(ms(5_000)));
+            poll_fn(|cx| {
+                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
+                later.as_mut().poll(cx)
+            })
+            .await;
+            let before = *live.lock().expect("no panic");
+            drop(run);
+            clock.sleep(ms(1)).await;
+            (before, *live.lock().expect("no panic"))
+        });
+        assert_eq!(live, (1, 0), "the second run's task outlives the drop");
     }
 }

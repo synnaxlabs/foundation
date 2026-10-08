@@ -369,6 +369,7 @@ fn the_pointer_after_a_stop_is_the_pointer_at_the_stop() {
             root: common::digest(1),
             chunks: [common::digest(1)].into(),
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         mesh.propose_data(encoded(&change)).await.unwrap();
         let bad = mesh.propose_data(vec![9]).await.unwrap();
