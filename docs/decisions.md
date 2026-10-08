@@ -74,12 +74,17 @@ How to read this record:
 - **Root CLAUDE.md principles** apply to every crate: injected dependencies, no mutable
   globals, no load-time self-wiring, concrete types by default, fail loud on an internal
   dispatch key, no defense in depth.
-- **DEVX (#1744, 2026-10-08)** Design each public API that people, agents, or their
-  programs use for developer experience. The person, on the first admin (FIRST ADMIN):
-  "Keep in mind that when we're designing public APIs like this, we really need to
-  think about devx". Recorded by `laptop.architect` from
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981
-  (2026-10-08T02:43:43Z).
+- **DEVX (2026-10-08)** Design each public API for the person, agent, or program that
+  uses it. A public API is any surface that a user reaches: the CLI, MCP, the config
+  language, the client protocol and each SDK, and each file that a user reads or
+  writes. Each plan for one compares its options by the steps of each common task, the
+  first use after a new install among them, and by the error and fix that each wrong
+  step gives (C7). A step that Foundation can do itself is not a step for the user
+  (FIRST ADMIN). The person, on 2026-10-08: "when we're designing public APIs like
+  this, we really need to think about devx"
+  (https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981,
+  2026-10-08T02:43:43Z). The plan rule is decided by `laptop.architect-2` and
+  `laptop.architect` from those words.
 - **Process** Each data structure and key decision is proposed with a sketch and
   locked only on agreement. RESCOPE: delivery and wire internals are tuned by
   benchmarks, not interviewed.
@@ -3784,15 +3789,19 @@ How to read this record:
   `mesh.changes` record, so every node checks its subject signature and the `secret`
   action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
   the coordinator (#409).
-- **FIRST ADMIN (#1744, locked 2026-10-08)** A new node has an empty spec, and BQ12
-  checks each apply against a key that the spec names. So the first `foundation start`
-  creates the spec with one admin, and writes the admin's private key to the data
-  directory, readable only by the user who started the node. The CLI on the same host
-  signs with that key. Lost: the first apply from any local process, and an admin
-  public key given before the first start. The person: "Yes, I approve." Recorded by
-  `laptop.architect` from
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981
-  (2026-10-08T02:43:43Z).
+- **FIRST ADMIN (2026-10-08)** A new node has an empty spec, and under BQ12 only a key
+  that the spec names can sign an apply. So the first `foundation start` on an empty
+  data directory creates the spec with one admin subject, and writes the admin's
+  private key into the data directory, readable only by the user who started the
+  node. The CLI on the same host signs with that key, so the first `apply` needs no
+  key step. BQ12 holds as written: each apply, the first one too, is checked against
+  a key in the spec. Lost: the first apply from any local process (any local user
+  could then take the node), and an admin public key given before the first start (a
+  step before the first use). The #1744 plan names the subject, its access policy,
+  and the key file. Decided by the person ("Yes, I approve."), 2026-10-08T02:43:43Z:
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6051096981. The
+  question:
+  https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051078801.
 
 ### 1.13 Operations, agents, and the factory
 
@@ -5592,6 +5601,15 @@ minimal `hub` (one writer and one reader session). Access, config files, and fai
 wait until its acceptance scenario passes. The plan and owners are on #462. The person
 decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
 the system is solid.
+
+Amendment (2026-10-08): ONE NODE work goes on beside FIRST SLICE, which keeps
+priority. FIRST SLICE focuses on the internals, and ONE NODE on the developer APIs and
+connectors. Supersedes, for ONE NODE work only, the sentence of this entry that access
+and config files wait until its acceptance scenario passes (#462). The person decided
+("Yes, that's fine. I really think that first slice should try to focus on the 'guts'
+the internals while ONE NODE work should be focused on developer APIs and
+connectors."), relayed by `laptop.monitor` at 2026-10-08T02:45:18Z:
+https://github.com/synnaxlabs/foundation/issues/1737#issuecomment-6051113411.
 
 **STORE AND FORWARD (2026-10-06)** The second milestone is the store-and-forward
 scenario of 5.5: an edge node writes 1M samples/s while its link to the cloud is cut
