@@ -1,5 +1,5 @@
-//! `config::plan::Plan::decode` never panics, and a plan it reads encodes to the same bytes,
-//! because the encoding is canonical.
+//! `config::plan::Plan::decode` never panics, and a plan it reads encodes to the same
+//! bytes, because the encoding is canonical.
 
 #![no_main]
 

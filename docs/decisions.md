@@ -5016,21 +5016,26 @@ How to read this record:
   plan refuses the rest. `config::plan::Plan::definitions(applied, key)` gives those
   definitions with the key rule of PLAN SURFACE, and an edge to no channel gets a key
   from `key`, which the check refuses as dangling. Each call of `key` must give a key
-  that no channel holds and that no earlier call gave. `definitions` refuses with
-  `plan::Error::Mismatch { name }` at the first change whose `old` is not the digest of
-  the stored definition at its name, so the digest rule stays in `config`; apply still
-  checks `base` first (`laptop.architect-2`, 2026-10-08T19:11:26Z,
-  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684). The
-  codec copies the channel kind layout of `spec::definition`; #1975 gives `spec` the
-  bytes of `channel::Kind<E>`, at the next change to the channel kind format of
-  `spec` or at a second user of the bytes of `Kind<Name>`. Each item of a plan has one
-  path, under `config::plan`. Plan:
+  that no channel holds and that no earlier call gave. `definitions` is fallible: it
+  refuses with `plan::Error::Mismatch { name }` at the first change that `plan`
+  cannot make from `applied`, which only a hand-made file holds. The change's `old` is
+  not the digest of the stored definition at its name, or the stored or new definition
+  is of a kind that no block defines or is not at the tree key of an unreserved label of
+  its kind. The rule stays in `config`, in the one place that holds `applied`; apply
+  still checks `base` first. The codec copies the channel kind layout of
+  `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`, at the next
+  change to the channel kind format of `spec` or at a second user of the bytes of
+  `Kind<Name>`. Each item of a plan has one path, under `config::plan`. Plan:
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221. Decided
   by `laptop.architect-2`: the three methods and the version byte (2026-10-08T16:00:18Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745); one
-  path, the `Error` variants, the new key for a dangling edge, and the `key` contract
-  (2026-10-08T18:45:40Z,
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066727322).
+  path, the variants `Version` and `Malformed`, the new key for a dangling edge, and the
+  `key` contract (2026-10-08T18:45:40Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066727322);
+  `Mismatch`, a fallible `definitions`, and the #1975 deferral (2026-10-08T19:11:26Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067164684); a change
+  at a reserved name or of a blockless kind is a `Mismatch` (2026-10-08T19:20:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179).
 - **FRONT ENDS (#337, 2026-10-08)** `ops` takes a table of front ends from `node`, as
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
