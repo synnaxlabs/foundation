@@ -5399,9 +5399,14 @@ mod name {
             });
             let found = resolve(&mut sim, &host, None);
             assert_eq!(found, Err(error), "{operation:?}");
+            host.fail_file(Path::new(FILE), operation);
+            let given = resolve(&mut sim, &host, Some("cloud"));
+            assert_eq!(given, Ok(name("cloud")), "reads nothing: {operation:?}");
         }
     }
 
+    /// `node::name` gives a given name and reads nothing, so only the start, under
+    /// the lock, refuses another name.
     #[test]
     fn a_start_with_another_name_stops_and_keeps_the_file() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -5412,12 +5417,10 @@ mod name {
             stored: name("edge"),
             given: name("cloud"),
         };
+        let given = resolve(&mut sim, &host, Some("cloud"));
+        assert_eq!(given, Ok(name("cloud")));
         let started = start_and_stop(&mut sim, &host, "cloud");
         assert_eq!(started, Err(renamed.clone()));
-        assert_eq!(
-            resolve(&mut sim, &host, Some("cloud")),
-            Err(renamed.clone())
-        );
         assert_eq!(read(&mut sim, &host), kept, "keeps the file");
         assert_eq!(
             renamed.to_string(),
@@ -5443,6 +5446,8 @@ mod name {
             let host = super::host(&mut sim, 2);
             write(&mut sim, &host, FILE, bytes.clone());
             assert_eq!(resolve(&mut sim, &host, None), Err(Error::Name));
+            let given = resolve(&mut sim, &host, Some("edge"));
+            assert_eq!(given, Ok(name("edge")));
             assert_eq!(start_and_stop(&mut sim, &host, "edge"), Err(Error::Name));
             assert_eq!(read(&mut sim, &host), Some(bytes), "keeps the file");
         }

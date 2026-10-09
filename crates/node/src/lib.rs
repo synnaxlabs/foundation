@@ -409,25 +409,23 @@ pub async fn create_key(
     identity::store(files, &identity::Identity { key, private_key }).await
 }
 
-/// The name of the node of the data directory `files`: the one that the file `name`
-/// holds, else `given`. Writes nothing, and reads also while another node runs on
-/// `files`.
+/// The name of the node of the data directory `files`: `given`, else the one that the
+/// file `name` holds. Reads the file only when `given` is `None`, writes nothing, and
+/// reads also while another node runs on `files`. A `given` that is not the stored
+/// name stops the start with [`Error::Renamed`].
 ///
 /// # Errors
 ///
-/// [`Error::Unnamed`] when there is neither, [`Error::Renamed`] when `given` is
-/// another name, [`Error::Name`] for a file `name` that a node did not write, and
+/// When `given` is `None`: [`Error::Unnamed`] when the file holds no name,
+/// [`Error::Name`] for a file `name` that a node did not write, and
 /// [`Error::Directory`] for a file call that fails.
 pub async fn name(
     files: &env::files::Files,
     given: Option<types::name::Name>,
 ) -> Result<types::name::Name, Error> {
-    match (name::read(files).await?, given) {
-        (Some(stored), Some(given)) if stored != given => {
-            Err(Error::Renamed { stored, given })
-        }
-        (Some(name), _) | (None, Some(name)) => Ok(name),
-        (None, None) => Err(Error::Unnamed),
+    match given {
+        Some(given) => Ok(given),
+        None => name::read(files).await?.ok_or(Error::Unnamed),
     }
 }
 
