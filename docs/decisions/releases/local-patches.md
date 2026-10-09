@@ -23,9 +23,11 @@
   builds a release of a patched crate in place of the copy that the root builds. A
   release that the copy cannot replace passes: one of another semver series, or one
   beside the copy in the `fuzz` graph, which Cargo takes only for a requirement that
-  the copy cannot meet. The task checks the graphs of `cargo metadata --locked`, not
-  the text of the two tables: a patch that `fuzz/` does not use changes no code that
-  it tests (`laptop.architect-2`, 2026-10-09T04:27:21Z,
+  the copy cannot meet (`laptop.architect-2`, 2026-10-09T04:43:40Z,
+  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462).
+  The task checks the graphs of `cargo metadata --locked`, not the text of the two
+  tables: a patch that `fuzz/` does not use changes no code that it tests
+  (`laptop.architect-2`, 2026-10-09T04:27:21Z,
   https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074258921). The PR
   that changes a copy of a Rust crate lists its mutants as `docs/dependencies.md`,
   "Local patches", states (`laptop.architect-2`, 2026-10-08T11:36:09Z,
