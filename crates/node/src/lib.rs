@@ -365,6 +365,7 @@ impl Node {
     }
 
     /// A handle that stops this node from another thread.
+    #[must_use]
     pub fn stopper(&self) -> Stopper {
         Stopper(self.stop.clone())
     }
