@@ -4021,7 +4021,8 @@ mod port {
 
         /// Takes the lock of `host` as soon as it is free, then binds the node's port
         /// and opens the mesh's log to write. Gives whether the lock was held, the
-        /// bind, and the open of the log.
+        /// bind, the open of the log, and the file closes of `host` before the
+        /// probe's own.
         fn probe(
             sim: &mut sim::Sim,
             host: &sim::node::Node,
@@ -4029,6 +4030,7 @@ mod port {
             bool,
             Result<(), env::net::Error>,
             Result<(), env::files::Error>,
+            Vec<PathBuf>,
         ) {
             sim.run_on(host, |host, _| async move {
                 let files = host.files();
@@ -4051,9 +4053,10 @@ mod port {
                 };
                 let port = host.net().udp(&udp).map(drop);
                 let mode = env::files::Mode::Write;
-                let log = files.open(Path::new(LOG), mode).await.map(drop);
+                let log = files.open(Path::new(LOG), mode).await;
+                let closes = host.file_closes();
                 drop(lock);
-                (waited, port, log)
+                (waited, port, log.map(drop), closes)
             })
             .expect("the probe ends")
         }
@@ -4080,14 +4083,14 @@ mod port {
 
         /// A stop at any point of the start and the run of a node whose mesh writes
         /// its log for each home that the peer sets, then a probe that takes the
-        /// lock as soon as it is free: the mesh's log is never busy then, and the port
-        /// of a node that held the lock binds once the lock is free. A node stopped
-        /// before its claim holds no lock, so its port can still be bound. The order
-        /// of the two closes waits on #1835. The peer ends once a set waits [`TEN`],
-        /// so the probe's run ends.
+        /// lock as soon as it is free: the node closes the mesh's log before the lock,
+        /// the log is never busy then, and the port of a node that held the lock
+        /// binds once the lock is free. A node stopped before its claim holds no
+        /// lock, so its port can still be bound. The peer ends once a set waits
+        /// [`TEN`], so the probe's run ends.
         #[test]
         fn the_log_of_the_mesh_is_free_once_the_lock_is() {
-            let (mut held, mut logged) = (false, false);
+            let (mut held, mut logged, mut ordered) = (false, false, false);
             // The mesh opens at about 1.5 ms, and from 1.6 s the log writes a home
             // about each 0.7 ms.
             let opens = (0..200).map(|step| step * 13_000);
@@ -4101,11 +4104,16 @@ mod port {
                 let after = Span::from_nanos(after);
                 assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
                 node.stop();
-                let (waited, port, log) = probe(&mut sim, &hosts[0]);
+                let (waited, port, log, closes) = probe(&mut sim, &hosts[0]);
                 held |= waited;
                 logged |= log.is_ok();
                 let busy = matches!(log, Err(env::files::Error::Busy { .. }));
                 assert!(!busy, "at {after:?}: {log:?}");
+                let last = |path| closes.iter().rposition(|c| c == Path::new(path));
+                if let (Some(log), Some(lock)) = (last(LOG), last("lock")) {
+                    assert!(log < lock, "at {after:?}: {closes:?}");
+                    ordered = true;
+                }
                 // A probe that takes the lock before the claim refuses the node.
                 let refused = Error::Directory(env::files::Error::Busy {
                     path: PathBuf::from("lock"),
@@ -4116,7 +4124,7 @@ mod port {
                     assert_eq!(port, Ok(()), "at {after:?}");
                 }
             }
-            assert!(held && logged);
+            assert!(held && logged && ordered);
         }
 
         /// When the mesh's group stops the node while a peer holds a session with it,
@@ -4130,7 +4138,7 @@ mod port {
             set_homes(&hosts[1], members);
             assert_eq!(sim.run_for(Span::from_nanos(1_700_000_000)), Ok(()));
             hosts[0].fail_file(Path::new(LOG), env::files::Operation::WriteAt);
-            let (waited, port, _) = probe(&mut sim, &hosts[0]);
+            let (waited, port, _, _) = probe(&mut sim, &hosts[0]);
             assert_eq!((waited, port), (true, Ok(())));
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }

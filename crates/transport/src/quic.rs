@@ -713,8 +713,6 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
-        // noq-proto answers a short header only with a stateless reset.
-        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -743,8 +741,9 @@ impl Endpoint {
                 }
             }
             Some(DatagramEvent::Response(response)) => {
+                let reset = reply.first().is_some_and(|form| form & 0x80 == 0);
                 let admitted =
-                    !short || self.resets.admit(now, response.destination.ip());
+                    !reset || self.resets.admit(now, response.destination.ip());
                 admitted.then_some(response)
             }
         };

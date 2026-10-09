@@ -60,3 +60,4 @@
 | NODE PORT, test of the amendment (#1962, 6069568312): the port is free once `lock` is | NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `sim` the port is free once `lock` is; under `os` the carrier's task can hold the socket until the runtime of shard 0 drops, until #2017 |
 | HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
+| "It is never less than the PTO base." of 6060065670 | PROBE GAP (6066780738): a probe of data in flight never comes before the PTO base; the client's probe in a dial with no data in flight keeps the release's rule |
