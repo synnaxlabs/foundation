@@ -2153,6 +2153,7 @@ mod hub {
                     node: types::node::Key::from_u128(1),
                     time,
                     entropy,
+                    mesh: None,
                 });
                 define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;
@@ -3038,7 +3039,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_792_458_154;
+        const WRITE: i64 = 1_792_553_323;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -3090,7 +3091,8 @@ mod port {
         }
 
         /// The region of the node [`OWN`] on `host` alone, whose founding spec holds
-        /// the index `plant.time` (key 1) and the data channel `plant.value` (key 2).
+        /// the index `plant.time` (key 1), with its home at [`OWN`], and the data
+        /// channel `plant.value` (key 2).
         fn founded(host: &sim::node::Node) -> Founding {
             use super::super::hub::{I64, data, index};
             let mut founding = region(&[member(OWN, &KEY, host)]);
@@ -3101,6 +3103,9 @@ mod port {
                     .definitions
                     .insert(name, Definition::Channel(channel));
             }
+            founding
+                .homes
+                .insert(types::channel::Key::from_u128(1), OWN);
             founding
         }
 
@@ -3191,6 +3196,34 @@ mod port {
             let later = stamp + TEN.nanos();
             let read = round_trip(&mut sim, &host, later);
             assert_eq!(read, Some((vec![later], vec![7])));
+        }
+
+        /// The hub reads the homes of the node's mesh, so a reader of a channel whose
+        /// index has its home at another node gets that home.
+        #[test]
+        fn a_reader_of_a_channel_whose_home_is_another_node_gets_the_home() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let mut founding = founded(&host);
+            founding.members.push(member(OTHER.0, &OTHER.1, &host));
+            founding.voters.insert(OTHER.0);
+            founding
+                .homes
+                .insert(types::channel::Key::from_u128(1), OTHER.0);
+            let node = start(&host, founding);
+            let opened = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&opened);
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                *out.lock().unwrap() = Some(reader.err());
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let remote = ::hub::reader::Error::Remote { home: OTHER.0 };
+            assert_eq!(opened.lock().unwrap().take(), Some(Some(remote)));
         }
 
         /// The node with key [`OWN`] on `host`, the one member and voter of its region.
@@ -3461,28 +3494,19 @@ mod port {
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
 
-        /// A task that panics one yield after the instant of the write that fails,
-        /// before the group stops: `join` gives the panic.
+        /// A task that panics one nanosecond before the group stops: `join` gives the
+        /// panic.
         #[test]
         fn a_panic_before_the_group_stops_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
-            let at =
-                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            let at = sim::node::Config::default().monotonic
+                + OPEN
+                + Span::from_nanos(WRITE - 1);
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;
-                let mut yielded = false;
-                poll_fn(|cx| {
-                    if yielded {
-                        return Poll::Ready(());
-                    }
-                    yielded = true;
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                })
-                .await;
                 panic!("a task panics");
             });
             assert_eq!(sim.run_for(OPEN), Ok(()));
@@ -3505,19 +3529,14 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. The seed and the instant are ones where the sim
-        /// runs the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], the sim runs the group's stop first.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
-            let mut sim = sim::Sim::new(sim::Config {
-                seed: 22,
-                ..sim::Config::default()
-            });
+            let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
-            let at = sim::node::Config::default().monotonic
-                + OPEN
-                + Span::from_nanos(1_592_294_695);
+            let at =
+                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;
@@ -3530,7 +3549,7 @@ mod port {
                 Err(sim::Error::Panicked {
                     thread: "shard-0".into(),
                     message: "a task panics".into(),
-                    seed: 22,
+                    seed: 0,
                 })
             );
             assert_eq!(sim.run(), Ok(()));
@@ -3565,8 +3584,7 @@ mod port {
         }
 
         /// Of a transport and a group that stop, `join` gives the one that the node
-        /// sees first, which at one instant can be either. A transport that stops
-        /// drops the mesh, so the node sees the group's `Dropped` at the same poll.
+        /// sees first, which at one instant can be either.
         #[test]
         fn join_gives_the_stop_that_the_node_sees_first() {
             let error = transport::Error::Network {

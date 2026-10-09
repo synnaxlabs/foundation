@@ -8,7 +8,10 @@
   }`, which holds the digest of the stored bytes and the `Entry` of the files. The
   stored bytes are the `encode` of each applied definition: `decode` takes only
   canonical bytes, so they are the bytes of the tree. The plan holds no channel key
-  (A4). `homes` gives the home of each index that the stored spec has no index at. A
+  (A4). `homes` gives the home of each index of the files, as the placements give it.
+  The apply gives this home only to an index with no home (`laptop.architect-2`,
+  2026-10-08T18:33:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066530508). A
   channel keeps the stored key at its name, and a new name gets `Key::from_u128(n)`, a
   key that no stored channel holds. A definition changes when its encoded bytes differ
   from the stored bytes. A stored definition that no file holds is removed (A2), except
@@ -125,7 +128,7 @@
   home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
   and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
   applied tree as an input, with which `ops` reads the tree a second time and a missing
-  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
+  chunk panics in `config`, though #1741 names that case (`Cause::Read`), and, for
   checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
   `config`, no report for the `Tie` or `Homeless` of a connector, a check against each
   connector above the index, with which two nested connectors on two nodes share one

@@ -1,6 +1,7 @@
-- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and accepts;
-  the node's sockets and relays sit in one node-level part, `transport::Port` (ONE
-  PORT PER NODE), which `node` binds once and splits into one part for each shard. A
+- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and accepts.
+  Each `Transport` keeps one session to each node (ONE SESSION PER PEER). The node's
+  sockets and relays sit in one node-level part, `transport::Port` (ONE PORT PER NODE),
+  which `node` binds once and splits into one part for each shard. A
   `Session` goes to one peer over one path, direct or relayed, fixed for its life, and
   runs every class on one carrier. A second carrier for some classes waits for the
   measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99 holds while

@@ -247,6 +247,9 @@ impl Tcp {
     /// bytes written, which may be less than all. It is ready when the bytes not yet
     /// sent are fewer than [`tcp::Options::unsent_bytes_max`].
     ///
+    /// A write of no bytes gives `Ok(0)` at once, also after a reset or
+    /// [`Tcp::poll_close`].
+    ///
     /// # Errors
     ///
     /// [`Error::Reset`] when the peer reset the stream, also after this end's
