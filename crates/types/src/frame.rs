@@ -273,6 +273,11 @@ impl<'a> Layout<'a> {
         Self::checked(set, ends, Sizes::Ends)
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it keeps `Draft::new` from folding its constant `Sizes`"
+    )]
+    #[inline(always)]
     fn checked(
         set: &'a KeySet,
         series: &'a [(usize, usize)],
@@ -353,6 +358,9 @@ impl<'a> Layout<'a> {
     /// # Errors
     ///
     /// The pool's error when it cannot give the block.
+    // Without the hint, fat LTO stops inlining it into `Draft::new` once it has a
+    // second caller.
+    #[inline]
     pub fn draft(self, pool: &block::Pool, form: Form) -> Result<Draft, block::Error> {
         let Self {
             set,
