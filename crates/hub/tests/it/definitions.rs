@@ -311,6 +311,45 @@ fn gives_a_latest_reader_of_a_kept_channel_the_newest_frame_after_a_change() {
     });
 }
 
+/// An index that is removed and returns gives a latest reader no newest frame from
+/// before it was removed.
+#[test]
+fn gives_a_latest_reader_no_frame_of_an_index_from_before_it_was_removed() {
+    run(44, |test| async move {
+        let mut writer = test.writer("a", &["value-b"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(3, &[now]), (4, &[10])]);
+        test.hub.set_definitions(&without(&["time-b", "value-b"]));
+        drop(writer);
+        test.hub.set_definitions(&channels());
+        let mut reader = test.reader(&["value-b"], Mode::Latest).await;
+        let (polled, _) = poll_flagged(pin!(reader.next()));
+        assert!(polled.is_pending(), "the removed index left no newest frame");
+    });
+}
+
+/// A renamed index keeps its newest frame for a latest reader of its data.
+#[test]
+fn gives_a_latest_reader_the_newest_frame_of_a_renamed_index() {
+    run(45, |test| async move {
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        let outcomes =
+            write_series(&mut writer, &[(1, &[now]), (2, &[10]), (5, &[30])]);
+        assert_eq!(outcomes, [applied(0)]);
+        let mut renamed = channels();
+        let time = renamed
+            .remove(&name("time"))
+            .expect("a channel of the test");
+        renamed.insert(name("clock"), time);
+        test.hub.set_definitions(&renamed);
+        let mut reader = test.reader(&["value-c"], Mode::Latest).await;
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1, 5]);
+        assert_eq!(samples(&received, 5), [30]);
+    });
+}
+
 /// A data channel that moves to another index and back with a new type leaves no
 /// series of its old type on its first index.
 #[test]
