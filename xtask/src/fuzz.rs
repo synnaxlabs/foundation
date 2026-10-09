@@ -352,8 +352,9 @@ impl<'a> Package<'a> {
     /// `dependency` under the name of the edge, of a kind and target of the edge, that
     /// the version of `dependency` meets. Cargo names an edge from a package to itself
     /// by the lib target, whatever the rename, so such an edge can resolve a
-    /// requirement of any name. Two edges can resolve one requirement. It fails when
-    /// none is, or on a version of `dependency` or a requirement that does not parse.
+    /// requirement on the package with any rename. Two edges can resolve one
+    /// requirement. It fails when none is, or on a version of `dependency` or a
+    /// requirement that does not parse.
     fn requirements(
         &self,
         dependency: &Package<'_>,
