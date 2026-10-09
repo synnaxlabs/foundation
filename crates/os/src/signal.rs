@@ -5,7 +5,8 @@ use std::mem::MaybeUninit;
 use crate::Error;
 
 /// Blocks SIGINT and SIGTERM on the calling thread, then starts a thread that waits
-/// for them. The future completes at the first.
+/// for them. The future completes at the first, and then the thread takes them as with
+/// no hold.
 pub(crate) fn hold() -> Result<impl Future<Output = ()> + Send + 'static, Error> {
     let set = set();
     // SAFETY: `set` is an initialized sigset, and the old mask is not asked for.
@@ -20,21 +21,29 @@ pub(crate) fn hold() -> Result<impl Future<Output = ()> + Send + 'static, Error>
     let handle = crate::thread::start(
         "signal".to_owned(),
         |_| Ok(()),
-        move |()| {
-            wait(&set);
-            // The future may be gone, as when the process stops on its own.
-            fire.send(()).unwrap_or(());
-            false
-        },
+        move |()| serve(&set, fire),
     )
     .map_err(Error::Thread)?;
-    // The thread ends at the first signal, or with the process.
+    // The thread ends with the process.
     drop(handle);
     Ok(async move {
         fired
             .await
             .expect("invariant: the signal thread fires before it ends");
     })
+}
+
+/// Fires `fire` at the first signal of `set`, then takes them as with no hold.
+fn serve(set: &libc::sigset_t, fire: tokio::sync::oneshot::Sender<()>) -> ! {
+    wait(set);
+    // The future may be gone, as when the process stops on its own.
+    fire.send(()).unwrap_or(());
+    unblock(set);
+    // A signal goes only to a thread that takes it, so this one stays.
+    loop {
+        // SAFETY: `pause` takes no arguments.
+        unsafe { libc::pause() };
+    }
 }
 
 /// The set of SIGINT and SIGTERM.
@@ -58,4 +67,15 @@ fn wait(set: &libc::sigset_t) {
     // SAFETY: `set` is an initialized sigset, and `signal` an int that the call writes.
     let rc = unsafe { libc::sigwait(set, &raw mut signal) };
     assert_eq!(rc, 0, "invariant: sigwait of a valid set does not fail");
+}
+
+/// Takes the signals of `set` on the calling thread again.
+fn unblock(set: &libc::sigset_t) {
+    // SAFETY: `set` is an initialized sigset, and the old mask is not asked for.
+    let rc =
+        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, set, std::ptr::null_mut()) };
+    assert_eq!(
+        rc, 0,
+        "invariant: SIG_UNBLOCK and a valid set are valid arguments"
+    );
 }

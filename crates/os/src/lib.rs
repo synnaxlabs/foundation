@@ -154,17 +154,17 @@ pub fn net() -> env::net::Net {
     env::net::Net::new(net::Driver)
 }
 
-/// The real disk under `dir/data`, which it makes when it is not there, and the
-/// handle of its I/O thread. `os` keeps its own entries in `dir`, so give it a
-/// directory that nothing else uses. `threads` starts I/O thread `name`, which runs
-/// each call of the disk and of its files in the order they reach it, and ends after
-/// the disk and its files drop. Give each shard a disk of its own. The mode of each
+/// The real disk under `dir/data`, and the handle of its I/O thread. It makes `dir`
+/// and `dir/data` when they are not there, but not the parents of `dir`. `os` keeps
+/// its own entries in `dir`, so give it a directory that nothing else uses. `threads`
+/// starts I/O thread `name`, which runs each call of the disk and of its files in the
+/// order they reach it, and ends after the disk and its files drop. Give each shard a disk of its own. The mode of each
 /// file and directory that it makes gives the group and other users no access. It does
 /// not change the mode of a file or directory that is there.
 ///
 /// # Errors
 ///
-/// - [`Error::Dir`] when the OS cannot open `dir`, or open or make `dir/data`.
+/// - [`Error::Dir`] when the OS cannot open or make `dir` or `dir/data`.
 /// - [`Error::Thread`] when the I/O thread cannot start.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn files(
@@ -175,10 +175,12 @@ pub fn files(
     Disk::new(dir, threads, name)
 }
 
-/// Holds SIGINT and SIGTERM: from the call on, neither ends the process, and the
-/// future completes at the first that comes, also one that came before its first
-/// poll. Call it once, on the main thread, before the process starts any other thread:
-/// a thread that was there before still takes them, and ends the process on one.
+/// Holds SIGINT and SIGTERM: the first that comes does not end the process, and the
+/// future completes at it, also when it came before the first poll. A second one
+/// ends the process as it does with no hold, so a stop that hangs can still be
+/// ended. Call it once, on the main thread, before the process starts any other
+/// thread: a thread that was there before still takes them, and ends the process
+/// on one.
 ///
 /// # Errors
 ///

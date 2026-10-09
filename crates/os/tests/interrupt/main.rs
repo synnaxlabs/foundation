@@ -1,36 +1,81 @@
-//! A SIGINT and a SIGTERM that the process sends itself after `os::interrupt` end
-//! no thread, and complete its future, which waits until then. This binary has no
-//! test harness: the threads of a harness start before the hold, so a signal would
-//! end the process.
+//! `os::interrupt` holds the first SIGINT or SIGTERM and completes its future at it,
+//! and a second one ends the process. This binary has no test harness: the threads
+//! of a harness start before the hold, so a signal would end the process. With the
+//! argument `child`, it is the process that the test signals.
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::pin::pin;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use rustix::process::{Signal, getpid, kill_process};
-use tokio::time::timeout;
+use rustix::process::{Pid, Signal, getpid, kill_process};
+use tokio::time::{sleep, timeout};
 
 /// How long the future must wait with no signal.
 const QUIET: Duration = Duration::from_millis(200);
-/// The bound of the wait for the signals.
+/// The bound of each wait for a signal. A child ends in twice this, so no wait of
+/// the test on it hangs.
 const BOUND: Duration = Duration::from_secs(10);
 
 fn main() {
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "child") {
+        child();
+    } else {
+        a_second_signal_ends_the_process();
+        the_future_completes_at_the_first_signal();
+    }
+}
+
+/// Holds the signals, then waits for one and the end of the process.
+fn child() {
     let interrupt = os::interrupt().expect("the signal thread starts");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("a runtime");
-    runtime.block_on(async {
+    let mut output = std::io::stdout();
+    writeln!(output, "held").expect("a write to the test");
+    runtime().block_on(async {
+        timeout(BOUND, interrupt)
+            .await
+            .unwrap_or_else(|_| panic!("no signal came in {BOUND:?}"));
+        writeln!(output, "fired").expect("a write to the test");
+        sleep(BOUND).await;
+    });
+}
+
+fn a_second_signal_ends_the_process() {
+    let mut child = Command::new(std::env::current_exe().expect("the test binary"))
+        .arg("child")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the child starts");
+    let pid = Pid::from_child(&child);
+    let mut lines = BufReader::new(child.stdout.take().expect("a pipe")).lines();
+    let mut line = || lines.next().expect("a line of the child").expect("a read");
+    assert_eq!(line(), "held", "the child holds the signals");
+    kill_process(pid, Signal::TERM).expect("the test signals the child");
+    assert_eq!(line(), "fired", "the first SIGTERM completes the future");
+    kill_process(pid, Signal::TERM).expect("the test signals the child");
+    let status = child.wait().expect("the child ends");
+    assert_eq!(status.signal(), Some(libc::SIGTERM), "{status}");
+}
+
+fn the_future_completes_at_the_first_signal() {
+    let interrupt = os::interrupt().expect("the signal thread starts");
+    runtime().block_on(async {
         let mut interrupt = pin!(interrupt);
         assert!(
             timeout(QUIET, interrupt.as_mut()).await.is_err(),
             "the future completed with no signal"
         );
-        for signal in [Signal::INT, Signal::TERM] {
-            kill_process(getpid(), signal).expect("the process signals itself");
-        }
+        kill_process(getpid(), Signal::INT).expect("the process signals itself");
         timeout(BOUND, interrupt)
             .await
             .unwrap_or_else(|_| panic!("no signal came in {BOUND:?}"));
     });
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a runtime")
 }
