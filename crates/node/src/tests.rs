@@ -2791,6 +2791,74 @@ mod port {
         assert_eq!(node.join(), Ok(()));
     }
 
+    /// A peer holds a session over a slow link when the node stops. The node drains
+    /// the session before it frees the lock: the peer sees its close before a probe
+    /// can take the lock, and the probe then binds the node's port at once.
+    #[test]
+    fn a_peer_sees_its_close_before_the_lock_is_free() {
+        #[derive(Clone, Debug, PartialEq)]
+        enum Event {
+            /// The peer's session closed with this error.
+            Closed(transport::Error),
+            /// The probe took the lock, then bound the node's port with this result.
+            Locked(Result<(), env::net::Error>),
+        }
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = keyed(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let slow = sim::link::Config {
+            delay: Span::from_nanos(10 * Span::MILLISECOND.nanos()),
+            ..sim::link::Config::default()
+        };
+        sim.link(&peer, &host, slow);
+        sim.link(&host, &peer, slow);
+        let listen = listen(&host);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let (transport, _pool) = transport(&own, tasks, CLIENT);
+            let session = transport
+                .dial(KEY.public(), &[Address::Udp(listen)])
+                .await
+                .expect("a session");
+            let closed = session.closed().await;
+            seen.lock().unwrap().push(Event::Closed(closed));
+            drop(transport);
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        node.stop();
+        let seen = Arc::clone(&events);
+        sim.run_on(&host, move |host, _| async move {
+            let files = host.files();
+            let clock = host.clock();
+            let lock = loop {
+                let mode = env::files::Mode::Create { len: 0 };
+                match files.open(Path::new("lock"), mode).await {
+                    Err(env::files::Error::Busy { .. }) => {
+                        clock.sleep(Span::from_nanos(1_000)).await;
+                    }
+                    opened => break opened.expect("the lock opens"),
+                }
+            };
+            let bound = transport::Port::bind(&host.net(), listen).map(drop);
+            seen.lock().unwrap().push(Event::Locked(bound));
+            drop(lock);
+        })
+        .expect("the probe ends");
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events, [Event::Closed(closed), Event::Locked(Ok(()))]);
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
     mod key {
         use super::*;
         use crate::identity::{FILE, LEN};
@@ -3528,10 +3596,9 @@ mod port {
                 let home = opened.expect("the buffer opens");
                 let interner = next.await.expect("the open gives the interner");
                 let (key, entropy) = (identity.key, endpoint.entropy.clone());
-                let (transport, mesh) = endpoint
-                    .open(identity, own.files(), pool, tasks.clone())
-                    .await
-                    .expect("the mesh opens");
+                let opened = endpoint.open(identity, own.files(), pool, tasks.clone());
+                let (transport, mesh) = opened.await;
+                let mesh = mesh.expect("the mesh opens");
                 let mesh = mesh.expect("the peer has a region");
                 let hub = ::hub::Hub::new(::hub::Config {
                     home,
