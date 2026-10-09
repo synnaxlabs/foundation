@@ -1803,6 +1803,16 @@ mod tests {
         }
 
         #[test]
+        fn refuses_an_empty_allow_only_when_each_attribute_is_known() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes.push(("deny", string("write")));
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.unknown-attribute"]));
+        }
+
+        #[test]
         fn refuses_an_authority_that_is_not_from_0_to_255() {
             for (authority, message) in [
                 (Kind::Integer(256), "the authority 256 is not from 0 to 255"),
