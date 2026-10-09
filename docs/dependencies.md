@@ -59,9 +59,9 @@ patched copy lives in `patches/<crate>/` (LOCAL PATCHES in
 no `[patch.crates-io]`: its `build.rs` reads `patches/open62541/`. Searches skip
 `patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`.
 `cargo xtask fuzz` fails when `fuzz/` builds a copy that the root does not build, or
-builds a release of a patched crate in place of the copy that the root builds (LOCAL
-PATCHES;
-https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074258921).
+when a copy that the root builds meets a requirement in the `fuzz` graph and the
+requirement resolves to another package (LOCAL PATCHES;
+https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074513522).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
@@ -107,6 +107,7 @@ These never ship in the binary.
 | Crate | Used by | Why | License | Version | Approved |
 | --- | --- | --- | --- | --- | --- |
 | `serde_json` | `xtask` | Read `cargo metadata` output for the layer check | MIT or Apache-2.0 | | Bootstrap |
+| `semver` | `xtask` | Whether a version meets a Cargo requirement, for the patch check of `cargo xtask fuzz` (LOCAL PATCHES). It was in `Cargo.lock` already, through `rustc_version`. Approval owed: https://github.com/synnaxlabs/foundation/issues/252#issuecomment-6074542686 | MIT or Apache-2.0 | 1.0.28 | |
 | `proptest` | All crates (dev) | Property tests (testing layer 1) | MIT or Apache-2.0 | 1.11.0 | 2026-10-04 |
 | `loom` | `ring`, `block` (`cfg(loom)`) | Exhaustive checks of wake protocols and atomics | MIT | 0.7.2 | 2026-10-04 |
 | `shuttle` | `ring`, `block` (dev) | Randomized (PCT) checks of larger concurrent models | Apache-2.0 | 0.9.5 | 2026-10-04 |

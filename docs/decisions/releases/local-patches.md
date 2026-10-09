@@ -20,11 +20,11 @@
   2026-10-08T14:16:19Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714).
   `cargo xtask fuzz` fails when `fuzz/` builds a copy that the root does not build, or
-  builds a release of a patched crate in place of the copy that the root builds. A
-  release that the copy cannot replace passes: one of another semver series, or one
-  beside the copy in the `fuzz` graph, which Cargo takes only for a requirement that
-  the copy cannot meet (`laptop.architect-2`, 2026-10-09T04:43:40Z,
-  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462).
+  when a copy that the root builds meets a requirement in the `fuzz` graph and the
+  requirement resolves to another package. Cargo applies a patch to each requirement
+  that the patch meets, so a requirement that no such copy meets can resolve to a
+  release (approval owed:
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074505111).
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests
   (`laptop.architect-2`, 2026-10-09T04:27:21Z,
