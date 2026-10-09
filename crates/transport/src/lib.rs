@@ -137,7 +137,7 @@ impl Transport {
         let public_key = config.private_key.public();
         let tasks = config.tasks.clone();
         let carrier = quic::Carrier::new(config.setup()?, part);
-        let table = Table::new(public_key, tasks, carrier.dialer());
+        let table = Table::new(public_key, tasks, carrier.handle());
         Ok(Self {
             carrier,
             public_key,

@@ -24,7 +24,7 @@ pub(crate) struct Table {
     tasks: Tasks,
     /// Dials on the transport's carrier, and takes the sessions that wait there for
     /// `accept`.
-    dialer: quic::Dialer,
+    carrier: quic::Handle,
     /// This table, for its tasks. A strong handle would keep the sessions for
     /// `accept` open after the transport drops.
     this: rc::Weak<RefCell<Table>>,
@@ -94,14 +94,14 @@ pub(crate) async fn dial(
         Found::Dialing(attempt) => attempt,
         Found::Start(attempt) => {
             let table = table.borrow();
-            let dialer = table.dialer.clone();
+            let carrier = table.carrier.clone();
             let this = rc::Weak::clone(&table.this);
             let addresses = addresses.to_vec();
             // A strong handle would keep the result of an attempt that a session
             // from the peer ended, and so that session, open while the dial runs.
             let started = Rc::downgrade(&attempt);
             table.tasks.spawn(async move {
-                let dial = dial::dial(&dialer, node, &addresses).await;
+                let dial = dial::dial(&carrier, node, &addresses).await;
                 let (Some(table), Some(started)) = (this.upgrade(), started.upgrade())
                 else {
                     return;
@@ -147,13 +147,13 @@ impl Table {
     pub(crate) fn new(
         key: PublicKey,
         tasks: Tasks,
-        dialer: quic::Dialer,
+        carrier: quic::Handle,
     ) -> Rc<RefCell<Self>> {
         Rc::new_cyclic(|this| {
             RefCell::new(Self {
                 key,
                 tasks,
-                dialer,
+                carrier,
                 this: rc::Weak::clone(this),
                 nodes: Map::default(),
                 limit: 0,
@@ -213,7 +213,7 @@ impl Table {
     /// Takes each session that a peer opened and that no `accept` took from the
     /// carrier.
     fn take(&mut self) {
-        while let Some(session) = self.dialer.accepted() {
+        while let Some(session) = self.carrier.accepted() {
             if let Some(session) = self.arrive(Session::new(session)) {
                 self.push(session);
             }

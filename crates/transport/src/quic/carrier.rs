@@ -69,19 +69,19 @@ impl Carrier {
     ///
     /// # Errors
     ///
-    /// As [`Dialer::dial`], or why the dial ended before the handshake finished, as
+    /// As [`Handle::dial`], or why the dial ended before the handshake finished, as
     /// [`Session::closed`] gives it.
     ///
     /// # Panics
     ///
-    /// As [`Dialer::dial`].
+    /// As [`Handle::dial`].
     #[cfg(test)]
     pub(crate) async fn connect(
         &self,
         peer: PublicKey,
         remote: SocketAddr,
     ) -> Result<Session, Error> {
-        let session = self.dialer().dial(peer, remote)?;
+        let session = self.handle().dial(peer, remote)?;
         poll_fn(|cx| session.poll_connected(cx)).await?;
         Ok(session)
     }
@@ -102,8 +102,8 @@ impl Carrier {
     }
 
     /// A handle that dials on this carrier, and that does not keep it from its drop.
-    pub(crate) fn dialer(&self) -> Dialer {
-        Dialer(Rc::clone(&self.0))
+    pub(crate) fn handle(&self) -> Handle {
+        Handle(Rc::clone(&self.0))
     }
 
     /// Ready with the next session that a peer dialed. Each that connects comes
@@ -140,9 +140,9 @@ impl Carrier {
 
 /// Dials on a [`Carrier`]. Clones share the carrier.
 #[derive(Clone)]
-pub(crate) struct Dialer(Rc<RefCell<State>>);
+pub(crate) struct Handle(Rc<RefCell<State>>);
 
-impl Dialer {
+impl Handle {
     /// The clock of the carrier's endpoint.
     pub(crate) fn clock(&self) -> Clock {
         self.0.borrow().clock.clone()
@@ -182,7 +182,7 @@ impl Dialer {
     ///
     /// # Errors
     ///
-    /// As [`Dialer::check`].
+    /// As [`Handle::check`].
     ///
     /// # Panics
     ///
@@ -1630,31 +1630,31 @@ mod tests {
     }
 
     // No caller sees this error: the carrier drops only with its `Transport` or
-    // `Client`, which drops each task that holds a dialer. So the test calls the
-    // dialer itself.
+    // `Client`, which drops each task that holds a handle. So the test calls the
+    // handle itself.
     #[test]
     fn a_dial_after_the_carrier_dropped_gives_closed_with_code_0() {
         let (mut sim, client, server) = nodes(0);
         let at = [crate::Address::Udp(address(&server))];
         testing::carrier(&client, CLIENT, move |carrier, _| async move {
-            let dialer = carrier.dialer();
+            let handle = carrier.handle();
             drop(carrier);
             let closed = Error::Closed { code: Code(0) };
-            assert_eq!(dialer.check(), Err(closed.clone()));
-            let session = crate::dial::dial(&dialer, SERVER.public(), &at).await;
+            assert_eq!(handle.check(), Err(closed.clone()));
+            let session = crate::dial::dial(&handle, SERVER.public(), &at).await;
             assert_eq!(session.err(), Some(closed));
         });
         assert_eq!(sim.run(), Ok(()));
     }
 
     // No caller sees this order: the carrier drops only with its `Transport` or
-    // `Client`, which drops each task that holds a dialer. So the test calls the
-    // dialer itself.
+    // `Client`, which drops each task that holds a handle. So the test calls the
+    // handle itself.
     #[test]
-    fn a_dialer_gives_the_broken_socket_after_the_carrier_dropped() {
+    fn a_handle_gives_the_broken_socket_after_the_carrier_dropped() {
         let (mut sim, client, _) = nodes(0);
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialer = carrier.dialer();
+            let handle = carrier.handle();
             let network = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
@@ -1665,7 +1665,7 @@ mod tests {
                 assert_eq!(accepting.await.err(), Some(network.clone()));
             }
             drop(carrier);
-            assert_eq!(dialer.check(), Err(network));
+            assert_eq!(handle.check(), Err(network));
         });
         assert_eq!(sim.run(), Ok(()));
     }
