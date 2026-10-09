@@ -135,7 +135,7 @@ pub(crate) fn spans(span: Span, n: i64) -> Span {
 }
 
 /// A run from `value` with a client node and a server node, whose timers wake early
-/// once a second, as on `os`.
+/// as on `os`.
 pub(crate) fn nodes(value: u64) -> (Sim, Node, Node) {
     let mut sim = Sim::new(sim::Config {
         seed: value,
