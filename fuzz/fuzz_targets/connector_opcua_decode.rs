@@ -7,8 +7,9 @@
 //! (`connector_opcua::fuzz::decode`). A new open62541 copy can change the type of an
 //! input.
 //!
-//! The C code gets no coverage or AddressSanitizer flags from cargo-fuzz or from the
-//! `fuzz` jobs, so they check none of it until #1912. Build with
+//! The C code gets no coverage or AddressSanitizer flags from cargo-fuzz or, until
+//! #1912, from the `fuzz` jobs: libFuzzer sees none of its coverage, and ASan sees no
+//! bad load or store in it. Build with
 //! `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`.
 
 #![no_main]
