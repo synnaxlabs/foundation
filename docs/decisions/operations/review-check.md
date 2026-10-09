@@ -33,11 +33,12 @@
   paragraph, so a list after the `Hot path:` line fails. A round comment posted after
   the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
   block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source,
-  after the indent and the marks of quotes, list items, and footnote labels, starts
-  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. GitHub reads some
-  of these lines in a different way, and an open `<!--` or `<details>` hides the text
-  after it. It also fails when the source of a line of text, after the indent and those
-  marks, starts with a footnote label that `pulldown-cmark` does not read as a footnote
+  after the indent and the marks of quotes, list items, and footnote labels, starts with
+  `<` and a letter, `!`, `/`, or `?` and that is not an autolink, also when the line
+  starts inside a code span, a link, or a link definition. GitHub reads some of these
+  lines in a different way, and an open `<!--` or `<details>` hides the text after it.
+  It also fails when the source of a line of text, after the indent and those marks,
+  starts with a footnote label that `pulldown-cmark` does not read as a footnote
   definition, also when the line starts inside a code span, a link, or a link
   definition. GitHub reads the blocks of a comment before its spans, can read that label
   as a footnote, and does not show a footnote with no reference. A footnote label here
@@ -47,14 +48,17 @@
   stays. In an old round, a `Hot path:` line, or a `Reviewers:` line of a round that
   does not parse, counts where GitHub shows it as a line of text of a paragraph, at any
   depth and any indent. A line of a code block or an HTML block does not count. Changed
-  by https://github.com/synnaxlabs/foundation/issues/1783 and
-  https://github.com/synnaxlabs/foundation/issues/2037, with the rulings of the director
+  by https://github.com/synnaxlabs/foundation/issues/1783,
+  https://github.com/synnaxlabs/foundation/issues/2037, and
+  https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
   at 2026-10-08T21:47:24Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983) and
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
   2026-10-08T23:46:02Z
-  (https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522),
-  approved by the director at 2026-10-09T00:05:24Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6071492537).
+  (https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522), and
+  2026-10-09T00:29:41Z
+  (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
+  approved by the director at 2026-10-09T00:29:08Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6071759217).
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
