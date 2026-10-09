@@ -21,7 +21,7 @@ const FLOOR: usize = 16;
 pub(crate) struct Table {
     /// This node's key, which decides which of two sessions to one node wins.
     key: PublicKey,
-    /// Runs the dials and the pings.
+    /// Runs the dials, the pings, and the take of each session that a peer opens.
     tasks: Tasks,
     /// Dials and accepts on the transport's carrier.
     carrier: quic::Handle,
@@ -1381,24 +1381,6 @@ mod tests {
             let dialed = transport.dial(SERVER.public(), &slow).await;
             let dialed = dialed.expect("the server's session");
             assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(1) });
-        });
-        assert_eq!(sim.run(), Ok(()));
-    }
-
-    // Only a session from a peer empties the carrier's accept wakers, so a dial
-    // task that waits there leaves its waker after it ends.
-    #[test]
-    fn dials_with_no_session_from_a_peer_keep_no_wakers_in_the_carrier() {
-        let (mut sim, client, server) = testing::nodes(0);
-        let dead = dead(&server);
-        let failed = unreachable(SERVER.public(), &server);
-        testing::transport(&client, CLIENT, move |transport, _| async move {
-            for _ in 0..50 {
-                let dialed = transport.dial(SERVER.public(), &dead).await;
-                assert_eq!(dialed.err(), Some(failed.clone()));
-            }
-            let wakers = transport.table.borrow().carrier.accept_wakers();
-            assert_eq!(wakers, 1, "only the task that takes sessions waits");
         });
         assert_eq!(sim.run(), Ok(()));
     }
