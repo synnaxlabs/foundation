@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::mem;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use block::Pool;
 use bytes::Bytes;
@@ -47,6 +47,10 @@ pub(super) struct Connection {
     /// The number of the first packet sent after the last ping, until the peer
     /// acknowledges it or a later one.
     pinged: Option<u64>,
+    /// How long after `Connected` the peer's hello may take.
+    idle: Duration,
+    /// When the peer's hello is due, from `Connected` on.
+    hello_by: Option<Instant>,
     state: State,
 }
 
@@ -62,23 +66,27 @@ enum State {
 }
 
 impl Connection {
-    /// A dial that expects `expected`.
+    /// A dial that expects `expected`, whose peer breaks the protocol when its hello
+    /// has not arrived `idle` after `Connected`.
     pub(super) fn dialed(
         key: Key,
         inner: noq_proto::Connection,
         expected: PublicKey,
         streams: Streams,
+        idle: Duration,
     ) -> Self {
-        Self::new(key, inner, State::Dialing { expected }, streams)
+        Self::new(key, inner, State::Dialing { expected }, streams, idle)
     }
 
-    /// A connection a peer dialed.
+    /// A connection a peer dialed, which breaks the protocol when its hello has not
+    /// arrived `idle` after `Connected`.
     pub(super) fn accepted(
         key: Key,
         inner: noq_proto::Connection,
         streams: Streams,
+        idle: Duration,
     ) -> Self {
-        Self::new(key, inner, State::Accepting, streams)
+        Self::new(key, inner, State::Accepting, streams, idle)
     }
 
     fn new(
@@ -86,6 +94,7 @@ impl Connection {
         inner: noq_proto::Connection,
         state: State,
         streams: Streams,
+        idle: Duration,
     ) -> Self {
         Self {
             key,
@@ -94,8 +103,35 @@ impl Connection {
             streams,
             datagrams: Received::default(),
             pinged: None,
+            idle,
+            hello_by: None,
             state,
         }
+    }
+
+    /// When [`Connection::timeout`] must next run, if ever.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.inner
+            .poll_timeout()
+            .into_iter()
+            .chain(self.hello_due())
+            .min()
+    }
+
+    /// When the peer's hello is due, while the connection waits for it.
+    fn hello_due(&self) -> Option<Instant> {
+        self.hello_by
+            .filter(|_| self.connected() && !self.streams.welcomed())
+    }
+
+    /// Ends the connection as a fault of the peer's when its hello is due by `now`,
+    /// and gives its [`Event::Closed`].
+    pub(super) fn hello_timeout(&mut self, now: Instant) -> Option<Event> {
+        let due = self.hello_due()?;
+        if due > now {
+            return None;
+        }
+        self.fault(now, "a peer with no hello".to_owned())
     }
 
     /// Moves the connection's events to `endpoint` and to `events` at `now`, and
@@ -159,6 +195,7 @@ impl Connection {
                     return;
                 }
                 self.state = State::Open;
+                self.hello_by = Some(now + self.idle);
                 let peer = self.peer();
                 events.push_back(Event::Connected { key, peer });
             }

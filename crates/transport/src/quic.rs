@@ -71,6 +71,8 @@ pub(crate) struct Endpoint {
     message_bytes_max: usize,
     /// The most bytes in flight on a connection in each direction.
     window_bytes: usize,
+    /// How long a peer may be silent, and may take to send its hello.
+    idle: Duration,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
     /// The messages of the drained connections that waited for send budget room.
@@ -105,8 +107,8 @@ pub(crate) enum Event {
     /// [`Endpoint::accept`] has a stream for `key`.
     Incoming { key: connection::Key },
     /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
-    /// comes first when the peer's hello arrives. A peer may never send its hello:
-    /// the caller bounds that wait.
+    /// comes first when the peer's hello arrives. A peer whose hello has not arrived
+    /// `idle` after [`Event::Connected`] gets [`Event::Closed`] in its place.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -135,6 +137,10 @@ impl Endpoint {
             pool: Rc::clone(&setup.pool),
             message_bytes_max: setup.message_bytes_max,
             window_bytes: setup.window_bytes,
+            idle: Duration::from_nanos(
+                u64::try_from(setup.idle.nanos())
+                    .expect("invariant: a `Setup` has a positive idle"),
+            ),
             connections: Vec::new(),
             budget_waits: 0,
             serial: 0,
@@ -167,8 +173,9 @@ impl Endpoint {
             .unwrap_or_else(|error| {
                 panic!("a dial fails only on its address: {error}")
             });
+        let idle = self.idle;
         let key = self.insert(handle, |key, streams| {
-            Connection::dialed(key, inner, peer, streams)
+            Connection::dialed(key, inner, peer, streams, idle)
         });
         self.drive(handle, now);
         key
@@ -231,15 +238,13 @@ impl Endpoint {
     /// When [`Endpoint::timeout`] must next run, or `None` with no connection.
     pub(crate) fn deadline(&self) -> Option<Monotonic> {
         let connections = self.connections.iter().flatten();
-        let deadline = connections
-            .filter_map(|connection| connection.inner.poll_timeout())
-            .min()?;
+        let deadline = connections.filter_map(Connection::deadline).min()?;
         let nanos = deadline.duration_since(self.epoch).as_nanos();
         Some(Monotonic(u64::try_from(nanos).unwrap_or(u64::MAX)))
     }
 
-    /// Runs the timers due at `now`: loss detection, keep-alives, and the idle
-    /// timeout.
+    /// Runs the timers due at `now`: loss detection, keep-alives, the idle timeout,
+    /// and the wait for each peer's hello.
     pub(crate) fn timeout(&mut self, now: Monotonic) {
         let now = self.instant(now);
         for handle in (0..self.connections.len()).map(ConnectionHandle) {
@@ -252,6 +257,12 @@ impl Endpoint {
                 .is_some_and(|deadline| deadline <= now)
             {
                 connection.inner.handle_timeout(now);
+                self.drive(handle, now);
+            }
+            if let Some(connection) = &mut self.connections[handle.0]
+                && let Some(closed) = connection.hello_timeout(now)
+            {
+                self.events.push_back(closed);
                 self.drive(handle, now);
             }
         }
@@ -731,8 +742,9 @@ impl Endpoint {
             Some(DatagramEvent::NewConnection(incoming)) => {
                 match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
+                        let idle = self.idle;
                         self.insert(handle, |key, streams| {
-                            Connection::accepted(key, inner, streams)
+                            Connection::accepted(key, inner, streams, idle)
                         });
                         self.drive(handle, now);
                         None

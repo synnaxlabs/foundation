@@ -1092,6 +1092,11 @@ impl Sending {
 }
 
 impl Streams {
+    /// Whether the peer's hello arrived.
+    pub(super) fn welcomed(&self) -> bool {
+        self.peer.hello().is_some()
+    }
+
     /// The messages that waited for room in the send budget.
     pub(super) fn budget_waits(&self) -> u64 {
         self.sending.budget.queued()
@@ -7272,6 +7277,54 @@ mod tests {
                 );
                 let opened = pair.client.endpoint.open_sender(now, key, Class::Command);
                 assert!(opened.is_some());
+            });
+        }
+
+        #[test]
+        fn end_a_session_whose_peer_sends_no_hello_for_idle() {
+            testing::run(1, |shard| {
+                let mut accepted = foreign_dial(shard, |_| {});
+                accepted.run(Duration::from_secs(3));
+                let mut dialed = dial_foreign(shard, Foreign::new(shard, |_| {}));
+                dialed.run(Duration::from_secs(3));
+                for side in [&accepted.server, &dialed.client] {
+                    let [
+                        (connected, Event::Connected { key, .. }),
+                        (closed, Event::Closed { key: ended, error }),
+                    ] = &side.events[..]
+                    else {
+                        panic!("{:?}", side.events);
+                    };
+                    assert_eq!(*closed - *connected, Duration::from_secs(1));
+                    assert_eq!(ended, key);
+                    let reason = "a peer with no hello".to_owned();
+                    assert_eq!(error, &Error::Broken { reason });
+                }
+            });
+        }
+
+        #[test]
+        fn keep_a_session_whose_peer_hello_arrives_before_idle() {
+            testing::run(1, |shard| {
+                let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
+                let (connected, _) = pair.client.events[0];
+                let now = Duration::from_nanos(pair.now().0);
+                let arrival =
+                    connected + Duration::from_secs(1) - Duration::from_nanos(1);
+                pair.run(arrival - DELAY - now);
+                raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
+                pair.run(Duration::from_secs(3));
+                let key = key(&pair.client);
+                assert!(
+                    matches!(
+                        events(&pair.client)[..],
+                        [Event::Connected { .. }, Event::Available { key: available }]
+                            if *available == key
+                    ),
+                    "{:?}",
+                    pair.client.events
+                );
+                assert_eq!(pair.client.events[1].0, arrival);
             });
         }
 
