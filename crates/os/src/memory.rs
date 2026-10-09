@@ -8,6 +8,10 @@ use std::{fmt, io, process};
 use rustix::io::Errno;
 use rustix::mm::{self, MapFlags, MprotectFlags, ProtFlags};
 
+mod available;
+
+pub use available::available;
+
 /// The protection of reserved pages.
 const RESERVED: ProtFlags = ProtFlags::empty();
 
