@@ -287,8 +287,11 @@
   https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6084098381). Built in
   #2156, where each driver gives the wait: `os` by the order of its I/O queue, `sim` by
   an end time no earlier than the end of each such call and of a remove through a
-  handle. `sim` gives each `Files` of a node as clones of one. Lost there: the wait in
-  `Files`, which cannot see the end of a dropped call without a change to `Driver`.
+  handle, where a later call with the same end time ends after it: `laptop.architect-2`,
+  2026-10-09T16:10:14Z
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6084674649). `sim`
+  gives each `Files` of a node as clones of one. Lost there: the wait in `Files`, which
+  cannot see the end of a dropped call without a change to `Driver`.
   Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
   the receive buffer of its listener, so `os` sets the options of the listener again
   on each accepted socket, on every OS. The listener still sets them before `listen`:
