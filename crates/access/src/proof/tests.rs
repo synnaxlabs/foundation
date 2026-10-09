@@ -886,6 +886,102 @@ fn names_each_changed_field() {
     }
 }
 
+mod clamp {
+    use super::*;
+
+    /// Checks `admit`, `verify`, and `renew` of a hello that expires at `expires`
+    /// against the clamp, at a mesh time `width` wide that ends at `latest`.
+    fn check(latest: i64, expires: i64, width: i64) -> Result<(), TestCaseError> {
+        let latest = Stamp::from_nanos(latest);
+        let earliest = Stamp::from_nanos(latest.nanos().saturating_sub(width));
+        let now = Some(Interval { earliest, latest });
+        let hello = Hello {
+            expires: Stamp::from_nanos(expires),
+            ..create_hello()
+        };
+        let got = admit(&listed(), now, hello.clone());
+        if latest >= hello.expires {
+            prop_assert_eq!(
+                got.map(|a| a.ends()),
+                Err(Error::Expired {
+                    expires: hello.expires,
+                    now: latest
+                })
+            );
+            return Ok(());
+        }
+        let ends = match latest.checked_add(CAP) {
+            Some(cap) if cap < hello.expires => cap,
+            _ => hello.expires,
+        };
+        let admitted = got.map_err(|e| TestCaseError::fail(e.to_string()))?;
+        prop_assert_eq!(admitted.ends(), ends);
+        prop_assert!(admitted.ends() > latest);
+        let body = b"x";
+        prop_assert_eq!(listed().verify(&admitted, now, body, &signed(body)), Ok(()));
+        let at_end = Some(Interval {
+            earliest: ends,
+            latest: ends,
+        });
+        prop_assert_eq!(
+            listed().verify(&admitted, at_end, body, &signed(body)),
+            Err(Error::Expired {
+                expires: ends,
+                now: ends
+            })
+        );
+        let sig = sign(&pair(TEST_1), &super::super::hello(&hello));
+        let renewed = listed()
+            .renew(&admitted, now, hello.clone(), &sig)
+            .map_err(|e| TestCaseError::fail(e.to_string()))?;
+        prop_assert_eq!(renewed.ends(), ends);
+        Ok(())
+    }
+
+    #[test]
+    fn holds_at_each_edge() {
+        let cap = CAP.nanos();
+        let cases = [
+            (i64::MAX, i64::MAX),
+            (i64::MAX - 1, i64::MAX),
+            (i64::MAX - cap, i64::MAX),
+            (i64::MAX - cap + 1, i64::MAX),
+            (i64::MAX - cap - 1, i64::MAX),
+            (i64::MIN, i64::MIN + 1),
+            (i64::MIN, i64::MAX),
+            (i64::MIN, i64::MIN),
+            (0, cap),
+            (0, cap + 1),
+            (0, cap - 1),
+            (-1, 0),
+            (i64::MAX, i64::MIN),
+        ];
+        for (latest, expires) in cases {
+            check(latest, expires, 1_000_000_000).unwrap();
+            check(latest, expires, 0).unwrap();
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn ends_at_the_earlier_of_expires_and_the_cap(
+            latest: i64,
+            expires: i64,
+            width in 0..i64::MAX,
+        ) {
+            check(latest, expires, width)?;
+        }
+
+        #[test]
+        fn ends_at_the_earlier_near_the_cap(
+            latest: i64,
+            delta in -2_000_000_000_000_i64..2_000_000_000_000,
+        ) {
+            check(latest, latest.saturating_add(delta), 1)?;
+        }
+    }
+}
+
 #[test]
 fn caps_a_hello_at_15_minutes() {
     assert_eq!(CAP.nanos(), 15 * 60 * 1_000_000_000);
