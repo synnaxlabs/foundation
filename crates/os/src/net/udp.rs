@@ -502,6 +502,8 @@ mod tests {
             }
         }
 
+        /// Linux refuses this send in the kernel too, so only macOS shows the check
+        /// through a send.
         #[test]
         fn an_ipv6_source_to_ipv4_gives_einval() {
             for remote in [mapped(2), v4(2)] {
