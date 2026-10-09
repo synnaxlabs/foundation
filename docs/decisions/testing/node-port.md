@@ -23,7 +23,7 @@
   Amended (2026-10-07, #1649 round 1, a finding of `performance` that
   `laptop.integrator-1` deferred, 23:41 UTC): the window caps a session at the window
   over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
-  bandwidth-delay product. The number of sessions has no bound until #1628 (below).
+  bandwidth-delay product. #1628 bounds the number of sessions (below).
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
   Amended (2026-10-08, #1647, by `laptop.architect-2`, 00:05 UTC): a transport that
   stops with an error stops the node, and `Node::join` gives `Error::Transport`. The
@@ -143,4 +143,10 @@
   programs cannot lock the region out. Trigger: the PR that adds the change kind that
   removes a member (MESH DRIVER). That change also closes each session of that node,
   with the code of a refused session, and so ends its `Hub` and `Mesh` streams. The node
-  then admits it again as any other peer.
+  then admits it again as any other peer. Supersedes the deferrals of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669 (item 5,
+  2026-10-07 21:09 UTC) and
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609 (23:41
+  UTC), and the sentence on the wait for a header of
+  https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6051519122
+  (2026-10-08 03:23 UTC).

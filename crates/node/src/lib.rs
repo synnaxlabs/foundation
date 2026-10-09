@@ -167,9 +167,9 @@ impl Node {
     /// Once each buffer has opened, shard 0 reads the node's key and private key from
     /// the file `node.key` in the data directory, and makes the file at the first start
     /// once it has mesh time, unless [`create_key`] made it, then opens the mesh of
-    /// [`Config::region`] when it has one, then serves the port and admits every peer
-    /// that proves its key, until its transport or the mesh's group stops, which stops
-    /// the node. Returns once each shard runs or one has failed to start. When the disk
+    /// [`Config::region`] when it has one, then serves the port, admits each member of
+    /// the region and at most 256 sessions of other peers at once, until its transport
+    /// or the mesh's group stops, which stops the node. Returns once each shard runs or one has failed to start. When the disk
     /// budget holds no ring on each shard, no shard starts, and [`Node::join`] gives
     /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
     /// start, a shard with no memory, a data directory that another node holds or that

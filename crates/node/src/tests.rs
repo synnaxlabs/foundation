@@ -3839,6 +3839,55 @@ mod port {
             assert_eq!(of_program, transport::Error::Stopped { code });
         }
 
+        /// A node with no region: 255 programs and the node [`CLIENT`] fill the bound,
+        /// so a second node key is refused. Once [`CLIENT`] closes its session, its
+        /// place frees, and the second node key is admitted.
+        #[test]
+        fn a_node_outside_the_region_holds_one_place_by_its_key() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = Node::start(config(&hosts[0], Size::MEBIBYTE, Box::new(heap)));
+            let listen = listen(&hosts[0]);
+            let out = Arc::new(Mutex::new(None));
+            let seen = Arc::clone(&out);
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = hosts[1].clone();
+            let started = hosts[1].shards().start(shard, move |tasks| async move {
+                let at = [Address::Udp(listen)];
+                let (program, _) = program(&own, tasks.clone());
+                let mut held = Vec::new();
+                for _ in 0..255 {
+                    held.push(
+                        program.dial(KEY.public(), &at).await.expect("a session"),
+                    );
+                }
+                let (first, _) = transport(&own, tasks.clone(), CLIENT);
+                let placed = first.dial(KEY.public(), &at).await.expect("a session");
+                let (second, pool) = transport(&own, tasks, OTHER.1);
+                let over = second.dial(KEY.public(), &at).await;
+                let refused = over.expect("a handshake").closed().await;
+                placed.close(Code(0));
+                own.clock().sleep(Span::SECOND).await;
+                let again = second.dial(KEY.public(), &at).await.expect("a session");
+                let admitted = sent_clock(&again, &pool, &own).await;
+                *seen.lock().unwrap() = Some((refused, admitted));
+                drop((held, again, first, second, program));
+            });
+            drop(started.expect("the peer starts"));
+            assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let (refused, admitted) = out.lock().unwrap().take().expect("the peer ran");
+            let code = Code(wire::session::REFUSED);
+            assert_eq!(refused, transport::Error::PeerClosed { code });
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(admitted, transport::Error::Stopped { code });
+        }
+
         /// 255 programs and one node outside the region fill the bound, and the next
         /// program is refused. Once the peer's links drop every packet, its sessions
         /// time out and free their places, and a later program is admitted.

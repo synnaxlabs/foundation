@@ -121,8 +121,9 @@ state on `main`.
   rejects a client's. It gives a `Hub` stream to the hub only when a member of its
   region has the peer's public key, once, at the header (NODE PORT); it rejects a
   client's until #1744. `node` stops and resets each other stream until its protocol
-  has a server. It reads no datagram yet (#1661), and admits every peer to a session
-  (#1628).
+  has a server. It reads no datagram yet (#1661). It admits each member of the region
+  to a session, and at most 256 sessions of other peers at once (NODE PORT); it
+  rejects a stream whose header has not arrived within 10 s.
 
 ### Subject to owner
 
