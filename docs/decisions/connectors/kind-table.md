@@ -21,4 +21,5 @@
   `connector::status` names, since the kind's code is wrong (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538, items
-  4 and 2).
+  4 and 2; `laptop.architect-2`, 2026-10-09T13:37:08Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824).
