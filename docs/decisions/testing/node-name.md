@@ -36,6 +36,9 @@
   `node::name` can give `Error::Name` during a first start; then `foundation start`
   races to `node.name` in place of `node.busy`. Also lost: `node::name` opens `lock`
   first; that takes the lock that a start needs, and a second start fails.
+  Supersedes "A file with no bytes, or with a sector of zeros, is no file", and the
+  read of the stored name before the given one, of
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545.
   Decided by `laptop.architect-2`, #1732: 2026-10-09T18:30:45Z, the file and the
   errors,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545;
