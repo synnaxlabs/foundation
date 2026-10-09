@@ -2820,9 +2820,11 @@ mod port {
         /// file.
         #[test]
         fn a_key_that_is_not_valid_stops_the_node() {
-            let tags = (0..16).map(|i| {
+            // Each tag byte with one bit changed, and the tag of the next form.
+            let edits = (0..16).map(|i| (i, own()[i] ^ 1)).chain([(15, b'2')]);
+            let tags = edits.map(|(i, byte)| {
                 let mut tag = own();
-                tag[i] ^= 1;
+                tag[i] = byte;
                 let crc = crc32c::crc32c(&tag[..64]);
                 tag[64..].copy_from_slice(&crc.to_le_bytes());
                 tag
