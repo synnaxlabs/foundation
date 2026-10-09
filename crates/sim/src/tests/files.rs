@@ -1756,6 +1756,59 @@ fn a_write_does_not_wait_for_a_dropped_write_on_its_path() {
     assert!((0..32).any(block_held_after_write));
 }
 
+/// Whether the block of a dropped write of a handle is still in use when a read of the
+/// handle ends.
+fn block_held_after_read(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        drop(read(&file, &pool, 0, 512).await);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_read_does_not_wait_for_a_dropped_write_on_its_path() {
+    assert!((0..32).any(block_held_after_read));
+}
+
+/// What a sync and a list of `d` give after a create of `d` dropped in flight.
+fn sync_and_list_after_dropped_create_dir(
+    value: u64,
+) -> (Option<Error>, Option<Error>) {
+    run(value, MIB, |node, _| async move {
+        let (files, dir) = (node.files(), Path::new("d"));
+        let mut create = Box::pin(files.create_dir(dir));
+        pend(create.as_mut()).await;
+        drop(create);
+        let synced = files.sync_dir(dir).await.err();
+        (synced, files.list(dir).await.err())
+    })
+}
+
+#[test]
+fn a_sync_and_a_list_of_a_directory_do_not_wait_for_its_dropped_create() {
+    let found: Vec<_> = (0..32)
+        .map(sync_and_list_after_dropped_create_dir)
+        .collect();
+    let missing = Some(Error::NotFound { path: "d".into() });
+    assert!(
+        found.iter().any(|(synced, _)| *synced == missing),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|(_, listed)| *listed == missing),
+        "{found:?}"
+    );
+}
+
 /// Whether the block of a dropped write of a handle, sent on `a`, is still in use when
 /// a rename of the handle from `a` to `b` ends.
 fn block_held_after_rename(value: u64) -> bool {
