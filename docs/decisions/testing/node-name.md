@@ -2,13 +2,14 @@
   gives it. Under `lock` (DATA DIRECTORY LOCK), after the claim of the shard count,
   shard 0 removes a file `name.new` that a crash left, writes the name to a new
   `name.new`, and renames it to `name`, which syncs the file first, then syncs the data
-  directory. A file `name` with the same name changes nothing: the claim has synced the
-  data directory, and a failed sync of an earlier start can leave a name that a read
-  sees but a crash loses. A read sees no file `name` or a whole one, also during a
-  first start. A file `name` that does not hold a whole name, also one of zeros or with
-  no bytes, is `Error::Name`: the start stops, and the node keeps the file. Another name
-  stops the start with `Error::Renamed { stored, given }` (the CLI code is
-  `node.renamed`, #1732). The node never writes another name over a name.
+  directory. A file `name` with the same name changes nothing. The claim has synced the
+  data directory at this start, which makes good a failed sync of an earlier start:
+  that sync can leave a name that a read sees but a crash loses. A read sees no file
+  `name` or a whole one, also during a first start. A file `name` that does not hold a
+  whole name, also one of zeros or with no bytes, is `Error::Name`: the start stops,
+  and the node keeps the file. Another name stops the start with `Error::Renamed {
+  stored, given }` (the CLI code is `node.renamed`, #1732). The node never writes
+  another name over a name.
   The file is the only copy of the name on the node, and the source of the name that
   the node puts in its card when it founds or joins a region (#1744). In the region,
   `card.name` is the one copy (MEMBER RECORD). Trigger: the first operation that
@@ -43,4 +44,6 @@
   https://github.com/synnaxlabs/foundation/pull/2172#issuecomment-6088201970;
   2026-10-09T20:09:33Z, the write by rename, a file of zeros or with no bytes, and the
   last two lost designs,
-  https://github.com/synnaxlabs/foundation/pull/2172#issuecomment-6088435494.
+  https://github.com/synnaxlabs/foundation/pull/2172#issuecomment-6088435494;
+  2026-10-09T20:42:29Z, a file `name` with the same name,
+  https://github.com/synnaxlabs/foundation/pull/2172#issuecomment-6088917341.
