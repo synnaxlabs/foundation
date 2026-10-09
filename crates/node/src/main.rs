@@ -59,10 +59,9 @@ fn node(start: &Start) -> Result<(), Failure> {
         )]
         let called = call.recv();
         if called.is_ok() {
-            // A write that fails changes nothing: the node runs either way.
-            let mut stdout = io::stdout().lock();
-            let written = stdout.write_all(line.as_bytes());
-            written.and_then(|()| stdout.flush()).unwrap_or(());
+            // A write that fails changes nothing: the node runs either way. The
+            // line ends in a newline, so standard output flushes it.
+            io::stdout().write_all(line.as_bytes()).unwrap_or(());
         }
     });
     let show = show.map_err(failed)?;
