@@ -159,6 +159,8 @@ pub(crate) struct Files {
     /// The waker of each close that waits for the calls of its descriptor, by the key
     /// of its handle.
     closes: BTreeMap<u64, Waker>,
+    /// The path of each descriptor that each node closed, in order.
+    closed: Vec<Vec<PathBuf>>,
     rng: Rng,
     /// The last tick. A call's key is the tick of its start, a file or directory
     /// that it makes takes the same key, and a write takes a tick when it ends. One
@@ -178,6 +180,7 @@ impl Files {
             queue: BTreeSet::new(),
             done: BTreeMap::new(),
             closes: BTreeMap::new(),
+            closed: Vec::new(),
             rng,
             tick: disk::ROOT,
             digest: DefaultHasher::new(),
@@ -187,6 +190,7 @@ impl Files {
     /// Adds the disk of a new node, with `bytes` bytes and an empty data directory.
     pub(crate) fn add(&mut self, bytes: u64) {
         self.disks.push(Disk::new(bytes));
+        self.closed.push(Vec::new());
     }
 
     /// Makes the next call of `operation` on `path` on `node` fail with code 5.
@@ -457,11 +461,22 @@ impl Files {
         (Poll::Pending, self.closes.insert(handle.key, waker))
     }
 
-    /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
-    /// after the lock is released.
-    pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
+    /// Closes descriptor `handle` of `node`, of the file at `path`. Returns the waker
+    /// of its close, to drop after the lock is released.
+    pub(crate) fn release(
+        &mut self,
+        node: usize,
+        handle: Handle,
+        path: &Path,
+    ) -> Option<Waker> {
         self.disks[node].release(handle);
+        self.closed[node].push(disk::normal(path));
         self.closes.remove(&handle.key)
+    }
+
+    /// The path of each descriptor that `node` closed, in order.
+    pub(crate) fn closed(&self, node: usize) -> Vec<PathBuf> {
+        self.closed[node].clone()
     }
 }
 

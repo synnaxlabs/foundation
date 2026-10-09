@@ -1594,3 +1594,14 @@ fn a_power_cut_keeps_a_prefix_in_the_order_that_the_calls_end() {
     let prefixes = [names(&[]), names(&["x"]), names(&["y"]), names(&["x", "y"])];
     assert_eq!(outcomes, BTreeSet::from(prefixes));
 }
+
+#[test]
+fn a_crash_closes_each_file_that_its_node_holds() {
+    let (mut sim, node) = disk(0);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        drop(create(&node, "a", 0).await);
+        let _held = create(&node, "b", 0).await;
+        pending::<()>().await;
+    });
+    assert_eq!(node.file_closes(), ["a", "b"].map(PathBuf::from));
+}

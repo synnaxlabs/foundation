@@ -4046,14 +4046,14 @@ mod port {
 
         /// A stop at any point of the start and the run of a node whose mesh writes
         /// its log for each home that the peer sets, then a probe that takes the
-        /// lock as soon as it is free: the mesh's log is never busy then, and the port
-        /// of a node that held the lock binds once the lock is free. A node stopped
-        /// before its claim holds no lock, so its port can still be bound. The order
-        /// of the two closes waits on #1835. The peer ends once a set waits [`TEN`],
-        /// so the probe's run ends.
+        /// lock as soon as it is free: the node closes the mesh's log before the lock,
+        /// the log is never busy then, and the port of a node that held the lock
+        /// binds once the lock is free. A node stopped before its claim holds no
+        /// lock, so its port can still be bound. The peer ends once a set waits
+        /// [`TEN`], so the probe's run ends.
         #[test]
         fn the_log_of_the_mesh_is_free_once_the_lock_is() {
-            let (mut held, mut logged) = (false, false);
+            let (mut held, mut logged, mut ordered) = (false, false, false);
             // The mesh opens at about 1.5 ms, and from 1.6 s the log writes a home
             // about each 0.7 ms.
             let opens = (0..200).map(|step| step * 13_000);
@@ -4072,6 +4072,15 @@ mod port {
                 logged |= log.is_ok();
                 let busy = matches!(log, Err(env::files::Error::Busy { .. }));
                 assert!(!busy, "at {after:?}: {log:?}");
+                let closes = hosts[0].file_closes();
+                // The probe closes its log, when it opened it, then its lock.
+                let own = closes.len() - if log.is_ok() { 2 } else { 1 };
+                let last =
+                    |path| closes[..own].iter().rposition(|c| c == Path::new(path));
+                if let (Some(log), Some(lock)) = (last(LOG), last("lock")) {
+                    assert!(log < lock, "at {after:?}: {closes:?}");
+                    ordered = true;
+                }
                 // A probe that takes the lock before the claim refuses the node.
                 let refused = Error::Directory(env::files::Error::Busy {
                     path: PathBuf::from("lock"),
@@ -4082,7 +4091,7 @@ mod port {
                     assert_eq!(port, Ok(()), "at {after:?}");
                 }
             }
-            assert!(held && logged);
+            assert!(held && logged && ordered);
         }
 
         /// When the mesh's group stops the node while a peer holds a session with it,

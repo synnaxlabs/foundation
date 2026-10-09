@@ -1587,3 +1587,23 @@ fn a_remove_after_a_dropped_rename_gives_poisoned_and_the_file_stays() {
         );
     }
 }
+
+#[test]
+fn the_node_gives_the_path_of_each_file_that_it_closed_in_order() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let a = create(&node, "a", 0).await;
+        let mut b = create(&node, "./b", 0).await;
+        b.rename(Path::new("c")).await.unwrap();
+        let d = create(&node, "d", 0).await;
+        b.close().await;
+        drop(a);
+        d.remove().await.unwrap();
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), ["c", "a", "d"].map(PathBuf::from));
+}

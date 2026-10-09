@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::task::Waker;
 
 use types::time::{Monotonic, Span, Stamp};
@@ -214,6 +214,14 @@ impl Node {
     #[must_use]
     pub fn files(&self) -> env::files::Files {
         env::files::Files::new(self.0.clone())
+    }
+
+    /// The path of each file that the node closed, in the order of the closes, since
+    /// the run started: by a drop, `close`, or `remove` of its descriptor, or by a
+    /// crash. A path is the one the file had at its close: a rename changes it.
+    #[must_use]
+    pub fn file_closes(&self) -> Vec<PathBuf> {
+        lock(&self.0.shared).files().closed(self.0.node)
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with
