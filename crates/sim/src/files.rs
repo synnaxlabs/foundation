@@ -476,8 +476,9 @@ impl Files {
     pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
         let disk = &mut self.disks[node];
         disk.release(handle);
-        let path = (disk.open.remove(&handle.key))
-            .expect("invariant: a descriptor has a path");
+        let Some(path) = disk.open.remove(&handle.key) else {
+            unreachable!("invariant: a descriptor has a path")
+        };
         disk.closed.push(path);
         self.closes.remove(&handle.key)
     }
