@@ -3,9 +3,9 @@
 //!
 //! The home serves the sessions of two peer nodes, whose transports take messages of at
 //! most 1472 bytes and 64 KiB. The bench holds the future of `Link::serve` and polls it
-//! by hand, so a timed poll is the home's work for the frames it sends. After each round
-//! of `FRAMES` frames, the bench waits until the peer has read each of them, so no timed
-//! poll waits on the transport. Each line gives ns per frame:
+//! by hand, so a timed poll is the home's work for the frames it sends. After each
+//! round of `FRAMES` frames, the bench waits until the peer has read each of them, so
+//! no timed poll waits on the transport. Each line gives ns per frame:
 //!
 //! - `timer`: an empty closure, the floor of each timed poll.
 //! - `narrow 1472`, `narrow 64k`: a latest session of 64 channels on one index, whose
@@ -21,8 +21,8 @@
 //! - `complete half 1472`: as `complete`, with a session of the index and half the data
 //!   channels, so the home walks each frame to charge it and to lay it.
 //! - `two sets 1472`: the `narrow` session, while two writers of half of its data
-//!   channels each write in turn, so each frame has another key set than the one before.
-//!   Each writer closes before the other opens, outside the timed poll.
+//!   channels each write in turn, so each frame has another key set than the one
+//!   before. Each writer closes before the other opens, outside the timed poll.
 //!
 //! As for the `reader` bench, judge a change by `net`, and compare two builds on one
 //! pinned core whose SMT sibling is idle.
@@ -77,8 +77,8 @@ const ROUNDS: usize = 50;
 const RUN: usize = (WARMUP + ROUNDS) * FRAMES;
 /// Samples per series of a `wide` frame.
 const SAMPLES: usize = 256;
-/// A ring that holds each frame of the run, as nothing frees a ring until #160: 64 times
-/// the ring of `home::testing::shard`.
+/// A ring that holds each frame of the run, as nothing frees a ring until #160: 64
+/// times the ring of `home::testing::shard`.
 const AREA: u64 = 1 << 28;
 /// How long the bench waits between two checks of what the peer read.
 const STEP: Span = Span::MILLISECOND;
