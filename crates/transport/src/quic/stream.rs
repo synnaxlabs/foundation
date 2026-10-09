@@ -3464,6 +3464,11 @@ mod tests {
             assert_eq!(share.order(), Order::RANK);
         }
 
+        /// A peer sees a cap of `Complete` only from about 1.6 times this one
+        /// (`complete_after_a_light_load_goes_at_most_three_windows_ahead`). The
+        /// server's reads miss the bytes in flight as the load changes, about two
+        /// windows: at a window of 1 MiB, the light load reads 1245284 of the
+        /// 3211264 B bound, and 2883684 B with a cap of 1.5 times.
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {

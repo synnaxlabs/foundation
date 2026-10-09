@@ -79,9 +79,10 @@
   architect-2 (#1998, 2026-10-09 03:15 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073524571. The rests
   in the lead: architect-2 (#1998, 2026-10-09 06:15 UTC):
-  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6075478571, which
-  supersedes the rest of one message for each stream of
-  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073524571 and
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6075478571.
+  Supersedes the rest of one message for each stream of
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073524571 and the
+  lead sentence of
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6074595514.
   Supersedes the sentence on the lead and the trigger bound of
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279. Lost: a
