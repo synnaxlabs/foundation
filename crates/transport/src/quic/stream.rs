@@ -3467,7 +3467,7 @@ mod tests {
         /// A cap one byte higher, or a floor one byte lower, changes the order only
         /// while the credit sits on that byte, so it moves at most one message by one
         /// turn. No seam test kills it, nor a cap up to 13 KiB higher or a floor up to
-        /// 8 KiB lower, which the light-load tests read within their bound (#2157).
+        /// 11 KiB lower, which the light-load tests read within their bound (#2157).
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
