@@ -51,11 +51,12 @@
   line with one of these causes, or the first line of the paragraph. A round comment
   that fails by these rules gets an edit that puts the line in a code span, or that
   writes each link and image on one line and puts a blank line after each link
-  reference definition, and the cutoff stays. In an old round, a `Hot path:` line, or a
-  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
-  line of text of a paragraph, at any depth and any indent, and in a paragraph that
-  `comrak` places in the wrong lines, at the start of any source line after its marks.
-  A line of a code block or an HTML block does not count. Changed by
+  reference definition, and the cutoff stays. A paragraph that `comrak` places in the
+  wrong lines fails in any round, also in one posted before the cutoff, since the
+  check cannot read it. In an old round, a `Hot path:` line, or a `Reviewers:` line of
+  a round that does not parse, counts where GitHub shows it as a line of text of a
+  paragraph, at any depth and any indent. A line of a code block or an HTML block does
+  not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
@@ -75,7 +76,8 @@
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328, and
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053208426. A round
   comment posted before the cutoff `CUTOFF` in
-  `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before: an earlier
+  `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before, except for a
+  paragraph that `comrak` places in the wrong lines: an earlier
   free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
   text that names a function still needs `performance`. Decided by the director at
   2026-10-08T02:44:00Z
