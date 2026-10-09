@@ -23,8 +23,8 @@ pub(crate) fn panicked(name: &str) -> Result<(), Panicked> {
 }
 
 /// Runs `child` in a new process of this test binary that runs only the calling test,
-/// and asserts that the process aborts at a panic in a drop during the unwind of a
-/// panic.
+/// and asserts that the process aborts at a panic that unwinds out of a drop during the
+/// unwind of a panic.
 pub(crate) fn assert_aborts(child: impl FnOnce()) {
     use std::os::unix::process::ExitStatusExt;
     const CHILD: &str = "OS_IT_CHILD";

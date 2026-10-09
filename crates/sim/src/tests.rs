@@ -847,7 +847,7 @@ impl Drop for Bomb {
 }
 
 /// Runs `child` in a copy of this test in a child process, and asserts that the child
-/// aborts at a panic in a drop during an unwind.
+/// aborts at a panic that unwinds out of a drop during an unwind.
 #[cfg(unix)]
 fn assert_aborts(child: impl FnOnce()) {
     use std::os::unix::process::ExitStatusExt;

@@ -1,8 +1,8 @@
 - **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, after the unwind of a panic in its poll, so a
-  panic in its drop never aborts the process. As anywhere in Rust, a panic in a drop
-  during an unwind aborts it (#871, approved by `laptop.architect`,
+  panic in its drop never aborts the process. As anywhere in Rust, a panic that unwinds
+  out of a drop during an unwind aborts it (#871, approved by `laptop.architect`,
   2026-10-09T00:26:41Z,
   https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6071732611). The error
   gives every panic, the first one first: a drop that panics is a defect of its own,
