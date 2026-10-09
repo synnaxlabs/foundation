@@ -528,7 +528,11 @@ fn gives_the_code_and_the_text_of_each_refusal() {
             2,
             "a message of the program broke the client wire",
         ),
-        (Refusal::Busy, 19, "the node had no memory for a response"),
+        (
+            Refusal::Busy,
+            19,
+            "the node had no memory for a response or a request body",
+        ),
         (
             Refusal::Refused,
             20,
