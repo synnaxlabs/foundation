@@ -390,6 +390,36 @@ fn a_connect_gives_opening_then_established_and_the_peer_reads_each_send() {
     assert!(reads.ended.is_some());
 }
 
+/// Three sends of 30000 bytes pass the 64 KiB send buffer, so the stream takes part
+/// of a buffer in one write and the rest in a later one.
+#[test]
+fn the_peer_reads_each_byte_of_sends_that_the_stream_takes_in_parts() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let sends: Vec<Vec<u8>> = (0..3u8)
+        .map(|k| (0..=u8::MAX).cycle().take(30_000).map(|b| b ^ k).collect())
+        .collect();
+    let written = sends.clone();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            for send in &written {
+                assert_eq!(side.send(1, send), Status::GOOD);
+            }
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.bytes(), sends.concat());
+    assert!(reads.ended.is_some());
+}
+
 #[test]
 fn a_connect_with_no_listener_gives_closing_and_no_established() {
     let mut network = Network::new();
