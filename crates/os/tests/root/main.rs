@@ -1,5 +1,6 @@
-//! `os::files` on a small filesystem that the test mounts with `sudo`. Only one CI
-//! step on a GitHub-hosted runner runs this target.
+//! `os` with `sudo`: files on a small filesystem that the test mounts, and a listener
+//! that an operator aborts. Only one CI step on a GitHub-hosted runner runs this
+//! target.
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 #![cfg(target_os = "linux")]
@@ -12,6 +13,9 @@ use env::files::{Error, Files, Mode};
 
 #[path = "../it/kept.rs"]
 mod kept;
+#[path = "../common/sockets.rs"]
+#[expect(dead_code, reason = "this binary only listens")]
+mod sockets;
 
 /// A 64 MiB ext4 filesystem on a loop device in a directory of its own, unmounted and
 /// removed when it drops.
@@ -125,4 +129,16 @@ fn a_create_on_fragmented_free_space_frees_the_blocks_past_the_end() {
             "{allocated} bytes allocated"
         );
     });
+}
+
+/// An operator aborts the listener with `ss -K`, as a tool that kills sockets does.
+#[test]
+#[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+fn a_listener_that_an_operator_aborts_drops_with_no_panic() {
+    let listener = os::net().listen(&sockets::LISTEN).unwrap();
+    let local = listener.local();
+    check(sudo("ss").args(["-K", "-t", "-l", "src", &local.to_string()]));
+    let refused = std::net::TcpStream::connect(local).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    drop(listener);
 }

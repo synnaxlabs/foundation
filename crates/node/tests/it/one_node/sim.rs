@@ -189,7 +189,10 @@ fn influx_stores_each_line_written_to_plant_and_keeps_it_after_a_stop() {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs SOCK_CLOEXEC and the shutdown of a listener"
+)]
 fn a_stopped_influx_refuses_and_serves_again_on_its_port_with_what_it_stored() {
     let mut influx = Influx::default();
     let address = influx.serve();
