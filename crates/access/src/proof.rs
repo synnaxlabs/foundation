@@ -219,8 +219,7 @@ pub enum Error {
         /// The node that carried the hello.
         peer: node::Key,
     },
-    /// The hello is no longer live at `expires`: its expiry, or [`Admitted::ends`] of
-    /// an admitted hello. `now` is at or after it.
+    /// The hello ended at `expires`, at or before the latest mesh time `now`.
     Expired {
         /// When the hello stops being live at this node: the earlier of its `expires`
         /// and [`CAP`] past the latest mesh time at its admission ([`Admitted::ends`]).
