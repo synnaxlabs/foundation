@@ -264,6 +264,19 @@
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
   `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
+  Amended (2026-10-08T00:45:03Z, #1524): a write open (`Mode::Write` or
+  `Mode::Create`), a `Files::remove`, and a `File::rename` to a path first wait for
+  each call on the path that a dropped future or a dropped handle of the same `Files`
+  and its clones left to run. `Busy` stays for a live handle, and for a handle in
+  another process or another `Files`. `Mode::Read` does not change. Each driver gives
+  the wait: `os` by the order of its I/O queue, `sim` by an end time past the end of
+  each such call. One test of each rule runs on `os` and on `sim`. This supersedes the
+  `Busy` after a drop in the #392 sentence above and in the #1604 amendment. Lost: the
+  wait in `Files`, which cannot see the end of a dropped call without a change to
+  `Driver`. Decided by `laptop.architect-2`, #1524, 2026-10-08T00:45:03Z
+  (https://github.com/synnaxlabs/foundation/issues/1524#issuecomment-6049807436). The
+  `File::remove` text: `laptop.architect-2`, 2026-10-08T01:03:54Z
+  (https://github.com/synnaxlabs/foundation/issues/1524#issuecomment-6050016336).
   Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
   the receive buffer of its listener, so `os` sets the options of the listener again
   on each accepted socket, on every OS. The listener still sets them before `listen`:

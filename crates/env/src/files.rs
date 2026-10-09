@@ -66,9 +66,10 @@ impl Files {
     ///
     /// - [`Error::NotFound`] when the file is not there and `mode` is not
     ///   [`Mode::Create`].
-    /// - [`Error::Busy`] when `mode` is not [`Mode::Read`] and another handle holds
-    ///   the file with [`Mode::Write`] or [`Mode::Create`]. A handle holds it until it
-    ///   drops and its calls end, in this process or another.
+    /// - [`Error::Busy`] when `mode` is not [`Mode::Read`] and a live handle holds
+    ///   the file with [`Mode::Write`] or [`Mode::Create`], or a handle in another
+    ///   process does. A write open first waits for each call on `path` that a
+    ///   dropped future or handle of this `Files` left to run.
     /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length that
     ///   is not empty.
     /// - [`Error::Full`] when the disk has no room for the file that
@@ -158,12 +159,13 @@ impl Files {
         self.0.create_dir(dir).await
     }
 
-    /// Removes the file at `path`. A file that is not there counts as removed. A remove
-    /// that a drop leaves to run removes what the path names when it ends. The removal
-    /// is not durable until [`Files::sync_dir`] on its directory ends. Count the file's
-    /// room as used until then, and while a handle holds the file. To remove a file and
-    /// then make one at its path, remove it through its write handle
-    /// ([`File::remove`]).
+    /// Removes the file at `path`. A file that is not there counts as removed. It first
+    /// waits for each call on `path` that a dropped future or handle of this `Files`
+    /// left to run. A remove that a drop leaves to run removes what the path names when
+    /// it ends. The removal is not durable until [`Files::sync_dir`] on its directory
+    /// ends. Count the file's room as used until then, and while a handle holds the
+    /// file. To remove a file and then make one at its path, remove it through its
+    /// write handle ([`File::remove`]).
     ///
     /// # Errors
     ///
@@ -401,8 +403,10 @@ impl File {
 
     /// Makes the writes that ended before the call durable, as [`File::sync`], then
     /// gives the file the name `to` in the same directory. It never replaces a file.
-    /// The errors of the handle then name `to`, and the handle keeps its hold: a write
-    /// open of `to` gives [`Error::Busy`] until the handle closes.
+    /// It first waits for each call on `to` that a dropped future or handle of this
+    /// `Files` left to run. The errors of the handle then name `to`, and the handle
+    /// keeps its hold: a write open of `to` gives [`Error::Busy`] until the handle
+    /// closes.
     ///
     /// The new name is not durable until [`Files::sync_dir`] on the directory ends. A
     /// crash before then can undo the rename. A crash never leaves the file at both
@@ -461,8 +465,8 @@ impl File {
     /// Closes the file. The future ends after every call of this handle ends, those
     /// of dropped futures too, and the file is closed. A write open of the same path
     /// then succeeds, unless another handle holds the file. A drop closes the handle
-    /// too, but without a wait. After the drop of a write handle, a write open before
-    /// its calls end gives [`Error::Busy`].
+    /// too, but without a wait. After the drop of a write handle, a write open of this
+    /// `Files` waits for its calls to end.
     ///
     /// It gives no error: [`File::sync`] makes the bytes durable, and a close after
     /// it loses nothing. A drop of the future closes the file without a wait.
@@ -482,8 +486,9 @@ impl File {
     }
 
     /// Removes the file of this handle from its directory, then closes the handle as
-    /// [`File::close`]. Until the remove ends, also after a drop of the future, a
-    /// write open of the path gives [`Error::Busy`]. A drop of the future can stop the
+    /// [`File::close`]. Until the remove ends, a write open of the path in another
+    /// process gives [`Error::Busy`]. A write open of this `Files` waits for it, also
+    /// after a drop of the future. A drop of the future can stop the
     /// remove before it starts; the file then stays, and the handle closes. The
     /// removal is not durable until [`Files::sync_dir`] on its directory ends. Count
     /// the file's room as used until then.
@@ -752,7 +757,9 @@ impl fmt::Display for Operation {
 ///
 /// Paths reach it checked and relative to the data directory. It opens, creates, and
 /// removes files with the rules of the [`Files`] calls; [`Files`] sorts and checks
-/// what it returns.
+/// what it returns. A write open, a remove, and a rename to a path first wait for
+/// each call on the path that a dropped future or descriptor of the driver left to
+/// run.
 ///
 /// ```
 /// fn wrap(driver: impl env::files::Driver + 'static) -> env::files::Files {
@@ -767,8 +774,9 @@ pub trait Driver {
     /// leaves no file at `path` and keeps no blocks. Another error can leave an empty
     /// file at `path`, as a crash can. It makes the allocation durable before it ends
     /// (`os`: `fallocate`, then `fsync` the file), so a `sync_dir` alone makes the file
-    /// whole. A write open of a file that a write handle holds gives [`Error::Busy`]
-    /// before any other check or change of the file.
+    /// whole. A write open of a file that a live write handle, or a handle in another
+    /// process, holds gives [`Error::Busy`] before any other check or change of the
+    /// file.
     fn open<'a>(
         &'a self,
         path: &'a Path,
