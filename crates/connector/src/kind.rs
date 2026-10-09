@@ -11,9 +11,11 @@ use env::clock::Clock;
 use env::net::Net;
 use env::rng::Rng;
 use env::tasks::Tasks;
+use types::authority::Authority;
 use types::name::Name;
+use types::time;
 
-use crate::{cancel, supervisor};
+use crate::{cancel, status, supervisor};
 
 /// The noun of the document that [`Kind::parse`] gets, for the text of a diagnostic.
 pub const NOUN: &str = "the connector";
@@ -61,6 +63,9 @@ pub struct Channels {
     pub reads: Vec<Name>,
     /// The channels it writes to the mesh: samples from the device.
     pub writes: Vec<Name>,
+    /// The last segment of each count channel, `<connector>.status.<count>`, which
+    /// the kind writes through its status.
+    pub counts: Vec<Name>,
 }
 
 /// Why a run or a discovery stopped. One handler for each variant.
@@ -174,6 +179,27 @@ impl<C> Context<C> {
         self.inputs.entropy.rng()
     }
 
+    /// Opens a writer session on `channels` as this connector: the session's subject
+    /// is the connector's name.
+    ///
+    /// # Errors
+    ///
+    /// As [`hub::Hub::writer`].
+    pub async fn writer(
+        &self,
+        channels: Vec<Name>,
+        authority: Authority,
+        lease: Option<time::Span>,
+    ) -> Result<hub::writer::Writer, hub::writer::Error> {
+        let config = hub::writer::Config {
+            subject: self.name.clone(),
+            authority,
+            lease,
+            channels,
+        };
+        self.inputs.hub.writer(config).await
+    }
+
     /// Connects streams and datagrams.
     #[must_use]
     pub fn net(&self) -> &Net {
@@ -221,20 +247,31 @@ impl Table {
     /// The diagnostics of the kind's `parse` or `check`, each with no span placed at
     /// `at`, where the file names the kind. An unknown kind gives one diagnostic,
     /// `connector.unknown-kind` at `at`.
+    ///
+    /// # Panics
+    ///
+    /// When the kind names a count that [`status`] names: the kind's code is wrong.
     pub fn check(
         &self,
         kind: &str,
         at: Option<Span>,
         config: &Document,
     ) -> Result<Channels, Vec<Diagnostic>> {
-        self.get(kind, at)?
-            .check(config)
-            .map_err(|mut diagnostics| {
-                for diagnostic in &mut diagnostics {
-                    diagnostic.span = diagnostic.span.or(at);
-                }
-                diagnostics
-            })
+        let place = |mut diagnostics: Vec<Diagnostic>| {
+            for diagnostic in &mut diagnostics {
+                diagnostic.span = diagnostic.span.or(at);
+            }
+            diagnostics
+        };
+        let channels = self.get(kind, at)?.check(config).map_err(place)?;
+        let mut counts = channels.counts.iter();
+        if let Some(count) = counts.find(|count| status::reserved(count.as_str())) {
+            panic!(
+                "the kind {kind:?} names the count `{count}`, a status channel of the \
+                 supervisor"
+            );
+        }
+        Ok(channels)
     }
 
     /// Finds connectors of `kind` that this node can run.
@@ -346,7 +383,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{inputs, run, run_on};
+    use crate::common::{create_inputs, run, run_on};
 
     const MISSING: Code = Code::new("test.missing");
     const RANGE: Code = Code::new("test.range");
@@ -388,6 +425,7 @@ mod tests {
             Ok(Channels {
                 reads: Vec::new(),
                 writes: (0..*n).map(|i| name(&format!("counter.c{i}"))).collect(),
+                counts: vec![name("frames")],
             })
         }
 
@@ -436,7 +474,8 @@ mod tests {
             channels,
             Ok(Channels {
                 reads: Vec::new(),
-                writes
+                writes,
+                counts: vec![name("frames")],
             })
         );
     }
@@ -531,6 +570,63 @@ mod tests {
         assert_eq!(format!("{table:?}"), r#"{"counter", "other"}"#);
     }
 
+    /// A kind that names one count, `.0`.
+    struct Counts(&'static str);
+
+    impl Kind for Counts {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels {
+                counts: vec![name(self.0)],
+                ..Channels::default()
+            })
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    fn check_counts(count: &'static str) -> Result<Channels, Vec<Diagnostic>> {
+        Table::new().with("counts", Counts(count)).check(
+            "counts",
+            None,
+            &Document::default(),
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "the kind \"counts\" names the count `state`, a status \
+                               channel of the supervisor")]
+    fn panics_on_a_count_named_as_a_status_channel_of_the_supervisor() {
+        drop(check_counts("state"));
+    }
+
+    #[test]
+    #[should_panic(expected = "the kind \"counts\" names the count `time`, a status \
+                               channel of the supervisor")]
+    fn panics_on_a_count_named_as_the_status_index() {
+        drop(check_counts("time"));
+    }
+
+    #[test]
+    fn checks_a_count_with_a_name_of_its_own() {
+        let channels = check_counts("restarts_seen").expect("checks");
+        assert_eq!(channels.counts, [name("restarts_seen")]);
+    }
+
     #[test]
     #[should_panic(expected = "the kind \"counter\" is in the table twice")]
     fn panics_on_a_kind_added_twice() {
@@ -570,7 +666,8 @@ mod tests {
     fn runs_until_cancelled_with_its_context() {
         let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
-            let inputs = Rc::new(inputs(&node, tasks.clone(), Table::new()));
+            let inputs =
+                Rc::new(create_inputs(&node, tasks.clone(), Table::new()).await.0);
             let ctx = Context::new(
                 name("plant.counter"),
                 3,
@@ -601,7 +698,8 @@ mod tests {
     #[test]
     fn gives_a_new_random_source_on_each_call() {
         let (a, b) = run_on(|node, tasks| async move {
-            let inputs = Rc::new(inputs(&node, tasks.clone(), Table::new()));
+            let inputs =
+                Rc::new(create_inputs(&node, tasks.clone(), Table::new()).await.0);
             let ctx = Context::new(name("a"), (), Token::new(), tasks, inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });

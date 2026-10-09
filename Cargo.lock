@@ -399,6 +399,7 @@ name = "connector"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "codec",
  "counting",
  "document",
  "env",
@@ -408,6 +409,7 @@ dependencies = [
  "hyper",
  "proptest",
  "sim",
+ "spec",
  "types",
 ]
 
@@ -421,6 +423,7 @@ dependencies = [
  "document",
  "env",
  "http",
+ "hub",
  "influxdb-line-protocol",
  "proptest",
  "sim",

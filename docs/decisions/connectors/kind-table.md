@@ -14,3 +14,11 @@
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/1782#issuecomment-6051900967,
   2026-10-08 03:59 UTC).
+  `Channels::counts` names the count channels of the kind,
+  `<connector>.status.<count>`. `connector::status` names the status index (`time`)
+  and the supervisor's channels (`state`, `class`, `restarts`) once, for the
+  supervisor and for `config`. `Table::check` panics when a kind names a count that
+  `connector::status` names, since the kind's code is wrong (`laptop.architect-2`,
+  2026-10-08T03:05:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538, items
+  4 and 2).

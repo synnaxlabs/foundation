@@ -39,6 +39,8 @@ pub struct Config {
     pub net: Net,
     /// The shard's tasks.
     pub tasks: Tasks,
+    /// The shard's hub. Each session a kind opens acts as its connector.
+    pub hub: hub::Hub,
 }
 
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
@@ -196,8 +198,16 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{inputs, run_on};
+    use crate::common::{create_inputs, run_on};
     use crate::kind::{Channels, Kind, Table};
+    use hub::reader::{Mode, Received};
+    use spec::channel::{Channel, Data};
+    use spec::data_type::DataType;
+    use spec::definition::Definition;
+    use types::authority::Authority;
+    use types::channel;
+    use types::frame::{Form, Label, Path};
+    use types::sample::{Scalar, Type};
 
     const BAD: Code = Code::new("test.bad");
 
@@ -351,7 +361,8 @@ mod tests {
             };
             let runs = Arc::clone(&script.runs);
             let kinds = Table::new().with("script", script);
-            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let supervisor =
+                Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
             let clock = node.clock();
             let token = Token::new();
             if cancel == Some(Span::ZERO) {
@@ -642,7 +653,8 @@ mod tests {
         let result = sim
             .run_on(&client, move |node, tasks| async move {
                 let kinds = Table::new().with("dial", dial);
-                let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+                let supervisor =
+                    Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
                 let token = Token::new();
                 let canceller = token.clone();
                 let clock = node.clock();
@@ -728,7 +740,8 @@ mod tests {
             };
             let (seen, live) = (Arc::clone(&kind.seen), Arc::clone(&kind.live));
             let kinds = Table::new().with("spawner", kind);
-            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let supervisor =
+                Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
             let token = Token::new();
             let canceller = token.clone();
             let clock = node.clock();
@@ -801,7 +814,8 @@ mod tests {
             let kind = Spawner::default();
             let live = Arc::clone(&kind.live);
             let kinds = Table::new().with("spawner", kind);
-            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let supervisor =
+                Supervisor::new(create_inputs(&node, tasks, kinds).await.0);
             let token = Token::new();
             let name = "plant.spawner".parse().expect("a valid name");
             let config = config();
@@ -824,7 +838,8 @@ mod tests {
             };
             let seen = Arc::clone(&kind.seen);
             let kinds = Table::new().with("spawner", kind);
-            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let supervisor =
+                Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
             let (token, config) = (Token::new(), config());
             let name: Name = "plant.spawner".parse().expect("a valid name");
             let clock = node.clock();
@@ -847,5 +862,143 @@ mod tests {
             [0, 0, 1],
             "the new call waited for the task of the dropped call"
         );
+    }
+
+    /// A kind that writes one sample of `plant.value` for each of `values`, through
+    /// a writer of its context, stamped from `start`, then returns.
+    struct Write {
+        start: i64,
+        values: Vec<i64>,
+    }
+
+    impl Kind for Write {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels::default())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let channels = vec![name("plant.value")];
+            let mut writer = ctx
+                .writer(channels, Authority(1), None)
+                .await
+                .expect("the writer opens");
+            let entries = writer.set().entries();
+            let entry = |key| {
+                let key = channel::Key::from_u128(key);
+                entries.iter().position(|entry| entry.key == key)
+            };
+            let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
+            let group = entries[time].group;
+            for (stamp, sample) in (self.start..).zip(&self.values) {
+                let mut series = [(time, 8), (value, 8)];
+                series.sort_unstable();
+                let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+                let time = draft.series_mut(time).expect("the index series");
+                time.copy_from_slice(&stamp.to_le_bytes());
+                let value = draft.series_mut(value).expect("the value series");
+                value.copy_from_slice(&sample.to_le_bytes());
+                draft.set_count(group, 1);
+                let outcomes = writer
+                    .write(Label::Path(Path::Live), draft)
+                    .expect("the home takes it");
+                assert!(
+                    matches!(outcomes, [hub::home::Outcome::Applied { .. }]),
+                    "{outcomes:?}"
+                );
+            }
+            Ok(())
+        }
+    }
+
+    fn name(text: &str) -> Name {
+        text.parse().expect("a valid name")
+    }
+
+    /// Defines `plant.time` (key 1) and `plant.value` (key 2, `i64`) on `hub`.
+    fn define(hub: &hub::Hub) {
+        let time = Channel {
+            key: channel::Key::from_u128(1),
+            kind: spec::channel::Kind::Index {
+                error: None,
+                control: None,
+            },
+        };
+        let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
+        let data = Data::new(time.key, None, i64, None).expect("no unit");
+        let value = Channel {
+            key: channel::Key::from_u128(2),
+            kind: spec::channel::Kind::Data(data),
+        };
+        let (time, value) = (Definition::Channel(time), Definition::Channel(value));
+        hub.set_definitions([
+            (&name("plant.time"), &time),
+            (&name("plant.value"), &value),
+        ]);
+    }
+
+    /// The `i64` samples of the channel of key 2 in `received`.
+    fn values(received: &Received<'_>) -> Vec<i64> {
+        let set = received.set;
+        let key = channel::Key::from_u128(2);
+        let entry = set.entries().iter().position(|entry| entry.key == key);
+        let entry = entry.expect("the set holds the channel");
+        let range = received.view.range(set.entries()[entry].group);
+        let count = range.expect("the group is present").count;
+        let count = usize::try_from(count).expect("a count");
+        let (_, bytes) = received
+            .view
+            .iter()
+            .find(|&(present, _)| present == entry)
+            .expect("the view holds the series");
+        let mut out = vec![0; count * 8];
+        let data_type = set.entries()[entry].data_type;
+        codec::decode(data_type, count, bytes, &mut out).expect("decodes");
+        let (chunks, _) = out.as_chunks::<8>();
+        chunks
+            .iter()
+            .map(|chunk| i64::from_le_bytes(*chunk))
+            .collect()
+    }
+
+    #[test]
+    fn gives_a_kind_a_writer_whose_samples_a_hub_reader_gets_in_order() {
+        let got = run_on(|node, tasks| async move {
+            let (mut inputs, now) = create_inputs(&node, tasks, Table::new()).await;
+            define(&inputs.hub);
+            let write = Write {
+                start: now.nanos(),
+                values: vec![30, 10, 20],
+            };
+            inputs.kinds = Arc::new(Table::new().with("write", write));
+            let mut reader = inputs
+                .hub
+                .reader(&[name("plant.value")], Mode::Complete)
+                .await
+                .expect("the reader opens");
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("write", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            let mut got = Vec::new();
+            for _ in 0..3 {
+                got.extend(values(&reader.next().await.expect("a frame")));
+            }
+            got
+        });
+        assert_eq!(got, [30, 10, 20]);
     }
 }

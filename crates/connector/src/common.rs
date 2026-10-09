@@ -1,13 +1,12 @@
 //! Test helpers for the modules of this crate.
 
-use std::sync::Arc;
-
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::tasks::Tasks;
+use types::time::Stamp;
 
 use crate::kind::Table;
-use crate::supervisor;
+use crate::{supervisor, testing};
 
 /// Runs `main` on a shard of one simulated node and returns its output.
 pub(crate) fn run<T, F>(
@@ -34,17 +33,19 @@ where
     sim.run_on(&node, main).expect("the run ends")
 }
 
-/// The inputs of a supervisor of `kinds` on a shard of `node`.
-pub(crate) fn inputs(
+/// The inputs of a supervisor of `kinds` on a shard of `node`, with a hub on a new
+/// shard, and the mesh time once the clock has one.
+pub(crate) async fn create_inputs(
     node: &sim::node::Node,
     tasks: Tasks,
     kinds: Table,
-) -> supervisor::Config {
-    supervisor::Config {
-        kinds: Arc::new(kinds),
+) -> (supervisor::Config, Stamp) {
+    let env = hub::testing::Env {
+        files: node.files(),
         clock: node.clock(),
+        wall: node.wall(),
         entropy: node.entropy(),
-        net: node.net(),
         tasks,
-    }
+    };
+    testing::create_config(env, node.net(), kinds).await
 }
