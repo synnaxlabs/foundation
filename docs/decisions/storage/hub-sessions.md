@@ -110,10 +110,13 @@
   `hub::Config::mesh`: a `Region` holds the mesh and the shard's transport, so a mesh
   with no transport is a state the type cannot hold. Each remote reader opens its
   stream on the session that `transport::Transport::dial` gives at that open, the one
-  session of the shard to the home (ONE SESSION PER PEER). A complete reader sends
-  `Credit` once its grant is half a window (512 KiB) short of the frames given back
-  plus a window. A task on `hub::Config::tasks` takes each frame off the stream of a
-  remote reader as it arrives, so the node takes each byte that it let the home send
+  session of the shard to the home (ONE SESSION PER PEER). When that session closes
+  with `Code(0)` before the home's `Opened`, it lost the tie-break of ONE SESSION PER
+  PEER, and the task dials once more and opens on the session that this dial gives.
+  A complete reader sends `Credit` once its grant is half a window (512 KiB) short of
+  the frames given back plus a window. A task on `hub::Config::tasks` takes each frame
+  off the stream of a remote reader as it arrives, so the node takes each byte that it
+  let the home send
   (STREAM WIRE), and an idle caller never holds the window of its session. The task
   also dials the home, sends the open, and sends each `Credit`, so no message that
   waits for room in the session waits for the caller. A complete reader queues at most

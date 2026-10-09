@@ -612,8 +612,28 @@ async fn dial(
 
 /// Opens a stream of `class` to `home`, and opens the session of `open` on `set` with
 /// `decoder`. A reply that breaks HUB WIRE, or a pool with no block for a message,
-/// stops the stream with its refusal.
+/// stops the stream with its refusal. A session that closes with `Code(0)` before
+/// `Opened` lost the tie-break of ONE SESSION PER PEER, so the open runs once more on
+/// the session that the next dial gives.
 async fn connect(
+    state: &Rc<RefCell<State>>,
+    home: types::node::Key,
+    class: Class,
+    decoder: &mut wire::hub::Reader,
+    open: &Open,
+    set: &KeySet,
+) -> Result<(Sender, Receiver), Error> {
+    match attempt(state, home, class, decoder, open, set).await {
+        Err(Error::Transport(
+            transport::Error::Closed { code: Code(0) }
+            | transport::Error::PeerClosed { code: Code(0) },
+        )) => attempt(state, home, class, decoder, open, set).await,
+        connected => connected,
+    }
+}
+
+/// One try of [`connect`], on the session that the dial gives.
+async fn attempt(
     state: &Rc<RefCell<State>>,
     home: types::node::Key,
     class: Class,

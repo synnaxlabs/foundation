@@ -24,7 +24,7 @@ use wire::header::MALFORMED;
 use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::OTHER;
-use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
+use super::serve::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 use super::{
     AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, name, samples, without, write,
     write_series, write_wide,
@@ -50,6 +50,10 @@ struct Steps {
     again: AtomicBool,
     /// The sessions that the home's node accepted.
     sessions: AtomicUsize,
+    /// The reader starts to open its session.
+    opening: AtomicBool,
+    /// The address of the reader's node.
+    reader: Option<Address>,
 }
 
 impl Steps {
@@ -102,7 +106,10 @@ fn remote_sized<H, R>(
     sim.link(&nodes[0], &nodes[1], link);
     sim.link(&nodes[1], &nodes[0], link);
     let at = Address::Udp(SocketAddr::new(nodes[1].addresses()[0], PORT));
-    let steps = Arc::new(Steps::default());
+    let steps = Arc::new(Steps {
+        reader: Some(Address::Udp(SocketAddr::new(nodes[0].addresses()[0], PORT))),
+        ..Steps::default()
+    });
     let shard = |name: &str| env::shards::Config {
         name: name.into(),
         core: None,
@@ -1163,7 +1170,7 @@ fn a_reader_after_the_home_closed_the_held_session_dials_again() {
         |node, tasks, transport, steps| async move {
             let session = transport.accept().await.expect("a session");
             session.accept().await.expect("a stream");
-            session.close(Code(0));
+            session.close(Code(1));
             let kept = Arc::clone(&steps);
             hub_home(node, tasks, transport, steps, |test| {
                 write_three(test, kept)
@@ -1177,11 +1184,90 @@ fn a_reader_after_the_home_closed_the_held_session_dials_again() {
                 .reader(&names, Mode::Latest)
                 .await
                 .expect_err("the home closed the session");
-            let closed = transport::Error::PeerClosed { code: Code(0) };
+            let closed = transport::Error::PeerClosed { code: Code(1) };
             assert_eq!(error, reader::Error::Transport(closed));
             read_three(test, steps).await;
         },
     );
+}
+
+#[test]
+fn a_reader_whose_home_closes_the_session_with_code_0_opens_on_the_next() {
+    remote(
+        15,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let session = transport.accept().await.expect("a session");
+            session.accept().await.expect("a stream");
+            session.close(Code(0));
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| {
+                write_three(test, kept)
+            })
+            .await;
+        },
+        |test, steps| async move {
+            read_three(test, Arc::clone(&steps)).await;
+            assert_eq!(steps.sessions.load(Ordering::Relaxed), 1);
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_home_closes_two_sessions_with_code_0_gets_transport() {
+    remote(
+        16,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            for _ in 0..2 {
+                let session = transport.accept().await.expect("a session");
+                session.accept().await.expect("a stream");
+                session.close(Code(0));
+            }
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let names = [name("value")];
+            let error = test
+                .hub
+                .reader(&names, Mode::Latest)
+                .await
+                .expect_err("the home closed both sessions");
+            let closed = transport::Error::PeerClosed { code: Code(0) };
+            assert_eq!(error, reader::Error::Transport(closed));
+        },
+    );
+}
+
+#[test]
+fn a_reader_whose_session_loses_the_tie_break_to_the_home_gets_each_frame() {
+    let link = sim::link::Config {
+        delay: Span::from_nanos(20 * Span::MILLISECOND.nanos()),
+        ..sim::link::Config::default()
+    };
+    for seed in [1, 9] {
+        remote(
+            seed,
+            link,
+            |node, tasks, transport, steps| async move {
+                until(&node.clock(), &steps.opening).await;
+                let at = [steps.reader.expect("the reader's address")];
+                // The lower key: both nodes keep this session.
+                let session = transport.dial(public_key(&HOME), &at);
+                let session = session.await.expect("dials");
+                let kept = Arc::clone(&steps);
+                hub_home(node, tasks, transport, steps, |test| {
+                    write_three(test, kept)
+                })
+                .await;
+                drop(session);
+            },
+            |test, steps| async move {
+                steps.opening.store(true, Ordering::Relaxed);
+                read_three(test, steps).await;
+            },
+        );
+    }
 }
 
 /// `Ok` with the output of `a` when it is done first, else `Err` with that of `b`.
