@@ -259,11 +259,15 @@
   Amended (#2143) by `laptop.architect` (2026-10-09T13:40:05Z:
   https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720):
   `Hub::writer` waits for the node's first mesh time (`clock::Reader::reach` on
-  `hub::Config::time`), as it waits for a home, so a hub caller never sees
-  `home::writer::Error::Unsynced`. The wait comes before the open resolves its channels
-  again, so it sees a change of the definitions during the wait. A task gets mesh time
-  from `writer::Writer::now`, which gives `home::Shard::now` (HOME CLOCKS) and cannot
-  fail, because mesh time stays once known. Lost: `Hub::now() -> Option<Stamp>`, because
-  each caller holds a writer and would expect mesh time itself. Lost: a `hub` export of
-  `clock::Reader`, because each task would compute the home's midpoint again. Lost: a
-  writer that stamps the frame, because only the caller knows when it read each sample.
+  `hub::Config::time`, the reader of the home), as it waits for a home, so a hub caller
+  never sees `home::writer::Error::Unsynced`. The wait comes before the open resolves
+  its channels and checks each home, so it sees a change of the definitions or of a
+  home during the wait, and no wait comes between the last home check and the carry
+  (PR #2161, round 1). A task gets mesh time from `writer::Writer::now`, which gives
+  `home::Shard::now` (HOME CLOCKS) and cannot fail, because mesh time stays once known.
+  Lost: `Hub::now() -> Option<Stamp>`, because each caller holds a writer and would
+  `expect` mesh time itself. Lost: a `hub::clock` export of `clock::Reader`, because
+  each task would compute the midpoint again, and a change of the home's rule would
+  make its stamps `Ahead`. Connector time sync adds what it needs with its own caller.
+  Lost: a writer that stamps the frame, because only the caller knows when it read each
+  sample.
