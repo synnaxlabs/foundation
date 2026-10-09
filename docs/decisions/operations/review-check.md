@@ -64,8 +64,8 @@
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983) and
   2026-10-09T00:29:41Z
   (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
-  approved by the director at 2026-10-09T02:49:31Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6073240852).
+  approved by the director at 2026-10-09T03:05:33Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6073409729).
   Supersedes the footnote label rule of
   https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522
   (2026-10-08T23:46:02Z), since `comrak` reads footnote labels as GitHub does.
@@ -76,8 +76,8 @@
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053059328, and
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6053208426. A round
   comment posted before the cutoff `CUTOFF` in
-  `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before, except for a
-  paragraph that `comrak` places in the wrong lines: an earlier
+  `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before, except that a
+  paragraph that `comrak` places in the wrong lines fails. Otherwise an earlier
   free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
   text that names a function still needs `performance`. Decided by the director at
   2026-10-08T02:44:00Z
