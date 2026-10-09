@@ -11,9 +11,7 @@
   line in a code block is not one, and a line that continues the paragraph with an
   indent is. Each end line may wrap onto the lines after it, and a paragraph after
   them fails. The first word of a value, with its backticks and one final comma,
-  period, or semicolon removed, is the word that is checked. A field name or an end
-  line name is read in the source of its line, so a name with an escape or an entity
-  in it does not count. Decided by the director at
+  period, or semicolon removed, is the word that is checked. Decided by the director at
   2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
   check reads the comment as GitHub does, by `comrak` (chosen by the person, as
@@ -49,16 +47,20 @@
   and hide the text between them. It also fails when `comrak` places the text of a
   paragraph before the last line of the paragraph, as it does after a link or an image
   with a line break after its text and after a link reference definition in the
-  paragraph, since each line that it then gives is wrong. The message names the first
+  paragraph, since each line that it then gives is wrong. A field name or an end line
+  name is read in the source of its line, so it also fails when GitHub shows such a
+  name at the start of a line of a paragraph and the source of the line does not start
+  with it, as with an escape, an entity, or emphasis. The message names the first
   line with one of these causes, or the first line of the paragraph. A round comment
-  that fails by these rules gets an edit that puts the line in a code span, or that
-  writes each link and image on one line and puts a blank line after each link
-  reference definition, and the cutoff stays. A paragraph that `comrak` places in the
-  wrong lines fails in any round, also in one posted before the cutoff, since the
-  check cannot read it. In an old round, a `Hot path:` line, or a `Reviewers:` line of
-  a round that does not parse, counts where GitHub shows it as a line of text of a
-  paragraph, at any depth and any indent, except in a paragraph that `comrak` places
-  in the wrong lines. A line of a code block or an HTML block does not count. Changed by
+  that fails by these rules gets an edit that puts the line in a code span, that writes
+  each link and image on one line and puts a blank line after each link reference
+  definition, or that writes each name as plain text, and the cutoff stays. A paragraph
+  that `comrak` places in the wrong lines fails in any round, also in one posted before
+  the cutoff, since the check cannot read it. In an old round, a `Hot path:` line, or a
+  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
+  line of text of a paragraph with its name at the start of its source, at any depth and
+  any indent, except in a paragraph that `comrak` places in the wrong lines. A line of a
+  code block or an HTML block does not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
