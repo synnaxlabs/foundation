@@ -1,6 +1,5 @@
 //! UDP sockets, TCP streams, listeners, and name lookups on the real network. Each
-//! socket is non-blocking, and registers with the I/O driver of the Tokio runtime of
-//! the thread of its first poll.
+//! socket is non-blocking. `os::net()` states when each registers.
 
 use std::io;
 use std::net::SocketAddr;
