@@ -1370,6 +1370,49 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // The client's dial waits on a silent address while the server's session comes
+    // through accept and ends the attempt. A second caller at 100 ms and the first
+    // share that session.
+    #[test]
+    fn callers_of_one_dial_share_the_session_the_table_holds() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let [silent] = dead(&server);
+        let at = [silent, Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let mine = transport.dial(CLIENT.public(), &back).await;
+            let _mine = mine.expect("a session");
+            node.clock().sleep(testing::spans(testing::IDLE, 2)).await;
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let tasks = config.tasks.clone();
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Rc::new(Transport::new(config, part).expect("a transport"));
+            let accepting = Rc::clone(&transport);
+            let held = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let keep = Rc::clone(&held);
+            tasks.spawn(async move {
+                while let Ok(session) = accepting.accept().await {
+                    keep.borrow_mut().push(session);
+                }
+            });
+            let clock = node.clock();
+            let (first, second) =
+                testing::join(transport.dial(SERVER.public(), &at), async {
+                    clock.sleep(testing::spans(Span::MILLISECOND, 100)).await;
+                    transport.dial(SERVER.public(), &[]).await
+                })
+                .await;
+            let (first, second) =
+                (first.expect("a session"), second.expect("a session"));
+            first.close(Code(3));
+            assert_eq!(second.closed().await, Error::Closed { code: Code(3) });
+            held.borrow_mut().clear();
+            linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
     // The client has the higher key and runs no accept. It dials 1 ms after the
     // server, so the server's session waits in the client's carrier when the
     // client's own dial ends. The dial gives the server's session.
