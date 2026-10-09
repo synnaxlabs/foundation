@@ -311,7 +311,7 @@ impl Lab {
     /// Opens a live reader on `channel` at `node`. It gets the samples written from
     /// now on.
     pub(crate) fn reader(&mut self, _node: Node, _channel: &str) -> Reader {
-        todo!("waits on #340, #462, #585")
+        todo!("waits on #340, #462, #585, #2018")
     }
 
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
@@ -322,7 +322,7 @@ impl Lab {
 
     /// Every sample that `reader` got, in the order it got them.
     pub(crate) fn received(&self, _reader: Reader) -> Vec<Sample> {
-        todo!("waits on #340, #462, #585")
+        todo!("waits on #340, #462, #585, #2018")
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -441,7 +441,7 @@ impl Lab {
         _subject: &str,
         _channel: &str,
     ) -> Vec<Sample> {
-        todo!("waits on #340")
+        todo!("waits on #340, #462, #585")
     }
 
     /// The commands recorded on `channel`, with their acknowledgments.
