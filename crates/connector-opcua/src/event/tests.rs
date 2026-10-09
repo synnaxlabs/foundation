@@ -75,14 +75,26 @@ impl Fixture {
 
     /// Adds a timer that records `n`, and gives its key.
     fn add(&self, n: usize, interval_ms: f64, policy: ffi::Policy) -> u64 {
+        self.timer(record, number(n), interval_ms, policy)
+    }
+
+    /// Adds a timer that runs `callback` with `data`, and gives its key.
+    fn timer(
+        &self,
+        callback: ffi::Callback,
+        data: *mut c_void,
+        interval_ms: f64,
+        policy: ffi::Policy,
+    ) -> u64 {
         let mut key = 0;
-        // SAFETY: `record` reads the probe, which lives as long as the loop.
+        // SAFETY: each callback of the tests reads the probe, which lives as long as
+        // the loop, and a `data` that outlives the run.
         let status = Status(unsafe {
             (self.members().add_timer)(
                 self.events.raw(),
-                record,
+                callback,
                 self.application(),
-                ptr::without_provenance_mut(n),
+                data,
                 interval_ms,
                 ptr::null_mut(),
                 policy,
@@ -212,6 +224,21 @@ fn the_loop_reads_its_clock() {
     );
 }
 
+/// Four values of open62541's generator after a loop with `rng` of `seed`.
+fn draws(seed: u64) -> [u32; 4] {
+    let mut sim = Sim::new(sim::Config::default());
+    let clock = sim.node(sim::node::Config::default()).clock();
+    let _events = Loop::new(clock, &mut Rng::from_seed(seed));
+    // SAFETY: it draws from the generator of this thread.
+    std::array::from_fn(|_| unsafe { ffi::test::UA_UInt32_random() })
+}
+
+#[test]
+fn a_loop_sets_the_generator_of_open62541_from_its_rng() {
+    assert_eq!(draws(1), draws(1));
+    assert_ne!(draws(1), draws(2));
+}
+
 #[test]
 fn a_run_before_the_start_fails() {
     let f = Fixture::new();
@@ -317,6 +344,19 @@ fn delayed_callbacks_run_in_order_after_the_due_timers() {
     f.advance(ms(1));
     f.run();
     assert_eq!(f.ran(), [3, 1, 2]);
+    assert_eq!(f.events.next(), None);
+}
+
+#[test]
+fn a_delayed_callback_that_a_timer_queues_runs_after_the_due_timers_of_its_run() {
+    let mut f = Fixture::new();
+    f.start();
+    let mut later = f.delayed(record, number(1));
+    f.timer(queue, ptr::from_mut(&mut later).cast(), 1.0, ffi::ONCE);
+    f.add(2, 1.0, ffi::ONCE);
+    f.advance(ms(1));
+    f.run();
+    assert_eq!(f.ran(), [0, 2, 1]);
     assert_eq!(f.events.next(), None);
 }
 
@@ -556,6 +596,45 @@ fn long() -> CString {
 #[test]
 fn connect_to_a_long_url() {
     connect(&long());
+}
+
+/// Sends a request on a client with no channel, when `CHILD` is set. The copy then
+/// logs an error.
+#[test]
+fn send_with_no_channel() {
+    if !is_child() {
+        return;
+    }
+    let f = Fixture::new();
+    // SAFETY: the loop lives until the client is deleted.
+    let client = unsafe { ffi::shim_client_new(f.events.raw()) };
+    assert!(!client.is_null());
+    // SAFETY: the client lives, and with no channel the copy reads no other argument.
+    let status = Status(unsafe {
+        ffi::test::__UA_Client_AsyncService(
+            client,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    });
+    assert_eq!(status.name(), "BadServerNotConnected");
+    // SAFETY: the client lives, and the loop outlives it.
+    unsafe { ffi::UA_Client_delete(client) };
+}
+
+#[test]
+fn an_error_goes_to_stderr() {
+    let output = child("event::tests::send_with_no_channel");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "connector-opcua: open62541 error: SecureChannel must be connected to send \
+         request\n"
+    );
 }
 
 #[test]
