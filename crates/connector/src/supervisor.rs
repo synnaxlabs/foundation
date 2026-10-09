@@ -1069,6 +1069,7 @@ mod tests {
     #[test]
     fn gives_a_kind_control_only_over_a_holder_of_lower_authority() {
         for (kind, holder, want) in [
+            (1, 0, None),
             (1, 1, Some(Refusal::Waiting)),
             (2, 1, None),
             (2, 2, Some(Refusal::Waiting)),
@@ -1101,9 +1102,16 @@ mod tests {
             let lease = Some(Span::from_nanos(nanos));
             let just_before = Span::from_nanos(nanos - 1);
             let at = Span::from_nanos(nanos);
-            assert_eq!(two_writes(lease, just_before), [None, None], "{nanos}");
-            let refused = [None, Some(Refusal::Expired)];
-            assert_eq!(two_writes(lease, at), refused, "{nanos}");
+            assert_eq!(
+                two_writes(lease, just_before),
+                [None, None],
+                "a lease of {nanos} ns, the second write 1 ns before its end"
+            );
+            assert_eq!(
+                two_writes(lease, at),
+                [None, Some(Refusal::Expired)],
+                "a lease of {nanos} ns, the second write at its end"
+            );
         }
     }
 }
