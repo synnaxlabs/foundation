@@ -3464,11 +3464,6 @@ mod tests {
             assert_eq!(share.order(), Order::RANK);
         }
 
-        /// A peer sees a cap of `Complete` only from about 1.6 times this one
-        /// (`complete_after_a_light_load_goes_at_most_three_windows_ahead`). The
-        /// server's reads miss the bytes in flight as the load changes, about two
-        /// windows: at a window of 1 MiB, the light load reads 1245284 of the
-        /// 3211264 B bound, and 2883684 B with a cap of 1.5 times.
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
@@ -8057,9 +8052,10 @@ mod tests {
         }
 
         /// Sends a light load of `light` against a backlog of the other class of the
-        /// share for 1000 [`STEP`]s, then backlogs both for 600. Gives how far `light`
-        /// went ahead in the second phase, and the peer window: the bytes of `light`
-        /// that the server read past the share of the bytes it read of the other.
+        /// share for 1000 [`STEP`]s, drains both, then backlogs both for 600, `light`
+        /// first. Gives how far `light` went ahead in the second phase, and the peer
+        /// window: the bytes of `light` that the server read past the share of the
+        /// bytes it read of the other.
         fn ahead_after_a_light_load(shard: &Shard, light: Class) -> (isize, usize) {
             let mut pair = connected(shard);
             let heavy = other(light).expect("a class of the share");
@@ -8082,11 +8078,16 @@ mod tests {
                 send(&mut pair, &mut lightly, &mut pending);
                 take(&mut pair, &mut receivers, &mut read);
             }
+            end_message(&mut pair, &mut receivers, &mut read, &backlogged);
+            end_message(&mut pair, &mut receivers, &mut read, &lightly);
+            for _ in 0..8 {
+                flush(&mut pair, &mut receivers, &mut read, &[]);
+            }
             let before = read;
             for _ in 0..600 {
                 pair.run(STEP);
-                refill(&mut pair, &mut backlogged, &big);
                 refill(&mut pair, &mut lightly, &big);
+                refill(&mut pair, &mut backlogged, &big);
                 take(&mut pair, &mut receivers, &mut read);
             }
             let [_, latest, complete, _] =
