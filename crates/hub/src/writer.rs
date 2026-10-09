@@ -138,6 +138,8 @@ pub struct Writer {
     /// The channel whose removal ended the writer.
     removed: Removal,
     set: Arc<KeySet>,
+    /// The entry in `set` of each channel of the config, in its order.
+    entries: Box<[usize]>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
 }
@@ -190,6 +192,14 @@ impl Writer {
             })
             .collect();
         let set = borrowed.interner.intern(&groups);
+        let entries = keys
+            .iter()
+            .map(|&key| {
+                let entries = set.entries();
+                let entry = entries.iter().position(|entry| entry.key == key);
+                entry.expect("invariant: the key set holds each channel of the config")
+            })
+            .collect();
         let writer = ::home::writer::Writer {
             subject,
             authority,
@@ -205,6 +215,7 @@ impl Writer {
             key,
             removed,
             set,
+            entries,
             outcomes: Vec::new(),
         })
     }
@@ -213,6 +224,14 @@ impl Writer {
     #[must_use]
     pub fn set(&self) -> &Arc<KeySet> {
         &self.set
+    }
+
+    /// The entry of each channel of [`Config::channels`], in that order: its
+    /// position in the entries of [`Self::set`], as [`Self::draft`] and
+    /// [`Draft::series_mut`] take it. A channel named twice has the same entry twice.
+    #[must_use]
+    pub fn entries(&self) -> &[usize] {
+        &self.entries
     }
 
     /// Mesh time now, as the home stamps each entry and checks each stamp: it never
