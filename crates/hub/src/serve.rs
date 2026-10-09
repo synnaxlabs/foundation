@@ -650,6 +650,9 @@ mod tests {
     const I64: Type = Type::Scalar(Scalar::I64);
 
     /// An open leaves no entry in the hub once it drops, also when it set its waker.
+    /// It reads private maps, as no public call reads them: a leak is only held
+    /// memory, and a counting allocator needs a binary with no harness that serves
+    /// streams over the sim network.
     #[test]
     fn an_open_keeps_no_entry_once_it_drops() {
         let mut sim = sim::Sim::new(sim::Config::default());

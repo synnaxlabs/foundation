@@ -55,6 +55,9 @@ exclude_re = [
   # `decode` show that `check` does.
   'crates/node/src/identity\.rs:.*replace check with \(\)',
   'crates/node/src/fuzz\.rs:.*replace identity with \(\)',
+  # No public call reads the entries that an open leaks. The unit test
+  # `an_open_keeps_no_entry_once_it_drops` reads them.
+  'crates/hub/src/serve\.rs:.*replace <impl Drop for Opening<._>>::drop with \(\)',
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
