@@ -53,7 +53,8 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   it or a channel on it, are on one node, when the winner of a writer is not the
 ///   winner of the index: once, naming each such writer, at the label of the index's
 ///   placement, or of the first such writer's when no placement selects the index.
-///   Its fix names each connector that the indexes they write link to the index.
+///   Its fix is the one fix of the unit of the index: its writers, each connector
+///   that writes another index of theirs, and so on.
 /// - `config.writer-nodes` at the `node` of the first connector, in name order, on a
 ///   second node that writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
