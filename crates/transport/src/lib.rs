@@ -303,8 +303,9 @@ pub struct Config {
     pub streams_max: NonZeroU32,
     /// A session whose peer is silent this long, or 3 PTO when that is longer, ends
     /// with [`Error::TimedOut`]. One whose peer has sent no hello twice that long after
-    /// the handshake ends with [`Error::Broken`]. Sessions send keep-alives, so a live
-    /// peer is never silent this long. Must be positive.
+    /// the handshake ends with [`Error::Broken`], or with [`Error::TimedOut`] when the
+    /// endpoint checks it only after the peer was also silent that long. Sessions send
+    /// keep-alives, so a live peer is never silent this long. Must be positive.
     pub idle: Span,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,
