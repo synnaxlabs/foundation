@@ -156,9 +156,6 @@ where
     }
 }
 
-/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
-/// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
-/// session of the first program that dials it, with its link.
 /// Serves each hub stream of `session` on `link`, once it reads the stream's header,
 /// and keeps each result in `kept`, until the session closes.
 pub(super) async fn serve_streams(
@@ -188,6 +185,8 @@ pub(super) fn shrink_wall_error(node: &sim::node::Node, tasks: &env::tasks::Task
     });
 }
 
+/// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
+/// session of the first program that dials it, with its link.
 pub(super) async fn accept(
     node: &sim::node::Node,
     tasks: &env::tasks::Tasks,
@@ -205,6 +204,7 @@ pub(super) async fn accept(
     (test, session, link)
 }
 
+/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
 pub(super) async fn home(
     node: &sim::node::Node,
     tasks: &env::tasks::Tasks,
