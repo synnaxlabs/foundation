@@ -134,7 +134,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   C under ASan and UBSan, with no `function` check (`laptop.architect-2`, #435,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
   2026-10-08 02:24 UTC, and #2165,
-  https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6086019787).
+  https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6086019787,
+  2026-10-09 17:35 UTC).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
