@@ -234,7 +234,8 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// graph builds when an edge of the package resolves a requirement on crates.io that
 /// the copy meets to another package. Cargo applies a patch to each such requirement,
 /// so one that an edge to a copy can resolve is not a problem, unless an edge to
-/// another package can resolve only such requirements. When two requirements of one
+/// another package can resolve only such requirements of one of its kinds and targets.
+/// When two requirements of one
 /// edge name, kind, and target can each resolve, `cargo metadata` does not say which
 /// one an edge resolves, so the check can miss a requirement or refuse one that
 /// resolves to nothing. It fails on an edge to a package with the name of a copy that
@@ -248,17 +249,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         .filter(|package| package.copied)
         .map(|package| Ok((package, package.release()?)))
         .collect::<Result<Vec<_>, String>>()?;
-    let mut problems = Vec::new();
-    for package in &packages {
-        if package.copied && !root.iter().any(|p| p.id == package.id) {
-            problems.push(format!(
-                "fuzz/Cargo.toml builds `{}` from the copy `{}`, which the root \
-                 Cargo.toml does not build. Give fuzz/Cargo.toml the [patch.crates-io] \
-                 table of the root Cargo.toml.",
-                package.name, package.manifest
-            ));
-        }
-    }
+    let mut problems = strays(&root, &packages);
     for node in field::list(&fuzz["resolve"], "nodes")? {
         let dependent = find(&packages, field::text(node, "id")?)?;
         let edges = field::list(node, "deps")?;
@@ -267,7 +258,8 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             let dependency = find(&packages, field::text(edge, "pkg")?)?;
             if built.iter().any(|(copy, _)| copy.name == dependency.name) {
                 let requirements = dependent.requirements(dependency, edge)?;
-                paired.push((dependency.copied, requirements));
+                let kinds = field::list(edge, "dep_kinds")?;
+                paired.push((dependency.copied, kinds, requirements));
             }
         }
         let met = |requirement: &Value, parsed: &VersionReq| {
@@ -279,17 +271,24 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                 .map(|(copy, _)| *copy)
         };
         let mut reported = Vec::new();
-        for (_, requirements) in paired.iter().filter(|(copied, _)| !copied) {
-            // The edge resolves one of these, so when a copy meets each, one is not
-            // patched.
-            let forced = requirements
-                .iter()
-                .all(|(requirement, parsed)| met(requirement, parsed).is_some());
+        for (_, kinds, requirements) in paired.iter().filter(|(copied, ..)| !copied) {
             for (requirement, parsed) in requirements {
                 let Some(copy) = met(requirement, parsed) else {
                     continue;
                 };
-                let patched = paired.iter().any(|(copied, others)| {
+                // The edge resolves one requirement of each of its kinds, so when a
+                // copy meets each of one kind, one is not patched.
+                let forced =
+                    kinds
+                        .iter()
+                        .filter(|kind| kinded(kind, requirement))
+                        .any(|kind| {
+                            requirements
+                                .iter()
+                                .filter(|(other, _)| kinded(kind, other))
+                                .all(|(other, parsed)| met(other, parsed).is_some())
+                        });
+                let patched = paired.iter().any(|(copied, _, others)| {
                     *copied
                         && others
                             .iter()
@@ -312,6 +311,29 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         }
     }
     Ok(problems)
+}
+
+/// A problem for each copy of `packages`, the packages of the `fuzz` graph, that `root`
+/// does not build.
+fn strays(root: &[Package<'_>], packages: &[Package<'_>]) -> Vec<String> {
+    packages
+        .iter()
+        .filter(|package| package.copied && !root.iter().any(|p| p.id == package.id))
+        .map(|package| {
+            format!(
+                "fuzz/Cargo.toml builds `{}` from the copy `{}`, which the root \
+                 Cargo.toml does not build. Give fuzz/Cargo.toml the [patch.crates-io] \
+                 table of the root Cargo.toml.",
+                package.name, package.manifest
+            )
+        })
+        .collect()
+}
+
+/// Whether `requirement` is of the kind and target of `kind`, an item of the
+/// `dep_kinds` of an edge.
+fn kinded(kind: &Value, requirement: &Value) -> bool {
+    kind["kind"] == requirement["kind"] && kind["target"] == requirement["target"]
 }
 
 /// The package `id` of `packages`, the packages of the `fuzz` graph.
@@ -385,10 +407,7 @@ impl<'a> Package<'a> {
                 Some(rename) => rename.replace('-', "_") == name,
                 None => dependency.lib()? == name,
             };
-            let kind = kinds.iter().any(|kind| {
-                kind["kind"] == requirement["kind"]
-                    && kind["target"] == requirement["target"]
-            });
+            let kind = kinds.iter().any(|kind| kinded(kind, requirement));
             let sourced = dependency.value["source"].as_str().is_none_or(|source| {
                 source.starts_with("git+")
                     || requirement["source"].as_str() == Some(source)
@@ -783,6 +802,21 @@ mod tests {
             crate::fixture().join("patched/cases/limit").display()
         );
         assert_eq!(patched("limit"), Ok(vec![unmet("^1", &dependent)]));
+    }
+
+    #[test]
+    fn refuses_a_release_beside_a_path_to_the_copy_with_a_dev_requirement_of_its_name()
+    {
+        let dependent = format!(
+            "path+file://{}#0.0.0",
+            crate::fixture().join("patched/cases/masked").display()
+        );
+        assert_eq!(patched("masked"), Ok(vec![unmet("^1", &dependent)]));
+    }
+
+    #[test]
+    fn passes_a_path_to_the_copy_beside_a_dev_requirement_of_its_name_with_the_patch() {
+        assert_eq!(patched("maskedpatched"), Ok(Vec::new()));
     }
 
     #[test]
