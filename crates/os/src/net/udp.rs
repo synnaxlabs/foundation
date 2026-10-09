@@ -777,6 +777,33 @@ mod tests {
             });
         }
 
+        /// The socket stays open in the `Udp` that the senders share.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_dropped_receiver_drops_its_registration() {
+            use std::os::unix::fs::MetadataExt;
+
+            use receiver::Driver as _;
+
+            runtime().block_on(async {
+                let (udp, mut receiver) =
+                    Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap();
+                let path = format!("/proc/self/fd/{}", udp.bound.socket.as_raw_fd());
+                let inode = std::fs::metadata(path).unwrap().ino();
+                let mut buffer = [0; 64];
+                let mut meta = [Meta::default()];
+                let poll = receiver.poll_recv(
+                    &mut Context::from_waker(Waker::noop()),
+                    &mut [IoSliceMut::new(&mut buffer)],
+                    &mut meta,
+                );
+                assert_eq!(poll, Poll::Pending);
+                assert_ne!(registrations(inode), 0);
+                drop(receiver);
+                assert_eq!(registrations(inode), 0);
+            });
+        }
+
         #[test]
         fn retries_a_pending_send_when_the_socket_is_writable() {
             runtime().block_on(async {
