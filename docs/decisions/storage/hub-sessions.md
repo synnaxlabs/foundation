@@ -123,6 +123,15 @@
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207; "the task
   of the remote reader", 2026-10-09T09:25:27Z,
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582).
+  Amended (#2185): `Hub::new` states when the hub lets go of the region, so `node`
+  cites the hub and not one of its tasks. The hub holds the home and
+  `hub::Config::region` until the hub, each of its sessions, each `Link`, and each
+  future of `Link::serve` drop, and each task of the hub ends at its next poll after
+  that, holding neither. Lost: `Hub::ended`, because the event that `node` waits for
+  is the free port, which the transport gives, so a hub future adds a surface whose
+  one caller must still wait for the transport (`laptop.architect`,
+  2026-10-09T21:38:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674).
   Supersedes the one more dial of
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101. A complete
   reader sends `Credit` once its grant is half a window (512 KiB) short of the frames
