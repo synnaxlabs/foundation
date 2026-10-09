@@ -344,13 +344,17 @@ impl Disk {
 
     /// Makes `handle`, which an open of `path` gave, a descriptor.
     pub(crate) fn opened(&mut self, handle: Handle, path: &Path) {
-        (self.descriptors).insert(handle.key, (handle.inode, normal(path)));
+        self.descriptors
+            .insert(handle.key, (handle.inode, normal(path)));
     }
 
     /// The path of descriptor `handle` now.
     pub(crate) fn path(&self, handle: Handle) -> &Path {
         let Some((_, path)) = self.descriptors.get(&handle.key) else {
-            unreachable!("invariant: a descriptor has a path")
+            unreachable!(
+                "invariant: descriptor {} of file {} has a path",
+                handle.key, handle.inode
+            )
         };
         path
     }
@@ -359,7 +363,10 @@ impl Disk {
     pub(crate) fn close(&mut self, handle: Handle) {
         self.release(handle);
         let Some((_, path)) = self.descriptors.remove(&handle.key) else {
-            unreachable!("invariant: a descriptor has a path")
+            unreachable!(
+                "invariant: descriptor {} of file {} has a path",
+                handle.key, handle.inode
+            )
         };
         self.closes.push(path);
     }

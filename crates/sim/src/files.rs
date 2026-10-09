@@ -213,7 +213,10 @@ impl Files {
         let path = match (path, call.handle()) {
             (Some(path), _) => path.to_path_buf(),
             (None, Some(handle)) => self.disks[node].path(handle).to_path_buf(),
-            (None, None) => unreachable!("invariant: a call with no path has a handle"),
+            (None, None) => unreachable!(
+                "invariant: a {:?} call with no path has a handle",
+                call.operation()
+            ),
         };
         let key = self.tick();
         let delay = self.rng.below(DELAYS);
