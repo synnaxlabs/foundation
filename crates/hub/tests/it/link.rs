@@ -23,8 +23,8 @@ use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::BUSY;
 use wire::hub::client::{
-    BODY_BYTES_MAX, CAPPED, CHANGED, Challenge, EXPIRED, REFUSED, Request, Response,
-    STALE, Signed, UNSYNCED, VIA,
+    BODY_BYTES_MAX, CHANGED, Challenge, EXPIRED, REFUSED, Request, Response, STALE,
+    Signed, UNSYNCED, VIA,
 };
 
 use super::{AREA, BODY_MAX, NODE, POOL, Test};
@@ -160,6 +160,16 @@ where
     }
 }
 
+/// Makes the error of the wall clock of `node` unknown, and 10 ms one minute later.
+pub(super) fn shrink_wall_error(node: &sim::node::Node, tasks: &env::tasks::Tasks) {
+    node.set_wall_error(None);
+    let shrink = node.clone();
+    tasks.spawn(async move {
+        shrink.clock().sleep(Span::MINUTE).await;
+        shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
+    });
+}
+
 /// The count of client sessions that [`sessions`] runs.
 const SESSIONS: usize = 3;
 
@@ -227,12 +237,12 @@ fn closed_after(
 }
 
 /// What `serve` gave for each stream, in the order they ended.
-type Kept = Arc<Mutex<Vec<Result<Got, serve::Error>>>>;
+pub(super) type Kept = Arc<Mutex<Vec<Result<Got, serve::Error>>>>;
 
 /// Serves each stream of `session` on `link` in its own task through [`answer`], and
 /// pushes what it gives to `kept`. Counts each stream in `accepted`. Ends when the
 /// session ends.
-fn serve_each(
+pub(super) fn serve_each(
     session: &Session,
     link: &hub::Link,
     tasks: &env::tasks::Tasks,
@@ -1302,25 +1312,103 @@ fn empty_request() -> [u8; Request::LEN] {
     out
 }
 
-/// A hello whose expiry is past the cap is refused, so a renewal cannot hold a
-/// session for longer than the cap.
+/// A hello whose expiry is past the cap lives only until the cap, so a renewal cannot
+/// hold a session for longer than the cap.
 #[test]
-fn refuses_a_hello_past_the_cap() {
-    let home = session(96, true, |mut agent| async move {
+fn closes_the_session_at_the_cap_of_a_hello_past_it() {
+    let cap = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&cap);
+    let home = session(96, true, move |mut agent| async move {
         let challenge = agent.hello.challenge().await;
         let mut hello = Agent::hello(challenge);
         hello.expires = challenge.now.latest + access::proof::CAP + Span::SECOND;
+        *kept.lock().expect("not poisoned") =
+            Some(challenge.now.latest + access::proof::CAP);
         agent.send_hello(hello, &AGENT).await;
-        assert_eq!(agent.closed().await, closed_with(CAPPED));
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
     });
+    let cap = cap.lock().expect("not poisoned").expect("a hello");
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        home.served.as_slice()
+    else {
+        panic!("one expiry, not {:?}", home.served);
+    };
+    let soon = Span::from_nanos(10_000_000);
     assert!(
-        matches!(
-            home.served.as_slice(),
-            [Err(serve::Error::Access(Refusal::Capped { .. }))]
-        ),
-        "{:?}",
-        home.served
+        *at >= cap && *at < cap + soon,
+        "the hello ends at the cap: {at:?}, {cap:?}"
     );
+    assert!(
+        *now >= *at && *now < *at + soon,
+        "the node closed the session at the cap: {now:?}, {at:?}"
+    );
+}
+
+/// A node with an unknown error admits a hello, its error shrinks to 10 ms, and the
+/// program renews once from the old challenge, then stops. The renewal ends at the
+/// cap past the latest edge at its admission, and the session closes there.
+#[test]
+fn closes_the_session_at_the_cap_of_a_renewal_after_a_drop() {
+    let ten = Span::from_nanos(10 * Span::MINUTE.nanos());
+    let five = Span::from_nanos(5 * Span::MINUTE.nanos());
+    let third = Arc::new(Mutex::new(None));
+    let kept_third = Arc::clone(&third);
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&served);
+    run(
+        173,
+        move |node, tasks| async move {
+            shrink_wall_error(&node, &tasks);
+            let (test, session, link) =
+                accept(&node, &tasks, POOL, true, Some(rules())).await;
+            serve_each(
+                &session,
+                &link,
+                &tasks,
+                &node.clock(),
+                &kept,
+                &Rc::default(),
+            )
+            .await;
+            drop((link, test));
+        },
+        move |mut agent| async move {
+            let first = agent.hello.challenge().await;
+            let mut hello = Agent::hello(first);
+            hello.expires = first.now.latest + ten;
+            agent.send_hello(hello, &AGENT).await;
+            let second = agent.hello.challenge().await;
+            agent.sleep(five).await;
+            let mut hello = Agent::hello(second);
+            hello.expires = second.now.latest + five + ten;
+            agent.send_hello(hello, &AGENT).await;
+            let next = agent.hello.challenge().await;
+            *kept_third.lock().expect("not poisoned") = Some(next.now);
+            let start = agent.node.clock().now();
+            assert_eq!(agent.closed().await, closed_with(EXPIRED));
+            let lived = agent.node.clock().now() - start;
+            assert!(
+                lived.nanos() <= access::proof::CAP.nanos() + Span::SECOND.nanos(),
+                "the session lived {lived:?} past the renewal"
+            );
+        },
+    );
+    let next = third
+        .lock()
+        .expect("not poisoned")
+        .expect("a third challenge");
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        served.as_slice()
+    else {
+        panic!("one expiry, not {served:?}");
+    };
+    let cap = next.latest + access::proof::CAP;
+    assert!(
+        *at <= cap && *at > cap - Span::SECOND,
+        "the renewal ends at the cap: {at:?}, {cap:?}"
+    );
+    assert!(*now >= *at && *now < *at + Span::from_nanos(10_000_000));
 }
 
 /// The first expiry that a link reads is the one the node checks: a hello that has

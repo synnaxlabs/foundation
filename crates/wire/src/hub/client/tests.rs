@@ -118,8 +118,8 @@ mod pins {
     #[test]
     fn the_constants() {
         assert_eq!(
-            [REFUSED, UNSYNCED, STALE, VIA, EXPIRED, CAPPED, CHANGED],
-            [20, 21, 22, 23, 24, 25, 26]
+            [REFUSED, UNSYNCED, STALE, VIA, EXPIRED, CHANGED],
+            [20, 21, 22, 23, 24, 26]
         );
         assert_eq!(BODY_BYTES_MAX, 16_777_216);
         assert_eq!((Challenge::LEN, Request::LEN, Response::LEN), (33, 73, 9));
@@ -546,12 +546,7 @@ fn gives_the_code_and_the_text_of_each_refusal() {
             "the hello does not echo the nonce of the node's last challenge",
         ),
         (Refusal::Via, 23, "the hello names another node as via"),
-        (Refusal::Expired, 24, "the hello expired"),
-        (
-            Refusal::Capped,
-            25,
-            "the hello expires later than the cap past the earliest mesh time",
-        ),
+        (Refusal::Expired, 24, "the hello ended"),
         (
             Refusal::Changed,
             26,
@@ -568,7 +563,7 @@ fn gives_the_code_and_the_text_of_each_refusal() {
 
 #[test]
 fn gives_no_refusal_for_0_or_a_code_outside_the_set() {
-    for code in [0, 1, 3, 16, 17, 18, 27, u32::MAX] {
+    for code in [0, 1, 3, 16, 17, 18, 25, 27, u32::MAX] {
         assert_eq!(Refusal::from_code(code), None, "{code}");
     }
 }
