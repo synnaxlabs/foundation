@@ -2056,6 +2056,73 @@ fn each_accepted_stream_is_a_connection_with_the_context_of_the_listen() {
     );
 }
 
+#[test]
+fn a_listen_from_a_run_accepts_and_reads_in_that_drive() {
+    let mut network = Network::new();
+    network.dial(Span::ZERO, b"a");
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::with(&node, Some(listener(&node)));
+            // The stream and its byte wait before the listen.
+            side.clock.sleep(Span::MILLISECOND).await;
+            let listened = Cell::new(false);
+            let mut drive = pin!(side.manager.drive(|_| {
+                if !listened.replace(true) {
+                    assert_eq!(side.listen(PORT), Status::GOOD);
+                }
+                Poll::<Infallible>::Pending
+            }));
+            let mut end = side.clock.sleep(Span::from_nanos(10_000_000));
+            // The end comes first, so the drive gets no pass at the end.
+            poll_fn(|cx| {
+                if Pin::new(&mut end).poll(cx).is_ready() {
+                    return Poll::Ready(());
+                }
+                if let Poll::Ready(never) = drive.as_mut().poll(cx) {
+                    match never {}
+                }
+                Poll::Pending
+            })
+            .await;
+            side.calls()
+        })
+        .expect("the run ends");
+    assert_eq!(
+        calls,
+        [
+            (1, ffi::ESTABLISHED, vec![]),
+            (2, ffi::ESTABLISHED, vec![]),
+            (2, ffi::ESTABLISHED, b"a".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn a_pass_accepts_each_stream_that_waits() {
+    let mut network = Network::new();
+    for say in [b"a", b"b", b"c", b"d"] {
+        network.dial(Span::ZERO, say);
+    }
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::with(&node, Some(listener(&node)));
+            side.drive(Span::from_nanos(10_000_000)).await;
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::from_nanos(10_000_000)).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    let opened: Vec<usize> = calls
+        .iter()
+        .filter(|(_, state, bytes)| *state == ffi::ESTABLISHED && bytes.is_empty())
+        .map(|(id, _, _)| *id)
+        .collect();
+    assert_eq!(opened, [1, 2, 3, 4, 5]);
+    assert_eq!(calls.len(), 9);
+}
+
 /// Fails the listener once it accepted one stream, when `child::running()`.
 #[test]
 fn failed_listener() {
