@@ -49,9 +49,10 @@
   https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6070616191). It panics
   on an open writer or reader of the index: the hub ends each session on the index
   first. A shed of an index that the shard does not carry does nothing, since the hub
-  carries an index only at its first session. A shed frees the place of the index in the shard, and the index at the last
-  place moves there. The hub sheds an index only when its key leaves the definitions; a
-  rename or a changed definition at the same key ends its sessions and keeps the index.
+  carries an index only at its first session. A shed frees the place of the index in
+  the shard, and the index at the last place moves there. The hub sheds an index only
+  when its key leaves the definitions; a rename or a changed definition at the same key
+  ends its sessions and keeps the index.
   No reader key is given twice, also after a shed and a carry: `delivery::Readers::end`
   gives the number after each key of a shed index, and panics while a record waits to be
   taken, and the shard carries each index with `Readers::after` at the highest of these.
