@@ -5,7 +5,6 @@
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
-#![cfg(target_os = "linux")]
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
