@@ -140,7 +140,10 @@
   own test `apple_fast_datapath`. Its trigger is in the `noq-udp` row of "Local patches"
   in `docs/dependencies.md`. The limit and its trigger: `laptop.architect-2` (2026-10-09
   05:03 UTC, #2097,
-  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074645099).
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074645099). The rule,
+  the limit, and the pointer as they are now: `laptop.architect-2` (2026-10-09
+  05:26 UTC, #2097,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074891760).
   Supersedes the `fast-apple-datapath` condition of
   https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074544404
   (04:55 UTC).
