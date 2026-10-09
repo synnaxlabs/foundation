@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use semver::{Version, VersionReq};
 use serde_json::Value;
 
 use crate::field;
@@ -24,7 +25,7 @@ const MAX_LEN: u64 = 16 * 1024;
 
 /// Runs each target of `fuzz/` at `root` for `seconds`, as many at once as the host has
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
-/// `oracles/fuzz/<target>`. It fails before the build on each problem that [`targets`]
+/// `oracles/fuzz/<target>`. It fails before the build on each problem that [`check`]
 /// finds, and then when the build fails or a target fails. cargo-fuzz keeps the input
 /// of a crash in `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
@@ -222,52 +223,81 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
     Ok(bins)
 }
 
-/// A problem for each package of the `fuzz` graph that is a copy in `patches/`, or
-/// that is a release compatible with a copy that the `root` graph builds and the
-/// `fuzz` graph does not, when the `root` graph has no package of its key.
+/// A problem for each package of the `fuzz` graph that is a copy in `patches/` and
+/// that the `root` graph does not build, and for each dependency of the `fuzz` graph
+/// whose requirement a copy that the `root` graph builds meets, and that resolves to
+/// another package. Cargo applies a patch to each requirement that the patch meets.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
-    let fuzz = Package::all(fuzz, &copies)?;
+    let packages = Package::all(fuzz, &copies)?;
+    let built = root
+        .iter()
+        .filter(|package| package.copied)
+        .map(|package| Ok((package, package.release()?)))
+        .collect::<Result<Vec<_>, String>>()?;
     let mut problems = Vec::new();
-    for package in &fuzz {
-        let Package {
-            id,
-            name,
-            version,
-            manifest,
-            copied,
-        } = *package;
-        if root.iter().any(|p| p.id == id) {
-            continue;
-        }
-        if copied {
+    for package in &packages {
+        if package.copied && !root.iter().any(|p| p.id == package.id) {
             problems.push(format!(
-                "fuzz/Cargo.toml builds `{name}` from the copy `{manifest}`, which the \
-                 root Cargo.toml does not build. Give fuzz/Cargo.toml the \
-                 [patch.crates-io] table of the root Cargo.toml."
+                "fuzz/Cargo.toml builds `{}` from the copy `{}`, which the root \
+                 Cargo.toml does not build. Give fuzz/Cargo.toml the [patch.crates-io] \
+                 table of the root Cargo.toml.",
+                package.name, package.manifest
             ));
         }
-        // Beside the copy, a release meets a requirement that the copy cannot.
-        if root.iter().any(|p| {
-            p.copied
-                && p.name == name
-                && compatible(version, p.version)
-                && !fuzz.iter().any(|f| f.id == p.id)
-        }) {
-            problems.push(format!(
-                "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the copy \
-                 in patches/ that the root Cargo.toml builds. Give fuzz/Cargo.toml the \
-                 [patch.crates-io] table of the root Cargo.toml."
-            ));
+    }
+    let find = |id: &str| {
+        packages
+            .iter()
+            .find(|package| package.id == id)
+            .ok_or_else(|| {
+                format!("the resolve of fuzz/Cargo.lock has no package `{id}`")
+            })
+    };
+    for node in field::list(&fuzz["resolve"], "nodes")? {
+        let dependent = find(field::text(node, "id")?)?;
+        for edge in field::list(node, "deps")? {
+            let dependency = find(field::text(edge, "pkg")?)?;
+            if dependency.copied {
+                continue;
+            }
+            let release = dependency.release()?;
+            for declared in field::list(dependent.value, "dependencies")? {
+                if field::text(declared, "name")? != dependency.name {
+                    continue;
+                }
+                let text = field::text(declared, "req")?;
+                let requirement = VersionReq::parse(text).map_err(|error| {
+                    format!(
+                        "`{}` needs `{}` `{text}`: {error}",
+                        dependent.id, dependency.name
+                    )
+                })?;
+                if !requirement.matches(&release) {
+                    continue;
+                }
+                let Some((copy, _)) = built.iter().find(|(copy, version)| {
+                    copy.name == dependency.name && requirement.matches(version)
+                }) else {
+                    continue;
+                };
+                problems.push(format!(
+                    "fuzz/Cargo.toml builds `{}` `{text}` of `{}` from `{}`, not from the \
+                     copy `{}` that meets it. Give fuzz/Cargo.toml the [patch.crates-io] \
+                     table of the root Cargo.toml.",
+                    dependency.name, dependent.id, dependency.manifest, copy.manifest
+                ));
+                break;
+            }
         }
     }
     Ok(problems)
 }
 
 /// The fields of a package of `cargo metadata` that [`unpatched`] reads.
-#[derive(Clone, Copy)]
 struct Package<'a> {
+    value: &'a Value,
     id: &'a str,
     name: &'a str,
     version: &'a str,
@@ -286,31 +316,24 @@ impl<'a> Package<'a> {
     }
 
     /// Reads `package`, which is a copy when its manifest is under `copies`.
-    fn read(package: &'a Value, copies: &Path) -> Result<Self, String> {
-        let manifest = field::text(package, "manifest_path")?;
+    fn read(value: &'a Value, copies: &Path) -> Result<Self, String> {
+        let manifest = field::text(value, "manifest_path")?;
         Ok(Package {
-            id: field::text(package, "id")?,
-            name: field::text(package, "name")?,
-            version: field::text(package, "version")?,
+            value,
+            id: field::text(value, "id")?,
+            name: field::text(value, "name")?,
+            version: field::text(value, "version")?,
             manifest,
             copied: Path::new(manifest).starts_with(copies),
         })
     }
-}
 
-/// Whether `a` and `b` share their leftmost nonzero part, so that a copy of one can
-/// meet a caret requirement that the other meets. It ignores a prerelease part, so it
-/// is also true for a prerelease, which a caret requirement of a release leaves out.
-fn compatible(a: &str, b: &str) -> bool {
-    let series = |version: &str| {
-        let parts: Vec<&str> = version.split(['.', '-', '+']).take(3).collect();
-        let last = parts
-            .iter()
-            .position(|part| *part != "0")
-            .unwrap_or(parts.len() - 1);
-        parts[..=last].join(".")
-    };
-    series(a) == series(b)
+    /// The version of the package.
+    fn release(&self) -> Result<Version, String> {
+        Version::parse(self.version).map_err(|error| {
+            format!("`{}` has the version `{}`: {error}", self.id, self.version)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -323,33 +346,84 @@ mod tests {
     use super::*;
 
     const PATCHED: &str = "path+file:///w/patches/noq-proto#noq-proto@1.3.0";
+    const TYPES: &str = "path+file:///w/crates/types#0.0.0";
+    const CRC: &str = "registry+x#crc32c@0.6.7";
+    const MEMBER: &str = "path+file:///w/fuzz#0.0.0";
 
     fn package(name: &str, id: &str, manifest: &str) -> Value {
         let version = id.rsplit(['@', '#']).next().unwrap();
-        json!({ "name": name, "id": id, "version": version, "manifest_path": manifest })
+        json!({
+            "name": name,
+            "id": id,
+            "version": version,
+            "manifest_path": manifest,
+            "dependencies": [],
+        })
+    }
+
+    fn copy() -> Value {
+        package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml")
+    }
+
+    fn types() -> Value {
+        package("types", TYPES, "/w/crates/types/Cargo.toml")
+    }
+
+    fn crc() -> Value {
+        package("crc32c", CRC, "/r/crc32c-0.6.7/Cargo.toml")
+    }
+
+    /// The id of the registry release `version` of `noq-proto`.
+    fn id(version: &str) -> String {
+        format!(
+            "registry+https://github.com/rust-lang/crates.io-index#noq-proto@{version}"
+        )
+    }
+
+    fn release(version: &str) -> Value {
+        package(
+            "noq-proto",
+            &id(version),
+            &format!("/r/noq-proto-{version}/Cargo.toml"),
+        )
+    }
+
+    /// `package` with one more requirement on `name`.
+    fn needs(mut package: Value, name: &str, req: &str) -> Value {
+        package["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "name": name, "req": req }));
+        package
     }
 
     fn root() -> Value {
         json!({
             "workspace_root": "/w",
-            "packages": [
-                package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml"),
-                package(
-                    "types",
-                    "path+file:///w/crates/types#0.0.0",
-                    "/w/crates/types/Cargo.toml",
-                ),
-                package(
-                    "crc32c",
-                    "registry+x#crc32c@0.6.7",
-                    "/r/crc32c-0.6.7/Cargo.toml",
-                ),
-            ],
+            "packages": [copy(), types(), crc()],
         })
     }
 
-    fn fuzz(packages: &[Value]) -> Value {
-        json!({ "workspace_root": "/w/fuzz", "packages": packages })
+    /// A graph of `packages`, where each pair of `edges` resolves a dependency of the
+    /// first package to the second.
+    fn fuzz(packages: &[Value], edges: &[(&str, &str)]) -> Value {
+        let nodes: Vec<Value> = packages
+            .iter()
+            .map(|package| {
+                let id = package["id"].as_str().unwrap_or_default();
+                let deps: Vec<Value> = edges
+                    .iter()
+                    .filter(|(from, _)| *from == id)
+                    .map(|(_, to)| json!({ "pkg": to }))
+                    .collect();
+                json!({ "id": id, "deps": deps })
+            })
+            .collect();
+        json!({
+            "workspace_root": "/w/fuzz",
+            "packages": packages,
+            "resolve": { "nodes": nodes },
+        })
     }
 
     #[test]
@@ -439,40 +513,86 @@ mod tests {
 
     #[test]
     fn passes_a_fuzz_graph_that_builds_the_copy() {
-        let fuzz = fuzz(&[package(
-            "noq-proto",
-            PATCHED,
-            "/w/patches/noq-proto/Cargo.toml",
-        )]);
+        let types = needs(types(), "noq-proto", "^1.3");
+        let fuzz = fuzz(&[types, copy()], &[(TYPES, PATCHED)]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
     }
 
     #[test]
-    fn refuses_a_fuzz_graph_that_builds_the_registry_release() {
-        let fuzz = fuzz(&[package(
-            "noq-proto",
-            "registry+https://github.com/rust-lang/crates.io-index#noq-proto@1.3.0",
-            "/r/noq-proto-1.3.0/Cargo.toml",
-        )]);
+    fn refuses_a_release_for_a_requirement_that_the_copy_meets() {
+        let types = needs(types(), "noq-proto", "^1.3");
+        let fuzz = fuzz(&[types, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
         assert_eq!(
             unpatched(&root(), &fuzz),
             Ok(vec![
-                "fuzz/Cargo.toml builds `noq-proto` from \
-                 `/r/noq-proto-1.3.0/Cargo.toml`, not from the copy in patches/ that \
-                 the root Cargo.toml builds. Give fuzz/Cargo.toml the \
-                 [patch.crates-io] table of the root Cargo.toml."
+                "fuzz/Cargo.toml builds `noq-proto` `^1.3` of \
+                 `path+file:///w/crates/types#0.0.0` from \
+                 `/r/noq-proto-1.3.0/Cargo.toml`, not from the copy \
+                 `/w/patches/noq-proto/Cargo.toml` that meets it. Give \
+                 fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml."
                     .to_string()
             ])
         );
     }
 
     #[test]
+    fn refuses_a_release_beside_the_copy_for_a_requirement_that_the_copy_meets() {
+        let member = needs(
+            package("fuzz", MEMBER, "/w/fuzz/Cargo.toml"),
+            "noq-proto",
+            "*",
+        );
+        let crc = needs(crc(), "noq-proto", "^1.0");
+        let fuzz = fuzz(
+            &[member, crc, copy(), release("1.3.0")],
+            &[(MEMBER, PATCHED), (MEMBER, CRC), (CRC, &id("1.3.0"))],
+        );
+        assert_eq!(
+            unpatched(&root(), &fuzz),
+            Ok(vec![
+                "fuzz/Cargo.toml builds `noq-proto` `^1.0` of `registry+x#crc32c@0.6.7` \
+                 from `/r/noq-proto-1.3.0/Cargo.toml`, not from the copy \
+                 `/w/patches/noq-proto/Cargo.toml` that meets it. Give \
+                 fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml."
+                    .to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn passes_a_release_for_a_requirement_that_the_copy_cannot_meet() {
+        let types = needs(needs(types(), "noq-proto", "^1.5"), "noq-proto", "^0.9");
+        let crc = needs(crc(), "noq-proto", "^1.3");
+        let fuzz = fuzz(
+            &[types, crc, copy(), release("1.5.0"), release("0.9.0")],
+            &[(TYPES, &id("1.5.0")), (TYPES, &id("0.9.0")), (CRC, PATCHED)],
+        );
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+        let lone = needs(self::types(), "noq-proto", "^1.5");
+        let alone = self::fuzz(&[lone, release("1.5.0")], &[(TYPES, &id("1.5.0"))]);
+        assert_eq!(unpatched(&root(), &alone), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn refuses_a_release_once_when_two_requirements_resolve_to_it() {
+        let types = needs(needs(types(), "noq-proto", "^1.3"), "noq-proto", "^1.0");
+        let fuzz = fuzz(&[types, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        assert_eq!(
+            unpatched(&root(), &fuzz).map(|problems| problems.len()),
+            Ok(1)
+        );
+    }
+
+    #[test]
     fn refuses_a_fuzz_graph_that_builds_a_copy_the_root_does_not() {
-        let fuzz = fuzz(&[package(
-            "noq-udp",
-            "path+file:///w/patches/noq-udp#noq-udp@1.3.0",
-            "/w/patches/noq-udp/Cargo.toml",
-        )]);
+        let fuzz = fuzz(
+            &[package(
+                "noq-udp",
+                "path+file:///w/patches/noq-udp#noq-udp@1.3.0",
+                "/w/patches/noq-udp/Cargo.toml",
+            )],
+            &[],
+        );
         assert_eq!(
             unpatched(&root(), &fuzz),
             Ok(vec![
@@ -486,71 +606,125 @@ mod tests {
     }
 
     #[test]
-    fn passes_a_release_that_the_copy_cannot_replace() {
-        let fuzz = fuzz(&[
-            package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml"),
-            package(
-                "noq-proto",
-                "registry+https://github.com/rust-lang/crates.io-index#noq-proto@0.9.0",
-                "/r/noq-proto-0.9.0/Cargo.toml",
-            ),
-        ]);
+    fn passes_a_fuzz_graph_that_lacks_a_patched_crate_or_has_others() {
+        let types = needs(types(), "crc32c", "^0.6");
+        let crc = package(
+            "crc32c",
+            "registry+x#crc32c@0.6.8",
+            "/r/crc32c-0.6.8/Cargo.toml",
+        );
+        let fuzz = fuzz(&[types, crc], &[(TYPES, "registry+x#crc32c@0.6.8")]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
-    }
-
-    #[test]
-    fn passes_a_release_of_the_series_of_the_copy_beside_the_copy() {
-        let fuzz = fuzz(&[
-            package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml"),
-            package(
-                "noq-proto",
-                "registry+https://github.com/rust-lang/crates.io-index#noq-proto@1.5.0",
-                "/r/noq-proto-1.5.0/Cargo.toml",
-            ),
-        ]);
-        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
-    }
-
-    #[test]
-    fn compatible_releases_share_their_leftmost_nonzero_part() {
-        assert!(compatible("1.3.0", "1.4.2"));
-        assert!(compatible("0.9.0", "0.9.7"));
-        assert!(compatible("0.0.3", "0.0.3"));
-        assert!(compatible("0.0.0", "0.0.0"));
-        assert!(compatible("0.0.3-alpha.1", "0.0.3"));
-        assert!(compatible("0.0.3+b", "0.0.3"));
-        assert!(!compatible("0.0.0", "0.0.1"));
-        assert!(compatible("1.3.0-alpha.1", "1.0.0"));
-        assert!(!compatible("0.9.0", "1.3.0"));
-        assert!(!compatible("0.9.0", "0.10.0"));
-        assert!(!compatible("0.0.3", "0.0.4"));
-        assert!(!compatible("2.0.0", "1.0.0"));
     }
 
     #[test]
     fn names_a_missing_field_of_a_graph() {
         assert_eq!(
-            unpatched(&json!({ "workspace_root": "/w" }), &fuzz(&[])),
+            unpatched(&json!({ "workspace_root": "/w" }), &fuzz(&[], &[])),
             Err("JSON has no array field `packages`".to_string())
         );
         assert_eq!(
-            unpatched(&json!({ "packages": [] }), &fuzz(&[])),
+            unpatched(&json!({ "packages": [] }), &fuzz(&[], &[])),
             Err("JSON has no string field `workspace_root`".to_string())
         );
         assert_eq!(
-            unpatched(&root(), &json!({})),
+            unpatched(&root(), &json!({ "resolve": { "nodes": [] } })),
             Err("JSON has no array field `packages`".to_string())
         );
+        assert_eq!(
+            unpatched(&root(), &json!({ "packages": [] })),
+            Err("JSON has no array field `nodes`".to_string())
+        );
         for key in ["id", "name", "version", "manifest_path"] {
-            let mut lacking =
-                package("x", "registry+x#x@1.0.0", "/r/x-1.0.0/Cargo.toml");
+            let mut lacking = release("1.0.0");
             lacking.as_object_mut().unwrap().remove(key);
             let error = Err(format!("JSON has no string field `{key}`"));
-            assert_eq!(unpatched(&root(), &fuzz(&[lacking.clone()])), error);
+            assert_eq!(unpatched(&root(), &fuzz(&[lacking.clone()], &[])), error);
             let mut root = root();
             root["packages"].as_array_mut().unwrap().push(lacking);
-            assert_eq!(unpatched(&root, &fuzz(&[])), error);
+            assert_eq!(unpatched(&root, &fuzz(&[], &[])), error);
         }
+        let mut lacking = fuzz(&[types()], &[]);
+        lacking["resolve"]["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("deps");
+        assert_eq!(
+            unpatched(&root(), &lacking),
+            Err("JSON has no array field `deps`".to_string())
+        );
+        let mut lacking = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        lacking["resolve"]["nodes"][0]["deps"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("pkg");
+        assert_eq!(
+            unpatched(&root(), &lacking),
+            Err("JSON has no string field `pkg`".to_string())
+        );
+        let mut lacking = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        lacking["packages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("dependencies");
+        assert_eq!(
+            unpatched(&root(), &lacking),
+            Err("JSON has no array field `dependencies`".to_string())
+        );
+        for key in ["name", "req"] {
+            let types = needs(types(), "noq-proto", "^1.3");
+            let mut lacking =
+                fuzz(&[types, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+            lacking["packages"][0]["dependencies"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert_eq!(
+                unpatched(&root(), &lacking),
+                Err(format!("JSON has no string field `{key}`"))
+            );
+        }
+    }
+
+    #[test]
+    fn names_an_unknown_package_and_a_bad_version_or_requirement() {
+        let unknown = fuzz(&[types()], &[(TYPES, "registry+x#gone@1.0.0")]);
+        assert_eq!(
+            unpatched(&root(), &unknown),
+            Err(
+                "the resolve of fuzz/Cargo.lock has no package `registry+x#gone@1.0.0`"
+                    .to_string()
+            )
+        );
+        let mut bad = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        bad["packages"][1]["version"] = json!("one");
+        assert_eq!(
+            unpatched(&root(), &bad),
+            Err(format!(
+                "`{}` has the version `one`: unexpected character 'o' while parsing \
+                 major version number",
+                id("1.3.0")
+            ))
+        );
+        let mut root = root();
+        root["packages"][0]["version"] = json!("one");
+        assert_eq!(
+            unpatched(&root, &fuzz(&[], &[])),
+            Err(format!(
+                "`{PATCHED}` has the version `one`: unexpected character 'o' while \
+                 parsing major version number"
+            ))
+        );
+        let types = needs(types(), "noq-proto", "one");
+        let bad = fuzz(&[types, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        assert_eq!(
+            unpatched(&self::root(), &bad),
+            Err(
+                "`path+file:///w/crates/types#0.0.0` needs `noq-proto` `one`: \
+                 unexpected character 'o' while parsing major version number"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
@@ -584,23 +758,6 @@ mod tests {
             bins(&keyless),
             Err("JSON has no string field `id`".to_string())
         );
-    }
-
-    #[test]
-    fn passes_a_fuzz_graph_that_lacks_a_patched_crate_or_has_others() {
-        let fuzz = fuzz(&[
-            package(
-                "types",
-                "path+file:///w/crates/types#0.0.0",
-                "/w/crates/types/Cargo.toml",
-            ),
-            package(
-                "crc32c",
-                "registry+x#crc32c@0.6.8",
-                "/r/crc32c-0.6.8/Cargo.toml",
-            ),
-        ]);
-        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
     }
 
     #[test]
