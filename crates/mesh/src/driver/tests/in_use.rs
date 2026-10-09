@@ -540,6 +540,47 @@ fn a_first_read_ends_when_the_group_stops() {
     });
 }
 
+// A call that waits for the read of v1 gets the stop that comes during it.
+#[test]
+fn a_call_that_waits_gives_a_stop_during_the_call() {
+    solo(|node, tasks| async move {
+        let config = config(&node, &tasks, 1, &[1], &[1]).await;
+        let store = Rc::clone(&config.store);
+        let mesh = Mesh::start(config).await.unwrap();
+        let mut chunks = Chunks::default();
+        let update = spec::region::tree(&mut chunks, &create_subjects(&["plant.b"], 1));
+        let held = update.chunks.iter().filter(|at| **at != update.root);
+        let held: Vec<Digest> = held.copied().collect();
+        put(&store, &mesh.pool, &chunks, &held).await.unwrap();
+        let block = mesh.pool.copy(chunks.get(update.root).unwrap()).unwrap();
+        let mut stuck = pin!(store.put(update.root, &block));
+        assert!(now(stuck.as_mut()).await.is_pending());
+        let holders = [key(1)].into();
+        let settled = mesh.settle_spec(
+            base(),
+            update.root,
+            BTreeSet::new(),
+            holders,
+            BTreeMap::new(),
+        );
+        let first = settled.await.unwrap();
+        let mut call = pin!(mesh.spec());
+        assert!(now(call.as_mut()).await.is_pending());
+        let stopped = super::fail_sync(&node);
+        let c = create_subjects(&["plant.c"], 1);
+        let settled = mesh.settle_spec(
+            first,
+            pointer(2, &c).root,
+            BTreeSet::new(),
+            [key(1)].into(),
+            BTreeMap::new(),
+        );
+        assert_eq!(settled.await, Err(Error::Stopped(stopped.clone())));
+        node.clock().sleep(Span::MILLISECOND).await;
+        assert_eq!(now(call.as_mut()).await, Poll::Ready(Err(stopped)));
+    });
+}
+
 // The spec of v0 is in use, so only the check of the stop fails this call.
 #[test]
 fn a_call_after_the_group_stops_gives_the_stop() {
