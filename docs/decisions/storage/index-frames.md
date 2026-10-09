@@ -22,3 +22,7 @@
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037240549
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037245942
   https://github.com/synnaxlabs/foundation/pull/1347#issuecomment-6037325066
+  Amended (#2040): the index's newest frame goes when a definitions change removes a
+  channel of the index (`home::Shard::drop_newest`, HUB SESSIONS). Ruled by
+  `laptop.architect`, 2026-10-09T00:08:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071529705
