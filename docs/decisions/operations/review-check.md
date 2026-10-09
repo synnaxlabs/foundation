@@ -35,39 +35,41 @@
   (decided by the director at 2026-10-09T04:03:10Z,
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6074014717). In a
   round posted after the cutoff with no such heading, it is the first such heading in
-  the comment read again with each HTML block that GitHub does not start read as lines
-  of a paragraph, until none is left: a block whose first line, after its indent, opens
-  a `search` tag or is `<!` and a lowercase letter. GitHub reads HTML blocks by an older
-  CommonMark, which has no `search` tag and needs an uppercase letter after `<!`, so it
-  can show a heading in these blocks. The fields are the first top-level block after it,
-  and the end lines are the last one, each when it is a paragraph. A code block, an HTML
-  block, a list, a quote, or a table is not a paragraph, so a list after the `Hot path:`
-  line fails. A footnote with no reference is not shown, so its lines do not count, and
-  of the footnotes of one label only the first is shown. The footnotes are the last
-  blocks, as GitHub shows them. A round comment posted after the cutoff fails when it
-  holds raw HTML outside a code span or a code block: an HTML block or inline HTML as
-  `comrak` reads it, or a line of text whose source, after the indent and the marks of
-  quotes, list items, and footnote labels, starts with `<` and a letter, `!`, `/`, or
-  `?` and that is not an autolink, also when the line starts inside a code span, a link,
-  or a link definition. GitHub reads some of these lines in a different way, and an open
-  `<!--` or `<details>` hides the text after it. A footnote label here is `[^`, one or
-  more characters other than `]`, space, or tab, then `]:`. It also fails when a span of
-  text, as `comrak` reads it, holds `[^` on a line before the last line of its
-  paragraph: GitHub can read a `]` on a later line as the end of a footnote reference
-  and hide the text between them. It also fails when `comrak` places the text of a
-  paragraph before the last line of the paragraph, as it does after a link or an image
-  with a line break after its text and after a link reference definition in the
-  paragraph, since each line that it then gives is wrong. The message names the first
-  line with one of these causes, or the first line of the paragraph. A round comment
-  that fails by these rules gets an edit that puts the line in a code span, or that
-  writes each link and image on one line and puts a blank line after each link reference
-  definition, and the cutoff stays. A paragraph that `comrak` places in the wrong lines
-  fails in any round, also in one posted before the cutoff, since the check cannot read
-  it. In an old round, a `Hot path:` line, or a `Reviewers:` line of a round that does
-  not parse, counts where GitHub shows it at the start of a line of text of a paragraph,
-  at any depth and any indent, except in a paragraph that `comrak` places in the wrong
-  lines. A line of a code block or an HTML block does not count. Changed by
-  https://github.com/synnaxlabs/foundation/issues/1783,
+  the comment read as GitHub reads HTML blocks, by an older CommonMark. At the start of
+  each line, after its indent and the marks of quotes, list items, and footnote labels,
+  the name of each `search` tag is read as a name in no list of block tags, the name of
+  each `source` tag is read as `option`, and `<!` and a lowercase letter start no HTML
+  block. That spec lists `source` and not `search` as block tags, so GitHub starts a
+  block at a `search` tag only when the line is one complete tag alone and does not
+  continue a paragraph, and it needs an uppercase letter after `<!`. The fields are the
+  first top-level block after it, and the end lines are the last one, each when it is a
+  paragraph. A code block, an HTML block, a list, a quote, or a table is not a
+  paragraph, so a list after the `Hot path:` line fails. A footnote with no reference is
+  not shown, so its lines do not count, and of the footnotes of one label only the first
+  is shown. The footnotes are the last blocks, as GitHub shows them. A round comment
+  posted after the cutoff fails when it holds raw HTML outside a code span or a code
+  block: an HTML block or inline HTML as `comrak` reads it, or a line of text whose
+  source, after the indent and the marks of quotes, list items, and footnote labels,
+  starts with `<` and a letter, `!`, `/`, or `?` and that is not an autolink, also when
+  the line starts inside a code span, a link, or a link definition. GitHub reads some of
+  these lines in a different way, and an open `<!--` or `<details>` hides the text after
+  it. A footnote label here is `[^`, one or more characters other than `]`, space, or
+  tab, then `]:`. It also fails when a span of text, as `comrak` reads it, holds `[^` on
+  a line before the last line of its paragraph: GitHub can read a `]` on a later line as
+  the end of a footnote reference and hide the text between them. It also fails when
+  `comrak` places the text of a paragraph before the last line of the paragraph, as it
+  does after a link or an image with a line break after its text and after a link
+  reference definition in the paragraph, since each line that it then gives is wrong.
+  The message names the first line with one of these causes, or the first line of the
+  paragraph. A round comment that fails by these rules gets an edit that puts the line
+  in a code span, or that writes each link and image on one line and puts a blank line
+  after each link reference definition, and the cutoff stays. A paragraph that `comrak`
+  places in the wrong lines fails in any round, also in one posted before the cutoff,
+  since the check cannot read it. In an old round, a `Hot path:` line, or a `Reviewers:`
+  line of a round that does not parse, counts where GitHub shows it at the start of a
+  line of text of a paragraph, at any depth and any indent, except in a paragraph that
+  `comrak` places in the wrong lines. A line of a code block or an HTML block does not
+  count. Changed by https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
   at 2026-10-08T21:47:24Z
