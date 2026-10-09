@@ -424,16 +424,7 @@ pub(super) async fn keep(
         let Some(gave) = gave.await else {
             continue;
         };
-        let done = match gave {
-            Gave::Got(digest, got) => Done::Got(digest, got),
-            Gave::Read(Ok((definitions, chunks)), got) => {
-                match name(&files, &held, pointer).await {
-                    Ok(()) => Done::Taken(definitions, chunks),
-                    Err(cause) => Done::Failed { cause, got },
-                }
-            }
-            Gave::Read(Err(cause), got) => Done::Failed { cause, got },
-        };
+        let done = done(gave, &files, &held, pointer).await;
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
         let moved = group.used.settle(pointer, done);
@@ -484,6 +475,20 @@ async fn read(
     let mut kept = Chunks::default();
     spec::region::tree(&mut kept, &definitions);
     Ok((definitions, kept))
+}
+
+// What the job for `pointer` gave, once the file in `held` names a read with no problem.
+async fn done(gave: Gave, files: &Files, held: &Path, pointer: Pointer) -> Done {
+    match gave {
+        Gave::Got(digest, got) => Done::Got(digest, got),
+        Gave::Read(Ok((definitions, chunks)), got) => {
+            match name(files, held, pointer).await {
+                Ok(()) => Done::Taken(definitions, chunks),
+                Err(cause) => Done::Failed { cause, got },
+            }
+        }
+        Gave::Read(Err(cause), got) => Done::Failed { cause, got },
+    }
 }
 
 // Makes the file in `held` that names `pointer` durable, then removes each other file
