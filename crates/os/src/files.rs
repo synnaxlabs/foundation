@@ -313,8 +313,14 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
     }
 }
 
-/// Opens `dir/data`, and first makes it when it is not there.
+/// Opens `dir/data`, and first makes `dir` and `dir/data` when they are not there.
 fn data(dir: &Path) -> io::Result<OwnedFd> {
+    match fs::mkdir(dir, DIR) {
+        // A `dir` made here is not durable until its parent syncs.
+        Ok(()) => sync_all(&fs::open(dir.join(".."), READ_DIR, fs::Mode::empty())?)?,
+        Err(Errno::EXIST) => {}
+        Err(errno) => return Err(errno),
+    }
     let dir = fs::open(dir, READ_DIR, fs::Mode::empty())?;
     match fs::mkdirat(&dir, "data", DIR) {
         Ok(()) | Err(Errno::EXIST) => {}

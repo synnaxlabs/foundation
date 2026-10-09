@@ -673,9 +673,21 @@ fn dir_error(dir: &Path) -> os::Error {
 }
 
 #[test]
-fn files_of_a_missing_dir_gives_dir_and_makes_nothing() {
+fn files_of_a_missing_dir_makes_it_with_its_data() {
     let scratch = Scratch::new();
-    let found = dir_error(&scratch.0.join("a"));
+    let dir = scratch.0.join("a");
+    let (disk, thread) = os::files(&dir, &os::threads().unwrap(), "files").unwrap();
+    assert!(std::fs::metadata(dir.join("data")).unwrap().is_dir());
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    drop(disk);
+    thread.join().unwrap();
+}
+
+#[test]
+fn files_of_a_dir_with_a_missing_parent_gives_dir_and_makes_nothing() {
+    let scratch = Scratch::new();
+    let found = dir_error(&scratch.0.join("a").join("b"));
     assert_eq!(
         found.to_string(),
         "cannot open the data directory: No such file or directory (os error 2)"
