@@ -492,6 +492,8 @@ fn error_codes_and_fixes_match_the_golden_file() {
     for diagnostic in [unknown, not_utf8] {
         lines.push(format!("{}\t{}\n", diagnostic.code, diagnostic.fix));
     }
+    let codes: BTreeSet<_> = lines.iter().map(|line| line.split('\t').next()).collect();
+    assert_eq!(codes.len(), lines.len(), "a code has one cause");
     assert_eq!(lines.concat(), include_str!("codes.golden"));
 }
 
