@@ -155,10 +155,12 @@
   when #2025 merges, #2031 steps the stream in the task of the remote reader with the
   poll forms, and `complete wait` is at most 5% over 27 ns on a quiet host. The task of
   the remote reader costs, per frame on the whole reader node, +16.2% when the caller
-  lags (11129 to 12937 ns for 16 KB frames), +13.1% with 1 sample per series, and
-  +1.5% when the caller waits, on a loaded host
+  lags (11129 to 12937 ns for 16 KB frames), +13.1% with 1 sample per series when the
+  caller lags, and +1.5% when the caller waits, on a loaded host
   (https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074115276).
-  Accepted until #2031 by `laptop.architect` (2026-10-09T04:13Z:
+  Accepted until #2031 by `laptop.architect` (2026-10-09T04:13:57Z:
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074122773).
-  Trigger: #2031 runs the three cases on a quiet host against those numbers, and a case
-  more than 5% over its number needs a new P1 judgment.
+  Trigger: #2031 runs the three cases on the `remote()` rig on a quiet host, and a case
+  more than 5% over its "before" number of 6074115276 (11129 ns when the caller lags,
+  1012 ns with 1 sample per series when the caller lags, 8965 ns when the caller
+  waits) needs a new P1 judgment of `laptop.architect`.
