@@ -68,6 +68,14 @@ jobs:
     if: "!cancelled() && needs.changes.outputs.code != 'false'"
     runs-on: [self-hosted, Linux, ARM64]
     steps:
+      # A cancelled or killed run of cargo mutants leaves its copies in /tmp, on a disk
+      # that the runners of a host share. The mutants job times out after 90 minutes,
+      # so no job still uses a copy older than 120.
+      - name: Remove old copies of cargo mutants
+        run: |
+          df -h /
+          du -sh /tmp/cargo-mutants-* "$HOME"/target/* 2>/dev/null || true
+          find /tmp -maxdepth 1 -name 'cargo-mutants-*' -mmin +120 -exec rm -rf {} +
       - uses: actions/checkout@v4
       - name: Add cargo to the path
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
