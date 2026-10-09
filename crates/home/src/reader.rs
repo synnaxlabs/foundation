@@ -191,7 +191,7 @@ impl Set {
     /// Opens an unnamed latest reader on the index at `place`. It is not woken for the
     /// newest frame it can take at once.
     pub(crate) fn open_latest(&mut self, place: usize) -> delivery::latest::Key {
-        self.entries[place].readers.open_latest().key
+        self.entries[place].readers.open_latest()
     }
 
     /// Opens a latest session for the named reader `reader` on the index at `place`,
