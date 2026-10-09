@@ -477,7 +477,8 @@ async fn read(
     Ok((definitions, kept))
 }
 
-// Names `pointer` in `held` when its read has no problem, and gives what its job gave.
+// Names `pointer` in `held` when its read has no problem. Gives what its job gave,
+// or the cause of a failed name.
 async fn hold(gave: Gave, files: &Files, held: &Path, pointer: Pointer) -> Done {
     match gave {
         Gave::Got(digest, got) => Done::Got(digest, got),
