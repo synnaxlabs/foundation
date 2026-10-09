@@ -74,8 +74,8 @@
   UTC, https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
   Supersedes the store of 1 on `EIO` or `EINVAL` of item 1 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541. Each
-  half has its own `dup` of the socket. The receiver registers for readable at its first poll, in a field of its
-  driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
+  half has its own `dup` of the socket. The receiver registers for readable at its
+  first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
   `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
   2026-10-08 18:27 UTC,
