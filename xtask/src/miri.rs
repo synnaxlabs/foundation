@@ -41,7 +41,7 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for flags in PASSES {
         for package in &packages {
-            let output = command(root, &nightly, package, flags)
+            let output = command(&nightly, package, flags)
                 .stderr(Stdio::inherit())
                 .output()
                 .map_err(|e| vec![format!("rustup: {e}")])?;
@@ -66,18 +66,15 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     }
 }
 
-/// The command that runs Miri with `flags` on `package` of the workspace at `root`,
-/// on the toolchain `nightly`.
+/// The command that runs Miri with `flags` on `package`, on the toolchain `nightly`.
 fn command(
-    root: &Path,
-    nightly: &str,
+    nightly: &crate::Nightly,
     package: &select::Package,
     flags: &str,
 ) -> Command {
-    let mut command = Command::new("rustup");
+    let mut command = nightly.cargo();
     command
-        .current_dir(root)
-        .args(["run", nightly, "cargo", "miri", "test", "-p", &package.id])
+        .args(["miri", "test", "-p", &package.id])
         .env("MIRIFLAGS", flags);
     command
 }
@@ -116,7 +113,11 @@ mod tests {
             id: "path+file:///w/crates/model#0.0.0".to_string(),
             name: "model".to_string(),
         };
-        let command = command(Path::new("/w"), "nightly-x", &package, PASSES[0]);
+        let nightly = crate::Nightly {
+            root: "/w".into(),
+            pin: "nightly-x".to_string(),
+        };
+        let command = command(&nightly, &package, PASSES[0]);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(
             args,

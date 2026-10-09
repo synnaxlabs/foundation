@@ -22,6 +22,7 @@ use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
+use types::name::Name;
 use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -279,6 +280,13 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The name of each member in this node's view of the region. No two members share a
+    /// name. It answers also after the group stops, from the view at the stop.
+    #[must_use]
+    pub fn names(&self) -> BTreeSet<Name> {
+        self.group.borrow().state.names()
     }
 
     /// The key of the member whose card holds `public_key` in this node's view of the
@@ -2102,6 +2110,18 @@ mod tests {
 
     #[test]
     fn a_leader_with_no_quorum_commits_nothing_and_takes_the_home_of_the_next() {
+        cut_leader(5);
+    }
+
+    #[test]
+    fn a_leader_cut_off_for_36_s_takes_the_home_of_the_next_5_s_after_the_heal() {
+        cut_leader(36);
+    }
+
+    /// Cuts the leader off for `cut` seconds while the others commit the home of the
+    /// next leader, heals the links, and checks that the old leader has that home 5 s
+    /// later.
+    fn cut_leader(cut: i64) {
         let mut cluster = Cluster::new(2);
         cluster.script(home);
         cluster.start();
@@ -2111,22 +2131,23 @@ mod tests {
         for other in IDS.into_iter().filter(|&id| id != old) {
             cluster.link(old, other, 1.0);
         }
-        cluster.script(|id| home(10 + id));
-        cluster.run(seconds(5));
+        cluster.script(|id| home(id.checked_add(10).unwrap()));
+        cluster.run(seconds(cut));
         let (led, homes) = cluster.take();
         let &[first, new] = led.as_slice() else {
             panic!("the group took a proposal from each of {led:?}");
         };
         assert_eq!(first, old);
         assert_ne!(new, old);
-        let mut expected = each(&[Some(key(10 + new))]);
+        let next = new.checked_add(10).unwrap();
+        let mut expected = each(&[Some(key(next))]);
         expected.remove(&old);
         assert_eq!(homes, expected);
         for other in IDS.into_iter().filter(|&id| id != old) {
             cluster.link(old, other, 0.0);
         }
         cluster.run(seconds(5));
-        let healed = BTreeMap::from([(old, vec![Some(key(10 + new))])]);
+        let healed = BTreeMap::from([(old, vec![Some(key(next))])]);
         assert_eq!(cluster.take(), (Vec::new(), healed));
     }
 
@@ -2161,25 +2182,45 @@ mod tests {
         healed.expect("the follower has no home 100 s after the heal")
     }
 
-    // The bound is the 5 s that the leader of the test above gets after its heal. The
-    // measured wait is at most 1 s, and a longer cut can give a longer wait (#1415).
-    #[test]
-    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+    /// Checks that a follower cut off for `cut` seconds has the home 5 s after the
+    /// links heal, the bound that the leader of the test above gets, in 4 runs.
+    fn follower_heals(cut: i64) {
         for run in 0..4 {
-            let waited = follower_heal_ms(run, 5);
+            let waited = follower_heal_ms(run, cut);
             assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
         }
     }
 
-    // The cut is longer than the idle time of a session, 60 s, so each session of
-    // the follower timed out, and the dial that follows is 2 s old at the heal. The
-    // measured wait is at most 1.5 s, and an older dial can wait longer (#1415).
+    #[test]
+    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(5);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_46_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(46);
+    }
+
+    // A cut longer than the idle time of a session, 60 s, times out each session of
+    // the follower, so a dial in the cut carries the heal.
     #[test]
     fn a_follower_cut_off_for_62_s_has_the_home_5_s_after_the_links_heal() {
-        for run in 0..4 {
-            let waited = follower_heal_ms(run, 62);
-            assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
-        }
+        follower_heals(62);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_68_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(68);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_104_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(104);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_110_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(110);
     }
 
     /// Runs `body` on the one node of a run.
@@ -2419,6 +2460,15 @@ mod tests {
             let stopped = Stopped::Change { at: bad, cause };
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
             assert_eq!(mesh.holder(public(1)), Some(key(1)));
+        });
+    }
+
+    #[test]
+    fn names_gives_the_name_of_each_founding_member() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let names = IDS.map(|id| format!("plant.node{id}").parse().unwrap());
+            assert_eq!(mesh.names(), BTreeSet::from(names));
         });
     }
 

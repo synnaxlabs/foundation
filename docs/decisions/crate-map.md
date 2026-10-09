@@ -83,7 +83,9 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
 
 `fuzz` holds the fuzz targets, outside the workspace. It is test-only, builds on the
-pinned nightly, may depend on any crate, and no crate depends on it.
+pinned nightly, may depend on any crate, and no crate depends on it (#252;
+`laptop.architect`, 2026-10-09T04:18Z,
+https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074164278).
 
 Outside the binary: the Rust SDK reuses `block`, `types`, `codec`, and `wire`; other
 SDKs hand-write their data path against golden vectors (D12).
