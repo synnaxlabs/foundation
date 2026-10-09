@@ -8,9 +8,10 @@
 //! input.
 //!
 //! The C code gets no coverage or AddressSanitizer flags from cargo-fuzz or, until
-//! #1912, from the `fuzz` jobs: libFuzzer sees none of its coverage, and ASan checks
-//! its memory access only in calls to `memcpy` and the other libc functions that ASan
-//! intercepts. Build with `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`.
+//! #1912, from the `fuzz` jobs. libFuzzer then sees no coverage of the C code. ASan
+//! checks its memory access only in calls to `memcpy` and the other libc functions
+//! that ASan intercepts. Build with
+//! `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`.
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
