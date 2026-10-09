@@ -88,6 +88,10 @@ impl Applied {
     /// `Applied <file>: <a> added, <c> changed, <r> removed, <h> homes listed.`, with
     /// each count of 0 left out and `1 home listed` for one home, or `no change` in
     /// place of the counts when each is 0.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table entries of #1744 call it")
+    )]
     pub(crate) fn text(&self) -> String {
         let counts = [
             (self.counts.added, "added"),

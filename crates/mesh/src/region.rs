@@ -109,6 +109,14 @@ impl State {
         self.members.get(&key)
     }
 
+    /// The name of each member.
+    pub(crate) fn names(&self) -> BTreeSet<Name> {
+        self.members
+            .values()
+            .map(|member| member.card.card().name.clone())
+            .collect()
+    }
+
     /// The key of the member whose card holds `public_key`, or `None` when none does.
     pub(crate) fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
         let mut members = self.members.iter();

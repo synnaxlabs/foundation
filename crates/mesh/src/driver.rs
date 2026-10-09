@@ -22,6 +22,7 @@ use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
+use types::name::Name;
 use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -279,6 +280,13 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The name of each member in this node's view of the region. It answers also after
+    /// the group stops, from the view at the stop.
+    #[must_use]
+    pub fn names(&self) -> BTreeSet<Name> {
+        self.group.borrow().state.names()
     }
 
     /// The key of the member whose card holds `public_key` in this node's view of the
