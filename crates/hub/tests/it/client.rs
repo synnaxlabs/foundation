@@ -136,6 +136,19 @@ fn closes_the_session_when_the_last_clone_drops() {
     assert_eq!(home.closed, transport::Error::PeerClosed { code: Code(0) });
 }
 
+/// The home keeps the end of each stream, whichever task the sim picks first.
+#[test]
+fn keeps_the_end_of_each_stream_at_each_seed() {
+    for seed in 0..16 {
+        let home = with_client(seed, |client, node| async move {
+            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+            drop(client);
+            node.clock().sleep(QUIET).await;
+        });
+        assert_eq!(home.served.len(), 2, "seed {seed}: {:?}", home.served);
+    }
+}
+
 #[test]
 fn refuses_a_hello_of_a_key_the_spec_does_not_list() {
     let got = Arc::new(Mutex::new(None));
