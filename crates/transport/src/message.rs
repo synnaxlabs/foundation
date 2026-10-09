@@ -810,6 +810,8 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
+            // Only the caller clears a failed read.
+            assert_eq!(reader.held(), (Some((8, 100)), 0));
             reader.clear();
             assert_eq!(reader.buffer().capacity(), 0);
             let mut next = Source::new(encode(&[vec![5; 20]]), 64);
