@@ -1214,12 +1214,12 @@ fn a_reader_whose_home_closes_the_session_with_code_0_opens_on_the_next() {
 }
 
 #[test]
-fn a_reader_whose_home_closes_two_sessions_with_code_0_gets_transport() {
+fn a_reader_whose_home_closes_three_sessions_with_code_0_gets_transport() {
     remote(
         16,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let session = transport.accept().await.expect("a session");
                 session.accept().await.expect("a stream");
                 session.close(Code(0));
@@ -1232,7 +1232,7 @@ fn a_reader_whose_home_closes_two_sessions_with_code_0_gets_transport() {
                 .hub
                 .reader(&names, Mode::Latest)
                 .await
-                .expect_err("the home closed both sessions");
+                .expect_err("the home closed each session");
             let closed = transport::Error::PeerClosed { code: Code(0) };
             assert_eq!(error, reader::Error::Transport(closed));
         },
@@ -1268,6 +1268,38 @@ fn a_reader_whose_session_loses_the_tie_break_to_the_home_gets_each_frame() {
             },
         );
     }
+}
+
+// The home's dial wins at the home and closes the reader's first session. The
+// reader's node does not have the home's session yet (a lost datagram), so the second
+// try dials a third session, which the home's session then also beats.
+#[test]
+fn a_reader_whose_session_loses_the_tie_break_on_a_lossy_link_gets_each_frame() {
+    let link = sim::link::Config {
+        delay: Span::from_nanos(20 * Span::MILLISECOND.nanos()),
+        loss: 0.2,
+        ..sim::link::Config::default()
+    };
+    remote(
+        3,
+        link,
+        |node, tasks, transport, steps| async move {
+            until(&node.clock(), &steps.opening).await;
+            let at = [steps.reader.expect("the reader's address")];
+            let session = transport.dial(public_key(&HOME), &at);
+            let session = session.await.expect("dials");
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| {
+                write_three(test, kept)
+            })
+            .await;
+            drop(session);
+        },
+        |test, steps| async move {
+            steps.opening.store(true, Ordering::Relaxed);
+            read_three(test, steps).await;
+        },
+    );
 }
 
 /// `Ok` with the output of `a` when it is done first, else `Err` with that of `b`.

@@ -22,6 +22,11 @@ use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 use super::{Ended, Error, Mode, Streak, WINDOW};
 use crate::State;
 
+/// The opens of [`connect`]. The home's node runs one dial to this node at a time, so
+/// its session beats at most the session that was open and one that this node dialed
+/// before that session arrived.
+const TRIES: u32 = 3;
+
 /// A reader session on one stream to the home. A task opens the stream, takes each
 /// frame off it as it arrives, and sends each credit, so an idle caller never holds
 /// the window or the send turn of the session.
@@ -613,8 +618,8 @@ async fn dial(
 /// Opens a stream of `class` to `home`, and opens the session of `open` on `set` with
 /// `decoder`. A reply that breaks HUB WIRE, or a pool with no block for a message,
 /// stops the stream with its refusal. A session that closes with `Code(0)` before
-/// `Opened`, as one that loses the tie-break of ONE SESSION PER PEER does, gets one
-/// more open on the session that the next dial gives.
+/// `Opened`, as one that loses the tie-break of ONE SESSION PER PEER does, gets
+/// another open on the session that the next dial gives, at most `TRIES` in all.
 async fn connect(
     state: &Rc<RefCell<State>>,
     home: types::node::Key,
@@ -623,12 +628,15 @@ async fn connect(
     open: &Open,
     set: &KeySet,
 ) -> Result<(Sender, Receiver), Error> {
-    match attempt(state, home, class, decoder, open, set).await {
-        Err(Error::Transport(
-            transport::Error::Closed { code: Code(0) }
-            | transport::Error::PeerClosed { code: Code(0) },
-        )) => attempt(state, home, class, decoder, open, set).await,
-        connected => connected,
+    let mut tries = 1;
+    loop {
+        match attempt(state, home, class, decoder, open, set).await {
+            Err(Error::Transport(
+                transport::Error::Closed { code: Code(0) }
+                | transport::Error::PeerClosed { code: Code(0) },
+            )) if tries < TRIES => tries += 1,
+            connected => return connected,
+        }
     }
 }
 
