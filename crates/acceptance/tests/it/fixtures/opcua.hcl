@@ -8,6 +8,10 @@ channel "dev.q" {
   data_type = "f64"
   index = "dev.q_time"
 }
+placement "dev" {
+  select = "dev.q_time"
+  home   = "edge"
+}
 
 connector "dev" {
   kind = "opcua"
