@@ -44,19 +44,23 @@ pub(crate) async fn create_config(
     kinds: Table,
     connector: &str,
 ) -> supervisor::Config {
-    let env = hub::testing::Env {
-        files: node.files(),
-        clock: node.clock(),
-        wall: node.wall(),
-        entropy: node.entropy(),
-        tasks,
-    };
-    let config = testing::create_config(env, node.net(), kinds).await;
+    let config = testing::create_config(env(node, tasks), node.net(), kinds).await;
     let status = create_status(connector);
     config
         .hub
         .set_definitions(status.iter().map(|(name, def)| (name, def)));
     config
+}
+
+/// The inputs of a hub on a new shard of `node`.
+pub(crate) fn env(node: &sim::node::Node, tasks: Tasks) -> hub::testing::Env {
+    hub::testing::Env {
+        files: node.files(),
+        clock: node.clock(),
+        wall: node.wall(),
+        entropy: node.entropy(),
+        tasks,
+    }
 }
 
 /// The first key of the status channels that [`create_config`] defines.

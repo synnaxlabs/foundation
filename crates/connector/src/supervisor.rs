@@ -264,7 +264,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{STATUS, create_config, create_status, run_on};
+    use crate::common::{STATUS, create_config, create_status, env, run_on};
     use crate::kind::{Channels, Kind, Table};
     use crate::testing;
     use hub::home::Refusal;
@@ -1437,14 +1437,8 @@ mod tests {
     /// gives when it returned and when each run started, and the status frames.
     fn unsynced(delay: Span, cancel: Span) -> (Span, Vec<Span>, Vec<Written>) {
         run_on(move |node, tasks| async move {
-            let env = hub::testing::Env {
-                files: node.files(),
-                clock: node.clock(),
-                wall: node.wall(),
-                entropy: node.entropy(),
-                tasks: tasks.clone(),
-            };
-            let hub = hub::testing::open_unsynced(env, delay).await;
+            let hub =
+                hub::testing::open_unsynced(env(&node, tasks.clone()), delay).await;
             let status = create_status("plant.script");
             hub.set_definitions(status.iter().map(|(name, def)| (name, def)));
             let statuses = read_status(&hub, "plant.script", &[], &tasks).await;
