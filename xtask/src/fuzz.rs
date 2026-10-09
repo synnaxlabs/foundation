@@ -233,7 +233,8 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// that the `root` graph does not build, and for each edge of the `fuzz` graph that
 /// resolves a requirement on crates.io, which a copy that the `root` graph builds
 /// meets, to another package. Cargo applies a patch to each such requirement. It fails
-/// on an edge to a release with the name of a copy that no requirement resolves.
+/// on an edge to a package with the name of a copy, not a copy, that no requirement
+/// resolves.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
@@ -254,26 +255,19 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             ));
         }
     }
-    let find = |id: &str| {
-        packages
-            .iter()
-            .find(|package| package.id == id)
-            .ok_or_else(|| {
-                format!("the resolve of fuzz/Cargo.lock has no package `{id}`")
-            })
-    };
     for node in field::list(&fuzz["resolve"], "nodes")? {
-        let dependent = find(field::text(node, "id")?)?;
-        for edge in field::list(node, "deps")? {
-            let dependency = find(field::text(edge, "pkg")?)?;
-            // An edge from a package to itself resolves only a requirement with a path.
+        let dependent = find(&packages, field::text(node, "id")?)?;
+        let edges = field::list(node, "deps")?;
+        for edge in edges {
+            let dependency = find(&packages, field::text(edge, "pkg")?)?;
             if dependency.copied
-                || dependency.id == dependent.id
                 || !built.iter().any(|(copy, _)| copy.name == dependency.name)
             {
                 continue;
             }
-            for requirement in dependent.requirements(dependency, edge)? {
+            for requirement in
+                dependent.requirements(dependency, edge, edges, &packages)?
+            {
                 if requirement["source"].as_str() != Some(CRATES_IO) {
                     continue;
                 }
@@ -300,6 +294,17 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         }
     }
     Ok(problems)
+}
+
+/// The package `id` of `packages`, the packages of the `fuzz` graph.
+fn find<'p, 'a>(
+    packages: &'p [Package<'a>],
+    id: &str,
+) -> Result<&'p Package<'a>, String> {
+    packages
+        .iter()
+        .find(|package| package.id == id)
+        .ok_or_else(|| format!("the resolve of fuzz/Cargo.lock has no package `{id}`"))
 }
 
 /// The fields of a package of `cargo metadata` that [`unpatched`] reads.
@@ -337,20 +342,38 @@ impl<'a> Package<'a> {
 
     /// The requirements of the package that `edge` of its node in the resolve, to
     /// `dependency`, resolves: those on `dependency` under the name of the edge, of a
-    /// kind and target of the edge. It fails when none is.
+    /// kind and target of the edge. `edges` are the edges of the node, and `packages`
+    /// the packages of the graph. Cargo names an edge from a package to itself by the
+    /// lib target, whatever the rename, so such an edge resolves each requirement on
+    /// the package, of a kind and target of the edge, that no other edge resolves. It
+    /// fails when none is.
     fn requirements(
         &self,
         dependency: &Package<'_>,
         edge: &Value,
+        edges: &[Value],
+        packages: &[Package<'_>],
     ) -> Result<Vec<&'a Value>, String> {
         let name = field::text(edge, "name")?;
         let kinds = field::list(edge, "dep_kinds")?;
+        let mut taken = Vec::new();
+        if dependency.id == self.id {
+            for other in edges {
+                let to = find(packages, field::text(other, "pkg")?)?;
+                if to.id != self.id && to.name == self.name {
+                    taken.extend(self.requirements(to, other, edges, packages)?);
+                }
+            }
+        }
         let mut resolved = Vec::new();
         for requirement in field::list(self.value, "dependencies")? {
             if field::text(requirement, "name")? != dependency.name {
                 continue;
             }
             let named = match requirement["rename"].as_str() {
+                _ if dependency.id == self.id => {
+                    !taken.iter().any(|other| std::ptr::eq(*other, requirement))
+                }
                 Some(rename) => rename.replace('-', "_") == name,
                 None => dependency.lib()? == name,
             };
@@ -677,6 +700,22 @@ mod tests {
     #[test]
     fn passes_a_self_edge_beside_a_patched_requirement_of_the_same_name() {
         assert_eq!(patched("selfname"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn refuses_a_self_edge_that_a_patch_resolves_for_a_requirement_the_copy_meets() {
+        let case = crate::fixture().join("patched/cases/selfpatch");
+        assert_eq!(
+            patched("selfpatch"),
+            Ok(vec![format!(
+                "fuzz/Cargo.toml builds `p` `^1` of `path+file://{0}#p@1.4.0` from \
+                 `{0}/Cargo.toml`, not from the copy `{1}/patches/p/Cargo.toml` \
+                 that meets it. Give fuzz/Cargo.toml the [patch.crates-io] table of \
+                 the root Cargo.toml.",
+                case.display(),
+                crate::fixture().join("patched").display()
+            )])
+        );
     }
 
     #[test]
