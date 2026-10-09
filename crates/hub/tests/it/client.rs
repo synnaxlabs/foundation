@@ -686,6 +686,30 @@ fn gives_an_unanswered_renewal_to_a_request_in_flight() {
     );
 }
 
+/// A body over the cap gives [`Error::Body`] also once the renewal ended.
+#[test]
+fn gives_the_body_error_first_after_the_renewal_ended() {
+    raw(
+        152,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock().sleep(LIFE).await;
+            let length = usize::try_from(BODY_BYTES_MAX).expect("fits") + 1;
+            assert_eq!(
+                client.request(&vec![0; length]).await,
+                Err(Error::Body { length })
+            );
+        },
+    );
+}
+
 /// The retry of a message that finds the pool full, as the record states it.
 const RETRY: Span = Span::from_nanos(10_000_000);
 
