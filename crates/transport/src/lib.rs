@@ -377,8 +377,8 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::rc::Rc;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
 
     use block::{Heap, Pool};
@@ -790,6 +790,59 @@ mod tests {
             assert_eq!(session.closed().await, closed);
         });
         assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// Once the handshake is confirmed, the close of a dropped session leaves at once,
+    /// also when a burst just before the drop has emptied the pacer.
+    #[test]
+    fn the_close_of_a_confirmed_session_leaves_at_the_drop() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let delay = testing::spans(Span::SECOND, 4);
+        let link = sim::link::Config {
+            delay,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, link);
+        sim.link(&client, &server, link);
+        let at = testing::address(&server);
+        let idle = testing::spans(Span::SECOND, 120);
+        let [dropped, closed] = [(); 2].map(|()| Arc::new(Mutex::new(None)));
+        let (dropped_at, closed_at) = (Arc::clone(&dropped), Arc::clone(&closed));
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), at);
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            let session = transport.accept().await.expect("a session");
+            let mut sender = session
+                .open_sender(Class::Complete)
+                .await
+                .expect("a stream");
+            let burst = testing::block(&pool, &[0; 16 << 10]);
+            sender.send(burst).await.expect("the burst is sent");
+            let ended = transport.ended();
+            drop((sender, session, transport));
+            *dropped_at.lock().unwrap() = Some(node.clock().now());
+            ended.await;
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let setup = testing::setup(&Config { idle, ..config });
+            let carrier = crate::quic::Carrier::new(setup, part);
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            let closed = dialed.expect("a session").closed().await;
+            *closed_at.lock().unwrap() = Some(node.clock().now());
+            assert_eq!(closed, Error::PeerClosed { code: Code(0) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+        let dropped = dropped.lock().unwrap().expect("the session dropped");
+        let after =
+            closed.lock().unwrap().expect("the peer's session closed") - dropped;
+        let late = after.nanos() - delay.nanos();
+        assert!(
+            (0..Span::MILLISECOND.nanos()).contains(&late),
+            "the peer saw its close {after:?} after the drop, not {delay:?}"
+        );
     }
 
     /// The drop closes the dial, whose handshake gets no answer, so the stop does not
