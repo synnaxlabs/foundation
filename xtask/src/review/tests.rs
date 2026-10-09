@@ -1243,9 +1243,10 @@ fn passes_a_round_whose_text_github_shows_as_text() {
 /// The problem of a round 3 with a footnote label that only GitHub reads in `line`.
 fn label(line: &str) -> String {
     format!(
-        "review round 3 has a footnote label that GitHub reads and pulldown-cmark does \
-         not, which can hide text on GitHub, in the line `{line}`. Put the line in a \
-         code span, in the format of .claude/skills/review/SKILL.md, \"Round comment\"."
+        "review round 3 has a footnote label in GitHub's form that pulldown-cmark does \
+         not read as a definition, which can hide text on GitHub, in the line \
+         `{line}`. Put the line in a code span, in the format of \
+         .claude/skills/review/SKILL.md, \"Round comment\"."
     )
 }
 
@@ -1284,6 +1285,27 @@ fn fails_a_round_with_a_footnote_label_that_only_github_reads() {
     }
     let old = old("## Review round 1\n\nNo fields.\n\n[^a\\]: x");
     assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
+}
+
+#[test]
+fn fails_a_footnote_label_on_a_line_inside_a_span() {
+    let cases = [
+        ("[x](https://x.y \"t\n[^a\\]: y\")", "[^a\\]: y\")"),
+        ("`x\n[^a\\]: y`", "[^a\\]: y`"),
+        ("> `x\n> [^a\\]: y`", "> [^a\\]: y`"),
+        ("*a `x\n[^a\\]: y` b*", "[^a\\]: y` b*"),
+    ];
+    for (text, line) in cases {
+        let hidden = ROUND.replace("but comments", &format!("but {text}"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            vec![label(line)],
+            "{text}"
+        );
+    }
+    let shown = ROUND.replace("but comments", "but `x\ny [^a\\]: z`");
+    assert_eq!(check(&record(vec![bot(&shown)])), Vec::<String>::new());
 }
 
 #[test]
