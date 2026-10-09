@@ -10,6 +10,7 @@ use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -104,7 +105,7 @@ struct Member {
 }
 
 /// One node in a [`Lab`]: its index in `members`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Node(usize);
 
 /// A live reader on one channel, opened with [`Lab::reader`].
@@ -484,15 +485,99 @@ impl Lab {
         todo!("waits on #336")
     }
 
-    /// Runs `plan` of `hcl` on `node` through the JSON CLI and returns the names of
-    /// the changed definitions.
-    pub(crate) fn plan(&mut self, _node: Node, _hcl: &str) -> Vec<String> {
-        todo!("waits on #337")
+    /// Runs `plan` of `hcl` on `node` through `ops::Node`, and returns the names of
+    /// the changed definitions, sorted.
+    ///
+    /// # Panics
+    ///
+    /// With the JSON error of the plan.
+    pub(crate) fn plan(&mut self, node: Node, hcl: &str) -> Vec<String> {
+        let files = vec![(PathBuf::from("lab.hcl"), hcl.to_owned())];
+        let output = self.operate(node, |ops| async move {
+            ops.plan(files).await.map(|(_, output)| output)
+        });
+        let output = output.unwrap_or_else(|error| panic!("lab failure: {error}"));
+        let changes = output["changes"].as_array().expect("a list of changes");
+        let mut names: Vec<String> = changes
+            .iter()
+            .map(|change| change["name"].as_str().expect("a name").to_owned())
+            .collect();
+        names.sort();
+        names
     }
 
-    /// Runs `plan` then `apply` of `hcl` on `node` through the JSON CLI.
-    pub(crate) fn apply(&mut self, _node: Node, _hcl: &str) {
-        todo!("waits on #337")
+    /// Runs `plan` then `apply` of `hcl` on `node` through `ops::Node`.
+    ///
+    /// # Panics
+    ///
+    /// With the JSON error of the plan or the apply.
+    pub(crate) fn apply(&mut self, node: Node, hcl: &str) {
+        let files = vec![(PathBuf::from("lab.hcl"), hcl.to_owned())];
+        let applied = self.operate(node, |ops| async move {
+            let (plan, _) = ops.plan(files).await?;
+            ops.apply(Path::new("lab.plan"), &plan).await
+        });
+        applied.unwrap_or_else(|error| panic!("lab failure: {error}"));
+    }
+
+    /// The node that holds the home of the index `index`, as `node` sees it, or `None`
+    /// when it has no home.
+    ///
+    /// # Panics
+    ///
+    /// When `index` is not a channel of the spec that `node` uses.
+    pub(crate) fn home(&mut self, node: Node, index: &str) -> Option<Node> {
+        let index: types::name::Name = index.parse().expect("a name");
+        let home = self.operate(node, |ops| async move {
+            let spec = ops.mesh().spec().await.expect("a spec");
+            let Some(spec::definition::Definition::Channel(channel)) =
+                spec.definitions.get(&index)
+            else {
+                panic!("lab failure: no channel {index}");
+            };
+            ops.mesh().watch(channel.key).next().await.expect("a mesh")
+        });
+        let mut members = self.members.iter();
+        home.map(|key| {
+            Node(
+                members
+                    .position(|member| member.key == key)
+                    .expect("a member"),
+            )
+        })
+    }
+
+    /// Runs `task` with the `ops::Node` of `node`, and gives its result once it ends.
+    ///
+    /// # Panics
+    ///
+    /// When `task` does not end in 60 s of simulated time.
+    fn operate<T, F>(
+        &mut self,
+        node: Node,
+        task: impl FnOnce(Rc<ops::Node>) -> F + Send + 'static,
+    ) -> T
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + 'static,
+    {
+        self.boot();
+        let out = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&out);
+        let running = self.members[node.0].node.as_ref().expect("a started node");
+        running.operate(move |ops| async move {
+            *slot.lock().unwrap() = Some(task(ops).await);
+        });
+        for _ in 0..600 {
+            if let Some(out) = out.lock().unwrap().take() {
+                return out;
+            }
+            self.run(Duration::from_millis(100));
+        }
+        panic!(
+            "lab failure: an operation on {} took 60 s",
+            self.members[node.0].name
+        );
     }
 
     /// Runs the MCP `plan` tool on `node` and returns the plan and the names of the

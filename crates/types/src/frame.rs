@@ -873,11 +873,13 @@ mod tests {
         channel::Key::from_u128(u128::from(n))
     }
 
-    /// An interner where key `n` has slot `n`, for each `n` below 1000.
+    /// An interner where key `n` has slot `2n` as an index and `2n + 1` as a data
+    /// channel, for each `n` below 1000.
     pub(super) fn interner() -> Interner {
         let mut interner = Interner::new();
         for n in 0..1000 {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
+            interner.slots().data(key(n));
         }
         interner
     }
@@ -2109,7 +2111,8 @@ mod tests {
         }]);
         let mut interner = Interner::new();
         for &n in &remote.order {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
+            interner.slots().data(key(n));
         }
         let held = data(&|j| remote.held[j]);
         let reader = interner.intern(&[Group {

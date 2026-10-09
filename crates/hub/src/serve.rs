@@ -17,13 +17,19 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
-use wire::hub::client::Refusal;
+use wire::hub::client::{BODY_BYTES_MAX, Refusal};
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::reader::{Credit, Ended, Session};
+use crate::reader::{Credit, Session, Stop};
 use crate::{Away, State};
 
 pub use client::{Reply, Request};
+
+/// The most bytes of client request bodies that one hub holds at once, over each of
+/// its links: each from the decode of its request until the caller sends or drops
+/// its [`Reply`]. A request whose body does not fit stops with `BUSY` before the
+/// hub reads a byte of it.
+pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +47,8 @@ pub enum Error {
     NoIndex,
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
+    /// A channel of the open was removed from the definitions. Code `UNKNOWN`.
+    Removed(channel::Key),
     /// The mesh names another node as the home of the open's index. Code `NOT_HOME`.
     NotHome,
     /// The mesh stopped, so the home of the open's index is not known. Code `FAILED`.
@@ -64,6 +72,15 @@ pub enum Error {
     /// A request stream while another request of the link waits for its reply. Code
     /// `MALFORMED`.
     Pending,
+    /// The open requests of the hub hold so many body bytes that a body of `length`
+    /// more is over [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed
+    /// once enough open requests reply.
+    Bodies {
+        /// The body length of the refused request.
+        length: u64,
+        /// The body bytes that the open requests of the hub held.
+        held: u64,
+    },
 }
 
 impl Error {
@@ -79,10 +96,10 @@ impl Error {
             | Self::Pending => Some(Code(MALFORMED)),
             Self::Access(error) => Some(Code(client::refusal(error).code())),
             Self::Stale => Some(Code(Refusal::Stale.code())),
-            Self::Unknown(_) => Some(Code(UNKNOWN)),
+            Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
             Self::NotHome => Some(Code(NOT_HOME)),
             Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
-            Self::Pool(_) => Some(Code(BUSY)),
+            Self::Pool(_) | Self::Bodies { .. } => Some(Code(BUSY)),
             Self::Stream(_) => None,
         }
     }
@@ -110,6 +127,10 @@ impl fmt::Display for Error {
                     "the open names channel {key}, which this node does not know"
                 )
             }
+            Self::Removed(key) => write!(
+                f,
+                "the open names channel {key}, which was removed from this node"
+            ),
             Self::NotHome => f.write_str(
                 "the mesh names another node as the home of the open's index",
             ),
@@ -131,6 +152,12 @@ impl fmt::Display for Error {
             Self::Pending => f.write_str(
                 "the program sent a request while another request waits for its reply",
             ),
+            Self::Bodies { length, held } => write!(
+                f,
+                "a request body of {length} bytes does not fit under the cap of \
+                 {BODIES_BYTES_MAX} bytes: the open requests of the hub hold {held} \
+                 bytes"
+            ),
         }
     }
 }
@@ -140,7 +167,7 @@ impl std::error::Error for Error {}
 impl From<Away> for Error {
     fn from(away: Away) -> Self {
         match away {
-            Away::Remote(_) => Self::NotHome,
+            Away::Remote(..) => Self::NotHome,
             Away::Mesh(stopped) => Self::Mesh(stopped),
         }
     }
@@ -234,13 +261,16 @@ async fn serve(
             Event::Frame(Ok((frame, set, _))) => {
                 layout.send(state, sender, &frame, set).await?;
             }
-            Event::Frame(Err(Ended::Behind)) => {
+            Event::Frame(Err(Stop::Behind)) => {
                 sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
-            Event::Frame(Err(Ended::Buffer(error))) => {
+            Event::Frame(Err(Stop::Buffer(error))) => {
                 return Err(Error::Buffer(error));
+            }
+            Event::Frame(Err(Stop::Removed(key))) => {
+                return Err(Error::Removed(key));
             }
         }
     }
@@ -249,7 +279,7 @@ async fn serve(
 enum Event<F> {
     /// The peer finished, or broke the stream or HUB WIRE.
     Finished(Result<(), Error>),
-    Frame(Result<F, Ended>),
+    Frame(Result<F, Stop>),
 }
 
 /// Reads what the peer sends after the keys run, and grants each credit. Returns when
@@ -279,8 +309,9 @@ struct Opened {
 }
 
 /// Reads the open and its keys, checks each key as it arrives, waits until the mesh
-/// names a home for the index, and opens the session in the order of the keys. Gives
-/// `None` when the peer finishes first.
+/// names this node the home of the index, checks each key again, and carries the index
+/// and opens the session in the order of the keys. When the index changed meanwhile,
+/// it waits again for the new one. Gives `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -300,47 +331,41 @@ async fn open(
     if class != wanted {
         return Err(Error::Class(class));
     }
-    let (mut slots, mut index) = (Vec::new(), None);
+    let (mut keys, mut index) = (Vec::new(), None);
     loop {
         let Some(message) = receiver.recv().await? else {
             return Ok(None);
         };
-        let FromReader::Keys { keys, last } = home.decode(&message)? else {
+        let FromReader::Keys { keys: run, last } = home.decode(&message)? else {
             unreachable!("invariant: Home gives the keys run after the open");
         };
-        let mut state = state.borrow_mut();
-        let state = &mut *state;
-        for key in keys {
-            let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
-            let (first, slot) = index.get_or_insert((of, None));
-            if *first != of {
-                return Err(Error::ManyIndexes);
-            }
-            let assigned = state.interner.slots().assign(key);
-            if key == of {
-                *slot = Some(assigned);
-            }
-            slots.push(assigned);
-        }
+        let start = keys.len();
+        keys.extend(run);
+        check(&state.borrow(), &keys[start..], &mut index)?;
         if last {
             break;
         }
     }
-    let Some((of, Some(index))) = index else {
-        return Err(Error::NoIndex);
-    };
-    let Some(granted) = wait(state, of, home, receiver).await? else {
+    let Some((at, granted)) = wait(state, &keys, index, home, receiver).await? else {
         return Ok(None);
     };
-    let slots: Box<[Slot]> = slots.into();
+    let slots = state.borrow_mut().slots(keys[at], &keys);
+    let index = slots[at];
+    let keys: Box<[channel::Key]> = keys.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
             let charge = ::home::reader::complete::Charge::Places(slots.clone());
-            let (session, credit) =
-                Session::complete(state, slots.clone(), index, limit_bytes, charge);
+            let (session, credit) = Session::complete(
+                state,
+                keys,
+                slots.clone(),
+                index,
+                limit_bytes,
+                charge,
+            );
             (session, Some(credit))
         }
-        Mode::Latest => (Session::latest(state, slots.clone(), index), None),
+        Mode::Latest => (Session::latest(state, keys, slots.clone(), index), None),
     };
     if let Some(credit) = &credit {
         credit.grant(granted);
@@ -352,27 +377,81 @@ async fn open(
     }))
 }
 
-/// Waits until the home carries `index`, and reads the peer meanwhile. Gives the
-/// highest grant that the peer sent, 0 for none, or `None` when the peer finished
-/// first.
+/// The position of `index` in `keys`.
+fn position(
+    keys: &[channel::Key],
+    index: Option<channel::Key>,
+) -> Result<usize, Error> {
+    index
+        .and_then(|index| keys.iter().position(|&key| key == index))
+        .ok_or(Error::NoIndex)
+}
+
+/// Checks that each of `keys` is known and on `index`, which the first key sets when
+/// it is `None`.
+fn check(
+    state: &State,
+    keys: &[channel::Key],
+    index: &mut Option<channel::Key>,
+) -> Result<(), Error> {
+    for &key in keys {
+        let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
+        if *index.get_or_insert(of) != of {
+            return Err(Error::ManyIndexes);
+        }
+    }
+    Ok(())
+}
+
+/// Waits until the mesh names this node the home of the index of `keys`, and checks
+/// `keys` again after it, as a call of `set_definitions` while the open reads or
+/// waits can change a key. Waits again when the index changed. Gives the position of
+/// the index in `keys` and the highest grant that the peer sent, or `None` when the
+/// peer finished first.
 async fn wait(
+    state: &Rc<RefCell<State>>,
+    keys: &[channel::Key],
+    mut index: Option<channel::Key>,
+    home: &mut Home,
+    receiver: &mut Receiver,
+) -> Result<Option<(usize, u64)>, Error> {
+    let mut granted = 0;
+    loop {
+        let at = position(keys, index)?;
+        let Some(grant) = wait_for(state, keys[at], home, receiver).await? else {
+            return Ok(None);
+        };
+        granted = granted.max(grant);
+        let mut again = None;
+        check(&state.borrow(), keys, &mut again)?;
+        if again == index {
+            return Ok(Some((at, granted)));
+        }
+        index = again;
+    }
+}
+
+/// Waits until the mesh names this node the home of `index`, and reads the peer
+/// meanwhile. Gives the highest grant that the peer sent, 0 for none, or `None` when
+/// the peer finished first.
+async fn wait_for(
     state: &Rc<RefCell<State>>,
     index: channel::Key,
     home: &mut Home,
     receiver: &mut Receiver,
 ) -> Result<Option<u64>, Error> {
-    let mut carry = pin!(crate::carry(state, index));
+    let mut homed = pin!(crate::home(state, index));
     let mut granted = 0;
     loop {
         let mut recv = pin!(receiver.recv());
-        let read = poll_fn(|cx| match carry.as_mut().poll(cx) {
-            Poll::Ready(carried) => Poll::Ready(Err(carried)),
+        let read = poll_fn(|cx| match homed.as_mut().poll(cx) {
+            Poll::Ready(found) => Poll::Ready(Err(found)),
             Poll::Pending => recv.as_mut().poll(cx).map(Ok),
         })
         .await;
         let message = match read {
-            Err(carried) => {
-                carried?;
+            Err(found) => {
+                found?;
                 return Ok(Some(granted));
             }
             Ok(read) => match read? {
@@ -398,21 +477,7 @@ fn reply(state: &RefCell<State>, reply: wire::hub::Reply) -> Result<Block, Error
 /// largest block: a reply, an ends run, which is smaller than the frame's
 /// descriptors, or a message of a client stream.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
-    state
-        .borrow()
-        .home
-        .pool()
-        .alloc(len)
-        .map_err(|error| match error {
-            block::Error::TooLarge { .. } => {
-                unreachable!(
-                    "invariant: no caller asks for more than the largest block"
-                )
-            }
-            block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
-                Error::Pool(error)
-            }
-        })
+    state.borrow().alloc(len).map_err(Error::Pool)
 }
 
 /// How a session sends each frame, through its places. It keeps its buffers across
@@ -571,7 +636,7 @@ mod tests {
     fn gives_the_path_range_and_series_count_of_the_frame_in_the_head() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let index = interner.slots().assign(key(1));
+        let index = interner.slots().index(key(1));
         let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
         let head = head(&frame, &set, index, 2);
         assert_eq!(head.path, Path::Live);
@@ -584,7 +649,11 @@ mod tests {
     fn gives_the_range_of_the_index_group_of_the_session() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let [_, _, index, _] = [1, 2, 4, 5].map(|k| interner.slots().assign(key(k)));
+        let slots = interner.slots();
+        slots.index(key(1));
+        slots.data(key(2));
+        let index = slots.index(key(4));
+        slots.data(key(5));
         let set = interner.intern(&[
             Group {
                 index: key(1),

@@ -17,6 +17,8 @@ pub mod reader;
 mod shard;
 mod split;
 mod stored;
+#[cfg(feature = "sim")]
+pub mod testing;
 pub mod writer;
 
 pub use shard::{Commit, Config, Error, Outcome, Shard};

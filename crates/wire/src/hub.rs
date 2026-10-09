@@ -51,10 +51,67 @@ const BEHIND: u8 = 3;
 pub const UNKNOWN: u32 = 16;
 /// Stop code: the node is not the home of the open's index.
 pub const NOT_HOME: u32 = 17;
-/// Stop code: the home's buffer failed.
+/// Stop code: the home's buffer failed, or its mesh stopped.
 pub const FAILED: u32 = 18;
-/// Stop code: the home had no memory for a reply. A later open can succeed.
+/// Stop code: the side that stops had no block for a stream's session, or no room for
+/// a request body under its cap. A later open or request can succeed, but not when
+/// the block is larger than each block of that side's pool.
 pub const BUSY: u32 = 19;
+
+/// A code of HUB WIRE that ends a session, from the side that stops the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// [`MALFORMED`](crate::header::MALFORMED).
+    Malformed,
+    /// [`UNKNOWN`].
+    Unknown,
+    /// [`NOT_HOME`].
+    NotHome,
+    /// [`FAILED`].
+    Failed,
+    /// [`BUSY`].
+    Busy,
+}
+
+impl Refusal {
+    /// The refusal that `code` names, or `None` for a code that HUB WIRE does not
+    /// name.
+    #[must_use]
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            crate::header::MALFORMED => Some(Self::Malformed),
+            UNKNOWN => Some(Self::Unknown),
+            NOT_HOME => Some(Self::NotHome),
+            FAILED => Some(Self::Failed),
+            BUSY => Some(Self::Busy),
+            _ => None,
+        }
+    }
+
+    /// The code that stops or resets the stream.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        match self {
+            Self::Malformed => crate::header::MALFORMED,
+            Self::Unknown => UNKNOWN,
+            Self::NotHome => NOT_HOME,
+            Self::Failed => FAILED,
+            Self::Busy => BUSY,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "a message broke the hub protocol",
+            Self::Unknown => "the home does not know a channel of the open",
+            Self::NotHome => "the node is not the home of the index",
+            Self::Failed => "the home's buffer failed, or its mesh stopped",
+            Self::Busy => "the side that stopped had no block for the session",
+        })
+    }
+}
 
 /// The first message from the reader's node, which opens the session. The run of its
 /// [`keys`] follows.
@@ -501,6 +558,8 @@ pub enum Error {
         /// The bytes of the body that did not come.
         remain: usize,
     },
+    /// The home finished the stream outside a body, before it ended the session.
+    Finished,
 }
 
 impl fmt::Display for Error {
@@ -566,6 +625,9 @@ impl fmt::Display for Error {
                 f,
                 "the stream ended with {remain} bytes of its body to come"
             ),
+            Self::Finished => {
+                f.write_str("the home finished the stream before it ended the session")
+            }
         }
     }
 }
@@ -1267,6 +1329,41 @@ mod tests {
                 [[kind].as_slice(), &rest].concat()
             })
         })
+    }
+
+    #[test]
+    fn names_each_code_of_hub_wire_that_ends_a_session() {
+        let refusals = [
+            (Refusal::Malformed, 2, "a message broke the hub protocol"),
+            (
+                Refusal::Unknown,
+                16,
+                "the home does not know a channel of the open",
+            ),
+            (
+                Refusal::NotHome,
+                17,
+                "the node is not the home of the index",
+            ),
+            (
+                Refusal::Failed,
+                18,
+                "the home's buffer failed, or its mesh stopped",
+            ),
+            (
+                Refusal::Busy,
+                19,
+                "the side that stopped had no block for the session",
+            ),
+        ];
+        for (refusal, code, meaning) in refusals {
+            assert_eq!(refusal.code(), code);
+            assert_eq!(Refusal::from_code(code), Some(refusal));
+            assert_eq!(refusal.to_string(), meaning);
+        }
+        for code in (0..32).filter(|code| ![2, 16, 17, 18, 19].contains(code)) {
+            assert_eq!(Refusal::from_code(code), None, "{code}");
+        }
     }
 
     proptest! {

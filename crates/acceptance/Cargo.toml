@@ -15,7 +15,9 @@ env = { path = "../env" }
 hub = { path = "../hub" }
 mesh = { path = "../mesh" }
 node = { path = "../node" }
+ops = { path = "../ops" }
 proptest.workspace = true
+serde_json.workspace = true
 sim = { path = "../sim" }
 spec = { path = "../spec" }
 transport = { path = "../transport" }

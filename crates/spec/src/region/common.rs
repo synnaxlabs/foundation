@@ -29,12 +29,15 @@ pub(super) fn subject() -> Definition {
 
 pub(super) fn access() -> Definition {
     let select = |text| Selector::new([text]).unwrap();
-    Definition::Access(Policy::new(
-        select("@admin"),
-        select("**"),
-        [Action::Read].into_iter().collect(),
-        Authority(0),
-    ))
+    Definition::Access(
+        Policy::new(
+            select("@admin"),
+            select("**"),
+            [Action::Read].into_iter().collect(),
+            Authority(0),
+        )
+        .unwrap(),
+    )
 }
 
 pub(super) fn record() -> Definition {

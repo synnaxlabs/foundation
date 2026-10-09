@@ -156,3 +156,10 @@
   https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070861987). Trigger
   for a map by public key: a caller of `holder` for each message, or a measured
   `State::new` over 10 ms.
+  Amended (2026-10-09, #1756): `Mesh::names() -> BTreeSet<Name>` gives the name of
+  each member in this node's view of the region, also after the group stops, so
+  `ops::Node` gives `config::plan::plan` its exact input. Lost: `members() ->
+  Vec<Member>`, which clones each card and status map for a caller that reads only the
+  name; `keys()` with `member(key)`, which puts the loop in each caller. Decided by
+  `laptop.architect` (2026-10-09T01:46:26Z:
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072570741).

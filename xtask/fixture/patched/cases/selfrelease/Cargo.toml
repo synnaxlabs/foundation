@@ -1,0 +1,11 @@
+[package]
+name = "p"
+version = "1.4.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+me = { package = "p", path = "." }
+up = { package = "p", version = "1" }
