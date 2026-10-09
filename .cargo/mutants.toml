@@ -17,6 +17,9 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # The run needs the pinned nightly, which only the sanitizers CI job installs. A
+  # planted overflow in the shim fails that job.
+  'xtask/src/sanitizers\.rs:.*(replace run ->| in run$)',
   # The build and the runs need the pinned nightly and cargo-fuzz, which no test has. A
   # crash planted in a target must fail the `fuzz` job of `ci.yaml` (#2105).
   'xtask/src/fuzz\.rs:.*(replace run_one ->| in run$)',
@@ -28,11 +31,11 @@ exclude_re = [
   'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
-  # Empty outside a build with the address sanitizer, which no CI job makes until
-  # #1912. In a C ASan build, `asan_reports_a_write_before_a_block` fails without it.
+  # Empty outside a build with the address sanitizer, which only `cargo xtask
+  # sanitizers` makes. There, `asan_reports_a_write_before_a_block` fails without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace poison with \(\)$',
-  # Empty outside a build with the address sanitizer. Only the Rust ASan build of
-  # #1912 reads the header in `block`, and its alloc tests fail without it.
+  # Empty outside a build with the address sanitizer. In `cargo xtask sanitizers`,
+  # `block` reads the header, and the alloc tests fail without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',

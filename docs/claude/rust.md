@@ -129,8 +129,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
   cannot run, so tests on the real OS check them, and `cargo xtask miri` skips `os`
   (BLOCK MEMORY). `connector-opcua` compiles C into its tests, which Miri cannot run
-  either, so `cargo xtask miri` skips it. Its `sim` tests, with the C and Rust under
-  the sanitizers, are to check it (#1912; `laptop.architect-2`, #435,
+  either, so `cargo xtask miri` skips it. `cargo xtask sanitizers` (the `sanitizers`
+  job of `ci.yaml`) checks it: its tests, with the C under ASan and UBSan and the
+  Rust under ASan (`laptop.architect-2`, #435,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
   2026-10-08 02:24 UTC).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The

@@ -14,6 +14,7 @@ mod nightly;
 mod open62541;
 mod oracles;
 mod review;
+mod sanitizers;
 mod select;
 
 use std::collections::BTreeSet;
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
+        ["sanitizers"] => sanitizers::run(root),
         ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
         ["fuzz", seconds] => fuzz::seconds(seconds)
             .map_err(|e| vec![e])
@@ -44,7 +46,7 @@ fn main() -> ExitCode {
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
-                "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
+                "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri|sanitizers>\n       \
                  cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>"

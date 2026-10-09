@@ -54,6 +54,45 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     Builds { library, shim }
 }
 
+/// The C flags that give the copy and the shim the sanitizers of the Rust build.
+/// `sanitize` is `CARGO_CFG_SANITIZE`, empty when it is not set, and `fuzzing` is
+/// whether `cfg(fuzzing)` is set.
+pub(crate) fn sanitizers(sanitize: &str, fuzzing: bool) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if sanitize.split(',').any(|name| name == "address") {
+        // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
+        // function type, which `-fsanitize=function` stops on.
+        flags.extend([
+            "-fsanitize=address,undefined",
+            "-fno-sanitize=function",
+            "-fno-sanitize-recover=all",
+        ]);
+    }
+    if fuzzing {
+        flags.push("-fsanitize=fuzzer-no-link");
+    }
+    flags
+}
+
+impl Builds {
+    /// Adds `flags`, from [`sanitizers`], to both builds. With any flag, a compiler
+    /// that is not clang gives way to `clang`, since rustc links the LLVM runtimes.
+    pub(crate) fn sanitize(&mut self, flags: &[&str]) {
+        if flags.is_empty() {
+            return;
+        }
+        let clang = self.library.get_compiler().is_like_clang();
+        for build in [&mut self.library, &mut self.shim] {
+            if !clang {
+                build.compiler("clang");
+            }
+            for flag in flags {
+                build.flag(flag);
+            }
+        }
+    }
+}
+
 /// The file that `asan` preprocesses, relative to the crate.
 pub(crate) const PROBE: &str = "build/asan.c";
 

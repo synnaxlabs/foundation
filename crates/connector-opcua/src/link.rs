@@ -345,6 +345,32 @@ fn the_list_holds_no_lock_and_no_atomic() {
     assert!(held.is_empty(), "{held:?}");
 }
 
+/// Whether `name` is in the runtime of the address or the undefined behavior
+/// sanitizer, which `build.rs` adds together.
+fn sanitizer(name: &str) -> bool {
+    name.starts_with("__asan_")
+        || name.starts_with("__ubsan_")
+        || ["__start_asan_globals", "__stop_asan_globals"].contains(&name)
+}
+
+#[test]
+fn sanitizer_names_only_the_runtimes() {
+    for name in ["__asan_init", "__ubsan_handle_add_overflow_abort"] {
+        assert!(sanitizer(name), "{name}");
+    }
+    assert!(sanitizer("__start_asan_globals"));
+    assert!(sanitizer("__stop_asan_globals"));
+    for name in [
+        "memcpy",
+        "__start_other",
+        "asan_init",
+        "__msan_init",
+        "_asan_x",
+    ] {
+        assert!(!sanitizer(name), "{name}");
+    }
+}
+
 /// The symbols that `nm` with `flag` gives for `files`.
 fn names(
     files: &[std::path::PathBuf],
@@ -391,7 +417,7 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
     let unlisted: Vec<&str> = outside
         .into_iter()
-        .filter(|name| !OUTSIDE.contains(name))
+        .filter(|name| !(OUTSIDE.contains(name) || cfg!(asan) && sanitizer(name)))
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }

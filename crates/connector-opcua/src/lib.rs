@@ -81,6 +81,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sanitizers_follow_the_rust_build() {
+        let address = [
+            "-fsanitize=address,undefined",
+            "-fno-sanitize=function",
+            "-fno-sanitize-recover=all",
+        ];
+        let fuzzer = "-fsanitize=fuzzer-no-link";
+        assert!(compiler::sanitizers("", false).is_empty());
+        assert!(compiler::sanitizers("memory", false).is_empty());
+        assert_eq!(compiler::sanitizers("address", false), address);
+        assert_eq!(compiler::sanitizers("leak,address", false), address);
+        assert_eq!(compiler::sanitizers("", true), [fuzzer]);
+        let mut both = address.to_vec();
+        both.push(fuzzer);
+        assert_eq!(compiler::sanitizers("address", true), both);
+    }
+
+    /// The builds of `compiler::builds`, for `TARGET` and with the compiler `path`.
+    fn builds(path: &str) -> compiler::Builds {
+        let mut builds = compiler::builds(Path::new("/copy"), "-std=c99", "a.c");
+        for build in [&mut builds.library, &mut builds.shim] {
+            child::tool(build.compiler(path), TARGET);
+        }
+        builds
+    }
+
+    #[test]
+    fn sanitize_adds_the_flags_to_both_builds() {
+        let mut builds = builds("/missing/clang");
+        builds.sanitize(&["-fsanitize=address"]);
+        for build in [&mut builds.library, &mut builds.shim] {
+            let tool = child::tool(build, TARGET);
+            assert_eq!(tool.path(), Path::new("/missing/clang"));
+            assert!(args(&tool).contains(&"-fsanitize=address".into()));
+        }
+    }
+
+    #[test]
+    fn sanitize_moves_gcc_to_clang() {
+        let mut builds = builds("/missing/gcc");
+        builds.sanitize(&["-fsanitize=address"]);
+        for build in [&mut builds.library, &mut builds.shim] {
+            assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_gcc_with_no_flags() {
+        let mut builds = builds("/missing/gcc");
+        builds.sanitize(&[]);
+        for build in [&mut builds.library, &mut builds.shim] {
+            assert_eq!(child::tool(build, TARGET).path(), Path::new("/missing/gcc"));
+        }
+    }
+
     /// The directories that `-I` gives in `args`.
     fn includes(args: &[String]) -> Vec<&str> {
         let pairs = args.windows(2).filter(|pair| pair[0] == "-I");

@@ -1,5 +1,5 @@
 //! Compiles the open62541 copy in `patches/open62541/` and `src/shim.c`, with the
-//! feature `open62541`.
+//! feature `open62541`, under the sanitizers of the Rust build.
 
 #[cfg(feature = "open62541")]
 #[path = "build/compiler.rs"]
@@ -34,8 +34,18 @@ fn build() {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     };
-    let compiler::Builds { mut library, shim } =
-        compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
+    let mut builds = compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "cargo gives a build script the cfgs of its target only in the \
+                  environment"
+    )]
+    let (sanitize, fuzzing) = (
+        std::env::var("CARGO_CFG_SANITIZE").unwrap_or_default(),
+        std::env::var_os("CARGO_CFG_FUZZING").is_some(),
+    );
+    builds.sanitize(&compiler::sanitizers(&sanitize, fuzzing));
+    let compiler::Builds { mut library, shim } = builds;
     let tool = library.get_compiler();
     match compiler::check(&tool).and_then(|()| compiler::asan(&tool)) {
         Ok(true) => println!("cargo::rustc-cfg=asan"),
