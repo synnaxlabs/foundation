@@ -112,22 +112,26 @@
   stream on the session that `transport::Transport::dial` gives at that open, the one
   session of the shard to the home (ONE SESSION PER PEER). When that session closes with
   `Code(0)` before the home's `Opened`, as a session that loses the tie-break of ONE
-  SESSION PER PEER does, the task dials once more and opens on the session that this
-  dial gives. The home never served an open on the losing session: the lower node holds
-  its streams until it closes it. Amended by `laptop.architect` (2026-10-09T09:00:46Z,
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101). A
-  complete reader sends `Credit` once its grant is half a window (512 KiB) short of
-  the frames given back plus a window. A task on `hub::Config::tasks` takes each frame
-  off the stream of a remote reader as it arrives, so the node takes each byte that it
-  let the home send (STREAM WIRE), and an idle caller never holds the window of its
-  session. The task also dials the home, sends the open, and sends each `Credit`, so no
-  message that waits for room in the session waits for the caller. A complete reader
-  queues at most its grant plus one frame, and a frame that starts once the charges that
-  arrived reach the grant ends the session with `Refusal::Malformed`. A latest reader
-  keeps only the newest frame. Lost: a bound on the sum of the credit at one home; a
-  receive window for each stream in `transport`; one task for each session. Trigger: a
-  link that a remote latest reader with an idle caller fills, as measured, then a credit
-  of one frame for a latest reader (HUB WIRE). Decided by `laptop.architect`
+  SESSION PER PEER does, the task dials again and opens on the session that this dial
+  gives, at most twice. The home's node dials only when it has no open session, and runs
+  one dial at a time, so its session beats at most the session that was open and one
+  that this node dialed before that session arrived. A third loss needs a session of the
+  home's node to end first, and fails the open with `Error::Transport`. The home never
+  served an open on a losing session: the lower node holds its streams until it closes
+  it. Amended by `laptop.architect` (2026-10-09T09:12:45Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207). A
+  complete reader sends `Credit` once its grant is half a window (512 KiB) short of the
+  frames given back plus a window. A task on `hub::Config::tasks` takes each frame off
+  the stream of a remote reader as it arrives, so the node takes each byte that it let
+  the home send (STREAM WIRE), and an idle caller never holds the window of its session.
+  The task also dials the home, sends the open, and sends each `Credit`, so no message
+  that waits for room in the session waits for the caller. A complete reader queues at
+  most its grant plus one frame, and a frame that starts once the charges that arrived
+  reach the grant ends the session with `Refusal::Malformed`. A latest reader keeps only
+  the newest frame. Lost: a bound on the sum of the credit at one home; a receive window
+  for each stream in `transport`; one task for each session. Trigger: a link that a
+  remote latest reader with an idle caller fills, as measured, then a credit of one
+  frame for a latest reader (HUB WIRE). Decided by `laptop.architect`
   (2026-10-09T03:24:37Z:
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073632038), and the
   open in the task by `laptop.architect` (2026-10-09T06:07:04Z:

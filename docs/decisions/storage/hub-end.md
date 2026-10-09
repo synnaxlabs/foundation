@@ -32,14 +32,18 @@
   The state holds a clone of the region's mesh when the hub has one. Decided by
   `laptop.architect` (2026-10-08T18:42:42Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
-  With PR 4d-b of #340, the state holds the region (the mesh and an `Rc` of the
-  shard's transport), and holds no session: the transport keeps the one session to
-  each node (ONE SESSION PER PEER). When that session closes with `Code(0)` before the
-  home's `Opened`, as a session that loses the tie-break of ONE SESSION PER PEER does,
-  the task dials once more and opens on the session that this dial gives. The home never
-  served an open on the losing session: the lower node holds its streams until it closes
-  it. Amended by `laptop.architect` (2026-10-09T09:00:46Z,
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101). A remote
+  With PR 4d-b of #340, the state holds the region (the mesh and an `Rc` of the shard's
+  transport), and holds no session: the transport keeps the one session to each node
+  (ONE SESSION PER PEER). When that session closes with `Code(0)` before the home's
+  `Opened`, as a session that loses the tie-break of ONE SESSION PER PEER does, the task
+  dials again and opens on the session that this dial gives, at most twice. The home's
+  node dials only when it has no open session, and runs one dial at a time, so its
+  session beats at most the session that was open and one that this node dialed before
+  that session arrived. A third loss needs a session of the home's node to end first,
+  and fails the open with `Error::Transport`. The home never served an open on a losing
+  session: the lower node holds its streams until it closes it. Amended by
+  `laptop.architect` (2026-10-09T09:12:45Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207). A remote
   reader holds the state, so it counts as a session of the hub. Decided by
   `laptop.architect`: the region (2026-10-08T20:07:32Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), and no
