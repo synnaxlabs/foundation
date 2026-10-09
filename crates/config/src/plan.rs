@@ -679,7 +679,7 @@ fn connectors<'f>(
 
 /// Each unit of the connectors of `located`, with its fix, and the position of the
 /// unit of each connector. The fix of a unit names one target: the winner of its first
-/// connector that a placement selects, or the one placement that wins for its indexes.
+/// connector that a placement wins for, or the one placement that wins for its indexes.
 /// When no placement can win for each of its connectors and indexes at its node, the
 /// fix names each winner, the target first.
 fn units<'f>(
