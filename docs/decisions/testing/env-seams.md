@@ -59,7 +59,10 @@
   2026-10-08 18:27 UTC,
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). Its
   poll and its drop lock only Tokio's `Mutex`es, in Tokio's `AsyncFd` and I/O driver.
-  The receiver's `receiver::Driver` is its alone, as a sender clone's is:
+  `laptop.architect-2` reads item 2 as no `Mutex` of our own, with Tokio's own locks
+  allowed (2026-10-09 03:18 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6073564290). The
+  receiver's `receiver::Driver` is its alone, as a sender clone's is:
   `net::Driver::udp` gives it at the bind, beside the socket (`laptop.architect-2`,
   2026-10-09 01:42 UTC,
   https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
