@@ -772,6 +772,21 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    #[test]
+    fn accept_gives_the_error_of_a_broken_socket() {
+        let (mut sim, _, server) = testing::nodes(0);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            let mut accepting = pin!(transport.accept());
+            assert!(testing::poll_once(accepting.as_mut()).await.is_none());
+            node.fail_udp(testing::address(&node));
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            assert_eq!(accepting.await.err(), Some(network));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
     // The server closes the client's session, and once it drained, dials the client.
     // The new connection takes the handle of the old one, and a dial gives the new
     // session.
