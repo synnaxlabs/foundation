@@ -12,7 +12,8 @@
   Decided by `laptop.architect-2` (#1754, 2026-10-08T09:52:31Z):
   https://github.com/synnaxlabs/foundation/issues/1754#issuecomment-6057273348. The
   window is at least twice the message limit, as each window is, so one message of each
-  class fits (STREAM WIRE). Decided by `laptop.architect-2` (#1998, 2026-10-09T03:45:09Z):
+  class fits (STREAM WIRE). Decided by `laptop.architect-2` (#1998,
+  2026-10-09T03:45:09Z):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073837407.
   Supersedes the window of that or 1 MiB of #1754.
   `Client::new` binds the program's UDP socket at `[::]` port 0 on
