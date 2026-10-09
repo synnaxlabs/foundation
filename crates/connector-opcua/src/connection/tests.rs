@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::ffi::{CString, c_char, c_void};
 use std::future::poll_fn;
 use std::io::IoSlice;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::{Pin, pin};
 use std::ptr;
 use std::rc::Rc;
@@ -20,10 +20,12 @@ use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
-    Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_clear,
+    Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_getScalar,
     UA_KeyValueMap_setScalar, UA_findDataType,
 };
-use crate::ffi::{self, Bytes, ConnectionState, KeyValueMap, Status};
+use crate::ffi::{
+    self, Bytes, ConnectionState, KeyValueMap, Status, UA_KeyValueMap_clear,
+};
 
 const PORT: u16 = 4840;
 
@@ -79,6 +81,21 @@ fn text(text: &str) -> Bytes {
 }
 
 fn set(map: &mut KeyValueMap, key: &str, value: *const c_void, kind: u32) {
+    // SAFETY: the map copies the key and the value, each of the type `kind`.
+    let status = Status(unsafe {
+        UA_KeyValueMap_setScalar(map, name(key), value, builtin(kind))
+    });
+    assert_eq!(status, Status::GOOD);
+}
+
+/// Gives the value of `key` in `map` when it has the type `kind`, or null.
+fn get(map: *const KeyValueMap, key: &str, kind: u32) -> *const c_void {
+    // SAFETY: the caller gives a map that C allocated.
+    unsafe { UA_KeyValueMap_getScalar(map, name(key), builtin(kind)) }
+}
+
+/// Gives the builtin type of node `kind`.
+fn builtin(kind: u32) -> *const c_void {
     let id = NodeId {
         namespace: 0,
         kind: 0,
@@ -88,13 +105,15 @@ fn set(map: &mut KeyValueMap, key: &str, value: *const c_void, kind: u32) {
     // SAFETY: the id is a numeric node of namespace 0.
     let kind = unsafe { UA_findDataType(&raw const id) };
     assert!(!kind.is_null(), "a builtin type");
-    let key = QualifiedName {
+    kind
+}
+
+/// Gives the key `key` of namespace 0, which borrows `key`.
+fn name(key: &str) -> QualifiedName {
+    QualifiedName {
         namespace: 0,
         name: text(key),
-    };
-    // SAFETY: the map copies the key and the value, each of the type `kind`.
-    let status = Status(unsafe { UA_KeyValueMap_setScalar(map, key, value, kind) });
-    assert_eq!(status, Status::GOOD);
+    }
 }
 
 /// One call of the connection callback: the connection, the state, and the message.
@@ -1857,6 +1876,109 @@ fn listening(node: &node::Node) -> Side {
     side
 }
 
+/// Gives the bytes of `string`, a `UA_String` that C holds.
+fn string(string: *const Bytes) -> Vec<u8> {
+    // SAFETY: the caller gives a live string.
+    let string = unsafe { &*string };
+    if string.length == 0 {
+        return Vec::new();
+    }
+    // SAFETY: a string holds `length` bytes at `data`.
+    unsafe { std::slice::from_raw_parts(string.data, string.length) }.to_vec()
+}
+
+/// Records a call as [`record`] does, with the parameters of the call as the
+/// message: `key=value` for each of `listen-address`, `listen-port`, and
+/// `remote-address` that the call has, joined with a space.
+unsafe extern "C" fn note(
+    _: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    _: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    _: Bytes,
+) {
+    // SAFETY: `open` passes the calls of a live side.
+    let calls = unsafe { &*application.cast::<RefCell<Vec<Call>>>() };
+    let mut notes = Vec::new();
+    for key in ["listen-address", "remote-address"] {
+        let value = get(params, key, STRING);
+        if !value.is_null() {
+            notes.push([key.as_bytes(), b"=", &string(value.cast())].concat());
+        }
+    }
+    let port = get(params, "listen-port", UINT16);
+    if !port.is_null() {
+        // SAFETY: the value has the type `UInt16`.
+        let port = unsafe { *port.cast::<u16>() };
+        notes.push(format!("listen-port={port}").into_bytes());
+    }
+    calls.borrow_mut().push((id, state, notes.join(&b' ')));
+}
+
+/// Gives the calls of [`note`] on a side that listens at `local` and accepts one
+/// stream from the peer.
+fn notes(local: IpAddr) -> Vec<(usize, ConnectionState, String)> {
+    let mut network = Network::new();
+    network.dial(Span::MILLISECOND, b"");
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let listen = tcp::Listen {
+                local: SocketAddr::new(local, PORT),
+                backlog: 4,
+                options: OPTIONS,
+            };
+            let listener = node.net().listen(&listen).expect("the port is free");
+            let mut side = Side::with(&node, Some(listener));
+            side.callback = note;
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            side.calls()
+        })
+        .expect("the run ends")
+        .into_iter()
+        .map(|(id, state, bytes)| (id, state, String::from_utf8(bytes).expect("UTF-8")))
+        .collect()
+}
+
+#[test]
+fn a_listen_gives_its_address_and_port_and_an_accept_the_address_of_the_peer() {
+    let network = Network::new();
+    let local = network.local.addresses()[0];
+    let peer = network.peer.addresses()[0];
+    drop(network);
+    let calls = notes(local);
+    assert_eq!(
+        calls[..2],
+        [
+            (
+                1,
+                ffi::ESTABLISHED,
+                format!("listen-address={local} listen-port={PORT}")
+            ),
+            (2, ffi::ESTABLISHED, format!("remote-address={peer}")),
+        ]
+    );
+    assert!(calls[2..].iter().all(|(_, _, notes)| notes.is_empty()));
+}
+
+#[test]
+fn a_listen_on_each_address_gives_no_address_or_port() {
+    let network = Network::new();
+    let peer = network.peer.addresses()[0];
+    drop(network);
+    let calls = notes(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(
+        calls[..2],
+        [
+            (1, ffi::ESTABLISHED, String::new()),
+            (2, ffi::ESTABLISHED, format!("remote-address={peer}")),
+        ]
+    );
+}
+
 /// Records a call as [`record`] does, with the context that the call saw as the
 /// first byte of the message. A call with no context writes the id as the context. A
 /// first `ESTABLISHED` with a context, of an accepted connection, writes 10 times the
@@ -2074,6 +2196,12 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
             assert_eq!(status, Status::GOOD);
+            // SAFETY: the server lives.
+            let url = unsafe { ffi::test::shim_server_discovery_url(server, 0) };
+            assert_eq!(string(url), b"opc.tcp://10.0.0.1:4840");
+            // SAFETY: the server lives.
+            let url = unsafe { ffi::test::shim_server_discovery_url(server, 1) };
+            assert!(url.is_null());
             side.drive(Span::SECOND).await;
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });

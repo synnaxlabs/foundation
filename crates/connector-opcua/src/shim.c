@@ -529,6 +529,21 @@ void shim_cm_free(UA_ConnectionManager *cm) {
     UA_free(cm);
 }
 
+/* Sets `key` of `map` to a copy of the `length` bytes at `value`, as a string. */
+UA_StatusCode shim_params_string(UA_KeyValueMap *map, const char *key,
+                                 const UA_Byte *value, size_t length) {
+    UA_String text = {length, (UA_Byte *)(uintptr_t)value};
+    return UA_KeyValueMap_setScalar(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key),
+                                    &text, &UA_TYPES[UA_TYPES_STRING]);
+}
+
+/* Sets `key` of `map` to `value`. */
+UA_StatusCode shim_params_uint16(UA_KeyValueMap *map, const char *key,
+                                 UA_UInt16 value) {
+    return UA_KeyValueMap_setScalar(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key),
+                                    &value, &UA_TYPES[UA_TYPES_UINT16]);
+}
+
 /* Gives a client on `el`, or NULL on a failure. */
 UA_Client *shim_client_new(UA_EventLoop *el) {
     UA_ClientConfig config;
@@ -555,4 +570,13 @@ UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port) {
         return NULL;
     }
     return UA_Server_newWithConfig(&config);
+}
+
+/* Gives discovery URL `index` of `server`, or NULL past the last. */
+const UA_String *shim_server_discovery_url(UA_Server *server, size_t index) {
+    const UA_ApplicationDescription *description =
+        &UA_Server_getConfig(server)->applicationDescription;
+    if(index >= description->discoveryUrlsSize)
+        return NULL;
+    return &description->discoveryUrls[index];
 }

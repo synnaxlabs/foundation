@@ -348,6 +348,18 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
+    pub(crate) fn shim_params_string(
+        map: *mut KeyValueMap,
+        key: *const c_char,
+        value: *const u8,
+        length: usize,
+    ) -> u32;
+    pub(crate) fn shim_params_uint16(
+        map: *mut KeyValueMap,
+        key: *const c_char,
+        value: u16,
+    ) -> u32;
+    pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
 }
 
 /// Only tests use these.
@@ -489,12 +501,20 @@ pub(crate) mod test {
             value: *const c_void,
             kind: *const c_void,
         ) -> u32;
-        pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
+        pub(crate) fn UA_KeyValueMap_getScalar(
+            map: *const KeyValueMap,
+            key: QualifiedName,
+            kind: *const c_void,
+        ) -> *const c_void;
         pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
 
         pub(crate) fn shim_server_new(el: *mut EventLoop, port: u16) -> *mut Server;
         pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
+        pub(crate) fn shim_server_discovery_url(
+            server: *mut Server,
+            index: usize,
+        ) -> *const Bytes;
     }
 }

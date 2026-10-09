@@ -6,10 +6,11 @@
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::fmt;
 use std::future::poll_fn;
 use std::io::IoSlice;
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
@@ -428,20 +429,32 @@ impl State {
             .expect(
                 "invariant: a listen connection keeps its callback while it listens",
             );
+        let params = Params::remote(tcp.peer());
         let id = self.insert(callback, Stream::Open(tcp));
-        self.call(id, ffi::ESTABLISHED, &mut []);
+        self.establish(id, &params);
         self.wake(id);
     }
 
     /// Calls the connection callback of `id` with `state` and `message`.
     fn call(&self, id: usize, state: ffi::ConnectionState, message: &mut [u8]) {
-        let callback = self
-            .table
+        self.callback(id)
+            .call(self.raw.get(), id, state, &Params::NONE, message);
+    }
+
+    /// Calls the connection callback of `id` with `ESTABLISHED`, `params`, and no
+    /// message, as the first callback of a connection that a listen made.
+    fn establish(&self, id: usize, params: &Params) {
+        self.callback(id)
+            .call(self.raw.get(), id, ffi::ESTABLISHED, params, &mut []);
+    }
+
+    /// Gives the callback of `id`.
+    fn callback(&self, id: usize) -> Callback {
+        self.table
             .borrow()
             .get(&id)
             .and_then(|c| c.callback.clone())
-            .expect("invariant: a connection that is not closing has its callback");
-        callback.call(self.raw.get(), id, state, message);
+            .expect("invariant: a connection that is not closing has its callback")
     }
 }
 
@@ -472,12 +485,9 @@ impl Callback {
         cm: *mut ffi::ConnectionManager,
         id: usize,
         state: ffi::ConnectionState,
+        params: &Params,
         message: &mut [u8],
     ) {
-        let params = ffi::KeyValueMap {
-            size: 0,
-            map: ptr::null_mut(),
-        };
         let message = Bytes {
             length: message.len(),
             data: if message.is_empty() {
@@ -495,9 +505,67 @@ impl Callback {
                 self.application,
                 self.context.as_ptr(),
                 state,
-                &raw const params,
+                &raw const params.0,
                 message,
             );
+        }
+    }
+}
+
+/// The parameters of a callback, in a map that C allocates.
+struct Params(ffi::KeyValueMap);
+
+impl Params {
+    const NONE: Self = Self(ffi::KeyValueMap {
+        size: 0,
+        map: ptr::null_mut(),
+    });
+
+    /// The `listen-address` and `listen-port` of `local`, from which a server makes
+    /// its discovery URL. None when `local` is on each address, which names no host.
+    fn listen(local: SocketAddr) -> Self {
+        let mut params = Self::NONE;
+        if !local.ip().is_unspecified() {
+            params.string(c"listen-address", &local.ip().to_string());
+            // SAFETY: the map is one that C allocates, and the key is a C string.
+            let status = unsafe {
+                ffi::shim_params_uint16(
+                    &raw mut params.0,
+                    c"listen-port".as_ptr(),
+                    local.port(),
+                )
+            };
+            assert_eq!(Status(status), Status::GOOD, "a C allocation failed");
+        }
+        params
+    }
+
+    /// The `remote-address` of `peer`, which a server gives its channel.
+    fn remote(peer: SocketAddr) -> Self {
+        let mut params = Self::NONE;
+        params.string(c"remote-address", &peer.ip().to_string());
+        params
+    }
+
+    fn string(&mut self, key: &CStr, value: &str) {
+        // SAFETY: as in `listen`; C copies the `len` bytes of `value`.
+        let status = unsafe {
+            ffi::shim_params_string(
+                &raw mut self.0,
+                key.as_ptr(),
+                value.as_ptr(),
+                value.len(),
+            )
+        };
+        assert_eq!(Status(status), Status::GOOD, "a C allocation failed");
+    }
+}
+
+impl Drop for Params {
+    fn drop(&mut self) {
+        if self.0.size > 0 {
+            // SAFETY: C allocated the map.
+            unsafe { ffi::UA_KeyValueMap_clear(&raw mut self.0) };
         }
     }
 }
@@ -795,7 +863,7 @@ unsafe extern "C" fn listen(
         function: callback,
     };
     let id = state.insert(callback, Stream::Listening(listener));
-    state.call(id, ffi::ESTABLISHED, &mut []);
+    state.establish(id, &Params::listen(local));
     state.wake(id);
     Status::GOOD.0
 }
@@ -862,7 +930,7 @@ unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
             .get_mut(&id)
             .and_then(|c| c.callback.take())
             .expect("invariant: a connection keeps its callback until its `CLOSING`");
-        callback.call(state.raw.get(), id, ffi::CLOSING, &mut []);
+        callback.call(state.raw.get(), id, ffi::CLOSING, &Params::NONE, &mut []);
         state.wake(id);
     }
 }
