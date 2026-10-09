@@ -1,6 +1,7 @@
 //! Shard 0's sessions: each stream goes to the server of the protocol its header
 //! names.
 
+use std::cell::Cell;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
@@ -18,9 +19,15 @@ use crate::scope::Scope;
 /// How long a stream may take to give its header, a patch as [`crate::WINDOW`] is.
 const HEADER: Span = Span::from_nanos(10_000_000_000);
 
+/// How many sessions of peers outside the region the node holds at once, a patch as
+/// [`HEADER`] is.
+const SESSIONS: usize = 256;
+
 /// Serves each session of `transport` in its own future on `tasks`, until the
-/// transport stops, and gives the error that stopped it. Admits every peer to a
-/// session; `route` decides each stream.
+/// transport stops, and gives the error that stopped it. Admits each session of a
+/// member of `mesh`'s region, and of another peer while fewer than [`SESSIONS`] of
+/// them are open; closes each other session with `wire::session::REFUSED`. `route`
+/// decides each stream.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
     mesh: Option<Mesh>,
@@ -29,16 +36,47 @@ pub(crate) async fn accept(
     tasks: env::tasks::Tasks,
 ) -> Error {
     let mut sessions = Scope::new(tasks.clone());
+    let outside = Rc::new(Cell::new(0));
     loop {
-        match transport.accept().await {
-            Ok(session) => {
-                let link = hub.link(session.clone());
-                let serve =
-                    serve(session, mesh.clone(), link, clock.clone(), tasks.clone());
-                sessions.spawn(Box::pin(serve));
-            }
+        let session = match transport.accept().await {
+            Ok(session) => session,
             Err(error) => return error,
-        }
+        };
+        let member = match (session.peer(), &mesh) {
+            (Peer::Node(key), Some(mesh)) => mesh.holder(key).is_some(),
+            (Peer::Node(_), None) | (Peer::Client, _) => false,
+        };
+        let held = if member {
+            None
+        } else if outside.get() < SESSIONS {
+            Some(Outside::new(Rc::clone(&outside)))
+        } else {
+            session.close(Code(wire::session::REFUSED));
+            continue;
+        };
+        let link = hub.link(session.clone());
+        let serve = serve(session, mesh.clone(), link, clock.clone(), tasks.clone());
+        sessions.spawn(Box::pin(async move {
+            serve.await;
+            drop(held);
+        }));
+    }
+}
+
+/// One open session of a peer outside the region, in the count it holds until it
+/// drops.
+struct Outside(Rc<Cell<usize>>);
+
+impl Outside {
+    fn new(count: Rc<Cell<usize>>) -> Self {
+        count.set(count.get() + 1);
+        Self(count)
+    }
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
     }
 }
 

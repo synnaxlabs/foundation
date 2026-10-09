@@ -3789,6 +3789,76 @@ mod port {
             assert_eq!(read, Err(transport::Error::Reset { code }));
         }
 
+        /// The node holds 256 sessions of peers outside the region. It closes the next
+        /// with the code of a refused session, admits a member past them, and admits a
+        /// peer again once one of the 256 ends.
+        #[test]
+        fn refuses_a_session_over_256_of_peers_outside_the_region() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            let listen = listen(&hosts[0]);
+            let out = Arc::new(Mutex::new(None));
+            let seen = Arc::clone(&out);
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = hosts[1].clone();
+            let started = hosts[1].shards().start(shard, move |tasks| async move {
+                let at = [Address::Udp(listen)];
+                let (program, pool) = program(&own, tasks.clone());
+                let mut held = Vec::new();
+                for _ in 0..256 {
+                    let session = program.dial(KEY.public(), &at).await;
+                    held.push(session.expect("a session"));
+                }
+                let over = program.dial(KEY.public(), &at).await;
+                let refused = over.expect("the handshake completes").closed().await;
+                let (node, node_pool) = transport(&own, tasks, OTHER.1);
+                let member = node.dial(KEY.public(), &at).await.expect("a session");
+                let of_member = sent_clock(&member, &node_pool, &own).await;
+                held.pop().expect("a held session").close(Code(0));
+                own.clock().sleep(Span::SECOND).await;
+                let again = program.dial(KEY.public(), &at).await.expect("a session");
+                let of_program = sent_clock(&again, &pool, &own).await;
+                *seen.lock().unwrap() = Some((refused, of_member, of_program));
+                drop((held, member, again, node, program));
+            });
+            drop(started.expect("the peer starts"));
+            assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let (refused, of_member, of_program) =
+                out.lock().unwrap().take().expect("the peer ran");
+            let code = Code(wire::session::REFUSED);
+            assert_eq!(refused, transport::Error::PeerClosed { code });
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(of_member, transport::Error::Stopped { code });
+            assert_eq!(of_program, transport::Error::Stopped { code });
+        }
+
+        /// The error of the first send that fails on a one-way stream of `session`
+        /// whose header names the clock protocol, which the node rejects.
+        async fn sent_clock(
+            session: &transport::Session,
+            pool: &block::Pool,
+            host: &sim::node::Node,
+        ) -> transport::Error {
+            let sender = session.open_sender(Class::Complete).await;
+            let mut sender = sender.expect("a stream");
+            let header = wire::header::encode(wire::Protocol::Clock);
+            loop {
+                let mut block = pool.alloc(header.len()).unwrap();
+                block.copy_from_slice(&header);
+                if let Err(error) = sender.send(block.freeze()).await {
+                    return error;
+                }
+                host.clock().sleep(Span::MILLISECOND).await;
+            }
+        }
+
         /// The error of the first send that fails, when a peer that is not a member
         /// opens a one-way mesh stream to the node [`OWN`] of a region with [`OTHER`],
         /// then sends `message` up to 100 times, or `None` when no send fails.
