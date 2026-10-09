@@ -573,6 +573,8 @@ fn a_source_that_is_not_local_gives_the_answer_of_macos() {
             (any_v4, IpAddr::from([192, 0, 2, 1]), to_v4),
             (any_v4, IpAddr::from([127, 0, 0, 2]), to_v4),
             (any_v6, IpAddr::from([192, 0, 2, 1]), to_v4),
+            (any_v6, IpAddr::from([192, 0, 2, 1]), to_v6),
+            (any_v6, IpAddr::from(LOCALHOST), to_v6),
             (
                 any_v6,
                 IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
