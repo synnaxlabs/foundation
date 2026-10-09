@@ -187,6 +187,7 @@ fn a_batch_arrives_as_one_batch() {
 }
 
 /// Receives one batch, and gives its length, stride, and ECN mark.
+#[cfg(target_os = "linux")]
 async fn receive_batch(receiver: &mut Receiver) -> (usize, usize, Option<Ecn>) {
     let mut buffer = vec![0; receiver.batch_max().get() * DATAGRAM_BYTES_MAX];
     let mut meta = [Meta::default()];
