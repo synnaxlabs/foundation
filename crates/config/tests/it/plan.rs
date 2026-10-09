@@ -1,7 +1,6 @@
 //! `config::plan` against applied specs that the tests build and apply.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::slice;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use config::plan::Plan;
@@ -708,18 +707,6 @@ placement \"d_2\" {
   select = \"d.*\"
   home = \"m\"
 }
-channel \"e.time\" {
-  kind = \"index\"
-}
-placement \"e\" {
-  select = \"e.*\"
-  standby = \"n\"
-}
-connector \"w\" {
-  kind = \"writer\"
-  node = \"n\"
-  writes = [\"e.time\"]
-}
 ";
     let found = problems(Spec::create_empty().plan(&[text], &["m", "n"]));
     let unplaced = |index, message: &str, fix: &str| {
@@ -743,12 +730,6 @@ connector \"w\" {
             "the placements `d_1` and `d_2` select the name with the same specificity",
             "Change the `select` of one of the two placements, so that one selects the \
              name more specifically",
-        ),
-        unplaced(
-            "e.time",
-            "the node `n` of a connector is the home and has another role in the \
-             placement `e`",
-            OVERLAP,
         ),
     ];
     assert_eq!(found, expected);
@@ -1452,6 +1433,156 @@ connector \"d.e\" {{
 }
 
 #[test]
+fn checks_an_index_against_the_connector_that_writes_it_whatever_its_name() {
+    let text = |select: &str| {
+        format!(
+            "\
+channel \"site.time\" {{
+  kind = \"index\"
+}}
+connector \"site\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = []
+}}
+connector \"edge\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"site.time\"]
+}}
+{}",
+            placement("p", select, "n")
+        )
+    };
+    let nodes = ["m", "n"];
+    let refused = text("\"site.time\"");
+    let found = problems(Spec::create_empty().plan(&[&refused], &nodes));
+    let expected = split(
+        &refused,
+        "p",
+        "the placement `p` wins for the index `site.time`, but no placement selects \
+         the connector `edge`",
+        "p",
+        "edge",
+    );
+    assert_eq!(found, [expected]);
+    let fixed = text("\"site.time\", \"edge\"");
+    let plan = Spec::create_empty()
+        .plan(&[&fixed], &nodes)
+        .expect("no problems");
+    assert_eq!(plan.homes, BTreeMap::from([(name("site.time"), name("n"))]));
+}
+
+#[test]
+fn checks_the_index_of_each_channel_that_a_connector_writes() {
+    let text = |select: &str, home: &str| {
+        format!(
+            "\
+channel \"plant.time\" {{
+  kind = \"index\"
+}}
+channel \"plant.spike\" {{
+  data_type = \"f64\"
+  index = \"plant.time\"
+}}
+connector \"plc\" {{
+  kind = \"writer\"
+  node = \"edge\"
+  writes = [\"plant.spike\"]
+}}
+{}{}",
+            placement("plant", "\"plant.*\"", "core"),
+            placement("plc", select, home)
+        )
+    };
+    let nodes = ["core", "edge"];
+    let refused = text("\"plc\"", "edge");
+    let found = problems(Spec::create_empty().plan(&[&refused], &nodes));
+    let expected = split(
+        &refused,
+        "plant",
+        "the placement `plant` wins for the index `plant.time`, but the placement \
+         `plc` wins for the connector `plc`",
+        "plc",
+        "plc",
+    );
+    assert_eq!(found, [expected]);
+    let fixed = text("\"plc\", \"plant.time\"", "edge");
+    let plan = Spec::create_empty()
+        .plan(&[&fixed], &nodes)
+        .expect("no problems");
+    assert_eq!(
+        plan.homes,
+        BTreeMap::from([(name("plant.time"), name("edge"))])
+    );
+}
+
+#[test]
+fn checks_no_index_that_a_connector_only_reads() {
+    let text = format!(
+        "\
+channel \"valve.time\" {{
+  kind = \"index\"
+}}
+channel \"valve.open\" {{
+  data_type = \"f64\"
+  index = \"valve.time\"
+}}
+connector \"valve\" {{
+  kind = \"commander\"
+  node = \"edge\"
+  writes = [\"valve.open\"]
+}}
+{}{}",
+        placement("program", "\"valve.time\"", "core"),
+        placement("valve", "\"valve\"", "edge")
+    );
+    let plan = Spec::create_empty()
+        .plan(&[&text], &["core", "edge"])
+        .expect("no problems");
+    assert_eq!(
+        plan.homes,
+        BTreeMap::from([(name("valve.time"), name("core"))])
+    );
+}
+
+#[test]
+fn excludes_a_connector_whose_index_has_a_writer_on_another_node() {
+    let text = format!(
+        "\
+channel \"a.time\" {{
+  kind = \"index\"
+}}
+channel \"a.value\" {{
+  data_type = \"f64\"
+  index = \"a.time\"
+}}
+connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"a.time\"]
+}}
+connector \"b\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = [\"a.value\"]
+}}
+{}",
+        placement("p", "\"a\", \"a.*\"", "m")
+    );
+    let found = problems(Spec::create_empty().plan(&[&text], &["m", "n"]));
+    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+    let expected = [
+        (
+            "config.writer-nodes",
+            "Run each connector that writes `a.time` on one node".into(),
+        ),
+        ("config.connector-home", exclude("a", "`p`", "n")),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
 fn refuses_an_index_or_a_connector_that_no_placement_selects_when_the_other_is() {
     let text = "\
 channel \"b.time\" {
@@ -1508,6 +1639,14 @@ connector \"f\" {
              the connector `c`",
             "c",
             "c",
+        ),
+        split(
+            text,
+            "fx",
+            "the placement `fx` wins for the index `fx.time`, but no placement selects \
+             the connector `f`",
+            "fx",
+            "f",
         ),
     ];
     assert_eq!(found, expected);
@@ -1980,14 +2119,6 @@ connector \"e\" {
              connector writes the index",
             "Name a `home` in the placement, or write the index with a connector",
         ),
-        split(
-            text,
-            "c_time",
-            "the placement `c_time` wins for the index `c.time`, but the placement `c` \
-             wins for the connector `c`",
-            "c",
-            "c",
-        ),
         problem(
             "config.unplaced",
             (0, label(text, "e.time")),
@@ -2082,8 +2213,10 @@ placement \"p\" {{
 
 #[test]
 fn plans_after_the_overlap_move_and_its_connector_home_fix() {
-    let standby = |select: &str| {
-        format!("placement \"p\" {{\n  select = [{select}]\n  standby = \"k\"\n}}\n")
+    let standby = |select: &str, node: &str| {
+        format!(
+            "placement \"p\" {{\n  select = [{select}]\n  standby = \"{node}\"\n}}\n"
+        )
     };
     let index = "\
 channel \"c.time\" {
@@ -2092,11 +2225,6 @@ channel \"c.time\" {
 connector \"c\" {
   kind = \"writer\"
   node = \"n\"
-  writes = []
-}
-connector \"w\" {
-  kind = \"writer\"
-  node = \"k\"
   writes = [\"c.time\"]
 }
 ";
@@ -2116,222 +2244,36 @@ connector \"d\" {
     let connectors_fixed = connectors.to_owned()
         + &placement("p", "\"d\"", "k")
         + &placement("q", "\"c\"", "n");
-    // `k` is the one node of `p`, and `p` wins for `c` on `n`. In the first case, each
-    // name that `p` wins is on `n`.
+    // The node of `standby` is the one node of `p`, and `p` wins for `c` on `n`. In the
+    // first case, each name that `p` wins is on `n`.
     let excluded = exclude("c", "`p`", "n");
     let cases = [
-        (index, "\"c\", \"c.time\"", RENAMED.to_owned(), index_fixed),
-        (connectors, "\"c\", \"d\"", excluded, connectors_fixed),
+        (
+            index,
+            "\"c\", \"c.time\"",
+            "n",
+            2,
+            RENAMED.to_owned(),
+            index_fixed,
+        ),
+        (
+            connectors,
+            "\"c\", \"d\"",
+            "k",
+            1,
+            excluded,
+            connectors_fixed,
+        ),
     ];
-    let overlap = [("config.unplaced", OVERLAP.to_owned())];
-    for (common, select, fix, fixed) in cases {
-        let refused = common.to_owned() + &standby(select);
+    let overlap = ("config.unplaced", OVERLAP.to_owned());
+    for (common, select, node, overlaps, fix, fixed) in cases {
+        let refused = common.to_owned() + &standby(select, node);
         let found = problems(Spec::create_empty().plan(&[&refused], &["k", "m", "n"]));
         let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
-        assert_eq!(found, overlap, "{refused}");
+        assert_eq!(found, vec![overlap.clone(); overlaps], "{refused}");
         let moved = common.to_owned() + &placement("p", select, "k");
         plans_after_connector_home(&moved, &[fix], &fixed);
     }
-}
-
-/// The fix of each diagnostic of `connector` on `node` when its placement to win,
-/// `winner`, names no `home` and an index of `connector` has no writer.
-fn homed(winner: &str, connector: &str, node: &str) -> String {
-    format!(
-        "Name `{node}` as the `home` of `{winner}`, keep `{node}` out of its `standby` \
-         and `copies`, and make `{winner}` win for the connector `{connector}` and its \
-         indexes"
-    )
-}
-
-/// The index `c.time` and the connectors `c` on `n` and `d` on `m`, which write
-/// nothing, then `placements`.
-fn unwritten(placements: &str) -> String {
-    format!(
-        "\
-channel \"c.time\" {{
-  kind = \"index\"
-}}
-connector \"c\" {{
-  kind = \"writer\"
-  node = \"n\"
-  writes = []
-}}
-connector \"d\" {{
-  kind = \"writer\"
-  node = \"m\"
-  writes = []
-}}
-{placements}"
-    )
-}
-
-#[test]
-fn plans_after_the_split_placement_fix_that_names_a_home_for_an_unwritten_index() {
-    let t = "\
-placement \"t\" {
-  select = [\"c\"]
-  standby = \"k\"
-}
-";
-    let r = "\
-placement \"r\" {
-  select = [\"c.time\"]
-  home = \"n\"
-}
-";
-    let fixed = unwritten(
-        "\
-placement \"t\" {
-  select = [\"c\", \"c.time\"]
-  home = \"n\"
-  standby = \"k\"
-}
-",
-    );
-    let split = ("config.split-placement", homed("t", "c", "n"));
-    let selected = unwritten(&format!("{t}{r}"));
-    plans_after(&selected, slice::from_ref(&split), &fixed);
-    // No placement selects `c.time`.
-    let unselected = (
-        "config.unplaced",
-        "Select the index with a placement that names a `home`, or write it with a \
-         connector"
-            .to_owned(),
-    );
-    plans_after(&unwritten(t), &[unselected, split], &fixed);
-}
-
-#[test]
-fn plans_after_the_split_placement_fix_of_a_connector_whose_placement_overlaps() {
-    let refused = unwritten(
-        "\
-placement \"p\" {
-  select = [\"c\"]
-  standby = \"n\"
-}
-placement \"r\" {
-  select = [\"c.time\"]
-  home = \"n\"
-}
-",
-    );
-    let fixed = unwritten(
-        "\
-placement \"p\" {
-  select = [\"c\", \"c.time\"]
-  home = \"n\"
-}
-",
-    );
-    let expected = [
-        ("config.unplaced", OVERLAP.to_owned()),
-        ("config.split-placement", homed("p", "c", "n")),
-    ];
-    plans_after(&refused, &expected, &fixed);
-}
-
-#[test]
-fn plans_after_the_split_placement_fix_that_names_a_home_with_no_connector_placement() {
-    let refused = unwritten(
-        "\
-placement \"o\" {
-  select = [\"c.time\"]
-  standby = \"k\"
-}
-",
-    );
-    let fixed = unwritten(
-        "\
-placement \"o\" {
-  select = [\"c\", \"c.time\"]
-  home = \"n\"
-  standby = \"k\"
-}
-",
-    );
-    let expected = [
-        (
-            "config.unplaced",
-            "Name a `home` in the placement, or write the index with a connector"
-                .into(),
-        ),
-        ("config.split-placement", homed("o", "c", "n")),
-    ];
-    plans_after(&refused, &expected, &fixed);
-}
-
-#[test]
-fn moves_an_unwritten_index_when_its_placement_wins_on_another_node() {
-    let refused = unwritten(
-        "\
-placement \"t\" {
-  select = [\"c\", \"d\"]
-  standby = \"k\"
-}
-placement \"r\" {
-  select = [\"c.time\"]
-  home = \"n\"
-}
-",
-    );
-    let fixed = unwritten(
-        "\
-placement \"t\" {
-  select = [\"c\", \"d\", \"!c\", \"!c.time\"]
-  standby = \"k\"
-}
-placement \"r\" {
-  select = [\"c.time\", \"!c\", \"!c.time\"]
-  home = \"n\"
-}
-placement \"c\" {
-  select = [\"c\", \"c.time\"]
-  home = \"n\"
-}
-",
-    );
-    let expected = [("config.split-placement", exclude("c", "`t` and `r`", "n"))];
-    plans_after(&refused, &expected, &fixed);
-}
-
-#[test]
-fn moves_an_unwritten_index_when_its_own_placement_wins_on_another_node() {
-    let refused = unwritten(
-        "\
-placement \"o\" {
-  select = [\"c.time\", \"d\"]
-  standby = \"k\"
-}
-",
-    );
-    let fixed = unwritten(
-        "\
-placement \"o\" {
-  select = [\"c.time\", \"d\", \"!c.time\"]
-  standby = \"k\"
-}
-placement \"c\" {
-  select = [\"c\", \"c.time\"]
-  home = \"n\"
-}
-",
-    );
-    let expected = [
-        (
-            "config.unplaced",
-            "Name a `home` in the placement, or write the index with a connector"
-                .into(),
-        ),
-        (
-            "config.split-placement",
-            "Exclude the indexes of the connector `c` from the `select` of `o`, and \
-             select the connector and its indexes with another placement whose `home` \
-             is `n`"
-                .into(),
-        ),
-    ];
-    plans_after(&refused, &expected, &fixed);
 }
 
 #[test]
