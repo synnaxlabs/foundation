@@ -203,9 +203,13 @@ impl Writer {
                     none.insert(full)
                 }
             };
-            let mut guard =
-                ready!(full.poll_write_ready(cx)).map_err(|e| from_io(&e))?;
-            guard.clear_ready();
+            match ready!(full.poll_write_ready(cx)) {
+                Ok(mut guard) => guard.clear_ready(),
+                Err(e) => {
+                    self.full = None;
+                    return Poll::Ready(Err(from_io(&e)));
+                }
+            }
         }
     }
 }
@@ -781,6 +785,25 @@ mod tests {
                 let bound = std::time::Duration::from_secs(10);
                 assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
                 assert_eq!(sends, 2);
+            });
+        }
+
+        #[test]
+        fn a_failed_wait_drops_the_registration() {
+            let udp = loopback();
+            let fd = udp.bound.socket.try_clone().unwrap();
+            let mut writer = Writer { full: None, fd };
+            let mut cx = Context::from_waker(Waker::noop());
+            let full = runtime()
+                .block_on(async { writer.poll_send(&mut cx, |_| Poll::Pending) });
+            assert_eq!(full, Poll::Pending);
+            runtime().block_on(async {
+                let gone = writer.poll_send(&mut cx, |_| Poll::Pending);
+                assert_eq!(gone, Poll::Ready(Err(Error::Io { code: 5 })));
+                assert!(writer.full.is_none());
+                let full = writer.poll_send(&mut cx, |_| Poll::Pending);
+                assert_eq!(full, Poll::Pending);
+                assert!(writer.full.is_some());
             });
         }
 
