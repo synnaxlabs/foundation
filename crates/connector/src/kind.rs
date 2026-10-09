@@ -181,8 +181,8 @@ impl<C> Context<C> {
     }
 
     /// Runs the kind's own tasks on its shard. Each task must end when
-    /// [`Context::cancel`] is cancelled. The next run starts only after each of them
-    /// ends.
+    /// [`Context::cancel`] is cancelled. The next run of the same `Supervisor::run`
+    /// call starts only after each of them ends.
     #[must_use]
     pub fn tasks(&self) -> &Tasks {
         &self.tasks

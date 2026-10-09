@@ -55,9 +55,9 @@ impl Supervisor {
 
     /// Runs one connector: parses its config, starts `run`, and restarts it with
     /// backoff after any error but `Config`. The waits start again from the first
-    /// after a run that lasted at least a minute. Never starts a run before the last
-    /// one returned and each task it spawned through [`Context::tasks`] ended, or
-    /// after `cancel` is cancelled.
+    /// after a run that lasted at least a minute. Within one call, never starts a run
+    /// before the last one returned and each task it spawned through
+    /// [`Context::tasks`] ended, or after `cancel` is cancelled.
     ///
     /// Returns `Ok` when `run` returns `Ok`, or when `cancel` is cancelled and the
     /// run returned. It returns, with `Ok` or an error, only once each task of its
