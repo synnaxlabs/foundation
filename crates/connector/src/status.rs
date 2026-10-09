@@ -379,8 +379,8 @@ struct Session {
 impl Session {
     /// Writes the last value of each status channel. A frame that the home refuses
     /// as `Backwards` is stamped after the stamp the refusal gives and written again,
-    /// one time. A frame that the home does not apply, or that the shard's pool has
-    /// no room for, leaves the status staged, so the flush writes it again.
+    /// one time. A frame that the home does not apply, or for which the shard's pool
+    /// gives no frame, leaves the status staged, so the flush writes it again.
     ///
     /// # Panics
     ///

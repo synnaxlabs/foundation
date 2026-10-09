@@ -76,9 +76,12 @@
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088160535).
   `status::Writer` holds the rules of `state`, `class`, and `restarts`, and the
   supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling). A frame that
-  the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`) leaves the status
-  staged, so it is written again one second later, also the last frame of a call: the
-  call returns once the home applied it, or once `cancel` is cancelled. After
+  the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`), or for which the
+  shard's pool gives no frame (`frame::Error::Pool`), leaves the status staged, so it
+  is written again one second later, also the last frame of a call: the call returns
+  once the home applied it, or once `cancel` is cancelled. The pool case is load, not
+  a defect (`laptop.architect-2`, 2026-10-09T21:32:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089614613). After
   `Failure::Removed` or `home::Error::Disk` the call writes no more status. Each other
   refusal is a defect of `connector`, and panics (`laptop.architect-2`,
   2026-10-09T19:41:05Z:
