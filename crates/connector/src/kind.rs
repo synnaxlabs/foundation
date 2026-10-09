@@ -63,8 +63,8 @@ pub struct Channels {
     pub reads: Vec<Name>,
     /// The channels it writes to the mesh: samples from the device.
     pub writes: Vec<Name>,
-    /// The last segment of each count channel, `<connector>.status.<count>`, which
-    /// the kind writes through its status.
+    /// The last segment of each count channel of the kind,
+    /// `<connector>.status.<count>`.
     pub counts: Vec<Name>,
 }
 
@@ -250,7 +250,8 @@ impl Table {
     ///
     /// # Panics
     ///
-    /// When the kind names a count that [`status`] names: the kind's code is wrong.
+    /// When the kind names a count that [`status`] names in any case, a count of more
+    /// than one segment, or one count twice in any case: the kind's code is wrong.
     pub fn check(
         &self,
         kind: &str,
@@ -264,13 +265,7 @@ impl Table {
             diagnostics
         };
         let channels = self.get(kind, at)?.check(config).map_err(place)?;
-        let mut counts = channels.counts.iter();
-        if let Some(count) = counts.find(|count| status::reserved(count.as_str())) {
-            panic!(
-                "the kind {kind:?} names the count `{count}`, a status channel of the \
-                 supervisor"
-            );
-        }
+        status::check(kind, &channels.counts);
         Ok(channels)
     }
 
@@ -570,8 +565,8 @@ mod tests {
         assert_eq!(format!("{table:?}"), r#"{"counter", "other"}"#);
     }
 
-    /// A kind that names one count, `.0`.
-    struct Counts(&'static str);
+    /// A kind that names the counts `.0`.
+    struct Counts(&'static [&'static str]);
 
     impl Kind for Counts {
         type Config = ();
@@ -582,7 +577,7 @@ mod tests {
 
         fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
             Ok(Channels {
-                counts: vec![name(self.0)],
+                counts: self.0.iter().map(|count| name(count)).collect(),
                 ..Channels::default()
             })
         }
@@ -599,8 +594,10 @@ mod tests {
         }
     }
 
-    fn check_counts(count: &'static str) -> Result<Channels, Vec<Diagnostic>> {
-        Table::new().with("counts", Counts(count)).check(
+    fn check_counts(
+        counts: &'static [&'static str],
+    ) -> Result<Channels, Vec<Diagnostic>> {
+        Table::new().with("counts", Counts(counts)).check(
             "counts",
             None,
             &Document::default(),
@@ -611,20 +608,49 @@ mod tests {
     #[should_panic(expected = "the kind \"counts\" names the count `state`, a status \
                                channel of the supervisor")]
     fn panics_on_a_count_named_as_a_status_channel_of_the_supervisor() {
-        drop(check_counts("state"));
+        drop(check_counts(&["state"]));
     }
 
     #[test]
     #[should_panic(expected = "the kind \"counts\" names the count `time`, a status \
                                channel of the supervisor")]
     fn panics_on_a_count_named_as_the_status_index() {
-        drop(check_counts("time"));
+        drop(check_counts(&["time"]));
     }
 
     #[test]
-    fn checks_a_count_with_a_name_of_its_own() {
-        let channels = check_counts("restarts_seen").expect("checks");
-        assert_eq!(channels.counts, [name("restarts_seen")]);
+    #[should_panic(expected = "the kind \"counts\" names the count `State`, a status \
+                               channel of the supervisor")]
+    fn panics_on_a_count_named_as_a_status_channel_in_another_case() {
+        drop(check_counts(&["State"]));
+    }
+
+    #[test]
+    #[should_panic(expected = "the kind \"counts\" names the count `TIME`, a status \
+                               channel of the supervisor")]
+    fn panics_on_a_count_named_as_the_status_index_in_another_case() {
+        drop(check_counts(&["TIME"]));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the kind \"counts\" names the count `x.frames`, which is \
+                               not one segment"
+    )]
+    fn panics_on_a_count_of_more_than_one_segment() {
+        drop(check_counts(&["x.frames"]));
+    }
+
+    #[test]
+    #[should_panic(expected = "the kind \"counts\" names the count `Frames` twice")]
+    fn panics_on_a_count_named_twice_in_another_case() {
+        drop(check_counts(&["frames", "errors", "Frames"]));
+    }
+
+    #[test]
+    fn checks_counts_with_names_of_their_own() {
+        let channels = check_counts(&["frames", "restarts_seen"]).expect("checks");
+        assert_eq!(channels.counts, [name("frames"), name("restarts_seen")]);
     }
 
     #[test]

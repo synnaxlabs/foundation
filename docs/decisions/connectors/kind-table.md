@@ -18,8 +18,11 @@
   `<connector>.status.<count>`. `connector::status` names the status index (`time`)
   and the supervisor's channels (`state`, `class`, `restarts`) once, for the
   supervisor and for `config`. `Table::check` panics when a kind names a count that
-  `connector::status` names, since the kind's code is wrong (`laptop.architect-2`,
+  `connector::status` names in any case, a count of more than one segment, or one count
+  twice in any case, since the kind's code is wrong (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538, items
   4 and 2; `laptop.architect-2`, 2026-10-09T13:37:08Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824).
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824;
+  `laptop.architect-2`, 2026-10-09T13:58:16Z:
+  https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451).

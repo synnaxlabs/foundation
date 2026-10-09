@@ -1,6 +1,7 @@
 //! The status channels of a connector, `<connector>.status.<name>`, on one index of
 //! their own.
 
+use types::name::Name;
 use types::sample::{Scalar, Type};
 
 /// The name of the index of the status channels.
@@ -13,8 +14,23 @@ pub const CHANNELS: [(&str, Type); 3] = [
     ("restarts", Type::Scalar(Scalar::U64)),
 ];
 
-/// Whether a kind may not name `count`: the supervisor's channels and the index have
-/// those names.
-pub(crate) fn reserved(count: &str) -> bool {
-    count == TIME || CHANNELS.iter().any(|&(name, _)| name == count)
+/// Panics when `kind` names a count of more than one segment, a count that the index
+/// or a channel of the supervisor names in any case, or one count twice in any case.
+pub(crate) fn check(kind: &str, counts: &[Name]) {
+    for (i, count) in counts.iter().enumerate() {
+        let same = |name: &str| name.eq_ignore_ascii_case(count.as_str());
+        assert!(
+            count.segments().nth(1).is_none(),
+            "the kind {kind:?} names the count `{count}`, which is not one segment"
+        );
+        assert!(
+            !same(TIME) && !CHANNELS.iter().any(|&(name, _)| same(name)),
+            "the kind {kind:?} names the count `{count}`, a status channel of the \
+             supervisor"
+        );
+        assert!(
+            !counts[..i].iter().any(|earlier| same(earlier.as_str())),
+            "the kind {kind:?} names the count `{count}` twice"
+        );
+    }
 }
