@@ -302,12 +302,12 @@ impl Shard {
     }
 
     /// Carries the index at `slot`, with no writer in control. Each path continues
-    /// from its tail in the buffer.
-    ///
-    /// # Panics
-    ///
-    /// If the shard carries `slot` already.
+    /// from its tail in the buffer. It does nothing when the shard carries `slot`
+    /// already.
     pub fn carry(&mut self, slot: Slot) {
+        if self.places.contains_key(&slot) {
+            return;
+        }
         let tail = |path| {
             let tail = self.buffer.tail(slot, path);
             order::Tail {
@@ -318,8 +318,7 @@ impl Shard {
         let live = tail(Path::Live);
         let index = Index::new(self.limits, live, tail(Path::Backfill));
         let place = self.indexes.len();
-        let carried = self.places.insert(slot, place);
-        assert!(carried.is_none(), "the shard carries {slot:?} already");
+        self.places.insert(slot, place);
         self.indexes.push(index);
         self.readers.carry(place, slot, live.seq);
     }
@@ -1574,6 +1573,22 @@ mod tests {
             );
             let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
             assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 2, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn changes_nothing_at_a_second_carry_of_an_index() {
+        run(99, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            assert_eq!(shard.write(a, LIVE, first), Ok(&[applied(0, 0, 1)][..]));
+            let latest = shard.open_latest(Slot::new(0));
+            shard.carry(Slot::new(0));
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            assert_eq!(shard.write(a, LIVE, next), Ok(&[applied(0, 1, 1)][..]));
+            assert_eq!(taken(&mut shard, latest, 0), [Range { seq: 1, count: 1 }]);
         });
     }
 

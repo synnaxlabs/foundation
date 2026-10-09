@@ -18,10 +18,10 @@ use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
 use wire::hub::client::STALE;
-use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, UNKNOWN, ends};
+use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::State;
 use crate::reader::{Credit, Ended, Session};
+use crate::{Away, State};
 
 pub use client::{Reply, Request};
 
@@ -43,6 +43,10 @@ pub enum Error {
     Unknown(channel::Key),
     /// A channel of the open was removed from the definitions. Code `UNKNOWN`.
     Removed(channel::Key),
+    /// The mesh names another node as the home of the open's index. Code `NOT_HOME`.
+    NotHome,
+    /// The mesh stopped, so the home of the open's index is not known. Code `FAILED`.
+    Mesh(mesh::Stopped),
     /// The home's buffer failed. Code `FAILED`.
     Buffer(env::files::Error),
     /// The home's pool had no block for a reply (`Exhausted` or `Refused`). Code
@@ -78,7 +82,8 @@ impl Error {
             Self::Access(error) => Some(Code(client::code(error))),
             Self::Stale => Some(Code(STALE)),
             Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
-            Self::Buffer(_) => Some(Code(FAILED)),
+            Self::NotHome => Some(Code(NOT_HOME)),
+            Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
             Self::Pool(_) => Some(Code(BUSY)),
             Self::Stream(_) => None,
         }
@@ -111,6 +116,10 @@ impl fmt::Display for Error {
                 f,
                 "the open names channel {key}, which was removed from this node"
             ),
+            Self::NotHome => f.write_str(
+                "the mesh names another node as the home of the open's index",
+            ),
+            Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
             Self::Buffer(error) => write!(f, "the buffer of the shard failed: {error}"),
             Self::Pool(error) => {
                 write!(f, "the home's pool had no block for a reply: {error}")
@@ -133,6 +142,15 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(_) => Self::NotHome,
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
 
 impl From<wire::hub::Error> for Error {
     fn from(error: wire::hub::Error) -> Self {
@@ -269,9 +287,9 @@ struct Opened {
     layout: Layout,
 }
 
-/// Reads the open and its keys, checks each key as it arrives and again at the open,
-/// and opens the session in the order of the keys. Gives `None` when the peer
-/// finishes first.
+/// Reads the open and its keys, checks each key as it arrives, waits until the mesh
+/// names a home for the index, checks each key again, and opens the session in the
+/// order of the keys. Gives `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -306,12 +324,14 @@ async fn open(
             break;
         }
     }
-    // A call of `set_definitions` between two messages can remove a key.
-    let mut index = None;
-    check(&state.borrow(), &keys, &mut index)?;
     let at = index
         .and_then(|index| keys.iter().position(|&key| key == index))
         .ok_or(Error::NoIndex)?;
+    let Some(granted) = wait(state, keys[at], home, receiver).await? else {
+        return Ok(None);
+    };
+    // A call of `set_definitions` while the open reads or waits can remove a key.
+    check(&state.borrow(), &keys, &mut Some(keys[at]))?;
     let slots: Box<[Slot]> = {
         let interner = &mut state.borrow_mut().interner;
         keys.iter()
@@ -335,6 +355,9 @@ async fn open(
         }
         Mode::Latest => (Session::latest(state, keys, slots.clone(), index), None),
     };
+    if let Some(credit) = &credit {
+        credit.grant(granted);
+    }
     Ok(Some(Opened {
         session,
         credit,
@@ -356,6 +379,41 @@ fn check(
         }
     }
     Ok(())
+}
+
+/// Waits until the home carries `index`, and reads the peer meanwhile. Gives the
+/// highest grant that the peer sent, 0 for none, or `None` when the peer finished
+/// first.
+async fn wait(
+    state: &Rc<RefCell<State>>,
+    index: channel::Key,
+    home: &mut Home,
+    receiver: &mut Receiver,
+) -> Result<Option<u64>, Error> {
+    let mut carry = pin!(crate::carry(state, index));
+    let mut granted = 0;
+    loop {
+        let mut recv = pin!(receiver.recv());
+        let read = poll_fn(|cx| match carry.as_mut().poll(cx) {
+            Poll::Ready(carried) => Poll::Ready(Err(carried)),
+            Poll::Pending => recv.as_mut().poll(cx).map(Ok),
+        })
+        .await;
+        let message = match read {
+            Err(carried) => {
+                carried?;
+                return Ok(Some(granted));
+            }
+            Ok(read) => match read? {
+                Some(message) => message,
+                None => return Ok(None),
+            },
+        };
+        let FromReader::Credit(grant) = home.decode(&message)? else {
+            unreachable!("invariant: after the keys run, Home gives only credits");
+        };
+        granted = granted.max(grant.limit_bytes);
+    }
 }
 
 /// A block of the home's pool that holds `reply`.

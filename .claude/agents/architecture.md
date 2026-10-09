@@ -53,20 +53,20 @@ Check:
 - Shape decisions: read the PR's "Shape decisions" section. Challenge any choice where
   a rejected alternative is the better architecture.
 
-Start the report with two lines. First `Public surface: none`, or each public item (its
-signature or doc) and crate dependency that the PR changes, and each change to the
-meaning of a ruling that an architect comment on the PR, on a PR that it replaces, or
-on an issue that it closes gave or approved (`.claude/skills/architect/SKILL.md`,
-"Review before the person" step 3), in a doc or a decisions entry, with file and line.
-Give such a change as `departs from <link of that comment>`: that comment does not
-approve the change. Then `Hot path: none`, or each changed function that runs once per
-sample, series, frame, or data message, with the loop that runs it, whatever the PR body
-says. Name also each changed type (its fields, size, or alignment) that such a function
-reads for each item, with that function. A function that a crate benchmark measures per
-frame, sample, series, or message is one. So is a stub that its caller on record will
-run so, and code in a crate's `src/` that exists only for tests and benchmarks and that
-a benchmark runs in its timed loop, such as a counting `GlobalAlloc`. A change to a
-bench file alone is not one.
+Start the report with two lines. First `Public surface: none`, or each public item of a
+crate in the crate map (its signature or doc) and crate dependency that the PR changes,
+and each change to the meaning of a ruling that an architect comment on the PR, on a PR
+that it replaces, or on an issue that it closes gave or approved
+(`.claude/skills/architect/SKILL.md`, "Review before the person" step 3), in a doc or a
+decisions entry, with file and line. Give such a change as `departs from <link of that
+comment>`: that comment does not approve the change. Then `Hot path: none`, or each
+changed function that runs once per sample, series, frame, or data message, with the
+loop that runs it, whatever the PR body says. Name also each changed type (its fields,
+size, or alignment) that such a function reads for each item, with that function. A
+function that a crate benchmark measures per frame, sample, series, or message is one.
+So is a stub that its caller on record will run so, and code in a crate's `src/` that
+exists only for tests and benchmarks and that a benchmark runs in its timed loop, such
+as a counting `GlobalAlloc`. A change to a bench file alone is not one.
 
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.

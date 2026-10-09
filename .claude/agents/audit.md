@@ -29,9 +29,17 @@ topic, and `grep -rl` for each crate name), `docs/claude/testing.md`,
 `docs/claude/performance.md`, and `docs/claude/design.md`. For the review trail, use
 `gh pr view <n> --comments`, `gh pr diff <n>`, `gh api
 repos/synnaxlabs/foundation/pulls/<n>/reviews` and `.../pulls/<n>/comments`, and the
-linked issues. Judge the PR by the rules at its merge commit (`git show
-<merge>:<path>`). Report a gap in a rule only when the rule on `main` today still lets
-it through.
+linked issues. Judge each round, and the code of its range, by the rules on `main` when
+it started, and the rest of the PR (each "Done" item, each approval, and the body) by
+the rules on `main` when its last round started. A round starts at the commit date of
+the head of its range. The rules on `main` at a time are those of the last commit of
+`git log --first-parent origin/main` whose PR merged before that time
+(`gh api repos/synnaxlabs/foundation/commits/<sha>/pulls --jq '.[0].merged_at'`), read
+with `git show <sha>:<path>`. Never date a commit of `main` by its commit date: the
+merge queue sets it when it builds a batch. A rule that came into `main` after each
+round whose range holds the code started makes no breach of the review. What a rule at
+the merge commit (`git show <merge>:<path>`) finds in the code is still a defect: report
+it. Report a gap in a rule only when the rule on `main` today still lets it through.
 
 Check, with file and line at the merge commit:
 
@@ -44,7 +52,9 @@ Check, with file and line at the merge commit:
    only when `uptime` shows a load under 8, and the verdict names the load. Tests
    check behavior through public calls, not a private field or the `Debug` string of the
    type under test (the test of a hand-written `Debug` impl itself excepted), unless a
-   written reason holds and the assertion is not the only kill of a mutant
+   written reason holds and the assertion is not the only kill of a mutant whose reason
+   no record gives: a `.cargo/mutants.toml` entry, or, for a hand mutant that
+   `cargo mutants` never makes, the doc of that test, which a round comment links
    (`docs/claude/testing.md`). They cover the failure paths, and each error is asserted
    by variant and message.
 2. **Review trail.** List each round: its reviewers, its range, and its end time. Each

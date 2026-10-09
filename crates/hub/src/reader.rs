@@ -13,7 +13,7 @@ use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
-use crate::{Removal, State};
+use crate::{Away, Removal, State};
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -82,6 +82,14 @@ pub enum Error {
     ManyIndexes,
     /// The reader names no channel.
     Empty,
+    /// The home of the index is `home`, another node, and this hub does not yet read
+    /// from another node (#340).
+    Remote {
+        /// The home.
+        home: types::node::Key,
+    },
+    /// The mesh stopped, so the home of the index is not known.
+    Mesh(mesh::Stopped),
 }
 
 impl fmt::Display for Error {
@@ -92,11 +100,26 @@ impl fmt::Display for Error {
                 "the channels are on more than one index: open a reader per index",
             ),
             Self::Empty => f.write_str("a reader names at least one channel"),
+            Self::Remote { home } => write!(
+                f,
+                "the home of the index is node {home}, and a reader reads only at \
+                 this node"
+            ),
+            Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(home) => Self::Remote { home },
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
 
 /// A reader session through the reader's channels. Dropping it closes the session;
 /// frames that wait do not go out.
@@ -112,16 +135,14 @@ pub struct Reader {
 
 impl Reader {
     /// Opens a reader on the index of `channels`.
-    pub(crate) fn open(
+    pub(crate) async fn open(
         state: &Rc<RefCell<State>>,
         channels: &[Name],
         mode: Mode,
     ) -> Result<Self, Error> {
-        let mut slots = Vec::with_capacity(channels.len());
         let mut keys = Vec::with_capacity(channels.len() + 1);
-        let slot = {
-            let mut borrowed = state.borrow_mut();
-            let borrowed = &mut *borrowed;
+        let index = {
+            let borrowed = state.borrow();
             let mut index = None;
             for name in channels {
                 let channel = borrowed
@@ -131,15 +152,20 @@ impl Reader {
                 if *index.get_or_insert(channel.index()) != channel.index() {
                     return Err(Error::ManyIndexes);
                 }
-                slots.push(borrowed.interner.slots().assign(channel.key()));
                 keys.push(channel.key());
             }
-            let index = index.ok_or(Error::Empty)?;
-            keys.push(index);
-            borrowed.interner.slots().assign(index)
+            index.ok_or(Error::Empty)?
+        };
+        crate::carry(state, index).await?;
+        let (mut slots, slot) = {
+            let mut borrowed = state.borrow_mut();
+            let assigned = borrowed.interner.slots();
+            let slots: Vec<_> = keys.iter().map(|&key| assigned.assign(key)).collect();
+            (slots, assigned.assign(index))
         };
         // A frame without the reader's channels still shows that time moved.
         slots.push(slot);
+        keys.push(index);
         let (slots, keys) = (slots.into(), keys.into());
         let (session, credit) = match mode {
             Mode::Complete => {

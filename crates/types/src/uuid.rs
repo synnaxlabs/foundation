@@ -3,6 +3,19 @@
 
 use std::fmt;
 
+/// The bits of a UUIDv7 from `time`, in whole milliseconds, and the low 74 bits of
+/// `random`. Panics when `time` is before the Unix epoch.
+pub(crate) fn v7(time: crate::time::Stamp, random: u128) -> u128 {
+    let nanos = time.nanos();
+    let millis =
+        u128::try_from(nanos.div_euclid(1_000_000)).unwrap_or_else(|_before| {
+            panic!("invariant: a key is made after the Unix epoch, not at {nanos} ns")
+        });
+    let rand_a = (random >> 62) & 0xfff;
+    let rand_b = random & ((1 << 62) - 1);
+    millis << 80 | 0x7 << 76 | rand_a << 64 | 0b10 << 62 | rand_b
+}
+
 /// Writes `bits` as a lowercase hyphenated UUID string.
 pub(crate) fn write(bits: u128, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(

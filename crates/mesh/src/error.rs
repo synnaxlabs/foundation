@@ -1,4 +1,7 @@
 use std::fmt;
+use std::path::PathBuf;
+
+use env::files;
 
 use raft::Position;
 use spec::Pointer;
@@ -97,6 +100,13 @@ pub enum Error {
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
+    /// A file call on the directory of the spec in use, or on a file in it, failed.
+    Files(files::Error),
+    /// A file in the directory of the spec in use does not name a pointer.
+    Stray {
+        /// The file.
+        path: PathBuf,
+    },
     /// A home of a spec change names an index that the spec of the change does not
     /// hold as an index channel.
     NotIndex(Name),
@@ -114,6 +124,7 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
+    #[expect(clippy::too_many_lines, reason = "one arm for each error")]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Log(error) => error.fmt(f),
@@ -168,6 +179,13 @@ impl fmt::Display for Error {
                  majority"
             ),
             Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
+            Self::Files(error) => error.fmt(f),
+            Self::Stray { path } => write!(
+                f,
+                "{} is in the directory of the spec in use, but it does not name a \
+                 pointer",
+                path.display()
+            ),
             Self::NotIndex(index) => write!(
                 f,
                 "a home names {index}, which the spec does not hold as an index channel"
