@@ -131,9 +131,9 @@ pub fn net() -> env::net::Net {
 /// handle of its I/O thread. `os` keeps its own entries in `dir`, so give it a
 /// directory that nothing else uses. `threads` starts I/O thread `name`, which runs
 /// each call of the disk and of its files in the order they reach it, and ends after
-/// the disk and its files drop. Give each shard a disk of its own. Each file and
-/// directory that it makes gives the group and other users no access. It does not
-/// change the mode of a file or directory that is there.
+/// the disk and its files drop. Give each shard a disk of its own. The mode of each
+/// file and directory that it makes gives the group and other users no access. It does
+/// not change the mode of a file or directory that is there.
 ///
 /// # Errors
 ///

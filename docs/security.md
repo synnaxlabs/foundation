@@ -32,7 +32,7 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
 | Local user that runs the node | Read and write the node's files and memory, and so hold its keys and cached secrets and become that member node | |
-| Other local user | Read a file or list a directory of the node that is there with a wider mode, which `os` does not change | Read or list what `os` makes; read memory of the process |
+| Other local user | Read, write, or list a file or directory that the operator opens to it: one that is there with a wider mode, which `os` does not change, or one that an ACL of the data directory opens. With write, it can write the node's keys and so become that node | Read, write, or list another file or directory that `os` makes; read memory of the process |
 | Agent host | Use the key of the agent's subject, which the MCP process holds | Go past that subject's allows |
 | Dependency | Ship hostile or defective code in a crate we build | |
 
@@ -278,8 +278,8 @@ state on `main`.
   `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
   of each header block reads as zero, an open takes the file for a ring with no
   checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
-  local user who writes the file: it is not a secret, and a header block has no tie
-  to its ring.
+  local user who can write the file (Who attacks): it is not a secret, and a header
+  block has no tie to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
   ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
   #348. They do not have the `security` label: each needed a writer of the file, or,
@@ -314,8 +314,8 @@ state on `main`.
   and no equality. The TLS configs do not write key bytes in `Debug`.
 - Open hardening: `PrivateKey` is `Clone` with a public field, and neither it nor the
   PKCS#8 copy in `tls` is cleared when dropped.
-- Node key material is on the node's local disk. A local user who reads it is that
-  node.
+- Node key material is on the node's local disk. A local user who can read it (Who
+  attacks) is that node.
 - `ctx.secret(name)` is the only path to a secret value (SECRET STORES AS ADAPTERS).
   The built-in store seals each value to the X25519 seal key of each node that may
   use it (BQ16, S8). The other adapters (an environment variable or a file, and the
