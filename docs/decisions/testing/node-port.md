@@ -38,10 +38,16 @@
   message. A `Mesh` stream of a `Peer::Client` session stops with
   `Code(wire::header::REJECTED)`, and its reply half resets with the same code. For
   `Mesh` streams, the admission rule is the mesh's check of each message: a peer that
-  is not the member it names gets `Spoofed`, and the stream stops at that message. The
-  `Hub` rule comes with PR 4. At the stop, each session and stream future drops, then
-  the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
-  DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
+  is not the member it names gets `Spoofed`, and the stream stops at that message. A
+  `Hub` stream of a `Peer::Node` session goes to the hub's link of the session only
+  when the node has a mesh and a member of its region, in this node's view, has the
+  peer's public key; else it stops with `Code(wire::header::REJECTED)`, and its reply
+  half resets with the same code. A `Hub` stream of a `Peer::Client` session is
+  rejected until #1744 (PR 4b of #585, by `laptop.architect-2`, 22:22 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070221342). At the
+  stop, each session and stream future drops, then the mesh, and shard 0 waits for the
+  mesh's task to end before it drops `lock` (DATA DIRECTORY LOCK) and before
+  `Node::join` returns, so a restart at once opens the log:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. This
   supersedes the stop order of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669.
@@ -67,11 +73,15 @@
   region. Each other file error on `node.key` gives `Error::Directory`. The form is not
   a contract: only `node` reads it. The seal key goes into `node.key` with its first
   caller, as the tag `foundation/key/2` with 32 more bytes. `admin.key` (#1744 PR 1b)
-  shares this code when it lands. #1988 makes `os` give each file the mode `0600` and
-  each directory `0700`; until then `os` gives `0644` and `0755`:
+  shares this code when it lands. `os` gives each new file the mode `0600` and each new
+  directory `0700`, and on Linux a new directory takes the setgid bit of its parent; the
+  umask can clear more bits. It does not change the mode of one that is there (#1988):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
   plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
-  time of a new key, by `laptop.architect-2` (20:10 UTC):
+  umask, the setgid bit, and a file that is there, by `laptop.architect-2` (23:24 UTC):
+  https://github.com/synnaxlabs/foundation/pull/2028#issuecomment-6071026954, which
+  https://github.com/synnaxlabs/foundation/pull/2028#issuecomment-6071534642 confirms
+  (00:09 UTC). The time of a new key, by `laptop.architect-2` (20:10 UTC):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The
   private pool and the rank above `Error::Blob` and `Error::Mesh` are the amendment
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068057306, which

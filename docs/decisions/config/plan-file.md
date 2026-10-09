@@ -59,6 +59,20 @@
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179. Supersedes
   the `changes: Vec<Change>` field and `Change::name` of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688.
+  The `ops` apply decodes the plan, compares its base with the spec pointer, then calls
+  `definitions`, as `definitions` reads the definitions at the base. So a stale plan
+  with a reserved change gives `ops.stale-plan` (OPS OUTPUT). Decided by
+  `laptop.architect-2` (2026-10-08T22:57:59Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432).
+  Supersedes the order of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6060043966.
+  A plan with no change and no home proposes nothing: after the `ops.behind` check and
+  the base compare, the apply gives the pointer in use, so it makes no other plan
+  stale. Such a plan at an old base gives `ops.stale-plan`, as its files can differ
+  from the newest spec. A hand-made plan that lists no home for a new index applies,
+  and the index has no home until a later change gives one (SPEC APPLY). Decided by
+  `laptop.architect-2` (2026-10-08T23:51:37Z, items 3 and 4 of
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913).
   `config::plan::check(definitions, members, kinds)` checks the definitions after the
   plan, with no span. It holds: the kind table accepts the kind and the config of each
   connector, then `config.unplaced`, `config.connector-home`, `config.split-placement`,

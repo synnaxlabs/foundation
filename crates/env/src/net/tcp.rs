@@ -2,6 +2,7 @@
 
 use std::io::IoSlice;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::task::{Context, Poll};
 
 use super::Error;
@@ -9,10 +10,12 @@ use super::Error;
 /// The socket options of one TCP stream.
 ///
 /// ```
+/// use std::num::NonZeroUsize;
+///
 /// let options = env::net::tcp::Options {
 ///     send_buffer_bytes: 1 << 20,
 ///     recv_buffer_bytes: 1 << 20,
-///     unsent_bytes_max: 1 << 14,
+///     unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
 ///     delayed: false,
 /// };
 /// ```
@@ -24,7 +27,7 @@ pub struct Options {
     pub recv_buffer_bytes: usize,
     /// The most bytes written but not yet sent before a write waits
     /// (`TCP_NOTSENT_LOWAT`).
-    pub unsent_bytes_max: usize,
+    pub unsent_bytes_max: NonZeroUsize,
     /// Small writes wait to join later ones (Nagle's algorithm). Otherwise each write
     /// goes out at once.
     pub delayed: bool,
