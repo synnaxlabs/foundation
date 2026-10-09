@@ -114,9 +114,12 @@
   winner of the first connector of the unit, in name order, that a placement selects,
   else the placement that wins for the indexes of the unit. The fix is "Make the
   placement `t` win for the connectors `a` and `b` and their indexes", so one edit
-  applies it. A unit of one connector `c` keeps "the connector `c` and its indexes" in
-  each fix (same comment of 15:21:54Z, and `laptop.architect`, 2026-10-08T16:22:59Z,
-  and `laptop.architect`, 2026-10-09T22:58:00Z,
+  applies it. This also holds for the `config.connector-home` of a connector of the
+  unit whose winner is not `t`. The `config.connector-home` at `t` keeps the case 1
+  fix, which names `n` as the home of `t`. A unit of one connector `c` keeps "the
+  connector `c` and its indexes" in each fix (same comment of 15:21:54Z, and
+  `laptop.architect`, 2026-10-08T16:22:59Z, and `laptop.architect`,
+  2026-10-09T22:58:00Z,
   https://github.com/synnaxlabs/foundation/pull/2194#issuecomment-6090684061). When no
   placement can win for each connector and index of the unit at `n`, each of its
   diagnostics gives one fix that names each winner. When `t` gets case 2 of
@@ -163,10 +166,11 @@
   a removal that leaves no node, an `Overlap` fix computed in `config` for each name,
   which gives one variant a second source of text, a fix computed in `config` from each
   `Overlap` of `p`, the nearest connector by name, which checks an index that the
-  connector does not write and no index that it writes under another name, and a
+  connector does not write and no index that it writes under another name, a
   `config.split-placement` for each writer of an index on two nodes, whose fixes cannot
-  all hold, and an index that fails over apart from a writer, with one target for each
-  connector, whose fixes for the writers of one index cannot all hold.
+  all hold, an index that fails over apart from a writer, one target for each
+  connector, whose fixes for the writers of one index cannot all hold, and one target
+  for each index, whose fixes for a chain of indexes cannot all hold.
   Supersedes the nearest-connector rule of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459 and item 1
   of https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239.

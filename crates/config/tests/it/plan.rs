@@ -2669,3 +2669,25 @@ fn plans_after_the_one_regroup_fix_of_two_writers_of_an_index() {
     );
     plans_after(&refused, &expected, &fixed);
 }
+
+#[test]
+fn plans_after_the_one_fix_of_a_unit_whose_second_winner_names_another_home() {
+    let z =
+        "connector \"z\" {\n  kind = \"writer\"\n  node = \"m\"\n  writes = []\n}\n";
+    let text =
+        |more: &str| writers(&["a", "b"], &["\"i.time\""; 2], &(z.to_owned() + more));
+    let fixed = text(
+        &(placement("p", "\"a\", \"b\", \"i.time\"", "n")
+            + &placement("q", "\"z\"", "m")),
+    );
+    for select in ["\"a\"", "\"a\", \"i.time\""] {
+        let refused =
+            text(&(placement("p", select, "n") + &placement("q", "\"b\", \"z\"", "m")));
+        let fix = wins("p", "`a` and `b`");
+        let expected = [
+            ("config.split-placement", fix.clone()),
+            ("config.connector-home", fix),
+        ];
+        plans_after(&refused, &expected, &fixed);
+    }
+}

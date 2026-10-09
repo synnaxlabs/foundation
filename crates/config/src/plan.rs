@@ -53,8 +53,7 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   it or a channel on it, are on one node, when the winner of a writer is not the
 ///   winner of the index: once, naming each such writer, at the label of the index's
 ///   placement, or of the first such writer's when no placement selects the index.
-///   Connectors linked by the indexes that they write get one fix, which names them
-///   all.
+///   Its fix names each connector that the indexes they write link to the index.
 /// - `config.writer-nodes` at the `node` of the first connector, in name order, on a
 ///   second node that writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
@@ -580,6 +579,8 @@ impl<'f> Located<'f> {
 struct Unit<'f> {
     /// Its connectors, in name order.
     connectors: Vec<&'f Name>,
+    /// The placements that win for its indexes.
+    owners: BTreeSet<&'f Name>,
     /// The fix of each of its diagnostics, or `None` when no placement wins for a
     /// connector or an index of it.
     fix: Option<Fix<'f>>,
@@ -617,8 +618,11 @@ fn connectors<'f>(
         {
             let unit = &units[of[name]];
             let fix = match &unit.fix {
-                Some(fix @ (Fix::Exclude { .. } | Fix::Regroup { .. })) => fix,
-                _ => &Fix::Home { node },
+                Some(Fix::Win { placement: t }) if t == placement => {
+                    &Fix::Home { node }
+                }
+                Some(fix) => fix,
+                None => unreachable!("invariant: a unit with a winner has a fix"),
             };
             let p = label(placement);
             diagnostics.push(Diagnostic::new(
@@ -687,16 +691,7 @@ fn units<'f>(
             nodes.entry(own).or_default().extend(writers);
         }
     }
-    let (units, of) = link(located, indexes);
-    let mut owners = vec![BTreeSet::new(); units.len()];
-    for index in indexes.values() {
-        let own = index.placed.as_ref().ok().and_then(|own| own.placement);
-        if let (Some(own), None, Some(first)) =
-            (own, index.apart(), index.writers.first())
-        {
-            owners[of[first.name]].insert(own);
-        }
-    }
+    let (mut units, of) = link(located, indexes);
     let home = |placement: &Name| {
         placements
             .iter()
@@ -706,46 +701,38 @@ fn units<'f>(
     let elsewhere = |placement: &Name, node: &Name| {
         home(placement).is_some_and(|home| home != node)
     };
-    let units = units
-        .into_iter()
-        .zip(owners)
-        .map(|(connectors, owners)| {
-            let node = located[connectors[0]].connector.node;
-            let winners = connectors.iter().filter_map(|c| located[c].winner());
-            let target = winners.clone().next();
-            let spread = |p: &Name| nodes[p].iter().any(|other| *other != node);
-            let owned: Vec<_> = owners.iter().copied().collect();
-            let fix = match (target, owned.as_slice()) {
-                (Some(t), _) if elsewhere(t, node) && spread(t) => {
-                    let others: BTreeSet<_> = winners.chain(owners).collect();
-                    let others = others.into_iter().filter(|other| *other != t);
-                    Some(Fix::Exclude {
-                        placements: [t].into_iter().chain(others).collect(),
-                        node,
-                    })
-                }
-                (Some(placement), _) => Some(Fix::Win { placement }),
-                (None, &[placement]) if !elsewhere(placement, node) => {
-                    Some(Fix::Win { placement })
-                }
-                (None, []) => None,
-                (None, _) => Some(Fix::Regroup {
-                    owners: owned,
+    for unit in &mut units {
+        let node = located[unit.connectors[0]].connector.node;
+        let mut winners = unit.connectors.iter().filter_map(|c| located[c].winner());
+        let target = winners.next();
+        let spread = |p: &Name| nodes[p].iter().any(|other| *other != node);
+        let owners: Vec<_> = unit.owners.iter().copied().collect();
+        unit.fix = match (target, owners.as_slice()) {
+            (Some(t), _) if elsewhere(t, node) && spread(t) => {
+                let others: BTreeSet<_> = winners.chain(owners).collect();
+                let others = others.into_iter().filter(|other| *other != t);
+                Some(Fix::Exclude {
+                    placements: [t].into_iter().chain(others).collect(),
                     node,
-                }),
-            };
-            Unit { connectors, fix }
-        })
-        .collect();
+                })
+            }
+            (Some(placement), _) => Some(Fix::Win { placement }),
+            (None, &[placement]) if !elsewhere(placement, node) => {
+                Some(Fix::Win { placement })
+            }
+            (None, []) => None,
+            (None, _) => Some(Fix::Regroup { owners, node }),
+        };
+    }
     (units, of)
 }
 
-/// The connectors of `located` by unit, in name order, and the position of the unit
+/// The units of the connectors of `located`, with no fix, and the position of the unit
 /// of each connector. Each index whose writers are on one node links them.
 fn link<'f>(
     located: &BTreeMap<&'f Name, Located<'f>>,
     indexes: &BTreeMap<&'f Name, Index<'f>>,
-) -> (Vec<Vec<&'f Name>>, BTreeMap<&'f Name, usize>) {
+) -> (Vec<Unit<'f>>, BTreeMap<&'f Name, usize>) {
     let position: BTreeMap<_, _> = located.keys().copied().zip(0..).collect();
     let mut parent: Vec<usize> = (0..located.len()).collect();
     let root = |parent: &mut Vec<usize>, mut i: usize| {
@@ -766,14 +753,30 @@ fn link<'f>(
     }
     let mut of = BTreeMap::new();
     let mut roots = BTreeMap::new();
-    let mut units = Vec::<Vec<_>>::new();
+    let mut units = Vec::new();
     for (name, i) in position {
         let unit = *roots.entry(root(&mut parent, i)).or_insert_with(|| {
-            units.push(Vec::new());
+            units.push(Unit {
+                connectors: Vec::new(),
+                owners: BTreeSet::new(),
+                fix: None,
+            });
             units.len() - 1
         });
-        units[unit].push(name);
+        units[unit].connectors.push(name);
         of.insert(name, unit);
+    }
+    for index in indexes.values().filter(|index| index.apart().is_none()) {
+        if let (
+            Ok(Placed {
+                placement: Some(own),
+                ..
+            }),
+            Some(first),
+        ) = (&index.placed, index.writers.first())
+        {
+            units[of[first.name]].owners.insert(*own);
+        }
     }
     (units, of)
 }
