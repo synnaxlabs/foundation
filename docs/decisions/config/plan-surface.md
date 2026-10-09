@@ -74,14 +74,20 @@
   `config.connector-home` (X22) is at the `home` of a placement `p` that wins for a
   connector `a` on the node `n` and names another node. Its fix is "Name `n` as the
   `home`, and keep `n` out of `standby` and `copies`" when `p` wins for no connector on
-  another node, and for no index whose nearest connector is on another node, because a
+  another node, and for no index that a connector on another node writes, because a
   new `home` moves each index that `p` wins (`laptop.architect`, 2026-10-08T16:22:59Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064298961). Else it
   is "Exclude the connector `a` and its indexes from the `select` of `p`, and select
   them with another placement whose `home` is `n`", which changes no other connector of
   `p`, and which lists after `p` each placement that wins for an index of `a`. The
-  indexes of a connector are those whose nearest connector it is, as
-  `config.split-placement` reads them (`laptop.architect`, #1901, 2026-10-08T15:12:13Z,
+  indexes of a connector are the indexes that it writes to the mesh: each index that
+  it writes, and the index of each channel that it writes (`laptop.director`,
+  2026-10-08T18:36:00Z,
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6066565970). The X22
+  condition with writers: `laptop.architect`, 2026-10-09T22:21:16Z,
+  https://github.com/synnaxlabs/foundation/issues/1961#issuecomment-6090219134. For
+  "another" and the placements of the indexes: `laptop.architect`, #1901,
+  2026-10-08T15:12:13Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
   2026-10-08T15:21:54Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063150126,
@@ -89,13 +95,14 @@
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171, and
   2026-10-08T16:04:09Z, for "another" and the placements of the indexes,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123).
-  `config.split-placement` (BQ10) is at each index when the placement that wins for it
-  is not the one that wins for its nearest connector, the connector with the longest
-  name above the index (`Name::starts_with`): at the label of the index's placement, or
-  of the connector's when no placement selects the index. So the index `d.e.time`
-  follows the connector `d.e`, not `d`: the indexes of BQ10 are the connector's own, the
-  unit of failover (`laptop.director`, #1901, 2026-10-08T15:20:28Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459). Its fix
+  `config.split-placement` (BQ10) is at each index, for each connector that writes it,
+  when the placement that wins for the index is not the one that wins for the
+  connector: at the label of the index's placement, or of the connector's when no
+  placement selects the index. A connector only reads a command index, so command
+  indexes leave the unit (same ruling of 18:36:00Z). When the connectors that write an
+  index are on two nodes, `config.writer-nodes` reports it and the index gets no
+  `config.split-placement`, as no one fix can hold for each writer (`laptop.architect`,
+  OWED). Its fix
   is "Make the placement `p` win for the connector `c` and its indexes", where `p` wins
   for `c`, or for the index when no placement selects `c` (same comment of 15:21:54Z,
   and `laptop.architect`, 2026-10-08T16:22:59Z). It is the target state that each other
@@ -109,15 +116,7 @@
   for the indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the
   indexes of the connector `c` from the `select` of `p`, and select the connector and
   its indexes with another placement whose `home` is `n`", where `p` is each placement
-  that wins for an index of `c`. When `p`, the placement that the fix names (the winner
-  of `c`, else the one placement that wins for its indexes), names no `home` and an
-  index of `c` has no writer, the fix is "Name `n` as the `home` of `p`, keep `n` out of
-  its `standby` and `copies`, and make `p` win for the connector `c` and its indexes"
-  when `p` wins for no connector on another node, and for no index whose nearest
-  connector is on another node, because a placement with no `home` cannot hold an index
-  that no connector writes. Else it is the case 2 text, or the text for no placement
-  that selects `c` (`laptop.architect`, 2026-10-08T16:51:46Z,
-  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239, item 1). A
+  that wins for an index of `c`. A
   list of winners is "`p`", "`p` and `q`", or "`p`, `q`, and `r`": the winner of `c`
   first, then the others in tree key order. "Another" keeps a listed placement from
   being the new one, which its exclusion would empty (`laptop.architect`,
@@ -142,15 +141,21 @@
   `config.split-placement` fix "and each name under it", which also moves the indexes of
   a nested connector, and, when no placement can win for `c` and each of its indexes at
   `n`, a fix that names one placement, which moves the index `i` alone or conflicts with
-  the fix of another diagnostic of `c`, case 1 when `p` wins for an index whose nearest
-  connector is on another node, which moves that index away from its connector, and the
+  the fix of another diagnostic of `c`, case 1 when `p` wins for an index that a
+  connector on another node writes, which moves that index away from its writer, and the
   `config.split-placement` fix "and the index `i`", which gives each split diagnostic of
   `c` another edit, the node of the nearest connector as the home of an index with no
   writer, which guesses a home for data that no connector on that node makes, the
   `Overlap` fix "Move the node to `home`, or remove it from the placement", which offers
   a removal that leaves no node, an `Overlap` fix computed in `config` for each name,
-  which gives one variant a second source of text, and a fix computed in `config` from
-  each `Overlap` of `p`.
+  which gives one variant a second source of text, a fix computed in `config` from each
+  `Overlap` of `p`, the nearest connector by name, which checks an index that the
+  connector does not write and no index that it writes under another name, and a
+  `config.split-placement` for each writer of an index on two nodes, whose fixes cannot
+  all hold.
+  Supersedes the nearest-connector rule of
+  https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459 and item 1
+  of https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239.
   Supersedes the fix texts of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062816747, and
