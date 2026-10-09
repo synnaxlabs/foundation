@@ -28,7 +28,7 @@ use loom::sync::Mutex;
 #[cfg(loom)]
 use loom::sync::atomic::{AtomicBool, Ordering};
 
-use crate::kind;
+use crate::{cancel, kind};
 
 /// The name of the index of the status channels.
 const TIME: &str = "time";
@@ -211,17 +211,19 @@ pub(crate) struct Writer {
     session: RefCell<Session>,
     values: Rc<Values>,
     clock: Clock,
+    cancel: cancel::Token,
 }
 
 impl Writer {
     /// Opens the writer of the status channels of `connector`, whose kind named
     /// `counts`, as the connector, and gives the status that it writes. `clock` times
-    /// the writes.
+    /// the writes, and `cancel` ends a wait of a change of state.
     pub(crate) async fn open(
         hub: &hub::Hub,
         connector: &Name,
         counts: Vec<Name>,
         clock: Clock,
+        cancel: cancel::Token,
     ) -> Result<(Self, Status), hub::writer::Error> {
         let names = channels(connector, &counts);
         let (time, channels) = names.unwrap_or_else(|error| {
@@ -262,47 +264,62 @@ impl Writer {
             class: Class::None,
             restarts: 0,
             started: false,
+            unapplied: false,
         };
         let writer = Self {
             session: RefCell::new(session),
             values: Rc::clone(&status.0),
             clock,
+            cancel,
         };
         Ok((writer, status))
     }
 
     /// Writes `state` 0, with one more restart after the first start.
-    pub(crate) fn start(&self) {
+    pub(crate) async fn start(&self) {
         self.set(|session| {
             if session.started {
                 session.restarts = session.restarts.strict_add(1);
             }
             session.started = true;
             session.state = State::Running;
-        });
+        })
+        .await;
     }
 
     /// Writes `state` 3 with the class of a run that ended with `end`.
-    pub(crate) fn end(&self, end: &Result<(), kind::Error>) {
+    pub(crate) async fn end(&self, end: &Result<(), kind::Error>) {
         self.set(|session| {
             session.class = Class::of(end);
             session.state = State::Ending;
-        });
+        })
+        .await;
     }
 
     /// Writes `state` 1.
-    pub(crate) fn wait(&self) {
-        self.set(|session| session.state = State::Waiting);
+    pub(crate) async fn wait(&self) {
+        self.set(|session| session.state = State::Waiting).await;
     }
 
     /// Writes `state` 2.
-    pub(crate) fn stop(&self) {
-        self.set(|session| session.state = State::Stopped);
+    pub(crate) async fn stop(&self) {
+        self.set(|session| session.state = State::Stopped).await;
     }
 
-    fn set(&self, change: impl FnOnce(&mut Session)) {
+    /// Writes the change of state that `change` makes, after the home applied the
+    /// change before it or `cancel` is cancelled, so that no state replaces a state
+    /// that the home did not apply.
+    async fn set(&self, change: impl FnOnce(&mut Session)) {
+        self.cancel
+            .race(async {
+                while self.session.borrow().unapplied {
+                    self.write_staged().await;
+                }
+            })
+            .await;
         let mut session = self.session.borrow_mut();
         change(&mut session);
+        session.unapplied = true;
         session.write(&self.values, self.clock.now());
     }
 
@@ -374,6 +391,8 @@ struct Session {
     restarts: u64,
     /// Set at the first start, after which each start is a restart.
     started: bool,
+    /// Set while the last change of state is in no frame that the home applied.
+    unapplied: bool,
 }
 
 impl Session {
@@ -399,6 +418,9 @@ impl Session {
                 "invariant: a status frame stamped after {before}, the last stamp of \
                  its index, is not backwards, but the home gives {again} as last"
             )
+        }
+        if !values.staged.get() {
+            self.unapplied = false;
         }
     }
 
