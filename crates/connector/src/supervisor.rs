@@ -1315,12 +1315,14 @@ mod tests {
         }
     }
 
-    /// A kind with the count `samples`. Its run sets it to 1 at 500 ms and returns
-    /// `Ok` at 600 ms. A task of the run sets it to the value, if given, at 800 ms
-    /// and ends at 2 s.
-    struct Late(Option<u64>);
+    /// A kind with the count `samples`, whose run is the function it holds.
+    struct Counted<F>(F);
 
-    impl Kind for Late {
+    impl<F, R> Kind for Counted<F>
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+    {
         type Config = ();
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
@@ -1338,9 +1340,17 @@ mod tests {
             std::future::ready(Ok(Vec::new()))
         }
 
-        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+        fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
+            (self.0)(ctx)
+        }
+    }
+
+    /// A kind with the count `samples`. Its run sets it to 1 at 500 ms and returns
+    /// `Ok` at 600 ms. A task of the run sets it to `value`, if given, at 800 ms and
+    /// ends at 2 s.
+    fn late(value: Option<u64>) -> impl Kind<Config = ()> {
+        Counted(move |ctx: Context<()>| async move {
             let (late, clock) = (ctx.count("samples"), ctx.clock().clone());
-            let value = self.0;
             ctx.tasks().spawn(async move {
                 clock.sleep(ms(800)).await;
                 if let Some(value) = value {
@@ -1352,12 +1362,12 @@ mod tests {
             ctx.count("samples").set(1);
             ctx.clock().sleep(ms(100)).await;
             Ok(())
-        }
+        })
     }
 
     #[test]
     fn writes_a_change_of_counts_alone_a_second_after_a_write_of_the_supervisor() {
-        let statuses = tally(Late(Some(2)));
+        let statuses = tally(late(Some(2)));
         let got: Vec<_> = statuses
             .iter()
             .map(|(at, samples)| (*at, samples[0], samples[3]))
@@ -1373,7 +1383,7 @@ mod tests {
 
     #[test]
     fn writes_no_count_that_a_write_of_the_supervisor_wrote() {
-        let statuses = tally(Late(None));
+        let statuses = tally(late(None));
         let got: Vec<_> = statuses
             .iter()
             .map(|(at, samples)| (*at, samples[0], samples[3]))
@@ -1384,32 +1394,9 @@ mod tests {
 
     /// A kind with the count `samples`. Its run spawns a task that sets the count to
     /// each of 1 to `n`, `gap` apart, and returns `Ok` once that task ended.
-    struct Relay {
-        n: u64,
-        gap: Span,
-    }
-
-    impl Kind for Relay {
-        type Config = ();
-
-        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
-            Ok(())
-        }
-
-        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-            Tally::check(&Tally::new("samples"), &())
-        }
-
-        fn discover(
-            &self,
-            _: &cancel::Token,
-        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
-            std::future::ready(Ok(Vec::new()))
-        }
-
-        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+    fn relay(n: u64, gap: Span) -> impl Kind<Config = ()> {
+        Counted(move |ctx: Context<()>| async move {
             let (count, clock) = (ctx.count("samples"), ctx.clock().clone());
-            let (n, gap) = (self.n, self.gap);
             let done = Rc::new((Cell::new(false), Cell::new(None::<Waker>)));
             let signal = Rc::clone(&done);
             ctx.tasks().spawn(async move {
@@ -1431,15 +1418,12 @@ mod tests {
             })
             .await;
             Ok(())
-        }
+        })
     }
 
     #[test]
     fn gives_13_frames_for_10_000_samples_over_10_s_set_from_a_task() {
-        let statuses = tally(Relay {
-            n: 10_000,
-            gap: ms(1),
-        });
+        let statuses = tally(relay(10_000, ms(1)));
         assert_eq!(statuses.len(), 13, "{statuses:?}");
         assert_eq!(statuses.last().map(|(_, samples)| samples[3]), Some(10_000));
         assert_eq!(states(&statuses)[11..], [(3, 0, 0), (2, 0, 0)]);
@@ -1450,29 +1434,8 @@ mod tests {
     /// gives the frames back at 1.5 s, and returns `Ok` at 3 s. When `full`, it takes
     /// the room that came back again at 900 ms, so the pool is full at the flush at
     /// 1 s. Else the home has no room to take that flush's frame, and loses it.
-    struct Hog {
-        full: bool,
-    }
-
-    impl Kind for Hog {
-        type Config = ();
-
-        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
-            Ok(())
-        }
-
-        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-            Tally::check(&Tally::new("samples"), &())
-        }
-
-        fn discover(
-            &self,
-            _: &cancel::Token,
-        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
-            std::future::ready(Ok(Vec::new()))
-        }
-
-        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+    fn hog(full: bool) -> impl Kind<Config = ()> {
+        Counted(move |ctx: Context<()>| async move {
             let channels = ["state", "class", "restarts", "samples"]
                 .map(|c| name(&format!("plant.tally.status.{c}")))
                 .into();
@@ -1482,7 +1445,7 @@ mod tests {
                 .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
                 .collect();
             let mut held = Vec::new();
-            let mut fill = || {
+            let mut take = || {
                 let error = loop {
                     match writer.draft(Form::Raw, &series) {
                         Ok(draft) => held.push(draft),
@@ -1491,30 +1454,30 @@ mod tests {
                 };
                 assert!(matches!(error, frame::Error::Pool(_)), "{error}");
             };
-            fill();
+            take();
             ctx.count("samples").set(7);
             ctx.clock().sleep(ms(900)).await;
-            if self.full {
-                fill();
+            if full {
+                take();
             }
             ctx.clock().sleep(ms(600)).await;
             drop(held);
             ctx.clock().sleep(ms(1_500)).await;
             Ok(())
-        }
+        })
     }
 
     #[test]
     fn writes_a_count_again_when_the_pool_has_no_room_for_its_frame() {
-        assert_eq!(hogged(Hog { full: true }), HOGGED);
+        assert_eq!(hogged(true), HOGGED);
     }
 
     #[test]
     fn writes_a_count_again_when_the_home_loses_its_frame() {
-        assert_eq!(hogged(Hog { full: false }), HOGGED);
+        assert_eq!(hogged(false), HOGGED);
     }
 
-    /// The status of `Hog`: the count of the flush at 1 s is written at 2 s.
+    /// The status of `hog`: the count of the flush at 1 s is written at 2 s.
     const HOGGED: [(Span, i64, i64); 4] = [
         (Span::ZERO, 0, 0),
         (Span::from_nanos(2_000_000_000), 0, 7),
@@ -1522,9 +1485,9 @@ mod tests {
         (Span::from_nanos(3_000_000_001), 2, 7),
     ];
 
-    /// The time, `state`, and count of each status frame of `hog`.
-    fn hogged(hog: Hog) -> Vec<(Span, i64, i64)> {
-        let statuses = tally(hog);
+    /// The time, `state`, and count of each status frame of `hog(full)`.
+    fn hogged(full: bool) -> Vec<(Span, i64, i64)> {
+        let statuses = tally(hog(full));
         statuses
             .iter()
             .map(|(at, samples)| (*at, samples[0], samples[3]))
