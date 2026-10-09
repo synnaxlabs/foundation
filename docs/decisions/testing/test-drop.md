@@ -3,11 +3,12 @@
   hides a failure when a test does not stop the helper. A second panic aborts the test
   binary, and a helper that blocks during a panic can hang a failed test until the CI
   timeout. This is an exception to the rust.md rule that `Drop` never panics and never
-  blocks. SIM DROP is the other. The person chose option b: "B is fine" (2026-10-08
-  23:21 UTC, as `laptop.monitor` relayed it, recorded at
-  https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6071002339; the
-  question: https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6070953004),
-  and approved #2036 with this rule: "Yes approve" (relayed by `laptop.monitor` at
+  blocks. SIM DROP is the other. The person chose option b: "B is fine" (as
+  `laptop.monitor` relayed it at 2026-10-08 23:21 UTC; recorded at
+  https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6071002339, 2026-10-08
+  23:22 UTC; the question:
+  https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6070953004), and
+  approved #2036 with this rule: "Yes approve" (as `laptop.monitor` relayed it at
   2026-10-09 01:07 UTC:
   https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6072166747). A type in
   test code (under `tests/` or in a `#[cfg(test)]` module) whose `Drop` panics or blocks
