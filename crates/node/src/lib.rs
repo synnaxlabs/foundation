@@ -153,20 +153,20 @@ impl Node {
     /// the disk budget; shard 0 also takes each remainder. Unless the node stops first,
     /// shard 0 locks the data directory with the file `lock`, which it holds until each
     /// shard has closed its ring and each task of the mesh has ended, then records the
-    /// shard count in the data directory, or checks the one there, and each shard
-    /// opens its buffer in directory `shard-<i>` of its files, and makes it there when
-    /// it is not there. The shards open their buffers one after another, in order of
-    /// core. Once each buffer has opened, shard 0 reads the node's key and private key
-    /// from the file `node.key` in the data directory, and makes the file at the first
-    /// start once it has mesh time, then opens the mesh of [`Config::region`] when it
-    /// has one, then serves the port and admits every peer that proves its key, until
-    /// its transport or the mesh's group stops, which stops the node. Returns once each
-    /// shard runs or one has failed to start. When the disk budget holds no ring on
-    /// each shard, no shard starts, and [`Node::join`] gives [`Error::Disk`] with the
-    /// budget, the shard count, and the least budget. A failed start, a shard with no
-    /// memory, a data directory that another node holds or that was made for another
-    /// shard count, a key file that is not valid, or a buffer or a mesh that does not
-    /// open stops the node, and [`Node::join`] returns its error.
+    /// shard count in the data directory, or checks the one there, and each shard opens
+    /// its buffer in directory `shard-<i>` of its files, and makes it there when it is
+    /// not there. The shards open their buffers one after another, in order of core.
+    /// Once each buffer has opened, shard 0 reads the node's key and private key from
+    /// the file `node.key` in the data directory, and makes the file at the first start
+    /// once it has mesh time, unless [`create_key`] made it, then opens the mesh of
+    /// [`Config::region`] when it has one, then serves the port and admits every peer
+    /// that proves its key, until its transport or the mesh's group stops, which stops
+    /// the node. Returns once each shard runs or one has failed to start. When the disk
+    /// budget holds no ring on each shard, no shard starts, and [`Node::join`] gives
+    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
+    /// start, a shard with no memory, a data directory that another node holds or that
+    /// was made for another shard count, a key file that is not valid, or a buffer or a
+    /// mesh that does not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///

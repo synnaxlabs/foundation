@@ -71,8 +71,9 @@ pub(crate) async fn load(
 ///
 /// # Errors
 ///
-/// [`Error::Directory`] with [`env::files::Error::Exists`] when the file holds other
-/// bytes, and [`Error::Directory`] for a file call that fails.
+/// [`Error::Directory`] with [`env::files::Error::Exists`] when the file holds 68
+/// bytes that are not all zero, with [`env::files::Error::Length`] when it has another
+/// length, and with the error of each other file call that fails.
 pub(crate) async fn store(files: &Files, identity: &Identity) -> Result<(), Error> {
     let pool = block::Pool::heap(POOL);
     let (file, bytes) = read(files, &pool).await.map_err(Error::Directory)?;
