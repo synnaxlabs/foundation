@@ -608,21 +608,52 @@ fn fails_an_earlier_round_with_fields_and_no_number() {
 }
 
 #[test]
-fn reads_a_name_with_an_escape_or_an_entity_as_no_name() {
-    // GitHub shows `Hot path: none` and `Hot path: send`, but the check reads the
-    // source of a line.
-    let escaped = ROUND.replace("Hot path: none", "Hot path\\: none");
-    assert_ne!(escaped, ROUND);
-    assert_eq!(
-        check(&record(vec![bot(&escaped)])),
-        vec![unended("Hot path")]
-    );
+fn fails_a_name_that_github_shows_but_its_source_does_not_start_with() {
+    // GitHub shows each name as plain text at the start of its line.
+    let name = |line: &str| {
+        format!(
+            "review round 3 has a field or end line name that is not plain text, which \
+             the check does not read, in the line `{line}`. Write each name as plain \
+             text, {FORMAT}"
+        )
+    };
+    for (plain, shown) in [
+        ("Reviewers: reviewer", "Reviewers\\: reviewer"),
+        ("Findings: none", "Findings\\: 2\nFindings: none"),
+        ("Deferred: none", "Deferred\\: none"),
+        ("Hot path: none", "Hot path\\: none"),
+        ("Hot path: none", "&#72;ot path: `send`\nHot path: none"),
+        ("Hot path: none", "**Hot path:** `send`\nHot path: none"),
+        ("Hot path: none", "`Hot path:` `send`\nHot path: none"),
+    ] {
+        let comment = ROUND.replace(plain, shown);
+        assert_ne!(comment, ROUND);
+        let line = shown.lines().next().unwrap();
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![name(line)],
+            "{shown}"
+        );
+    }
+    // In an old round, only a name at the start of the source of its line counts.
     let entity =
         old("## Review round 1\n\nConfirmed a finding.\n\n&#72;ot path: `send`");
-    assert_eq!(
-        check(&record(vec![entity, bot(ROUND)])),
-        Vec::<String>::new()
+    let escaped = old(
+        "## Review round 1\n\nConfirmed a finding.\n\nReviewers\\: performance\n\n\
+         Hot path: `send`",
     );
+    for (round, problems) in [
+        (entity, Vec::<String>::new()),
+        (
+            escaped,
+            vec![
+                "review round 1 names no performance, which this round requires."
+                    .to_string(),
+            ],
+        ),
+    ] {
+        assert_eq!(check(&record(vec![round, bot(ROUND)])), problems);
+    }
 }
 
 #[test]

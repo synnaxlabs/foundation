@@ -38,6 +38,10 @@ enum Cause {
     /// definition, in a paragraph: comrak then places its text in the wrong lines
     /// ([`misplaced`]).
     Misplaced,
+    /// A field or an [`END`] name that GitHub shows at the start of a line, and that
+    /// the source of the line does not start with, as with an escape, an entity, or
+    /// emphasis ([`disguised`]).
+    Name,
 }
 
 impl Cause {
@@ -65,6 +69,13 @@ impl Cause {
                 ),
                 "Write each link and image on one line, and put a blank line after each \
                  link reference definition",
+            ),
+            Cause::Name => (
+                format!(
+                    "a field or end line name that is not plain text, which the check \
+                     does not read, in the line `{line}`"
+                ),
+                "Write each name as plain text",
             ),
         };
         format!("review round {number} has {cause}. {remedy}, {FORMAT}")
@@ -551,6 +562,10 @@ impl<'a> Shown<'a> {
                         bracket(node, last)
                             .map(|line| (line_start(line), Cause::Bracket)),
                     );
+                    hiding.extend(
+                        disguised(body, node, at)
+                            .map(|line| (line_start(line), Cause::Name)),
+                    );
                     shown.text.push(texts(body, node, at));
                 }
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
@@ -605,6 +620,53 @@ fn bracket<'n>(paragraph: &'n AstNode<'n>, last: usize) -> Option<usize> {
         let text = matches!(&data.value, NodeValue::Text(t) if t.contains("[^"));
         (text && line < last).then_some(line)
     })
+}
+
+/// The first line of `paragraph` that GitHub shows with a field or an [`END`] name at
+/// its start, while its source does not start with that name. The check reads each
+/// name in the source ([`texts`]).
+fn disguised<'n>(
+    body: &str,
+    paragraph: &'n AstNode<'n>,
+    at: impl Fn(LineColumn) -> usize,
+) -> Option<usize> {
+    let names = ["Reviewers", "Range", "Findings", "Breaker"]
+        .into_iter()
+        .chain(END);
+    let titled = |text: &str| {
+        let mut names = names.clone();
+        names.any(|n| {
+            text.strip_prefix(n)
+                .is_some_and(|rest| rest.starts_with(':'))
+        })
+    };
+    // Each line as its number, the offset of its first span, and the text shown.
+    let mut lines: Vec<(usize, usize, String)> = Vec::new();
+    let mut fresh = true;
+    for span in paragraph.descendants().skip(1) {
+        let data = span.data.borrow();
+        let text = match &data.value {
+            NodeValue::SoftBreak | NodeValue::LineBreak => {
+                fresh = true;
+                continue;
+            }
+            NodeValue::Text(text) => text.as_ref(),
+            NodeValue::Code(code) => code.literal.as_str(),
+            _ => "",
+        };
+        if fresh {
+            let start = data.sourcepos.start;
+            lines.push((start.line, at(start), String::new()));
+            fresh = false;
+        }
+        if let Some((_, _, shown)) = lines.last_mut() {
+            shown.push_str(text);
+        }
+    }
+    let mut lines = lines.into_iter();
+    lines
+        .find(|(_, start, shown)| titled(shown) && !titled(&body[*start..]))
+        .map(|(line, ..)| line)
 }
 
 /// Whether comrak places each span of `paragraph` before its last line `last`. It
