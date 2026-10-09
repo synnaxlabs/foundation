@@ -2879,7 +2879,7 @@ mod port {
     /// The stop holds the lock for the cut of 3 s, which ends the drain of that
     /// handshake before its 3 PTO of 1024 ms, and less than 1 ms for its other steps.
     #[test]
-    fn a_handshake_in_flight_holds_the_lock_only_for_its_drain() {
+    fn a_handshake_in_flight_holds_the_lock_at_most_3_s() {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = keyed(&mut sim, 2);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));

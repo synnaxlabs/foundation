@@ -739,10 +739,11 @@ impl Serve {
     /// the transport stops, or the mesh's group stops, by the rank of [`end`]. A
     /// transport or a group that ends it goes into `failed` before it drops the tasks
     /// given that still run. Before it returns, it drops the tasks, the hub, `home`,
-    /// `guard`, each session and stream future, the mesh, and the transport, and waits
-    /// for each task of the mesh to end, with a mesh, and for the transport to free the
-    /// port. Runs no task and takes no session when a shard did not open, or when the
-    /// identity did not load or the mesh did not open, which goes into `failed`.
+    /// `guard`, each session and stream future, the operations on the mesh, the mesh,
+    /// and the transport, and waits for each task of the mesh to end, with a mesh, and
+    /// for the transport to free the port. Runs no task and takes no session when a
+    /// shard did not open, or when the identity did not load or the mesh did not open,
+    /// which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
