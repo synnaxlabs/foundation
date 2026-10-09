@@ -426,9 +426,10 @@ fn drop_a_command_that_the_kernel_reaped(reaped: &str) -> String {
 fn a_failed_kill_panics() {
     let report = drop_a_command_that_the_kernel_reaped("drop");
     assert!(
-        report.contains(
-            "kill the command: Os { code: 3, kind: Uncategorized, message: \"No such process\" }\n"
-        ),
+        report.contains(concat!(
+            "kill the command: Os { code: 3, kind: Uncategorized, ",
+            "message: \"No such process\" }\n",
+        )),
         "{report}"
     );
 }
