@@ -7295,7 +7295,7 @@ mod tests {
                     else {
                         panic!("{:?}", side.events);
                     };
-                    assert_eq!(*closed - *connected, Duration::from_secs(1));
+                    assert_eq!(*closed, *connected + Duration::from_secs(1));
                     assert_eq!(ended, key);
                     let reason = "a peer with no hello".to_owned();
                     assert_eq!(error, &Error::Broken { reason });
@@ -7309,9 +7309,9 @@ mod tests {
                 let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
                 let (connected, _) = pair.client.events[0];
                 let now = Duration::from_nanos(pair.now().0);
-                let arrival =
-                    connected + Duration::from_secs(1) - Duration::from_nanos(1);
-                pair.run(arrival - DELAY - now);
+                // One step before the bound.
+                let arrival = connected + Duration::from_nanos(999_999_999);
+                pair.run(arrival.checked_sub(now + DELAY).expect("a send after now"));
                 raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
                 pair.run(Duration::from_secs(3));
                 let key = key(&pair.client);
