@@ -40,26 +40,24 @@ const PERIOD: Span = Span::SECOND;
 /// sample type of each channel on it, the supervisor's first, then each of `counts`
 /// as `u64`. `counts` is as [`kind::Table::check`] gives them.
 ///
-/// # Panics
+/// # Errors
 ///
-/// When the name of a status channel is longer than [`Name::MAX_BYTES`].
-#[must_use]
-pub fn channels(connector: &Name, counts: &[Name]) -> (Name, Vec<(Name, Type)>) {
-    let status = |last: &str| -> Name {
-        let text = format!("{connector}.status.{last}");
-        text.parse().unwrap_or_else(|error| {
-            panic!("the status channel `{text}` is not a name: {error}")
-        })
-    };
+/// [`types::name::Error::Long`] for the first status name over [`Name::MAX_BYTES`].
+pub fn channels(
+    connector: &Name,
+    counts: &[Name],
+) -> Result<(Name, Vec<(Name, Type)>), types::name::Error> {
+    let status = |last: &str| format!("{connector}.status.{last}").parse::<Name>();
+    let time = status(TIME)?;
     let supervisor = SUPERVISOR.iter().map(|&(name, sample)| (name, sample));
     let counts = counts
         .iter()
         .map(|count| (count.as_str(), Type::Scalar(Scalar::U64)));
     let channels = supervisor
         .chain(counts)
-        .map(|(last, sample)| (status(last), sample))
-        .collect();
-    (status(TIME), channels)
+        .map(|(last, sample)| Ok((status(last)?, sample)))
+        .collect::<Result<_, _>>()?;
+    Ok((time, channels))
 }
 
 /// Panics when `kind` names a count of more than one segment, a count that the index
@@ -220,7 +218,11 @@ impl Writer {
         counts: Vec<Name>,
         clock: Clock,
     ) -> Result<(Self, Status), hub::writer::Error> {
-        let (time, channels) = channels(connector, &counts);
+        let names = channels(connector, &counts);
+        let (time, channels) = names.unwrap_or_else(|error| {
+            let refused = "invariant: the plan refused the name of connector";
+            panic!("{refused} `{connector}`: {error}")
+        });
         let names = std::iter::once(time).chain(channels.into_iter().map(|(n, _)| n));
         let config = hub::writer::Config {
             subject: connector.clone(),
@@ -578,7 +580,7 @@ mod tests {
     #[test]
     fn gives_the_index_then_the_supervisor_channels_then_the_counts() {
         let counts = [name("samples"), name("errors")];
-        let (time, channels) = channels(&name("plant.modbus"), &counts);
+        let (time, channels) = channels(&name("plant.modbus"), &counts).expect("names");
         let (u8, u64) = (Type::Scalar(Scalar::U8), Type::Scalar(Scalar::U64));
         let want = [
             (name("plant.modbus.status.state"), u8),
@@ -601,16 +603,17 @@ mod tests {
     }
 
     #[test]
-    fn panics_on_a_status_channel_longer_than_a_name() {
-        let connector = "c".repeat(245);
-        let connector = name(&connector);
-        let panic = std::panic::catch_unwind(|| drop(channels(&connector, &[])));
-        let panic = panic.expect_err("a status name over the limit panics");
-        let message = panic.downcast::<String>().expect("a formatted message");
-        let want = format!(
-            "the status channel `{connector}.status.state` is not a name: a name or \
-             pattern is 258 bytes long, more than the limit of 255 bytes"
+    fn refuses_the_first_status_name_longer_than_a_name() {
+        let long = |bytes| Err(types::name::Error::Long { bytes });
+        // The index, `<connector>.status.time`, comes first.
+        assert_eq!(channels(&name(&"c".repeat(244)), &[]), long(256));
+        assert_eq!(channels(&name(&"c".repeat(243)), &[]), long(256));
+        let counts = [name(&"a".repeat(50)), name(&"b".repeat(60))];
+        assert_eq!(channels(&name(&"c".repeat(200)), &counts), long(258));
+        let error = channels(&name(&"c".repeat(244)), &[]).expect_err("too long");
+        assert_eq!(
+            error.to_string(),
+            "a name or pattern is 256 bytes long, more than the limit of 255 bytes"
         );
-        assert_eq!(*message, want);
     }
 }

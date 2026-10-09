@@ -80,9 +80,10 @@ impl Supervisor {
     /// # Panics
     ///
     /// When the status channels of `name` do not open for a reason other than a
-    /// stopped mesh: `node` did not define them, or homed them on another node. Or
-    /// when the home refuses a status frame for a cause that only a defect of
-    /// `connector` gives.
+    /// stopped mesh: `node` did not define them, or homed them on another node. When
+    /// a status name of `name` is longer than [`Name::MAX_BYTES`], which the plan
+    /// refuses. Or when the home refuses a status frame for a cause that only a defect
+    /// of `connector` gives.
     pub async fn run(
         &self,
         kind: &str,
@@ -418,7 +419,8 @@ mod tests {
         tasks: &env::tasks::Tasks,
     ) -> Rc<RefCell<Vec<Written>>> {
         let connector = connector.parse().expect("a valid name");
-        let (_, channels) = status::channels(&connector, counts);
+        let names = status::channels(&connector, counts).expect("names");
+        let (_, channels) = names;
         let names: Vec<_> = channels.into_iter().map(|(name, _)| name).collect();
         let keys = 1..=u128::try_from(names.len()).expect("a few channels");
         let reader = hub.reader(&names, Mode::Complete).await;
@@ -1396,6 +1398,23 @@ mod tests {
             let kinds = Table::new().with("script", Script::default());
             let inputs = create_config(&node, tasks, kinds, "plant.other").await;
             let name = name("plant.script");
+            let supervisor = Supervisor::new(inputs);
+            drop(
+                supervisor
+                    .run("script", name, &config(), &Token::new())
+                    .await,
+            );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: the plan refused the name of connector \
+                               `plant.ccc")]
+    fn panics_on_a_connector_name_that_makes_a_status_name_too_long() {
+        run_on(|node, tasks| async move {
+            let kinds = Table::new().with("script", Script::default());
+            let inputs = create_config(&node, tasks, kinds, "plant.other").await;
+            let name = name(&format!("plant.{}", "c".repeat(239)));
             let supervisor = Supervisor::new(inputs);
             drop(
                 supervisor

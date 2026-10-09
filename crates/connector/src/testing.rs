@@ -43,14 +43,15 @@ pub async fn create_config(
 ///
 /// # Panics
 ///
-/// As [`status::channels`].
+/// When [`status::channels`] gives an error.
 #[must_use]
 pub fn create_status(
     connector: &Name,
     counts: &[Name],
     first: channel::Key,
 ) -> Vec<(Name, Definition)> {
-    let (time, channels) = status::channels(connector, counts);
+    let names = status::channels(connector, counts);
+    let (time, channels) = names.expect("the status names are names");
     let index = first;
     let kind = Kind::Index {
         error: None,
