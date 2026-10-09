@@ -84,14 +84,17 @@
   Amended (2026-10-09, #2017, by `laptop.architect-2`, 02:17 UTC): shard 0 drops
   `lock` only once the transport has freed the port (`transport::Transport::ended`),
   also when the mesh does not open, so a restart at once binds the port under `os`
-  too. A peer sees its close before `lock` is free, which a test pins. The stop waits
-  for each connection to drain while the rings close: about 3 PTO for each connection
-  that the transport closes, and up to the idle time (30 s) for a handshake in flight
-  whose peer went silent, until #2084:
+  too. A peer sees its close before `lock` is free, which a test pins. Each clone of
+  the transport and each session lives in a future that shard 0 drops, or in a task of
+  the mesh that it waits for, before it waits for the port, so a leak holds the stop.
+  The stop waits for each connection to drain while the rings close: about 3 PTO for
+  each connection that the transport closes, and up to the idle time (30 s) for a
+  handshake in flight whose peer went silent, until #2084:
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717; the
   `transport` surface, by `laptop.architect` (02:19 UTC):
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
-  Supersedes the `sim` and `os` sentences of the #1962 amendment.
+  Supersedes the `sim` and `os` sentences of the #1962 amendment, and its sentence that
+  no test sees the drop of the transport.
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
   Once each buffer has opened, shard 0 reads the node's key and private key from the
   file `node.key` in the data directory, before the hub, the transport, and the mesh
