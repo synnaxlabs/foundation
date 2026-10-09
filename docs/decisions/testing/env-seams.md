@@ -56,12 +56,18 @@
   path. That driver is the receiver's alone, as a sender clone's is: `Net::udp` gets
   it once from the socket (`laptop.architect-2`, 2026-10-08 19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). A
-  sender registers for writable at its first poll and after each `EAGAIN`, and the next
-  send that succeeds drops the registration: Linux wakes each `EPOLLOUT` registration of
-  a socket for each datagram that the socket sends (1,000 wakes for 1,000 sends on
-  box2), so a sender that stays registered on each shard would wake each parked shard.
-  Decided by `laptop.architect-2` (2026-10-08 18:27 UTC, #119,
-  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541).
+  sender registers for writable at its first poll and after `EAGAIN`, and drops the
+  registration when the send ends: Linux wakes each `EPOLLOUT` registration of a socket
+  for each datagram that the socket sends (1,000 wakes for 1,000 sends on box2), so a
+  sender that stays registered on each shard would wake each parked shard. Decided by
+  `laptop.architect-2` (2026-10-08 18:27 UTC, #119,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). A send
+  ends at its first `Ready`, also with an error or a failed wait for writable. A send
+  that the caller drops while it waits keeps the registration until the next send of
+  that sender ends. Supersedes "the next send that succeeds deregisters it" of item 3
+  of https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541.
+  Decided by `laptop.architect-2` (2026-10-09 00:34 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071816983).
   The first poll of a UDP half binds it to its thread, whatever its result. A failed
   `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
   nothing stores a failure. For a source that is not local or is of the other family,
@@ -95,15 +101,15 @@
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
   Supersedes the removal of the feature in
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066303437, approved
-  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829.
-  Trigger: #2038 gives the loom models a cfg name of their own, and then removes the
-  feature.
-  On `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and
-  the stream
-  reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the
-  connect, an IPv4-mapped address as plain IPv4, and any other address as given, with
-  its scope and flow label. A caller that needs the kernel's peer there makes an
-  interface change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
+  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829, and
+  item 2 of https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843,
+  which removed it when the last of #119 and #1095 merged. Trigger: #2038 gives the
+  loom models a cfg name of their own, and then removes the feature. On `os`, a peer
+  that resets after the handshake gives `Ok` from `Net::connect`, and the stream reads
+  `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the connect,
+  an IPv4-mapped address as plain IPv4, and any other address as given, with its scope
+  and flow label. A caller that needs the kernel's peer there makes an interface
+  change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
   #1789, https://github.com/synnaxlabs/foundation/pull/1789#issuecomment-6063559667).
   Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
