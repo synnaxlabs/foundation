@@ -4233,7 +4233,8 @@ mod tests {
             let now = pair.now();
             pair.client.endpoint.reset(now, &mut sender, Code(9));
             // The stop goes before the client's reset arrives. The link loses it and
-            // the next datagram, so the resent stop comes after the reset's ACK.
+            // the next datagram, the `MAX_STREAMS` of the stream that the reset frees,
+            // so the resent stop comes after the reset's ACK.
             let over = VarInt::from_u64(1 << 32).expect("a varint");
             let stopped = pair.server.connection().recv_stream(id).stop(over);
             stopped.expect("stopped");
