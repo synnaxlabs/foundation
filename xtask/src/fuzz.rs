@@ -49,7 +49,7 @@ pub(crate) fn run(root: &Path, seconds: NonZeroU64) -> Result<(), Vec<String>> {
     let worker = || {
         let mut problems = Vec::new();
         while let Some(&target) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
-            if let Err(problem) = fuzz_one(root, &nightly, target, seconds) {
+            if let Err(problem) = run_one(root, &nightly, target, seconds) {
                 problems.push(problem);
             }
         }
@@ -75,7 +75,7 @@ pub(crate) fn run(root: &Path, seconds: NonZeroU64) -> Result<(), Vec<String>> {
 }
 
 /// Runs `target` for `seconds` and prints its result.
-fn fuzz_one(
+fn run_one(
     root: &Path,
     nightly: &str,
     target: &str,
