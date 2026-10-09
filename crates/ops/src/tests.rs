@@ -71,18 +71,12 @@ fn names(map: &Map<String, Value>) -> BTreeSet<&str> {
     map.keys().map(String::as_str).collect()
 }
 
-/// Each operation that has an MCP tool.
-fn tooled() -> impl Iterator<Item = &'static operation::Spec> {
-    TABLE.iter().filter(|spec| !spec.cli_only)
-}
-
 #[test]
 fn the_table_names_each_input_and_output_once() {
     let names_in_table: BTreeSet<_> = TABLE.iter().map(|spec| spec.name).collect();
     assert_eq!(names_in_table.len(), TABLE.len());
-    let tooled: BTreeSet<_> = tooled().map(|spec| spec.name).collect();
-    assert_eq!(names(&operation::inputs()), tooled);
-    assert_eq!(names(&operation::outputs()), tooled);
+    assert_eq!(names(&operation::inputs()), names_in_table);
+    assert_eq!(names(&operation::outputs()), names_in_table);
 }
 
 #[test]
@@ -91,9 +85,9 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     let tools = tools();
     let tools = tools["tools"].as_array().expect("tools is a list");
     let docs = operation::docs();
-    // Two more for `mcp` and `help`, which are not operations.
-    assert_eq!(command.get_subcommands().count(), TABLE.len() + 2);
-    assert_eq!(tools.len(), tooled().count());
+    // Three more for `start`, `mcp`, and `help`, which are not operations.
+    assert_eq!(command.get_subcommands().count(), TABLE.len() + 3);
+    assert_eq!(tools.len(), TABLE.len());
     let inputs = operation::inputs();
     let outputs = operation::outputs();
     for spec in TABLE {
@@ -105,24 +99,19 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
             Some(spec.summary)
         );
         let tool: Vec<_> = tools.iter().filter(|t| t["name"] == spec.name).collect();
-        if spec.cli_only {
-            assert_eq!(tool.len(), 0, "{}", spec.name);
-        } else {
-            assert_eq!(tool.len(), 1, "{}", spec.name);
-            assert_eq!(tool[0]["description"], spec.summary);
-            assert_eq!(tool[0]["annotations"]["readOnlyHint"], spec.read_only);
-            assert_eq!(tool[0]["annotations"]["destructiveHint"], spec.destructive);
-            assert_eq!(tool[0]["inputSchema"], inputs[spec.name]);
-            assert_eq!(tool[0]["outputSchema"], outputs[spec.name]);
-        }
+        assert_eq!(tool.len(), 1, "{}", spec.name);
+        assert_eq!(tool[0]["description"], spec.summary);
+        assert_eq!(tool[0]["annotations"]["readOnlyHint"], spec.read_only);
+        assert_eq!(tool[0]["annotations"]["destructiveHint"], spec.destructive);
+        assert_eq!(tool[0]["inputSchema"], inputs[spec.name]);
+        assert_eq!(tool[0]["outputSchema"], outputs[spec.name]);
         let yes = |flag| if flag { "yes" } else { "no" };
         let section = format!(
-            "## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n- MCP tool: {}\n",
+            "## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n",
             spec.name,
             spec.summary,
             yes(spec.read_only),
             yes(spec.destructive),
-            yes(!spec.cli_only),
         );
         assert_eq!(docs.matches(&section).count(), 1, "{section}");
         assert_eq!(docs.matches(&format!("## `{}`", spec.name)).count(), 1);
@@ -145,7 +134,7 @@ fn each_schema_is_a_closed_object() {
 
 #[test]
 fn json_output_parses_back_to_the_typed_output() {
-    for spec in tooled() {
+    for spec in TABLE {
         let exit = cli(&[spec.name, "--json"]);
         assert_eq!(
             (exit.status, exit.stderr.as_str()),
@@ -595,6 +584,22 @@ mod start {
         }
     }
 
+    /// `start` is a command, not an operation: the help names it, and the docs and
+    /// the tools do not.
+    #[test]
+    fn the_help_names_start_and_the_docs_do_not() {
+        let exit = cli(&["--help"]);
+        assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
+        assert!(
+            exit.stdout.contains(
+                "  start    Start a node on a data directory, and run it until Ctrl-C"
+            ),
+            "{}",
+            exit.stdout
+        );
+        assert!(!crate::operation::docs().contains("start"));
+    }
+
     #[test]
     fn start_has_no_tool() {
         assert_eq!(
@@ -621,7 +626,7 @@ mod start {
         start.running(&edge(), &mut json);
         assert_eq!(
             String::from_utf8(json).unwrap(),
-            "{\"data\":\"foundation-data\",\"name\":\"edge\"}\n"
+            "{\"name\":\"edge\",\"data\":\"foundation-data\"}\n"
         );
     }
 
@@ -639,7 +644,7 @@ mod start {
         start.running(&edge(), &mut json);
         assert_eq!(
             String::from_utf8(json).unwrap(),
-            "{\"data\":\"a\u{fffd}b\",\"name\":\"edge\"}\n"
+            "{\"name\":\"edge\",\"data\":\"a\u{fffd}b\"}\n"
         );
     }
 

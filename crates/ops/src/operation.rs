@@ -18,33 +18,22 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
     pub(crate) read_only: bool,
     pub(crate) destructive: bool,
-    /// Only the CLI runs it: it has no MCP tool.
-    pub(crate) cli_only: bool,
 }
 
 /// Every operation, in the order the help and the docs list them. A test holds the
 /// names equal to the variants of `Request` and `Response`.
 pub(crate) const TABLE: &[Spec] = &[
     Spec {
-        name: "start",
-        summary: "Start a node on a data directory, and run it until Ctrl-C",
-        read_only: false,
-        destructive: false,
-        cli_only: true,
-    },
-    Spec {
         name: "version",
         summary: "Print the version of Foundation",
         read_only: true,
         destructive: false,
-        cli_only: false,
     },
     Spec {
         name: "docs",
         summary: "Print the reference for every operation, as Markdown",
         read_only: true,
         destructive: false,
-        cli_only: false,
     },
 ];
 
@@ -66,14 +55,13 @@ struct Cli {
 enum Command {
     #[command(flatten)]
     Run(Request),
+    /// Start a node on a data directory, and run it until Ctrl-C.
     Start(StartArgs),
     /// Answer MCP messages on standard input, one JSON-RPC message per line, until it
     /// closes.
     Mcp,
     /// Print this help, or the help of one command.
-    Help {
-        command: Option<String>,
-    },
+    Help { command: Option<String> },
 }
 
 #[derive(clap::Args)]
@@ -88,8 +76,7 @@ struct StartArgs {
     name: Option<Name>,
 }
 
-/// The input of each operation that is not CLI only. Clap and serde both name a
-/// variant in kebab case.
+/// The input of each operation. Clap and serde both name a variant in kebab case.
 #[derive(Subcommand, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Request {
@@ -170,13 +157,12 @@ fn help(name: Option<&str>) -> Result<Parsed, Error> {
     Ok(Parsed::Help(command.render_help().to_string()))
 }
 
-/// Reads a request for the operation `name` from its JSON `arguments`. A CLI-only
-/// operation is unknown here.
+/// Reads a request for the operation `name` from its JSON `arguments`.
 pub(crate) fn read(
     name: &str,
     arguments: Map<String, Value>,
 ) -> Result<Request, Error> {
-    if !TABLE.iter().any(|spec| spec.name == name && !spec.cli_only) {
+    if !TABLE.iter().any(|spec| spec.name == name) {
         return Err(unknown(name));
     }
     let tagged = Map::from_iter([(name.to_owned(), Value::Object(arguments))]);
@@ -270,13 +256,11 @@ pub(crate) fn docs() -> String {
         .iter()
         .map(|spec| {
             format!(
-                "\n## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n- MCP tool: \
-                 {}\n",
+                "\n## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n",
                 spec.name,
                 spec.summary,
                 yes(spec.read_only),
                 yes(spec.destructive),
-                yes(!spec.cli_only),
             )
         })
         .collect();
