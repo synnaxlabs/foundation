@@ -41,14 +41,7 @@ fn main() -> ExitCode {
     })
 }
 
-/// A `--cfg loom` build has no network, and its tests run no node.
-#[cfg(loom)]
-fn node(_: &Start) -> Result<(), Failure> {
-    unreachable!("a `--cfg loom` build runs no node")
-}
-
 /// Runs a node on the data directory of `start` until SIGINT or SIGTERM stops it.
-#[cfg(not(loom))]
 fn node(start: &Start) -> Result<(), Failure> {
     // Before any thread starts, else that thread takes the signals.
     let interrupt = os::interrupt().map_err(failed)?;
@@ -77,7 +70,7 @@ fn node(start: &Start) -> Result<(), Failure> {
         }),
         entropy: os::entropy(),
         disk: DISK,
-        net: os::net(),
+        net: net(),
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         region: None,
         name: name.clone(),
@@ -103,6 +96,18 @@ fn node(start: &Start) -> Result<(), Failure> {
     // The thread lives until the process ends: a node that fails gets no signal.
     drop(stop.map_err(failed)?);
     joined.map_err(|error| failure(start, &error))
+}
+
+/// The network of the node.
+#[cfg(not(loom))]
+fn net() -> env::net::Net {
+    os::net()
+}
+
+/// A `--cfg loom` build has no network, and its tests run no node.
+#[cfg(loom)]
+fn net() -> env::net::Net {
+    unreachable!("a `--cfg loom` build runs no node")
 }
 
 /// The name of the node of `start`, read on a thread of `threads`.
