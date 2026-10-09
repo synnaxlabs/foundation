@@ -76,7 +76,6 @@ impl Manager {
             held: Cell::new(false),
             ahead: Cell::new(usize::MAX),
             again: RefCell::new(Vec::new()),
-            moving: Cell::new(Vec::new()),
             ends: RefCell::new(VecDeque::new()),
             closed: UnsafeCell::new(ffi::DelayedCallback {
                 next: ptr::null_mut(),
@@ -133,14 +132,14 @@ impl Manager {
         let mut sleep: Option<Sleep> = None;
         poll_fn(|cx| {
             state.driving.set(true);
+            self.pass(cx);
             let poll = loop {
-                state.again.borrow_mut().clear();
-                self.pass(cx);
-                if let Poll::Ready(value) = run(cx) {
-                    state.move_on_again(cx);
-                    break Poll::Ready(value);
+                let poll = run(cx);
+                let moved = state.move_on_again(cx);
+                if poll.is_ready() {
+                    break poll;
                 }
-                if !state.again.borrow().is_empty() {
+                if moved {
                     continue;
                 }
                 let Some(next) = self.events.next() else {
@@ -226,8 +225,6 @@ struct State {
     /// The connections that a hook asks to move on again during a drive, once the
     /// running pass has gone past them.
     again: RefCell<Vec<usize>>,
-    /// The buffer of `again` that the drive moves on, kept to reuse its memory.
-    moving: Cell<Vec<usize>>,
     /// The connections whose `CLOSING` the next run of the loop gives.
     ends: RefCell<VecDeque<usize>>,
     /// The delayed callback that gives each `CLOSING`. C writes its `next`.
@@ -263,20 +260,16 @@ impl State {
     }
 
     /// Moves on each connection in `again`, and each that those steps add, until
-    /// none is left.
-    fn move_on_again(&self, cx: &mut Context<'_>) {
-        let mut ids = self.moving.take();
+    /// none is left, and gives whether it moved one.
+    fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
+        let mut moved = false;
         loop {
-            std::mem::swap(&mut ids, &mut *self.again.borrow_mut());
-            if ids.is_empty() {
-                break;
-            }
-            for &id in &ids {
-                self.move_on(id, cx);
-            }
-            ids.clear();
+            let Some(id) = self.again.borrow_mut().pop() else {
+                return moved;
+            };
+            self.move_on(id, cx);
+            moved = true;
         }
-        self.moving.set(ids);
     }
 
     /// Logs `what` of connection `id` as a warning through the logger of the loop.
@@ -308,7 +301,7 @@ impl State {
                     }
                 };
         }
-        self.closing(id);
+        self.queue_closing(id);
     }
 
     /// Warns of `failure` on `id`, drops its stream and sends, and queues its
@@ -320,14 +313,14 @@ impl State {
             .borrow_mut()
             .get_mut(&id)
             .expect("invariant: only a pass removes a connection")
-            .drop_stream();
+            .take_stream();
         if matches!(stream, Stream::Connecting(_) | Stream::Open(_)) {
-            self.closing(id);
+            self.queue_closing(id);
         }
     }
 
     /// Queues the `CLOSING` of `id` for the next run of the loop.
-    fn closing(&self, id: usize) {
+    fn queue_closing(&self, id: usize) {
         self.ends.borrow_mut().push_back(id);
         if !self.queued.replace(true) {
             // SAFETY: the loop lives, and the callback is not in its queue.
@@ -449,8 +442,9 @@ impl Callback {
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
     Open(Tcp),
-    /// It gives no more reads, writes what waits, closes its side, and drops the
-    /// reads of the peer until the peer closes its side, so the drop sends no reset.
+    /// It gives no more reads, drops what the peer sends while it writes what waits,
+    /// closes its side, then reads until the peer closes its side, so the drop sends
+    /// no reset.
     Closing {
         tcp: Tcp,
         /// Ends the close when it takes too long, with sends or a peer that has not
@@ -560,7 +554,7 @@ impl Connection {
                     }
                 }
                 if *drained {
-                    self.drop_stream();
+                    self.take_stream();
                     return Ok(self.gone());
                 }
                 Ok(Step::Waiting)
@@ -580,7 +574,7 @@ impl Connection {
 
     /// Drops what waits to be written, and gives the stream it puts `Closed` in place
     /// of.
-    fn drop_stream(&mut self) -> Stream {
+    fn take_stream(&mut self) -> Stream {
         self.sends.clear();
         self.sent = 0;
         std::mem::replace(&mut self.stream, Stream::Closed)
