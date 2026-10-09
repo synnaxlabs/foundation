@@ -32,10 +32,15 @@ case "$*" in
     echo "${LEFT:-}" ;;
 esac
 EOF
+# It logs the remote command, and the `RUSTFLAGS` that a shell reads from it.
 cat >"$bin/ssh" <<'EOF'
 #!/usr/bin/env bash
-echo "ssh ${*: -1}" >>"$T/calls"
-case "${*: -1}" in
+while [[ $1 != ubuntu@* ]]; do shift; done
+shift
+echo "ssh $*" >>"$T/calls"
+flags=$(sed -nE 's/.*(RUSTFLAGS=([^ \\]|\\.)*).*/\1/p' <<<"$*")
+[[ -z $flags ]] || bash -c "$flags; echo \"\$RUSTFLAGS\"" >>"$T/rustflags"
+case "$*" in
 *loadavg*) echo "0.01 0.02 0.03 1/2 3" ;;
 *lscpu*) echo "Xeon, 96 CPUs, 6.8" ;;
 *"cargo bench"*)
@@ -142,6 +147,7 @@ note() {
 }
 
 args=(1047 box2.red-team delivery aaaa1111 bbbb2222)
+aligned='-C target-cpu=x86-64-v2 -C llvm-args=-align-all-functions=6'
 
 run '[]' "${args[@]}" release 'push (pop|peek)'
 check "a run posts the cap, the launch, the report, and the end" eval '
@@ -152,6 +158,10 @@ box2.red-team, cap 2.67 USD, ends by" &&
     has "$(posted 15)" "bench-host end i-1 for #1047: 0.00 h. Terminated: yes. \
 Still running from this run: none." &&
     [[ $(posted 1047 | grep -c "^table") == 4 ]]'
+check "each remote cargo gets the aligned flags, named in the report" eval '
+    [[ $(wc -l <"$T/rustflags") == 5 &&
+        $(sort -u "$T/rustflags") == "$aligned" ]] &&
+    has "$(posted 1047)" "\`RUSTFLAGS=\"$aligned\"\`"'
 check "each filter goes to the host as one argument" eval '
     has "$(cat "$T/calls")" "-- release push\ \(pop\|peek\)"'
 
