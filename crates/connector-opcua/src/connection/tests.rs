@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::convert::Infallible;
-use std::ffi::{CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
@@ -18,6 +18,10 @@ use types::time::{Monotonic, Span};
 use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
 use crate::child;
 use crate::event::Loop;
+use crate::ffi::test::{
+    Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_clear,
+    UA_KeyValueMap_setScalar, UA_findDataType,
+};
 use crate::ffi::{self, Bytes, ConnectionState, KeyValueMap, Status};
 
 const PORT: u16 = 4840;
@@ -30,34 +34,6 @@ fn sends(count: u8, length: usize) -> Vec<Vec<u8>> {
     (0..count)
         .map(|k| (0..=u8::MAX).cycle().take(length).map(|b| b ^ k).collect())
         .collect()
-}
-
-/// `UA_NodeId` with a numeric identifier.
-#[repr(C)]
-struct NodeId {
-    namespace: u16,
-    kind: c_int,
-    numeric: u32,
-    rest: [u32; 3],
-}
-
-/// `UA_QualifiedName`.
-#[repr(C)]
-struct QualifiedName {
-    namespace: u16,
-    name: Bytes,
-}
-
-unsafe extern "C" {
-    fn UA_findDataType(id: *const NodeId) -> *const c_void;
-    fn UA_KeyValueMap_setScalar(
-        map: *mut KeyValueMap,
-        key: QualifiedName,
-        value: *const c_void,
-        kind: *const c_void,
-    ) -> u32;
-    fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
-    fn UA_Client_disconnect(client: *mut ffi::Client) -> u32;
 }
 
 /// The numeric node of a builtin type.
@@ -153,9 +129,9 @@ impl Side {
         self.events().members().sources.cast()
     }
 
-    fn members(&self) -> &ffi::ConnectionManager {
+    fn members(&self) -> &Members {
         // SAFETY: the manager lives as long as `self`.
-        unsafe { &*self.cm() }
+        unsafe { &*self.cm().cast::<Members>() }
     }
 
     fn calls(&self) -> Vec<Call> {
@@ -240,7 +216,7 @@ fn send_on(cm: *mut ffi::ConnectionManager, id: usize, bytes: &[u8]) -> Status {
         data: ptr::null_mut(),
     };
     // SAFETY: the manager lives through the test.
-    let members = unsafe { &*cm };
+    let members = unsafe { &*cm.cast::<Members>() };
     // SAFETY: the member takes its own manager.
     let status =
         Status(unsafe { (members.alloc)(cm, id, &raw mut buffer, bytes.len()) });

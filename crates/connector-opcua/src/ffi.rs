@@ -201,74 +201,9 @@ pub(crate) type ConnectionCallback = unsafe extern "C" fn(
     message: Bytes,
 );
 
-/// `UA_ConnectionManager`. `shim.c` asserts its size and the same offsets.
+/// `UA_ConnectionManager`, which Rust holds only by pointer.
 #[repr(C)]
-pub(crate) struct ConnectionManager {
-    pub(crate) next: *mut c_void,
-    pub(crate) kind: c_int,
-    pub(crate) name: Bytes,
-    pub(crate) event_loop: *mut EventLoop,
-    pub(crate) params: KeyValueMap,
-    pub(crate) state: c_int,
-    pub(crate) start: unsafe extern "C" fn(cm: *mut ConnectionManager) -> u32,
-    pub(crate) stop: unsafe extern "C" fn(cm: *mut ConnectionManager),
-    pub(crate) free: unsafe extern "C" fn(cm: *mut ConnectionManager) -> u32,
-    pub(crate) protocol: Bytes,
-    pub(crate) open: unsafe extern "C" fn(
-        cm: *mut ConnectionManager,
-        params: *const KeyValueMap,
-        application: *mut c_void,
-        context: *mut c_void,
-        callback: ConnectionCallback,
-    ) -> u32,
-    pub(crate) send: unsafe extern "C" fn(
-        cm: *mut ConnectionManager,
-        id: usize,
-        params: *const KeyValueMap,
-        buffer: *mut Bytes,
-    ) -> u32,
-    pub(crate) close:
-        unsafe extern "C" fn(cm: *mut ConnectionManager, id: usize) -> u32,
-    pub(crate) alloc: unsafe extern "C" fn(
-        cm: *mut ConnectionManager,
-        id: usize,
-        buffer: *mut Bytes,
-        size: usize,
-    ) -> u32,
-    pub(crate) free_buffer:
-        unsafe extern "C" fn(cm: *mut ConnectionManager, id: usize, buffer: *mut Bytes),
-}
-
-const _: () = {
-    assert!(
-        size_of::<ConnectionManager>() == at(18),
-        "UA_ConnectionManager changed"
-    );
-    assert!(offset_of!(ConnectionManager, kind) == at(1), "kind moved");
-    assert!(
-        offset_of!(ConnectionManager, event_loop) == at(4),
-        "event_loop moved"
-    );
-    assert!(offset_of!(ConnectionManager, state) == at(7), "state moved");
-    assert!(
-        offset_of!(ConnectionManager, protocol) == at(11),
-        "protocol moved"
-    );
-    assert!(offset_of!(ConnectionManager, open) == at(13), "open moved");
-    assert!(offset_of!(ConnectionManager, send) == at(14), "send moved");
-    assert!(
-        offset_of!(ConnectionManager, close) == at(15),
-        "close moved"
-    );
-    assert!(
-        offset_of!(ConnectionManager, alloc) == at(16),
-        "alloc moved"
-    );
-    assert!(
-        offset_of!(ConnectionManager, free_buffer) == at(17),
-        "free_buffer moved"
-    );
-};
+pub(crate) struct ConnectionManager([u8; 0]);
 
 /// The hooks of a manager of `shim_cm_new`. Each takes its `state`.
 #[repr(C)]
@@ -318,12 +253,106 @@ unsafe extern "C" {
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
 }
 
-/// Only `link` calls these.
+/// Only tests use these.
 #[cfg(test)]
 pub(crate) mod test {
-    use std::ffi::c_void;
+    use std::ffi::{c_int, c_void};
+    use std::mem::offset_of;
 
-    use super::Bytes;
+    use super::{
+        Bytes, ConnectionCallback, ConnectionManager, EventLoop, KeyValueMap, at,
+    };
+
+    /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
+    /// offsets.
+    #[repr(C)]
+    pub(crate) struct Members {
+        pub(crate) next: *mut c_void,
+        pub(crate) kind: c_int,
+        pub(crate) name: Bytes,
+        pub(crate) event_loop: *mut EventLoop,
+        pub(crate) params: KeyValueMap,
+        pub(crate) state: c_int,
+        pub(crate) start: unsafe extern "C" fn(cm: *mut ConnectionManager) -> u32,
+        pub(crate) stop: unsafe extern "C" fn(cm: *mut ConnectionManager),
+        pub(crate) free: unsafe extern "C" fn(cm: *mut ConnectionManager) -> u32,
+        pub(crate) protocol: Bytes,
+        pub(crate) open: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            params: *const KeyValueMap,
+            application: *mut c_void,
+            context: *mut c_void,
+            callback: ConnectionCallback,
+        ) -> u32,
+        pub(crate) send: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            id: usize,
+            params: *const KeyValueMap,
+            buffer: *mut Bytes,
+        ) -> u32,
+        pub(crate) close:
+            unsafe extern "C" fn(cm: *mut ConnectionManager, id: usize) -> u32,
+        pub(crate) alloc: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            id: usize,
+            buffer: *mut Bytes,
+            size: usize,
+        ) -> u32,
+        pub(crate) free_buffer: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            id: usize,
+            buffer: *mut Bytes,
+        ),
+    }
+
+    const _: () = {
+        assert!(
+            size_of::<Members>() == at(18),
+            "UA_ConnectionManager changed"
+        );
+        assert!(offset_of!(Members, kind) == at(1), "kind moved");
+        assert!(offset_of!(Members, event_loop) == at(4), "event_loop moved");
+        assert!(offset_of!(Members, state) == at(7), "state moved");
+        assert!(offset_of!(Members, protocol) == at(11), "protocol moved");
+        assert!(offset_of!(Members, open) == at(13), "open moved");
+        assert!(offset_of!(Members, send) == at(14), "send moved");
+        assert!(offset_of!(Members, close) == at(15), "close moved");
+        assert!(offset_of!(Members, alloc) == at(16), "alloc moved");
+        assert!(
+            offset_of!(Members, free_buffer) == at(17),
+            "free_buffer moved"
+        );
+    };
+
+    /// `UA_NodeId` with a numeric identifier.
+    #[repr(C, align(8))]
+    pub(crate) struct NodeId {
+        pub(crate) namespace: u16,
+        pub(crate) kind: c_int,
+        pub(crate) numeric: u32,
+        pub(crate) rest: [u32; 3],
+    }
+
+    const _: () = {
+        assert!(size_of::<NodeId>() == at(3), "UA_NodeId changed");
+        assert!(offset_of!(NodeId, kind) == 4, "kind moved");
+        assert!(offset_of!(NodeId, numeric) == at(1), "numeric moved");
+    };
+
+    /// `UA_QualifiedName`.
+    #[repr(C)]
+    pub(crate) struct QualifiedName {
+        pub(crate) namespace: u16,
+        pub(crate) name: Bytes,
+    }
+
+    const _: () = {
+        assert!(
+            size_of::<QualifiedName>() == at(3),
+            "UA_QualifiedName changed"
+        );
+        assert!(offset_of!(QualifiedName, name) == at(1), "name moved");
+    };
 
     unsafe extern "C" {
         pub(crate) fn UA_DateTime_now() -> i64;
@@ -353,5 +382,15 @@ pub(crate) mod test {
         ) -> u32;
 
         pub(crate) fn UA_UInt32_random() -> u32;
+
+        pub(crate) fn UA_findDataType(id: *const NodeId) -> *const c_void;
+        pub(crate) fn UA_KeyValueMap_setScalar(
+            map: *mut KeyValueMap,
+            key: QualifiedName,
+            value: *const c_void,
+            kind: *const c_void,
+        ) -> u32;
+        pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
+        pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
     }
 }
