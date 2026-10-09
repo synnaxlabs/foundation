@@ -25,14 +25,20 @@
   and both commits. The diff only removes instructions: no added instruction, call,
   loop, or memory access. The runs with the machine named stay in the PR. A change that
   adds anything on such a path waits for a quiet host of its OS. Decided by
-  `laptop.director`, 2026-10-09T00:55:15Z:
-  https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072038524.
+  `laptop.director` for #2044 at 2026-10-09T00:55:15Z
+  (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072038524), and made
+  a rule for each such PR by item 3 of
+  https://github.com/synnaxlabs/foundation/issues/2041, as that ruling says.
   Amended (2026-10-09): each one-host quiet-host run builds both commits with
   `RUSTFLAGS="-C target-cpu=x86-64-v2 -C llvm-args=-align-all-functions=6"`, and its
-  result names these flags beside the machine. The two builds of one comparison, also
-  in the daily run against its fixed commit, use the same flags. An aligned result over
-  5% still needs the P1 judgment. The two-host carrier bench builds as
-  `bench/carrier/run.sh` does. Decided by `laptop.director`, 2026-10-09T02:44:36Z:
+  result names these flags beside the machine. The two builds of one comparison, also in
+  the daily run against its fixed commit, use the same flags. An aligned result over 5%
+  still needs the P1 judgment. `scripts/bench-host.sh` passes these flags after the item
+  of #1139
+  (https://github.com/synnaxlabs/foundation/issues/1139#issuecomment-6074402988). The
+  two-host carrier bench builds as `bench/carrier/run.sh` does, until a carrier result
+  over 5% is one that the P1 judgment does not find in the code of the PR: then the
+  script builds with the same flags. Decided by `laptop.director`, 2026-10-09T02:44:36Z:
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937, with its
   scope at 2026-10-09T02:50:37Z:
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073252079.

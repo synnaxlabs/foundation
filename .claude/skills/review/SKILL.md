@@ -107,15 +107,15 @@ command outside that worktree. Remove each worktree when its agent returns
    approval too: link its comment. So does a fix that reverses a finding of the
    architect. So does an answer that accepts a regression over 5% (P1). An answer to a
    run that cannot show the 5% check links the comment with the numbers of the rerun of
-   BENCH BASELINES (`docs/decisions/testing/bench-baselines.md`), never a queued run, or
-   does what an amendment of that record asks in place of the rerun. An answer that
-   leaves a rule of `CLAUDE.md` or `docs/claude/` unmet, and a dispute about what such a
-   rule means, go to `laptop.director`: link its ruling. A refusal that names a trigger
-   for later work is a deferral:
-   file its issue with the trigger, or write the trigger in the decisions entry that the
-   ruling cites. So is an answer that a later PR does the work, also a later PR of the
-   same issue. When the trigger is the work of another open issue or PR, also comment
-   the deferral issue and its trigger on that issue or PR.
+   BENCH BASELINES (`docs/decisions/testing/bench-baselines.md`), never a queued run,
+   does what an amendment of that record asks in place of the rerun, or is a PR that an
+   amendment of that record lets merge with no rerun. An answer that leaves a rule of
+   `CLAUDE.md` or `docs/claude/` unmet, and a dispute about what such a rule means, go
+   to `laptop.director`: link its ruling. A refusal that names a trigger for later work
+   is a deferral: file its issue with the trigger, or write the trigger in the decisions
+   entry that the ruling cites. So is an answer that a later PR does the work, also a
+   later PR of the same issue. When the trigger is the work of another open issue or PR,
+   also comment the deferral issue and its trigger on that issue or PR.
 
 ## Rating
 
@@ -190,17 +190,17 @@ nothing checked again. So when round 1 led to fix commits:
    Its report gives the `Public surface:` and `Hot path:` lines for the range. The round
    comment adds each item of the first to its own `Public surface:` line, and copies the
    second. When the `Hot path:` line names a function, run `performance` again on the
-   range, and update the Performance section with its numbers. 2. Handle their findings
-   as above. Fix commits from this round get another round, until one finds nothing. So
-   does a fix that only edits the PR body: its range is `<head>..<head>`, so its round
-   runs `reviewer` alone, on the edit, and its comment has the `Breaker:` skip line
-   (Round comment). When each finding of a round is low and in the PR title or body, or
-   in the `Deferred:`, `Later steps:`, or `Public surface:` line of a round comment, its
-   comment gives `Findings: none` and lists them under a line `Text fixes:`. Each item
-   gives the exact new text: an item that asks the author to write text is a finding.
-   The author applies each with the `reviewer`'s words as given, in the PR title or
-   body, or by an edit of the round comment that holds the line and in the same line of
-   the `Text fixes:` round, and needs no further round.
+   range, and update the Performance section with its numbers.
+2. Handle their findings as above. Fix commits from this round get another round, until
+   one finds nothing. So does a fix that only edits the PR body: its range is
+   `<head>..<head>`, so its round runs `reviewer` alone, on the edit, and its comment
+   has the `Breaker:` skip line (Round comment). When each finding of a round is low and
+   in the PR title or body, or in the `Deferred:`, `Later steps:`, or `Public surface:`
+   line of a round comment, its comment gives `Findings: none` and lists them under a
+   line `Text fixes:`. Each item gives the exact new text: an item that asks the author
+   to write text is a finding. The author applies each with the `reviewer`'s words as
+   given, in the PR title or body, or by an edit of the round comment that holds the
+   line and in the same line of the `Text fixes:` round, and needs no further round.
 
 After round 1, bring in `main` with a merge, never a rebase. A rebase moves the reviewed
 commits and the fix commits out of every round range. A clean merge needs no round: its

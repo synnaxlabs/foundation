@@ -12,4 +12,3 @@
   commits by `Text fixes:` (2026-10-08T01:17Z, on the decline by `laptop.director`,
   https://github.com/synnaxlabs/foundation/pull/1601#issuecomment-6050149418): "Ok
   fine". Both are recorded in https://github.com/synnaxlabs/foundation/issues/1703.
-  Supersedes FACTORY MODELS for these runs.
