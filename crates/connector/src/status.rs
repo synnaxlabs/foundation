@@ -490,7 +490,7 @@ fn after(stamp: Stamp) -> Stamp {
 
 /// Polls `run` to its end, and `side` after it while `run` is pending, so `side` sees
 /// what `run` did at the same instant. `side` has a waker of its own, and is polled
-/// only after a wake of it, so a poll of `run` alone costs one atomic swap.
+/// only after a wake of it, so a poll of `run` alone costs one atomic load.
 async fn beside<T>(
     run: impl Future<Output = T>,
     side: impl Future<Output = Infallible>,
@@ -511,7 +511,10 @@ async fn beside<T>(
         if let Poll::Ready(out) = run.as_mut().poll(cx) {
             return Poll::Ready(out);
         }
-        if woke.woken.swap(false, Ordering::AcqRel) {
+        // A wake that the load misses wakes the task again.
+        if woke.woken.load(Ordering::Relaxed)
+            && woke.woken.swap(false, Ordering::AcqRel)
+        {
             let side = side.as_mut().poll(&mut task::Context::from_waker(&waker));
             if let Poll::Ready(never) = side {
                 match never {}
