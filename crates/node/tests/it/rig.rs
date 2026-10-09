@@ -244,10 +244,10 @@ impl Drop for Process {
                               captures for the report of the test"
                 )]
                 match std::panic::catch_unwind(move || eprintln!("{line}")) {
-                    // An `Err` is the panic of `eprintln!` on a closed stderr. The
-                    // test fails already, and a panic out of this drop aborts the
-                    // test binary.
-                    Ok(()) | Err(_) => {}
+                    Ok(()) => {}
+                    // The test fails already, and a panic out of this drop aborts
+                    // the test binary.
+                    Err(_closed) => {}
                 }
             }
             kill => kill.expect("kill the command"),
