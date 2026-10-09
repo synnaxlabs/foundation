@@ -625,6 +625,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+    use crate::common::STATUS;
 
     /// A side of [`beside`] that counts its polls and keeps its last waker.
     fn side(
@@ -756,12 +757,21 @@ mod tests {
     #[test]
     #[should_panic(
         expected = "invariant: a status frame fits the largest block of the pool: block \
-                    of 128 bytes is above the largest block of 64 bytes"
+                    of 8000096 bytes is above the largest block of 7340032 bytes"
     )]
-    fn panics_when_no_block_of_the_pool_holds_a_status_frame() {
-        check_pool(&block::Error::TooLarge {
-            requested: 128,
-            largest: 64,
+    fn panics_at_the_start_of_a_status_larger_than_the_largest_block() {
+        // 16 bytes a count.
+        const N: usize = 500_000;
+        crate::common::run_on(|node, tasks| async move {
+            let (hub, _) = hub::testing::open(crate::common::env(&node, tasks)).await;
+            let connector = name("plant.wide");
+            let counts: Vec<_> = (0..N).map(|i| name(&format!("c{i}"))).collect();
+            let status = crate::testing::create_status(&connector, &counts, STATUS);
+            hub.set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let (clock, cancel) = (node.clock(), cancel::Token::new());
+            let opened = Writer::open(&hub, &connector, counts, clock, cancel).await;
+            let (writer, _status) = opened.expect("the writer opens");
+            writer.start().await;
         });
     }
 }
