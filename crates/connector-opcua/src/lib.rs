@@ -7,6 +7,9 @@ mod alloc;
 #[doc(hidden)]
 pub mod bench;
 #[cfg(feature = "open62541")]
+#[cfg_attr(not(test), expect(dead_code, reason = "the client of #435 uses it"))]
+mod connection;
+#[cfg(feature = "open62541")]
 #[cfg_attr(
     not(feature = "sim"),
     expect(dead_code, reason = "only `bench` uses it until the session of #435")
