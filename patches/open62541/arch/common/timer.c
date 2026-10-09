@@ -102,12 +102,13 @@ findTimer2Batch(void *context, UA_TimerEntry *compare) {
     return (te->interval == compare->interval) ? te : NULL;
 }
 
-/* Window-based comparison for batching */
+/* Window-based comparison for batching. ZIP_ITER_KEY reads LESS as a window
+ * below the entry. */
 static enum ZIP_CMP
 cmpBatchWindow(const UA_TimerBatchWindow *window, const UA_DateTime *nextTime) {
-    if(*nextTime < window->earliest)
-        return ZIP_CMP_LESS;
     if(*nextTime > window->latest)
+        return ZIP_CMP_LESS;
+    if(*nextTime < window->earliest)
         return ZIP_CMP_MORE;
     return ZIP_CMP_EQ;
 }

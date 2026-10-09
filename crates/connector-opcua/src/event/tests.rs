@@ -369,6 +369,56 @@ fn timers_due_at_one_time_run_in_the_order_of_their_adds() {
     }
 }
 
+/// A current-time timer due within a quarter of its interval of one with the same
+/// interval runs with it, bounds included.
+#[test]
+fn a_current_time_timer_runs_with_one_of_its_interval_due_near_it() {
+    for (due_ms, ran) in [
+        (34, vec![2, 1]),
+        (35, vec![1, 2]),
+        (85, vec![1, 2]),
+        (86, vec![1]),
+    ] {
+        let mut f = Fixture::new();
+        f.start();
+        let now = i64::try_from(f.now().0 / 100).unwrap();
+        for (n, due_ms) in [(1, 60), (2, due_ms)] {
+            let base = Some(now + due_ms * 10_000);
+            f.try_timer(record, number(n), 100.0, base, ffi::CURRENT_TIME)
+                .expect("a timer of 100 ms");
+        }
+        f.advance(ms(60));
+        f.run();
+        assert_eq!(f.ran(), ran, "timer 2 due at {due_ms} ms");
+    }
+}
+
+/// open62541 searched the window of a batch in the wrong direction, so whether a
+/// timer batched hung on the shape of the timer tree, which the other timers and their
+/// addresses set.
+#[test]
+fn a_batch_does_not_hang_on_the_other_timers() {
+    let mut kept = Vec::new();
+    for others in 0..64_u32 {
+        let mut f = Fixture::new();
+        f.start();
+        for (n, i) in (100..).zip(0..others / 8) {
+            f.add(n, 10.0 + f64::from(i), ffi::ONCE);
+        }
+        for (n, i) in (200..).zip(0..others % 8) {
+            f.add(n, 10_000.0 * (1.0 + f64::from(i)), ffi::ONCE);
+        }
+        f.add(1, 100.0, ffi::CURRENT_TIME);
+        f.advance(ms(5));
+        f.add(2, 100.0, ffi::CURRENT_TIME);
+        f.advance(ms(95));
+        f.run();
+        let ran: Vec<usize> = f.ran().into_iter().filter(|&n| n <= 2).collect();
+        assert_eq!(ran, [1, 2], "with {others} other timers");
+        kept.push(f);
+    }
+}
+
 #[test]
 fn a_timer_changes_its_interval_and_goes() {
     let mut f = Fixture::new();
