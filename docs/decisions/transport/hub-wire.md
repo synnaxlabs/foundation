@@ -93,7 +93,11 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641 ("the
   home's buffer failed") and
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084 ("the
-  home had no memory for a reply"). A reset drops the frames in flight, which is
+  home had no memory for a reply"), and the meaning of 19 in item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483 ("the node
+  had no memory for a reply or a request body"), which #2012 replaces with a text for
+  both causes (`laptop.architect`, 2026-10-09T00:13:01Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071579227). A reset drops the frames in flight, which is
   correct for `FAILED`, since the session cannot go on (lost: a `Reply::Failed` that
   keeps them, a second end message to fuzz). Each reply block
   holds one message. An ends message holds at most the frame's series, at 8 bytes each,
