@@ -51,7 +51,7 @@
   | `state` | `u8` | 0 running, 1 waiting to restart, 2 stopped, 3 ending |
   | `class` | `u8` | the end of the last run: 0 none or `Ok`, 1 `Config`, 2 `Device`, 3 `Retry` |
   | `restarts` | `u64` | the restarts in this call |
-  | each count of the kind | `u64` | as the kind sets it through `Context::status` |
+  | each count of the kind | `u64` | as the kind sets it through `Context::count` |
 
   Each write is one frame with the last value of every status channel. Each start of a
   run writes the whole status. A change of `state`, `class`, or `restarts` is written

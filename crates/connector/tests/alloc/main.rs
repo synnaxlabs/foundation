@@ -160,7 +160,7 @@ mod status {
         }
 
         async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
-            let count = ctx.status().count("samples");
+            let count = ctx.count("samples");
             let allocations = Cell::new(0);
             // The first wakes of the flush grow the simulator's lists.
             for second in 0..6_u64 {

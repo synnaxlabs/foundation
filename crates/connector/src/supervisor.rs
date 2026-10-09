@@ -1226,7 +1226,7 @@ mod tests {
         }
 
         async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
-            let count = ctx.status().count(self.count);
+            let count = ctx.count(self.count);
             for i in 1..=self.n {
                 ctx.clock().sleep(self.gap).await;
                 count.set(i);
@@ -1259,7 +1259,7 @@ mod tests {
         }
 
         async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
-            let (late, clock) = (ctx.status().count("samples"), ctx.clock().clone());
+            let (late, clock) = (ctx.count("samples"), ctx.clock().clone());
             let value = self.0;
             ctx.tasks().spawn(async move {
                 clock.sleep(ms(800)).await;
@@ -1269,7 +1269,7 @@ mod tests {
                 clock.sleep(ms(1_200)).await;
             });
             ctx.clock().sleep(ms(500)).await;
-            ctx.status().count("samples").set(1);
+            ctx.count("samples").set(1);
             ctx.clock().sleep(ms(100)).await;
             Ok(())
         }

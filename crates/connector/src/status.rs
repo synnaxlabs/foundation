@@ -84,7 +84,7 @@ pub(crate) fn check(kind: &str, counts: &[Name]) {
 /// The status channels of one connector, which its supervisor and its kind share.
 /// Each write gives one sample on every status channel, with the last value of each.
 #[derive(Debug)]
-pub struct Status(Rc<Values>);
+pub(crate) struct Status(Rc<Values>);
 
 impl Status {
     /// A status with each of `counts` at 0, that no writer writes yet.
@@ -101,14 +101,12 @@ impl Status {
         Self(Rc::clone(&self.0))
     }
 
-    /// The count `name`, to set from the kind's data path. The call searches the names
-    /// of the counts, so take each count once, before the data path.
+    /// The count `name`.
     ///
     /// # Panics
     ///
     /// When the kind's `check` did not name `name` as a count: the name is internal.
-    #[must_use]
-    pub fn count(&self, name: &str) -> Count {
+    pub(crate) fn count(&self, name: &str) -> Count {
         let at = self
             .0
             .counts

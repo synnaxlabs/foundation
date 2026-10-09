@@ -204,10 +204,16 @@ impl<C> Context<C> {
         self.inputs.hub.writer(config).await
     }
 
-    /// The connector's status channels.
+    /// The count `name` of the connector's status, `<connector>.status.<name>`, to
+    /// set from the kind's data path. The call searches the names of the counts, so
+    /// take each count once, before the data path.
+    ///
+    /// # Panics
+    ///
+    /// When the kind's `check` did not name `name` as a count.
     #[must_use]
-    pub fn status(&self) -> &status::Status {
-        &self.status
+    pub fn count(&self, name: &str) -> status::Count {
+        self.status.count(name)
     }
 
     /// Connects streams and datagrams.
