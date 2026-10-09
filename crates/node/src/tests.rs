@@ -2883,7 +2883,6 @@ mod port {
         use crate::identity::{FILE, LEN};
 
         /// Through the public fuzz entry, which panics when the decode is wrong.
-        #[cfg(feature = "sim")]
         #[test]
         fn a_key_decodes_and_a_key_with_another_tag_does_not() {
             let mut body = [7; 64];
