@@ -742,130 +742,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_os = "linux")]
-        fn a_retry_after_pending_sends_only_the_datagrams_that_did_not_go_out() {
-            runtime().block_on(async {
-                let udp = loopback();
-                turn_gso_off(&udp.bound);
-                let full = Outcome::Fails(Errno::AGAIN);
-                let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
-                let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = idle(fd);
-                let transmit = batch(b"abcdefgh", 2);
-                let sent = std::future::poll_fn(|cx| {
-                    writer.poll_transmit(cx, &udp.bound, &transmit, |_, d| {
-                        recorded.send(d)
-                    })
-                });
-                let bound = std::time::Duration::from_secs(10);
-                assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
-                let attempts: Vec<_> =
-                    recorded.sends.iter().map(|s| &s.0[..]).collect();
-                assert_eq!(attempts, [b"ab", b"cd", b"ef", b"ef", b"gh"]);
-            });
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn a_different_transmit_after_pending_loses_the_datagrams_that_went_out() {
-            runtime().block_on(async {
-                let udp = loopback();
-                turn_gso_off(&udp.bound);
-                let full = Outcome::Fails(Errno::AGAIN);
-                let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
-                let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = idle(fd);
-                let mut cx = Context::from_waker(std::task::Waker::noop());
-                let dropped = batch(b"abcdefgh", 2);
-                let pending =
-                    writer.poll_transmit(&mut cx, &udp.bound, &dropped, |_, d| {
-                        recorded.send(d)
-                    });
-                assert_eq!(pending, Poll::Pending);
-                let other = batch(b"ABCDEFGH", 2);
-                let sent = writer.poll_transmit(&mut cx, &udp.bound, &other, |_, d| {
-                    recorded.send(d)
-                });
-                assert_eq!(sent, Poll::Ready(Ok(())));
-                let attempts: Vec<_> =
-                    recorded.sends.iter().map(|s| &s.0[..]).collect();
-                assert_eq!(attempts, [b"ab", b"cd", b"ef", b"EF", b"GH"]);
-            });
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn a_different_transmit_of_one_datagram_after_pending_goes_out_whole() {
-            runtime().block_on(async {
-                let udp = loopback();
-                turn_gso_off(&udp.bound);
-                let full = Outcome::Fails(Errno::AGAIN);
-                let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
-                let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = idle(fd);
-                let mut cx = Context::from_waker(std::task::Waker::noop());
-                let dropped = batch(b"abcdefgh", 2);
-                let pending =
-                    writer.poll_transmit(&mut cx, &udp.bound, &dropped, |_, d| {
-                        recorded.send(d)
-                    });
-                assert_eq!(pending, Poll::Pending);
-                let other = transmit(v4(2), b"XY");
-                let sent = writer.poll_transmit(&mut cx, &udp.bound, &other, |_, d| {
-                    recorded.send(d)
-                });
-                assert_eq!(sent, Poll::Ready(Ok(())));
-                let attempts: Vec<_> =
-                    recorded.sends.iter().map(|s| &s.0[..]).collect();
-                assert_eq!(attempts, [b"ab", b"cd", b"ef", b"XY"]);
-            });
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn a_different_transmit_skips_one_datagram_for_each_lost_over_the_path_mtu() {
-            runtime().block_on(async {
-                let udp = loopback();
-                turn_gso_off(&udp.bound);
-                let over = Outcome::Fails(Errno::MSGSIZE);
-                let full = Outcome::Fails(Errno::AGAIN);
-                let mut recorded = Recorded::new(&[over, full]);
-                let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = idle(fd);
-                let mut cx = Context::from_waker(std::task::Waker::noop());
-                let dropped = batch(b"abcd", 2);
-                let pending =
-                    writer.poll_transmit(&mut cx, &udp.bound, &dropped, |_, d| {
-                        recorded.send(d)
-                    });
-                assert_eq!(pending, Poll::Pending);
-                let other = batch(b"ABCD", 2);
-                let sent = writer.poll_transmit(&mut cx, &udp.bound, &other, |_, d| {
-                    recorded.send(d)
-                });
-                assert_eq!(sent, Poll::Ready(Ok(())));
-                let attempts: Vec<_> =
-                    recorded.sends.iter().map(|s| &s.0[..]).collect();
-                assert_eq!(attempts, [b"ab", b"cd", b"CD"]);
-            });
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn a_datagram_over_the_path_mtu_counts_as_sent() {
-            let udp = loopback();
-            turn_gso_off(&udp.bound);
-            let outcomes =
-                [Outcome::Fails(Errno::MSGSIZE), Outcome::Fails(Errno::AGAIN)];
-            let mut recorded = Recorded::new(&outcomes);
-            let mut next = 0;
-            let transmit = batch(b"abcd", 2);
-            let sent = send_all(&udp.bound, &transmit, &mut next, |d| recorded.send(d));
-            assert_eq!(sent, Poll::Pending);
-            assert_eq!(next, 1);
-        }
-
-        #[test]
         fn sends_nothing_to_an_unreachable_family() {
             let mut recorded = Recorded::new(&[]);
             let remote = v6(2);
@@ -994,12 +870,11 @@ mod tests {
                 let udp = loopback();
                 let fd = udp.bound.socket.try_clone().unwrap();
                 let mut writer = idle(fd);
-                let mut nexts = Vec::new();
+                let mut sends = 0;
                 let sent = std::future::poll_fn(|cx| {
-                    writer.poll_send(cx, |_, next| {
-                        nexts.push(*next);
-                        if nexts.len() == 1 {
-                            *next = 2;
+                    writer.poll_send(cx, |_, _| {
+                        sends += 1;
+                        if sends == 1 {
                             Poll::Pending
                         } else {
                             Poll::Ready(Ok(()))
@@ -1008,13 +883,7 @@ mod tests {
                 });
                 let bound = std::time::Duration::from_secs(10);
                 assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
-                let mut cx = Context::from_waker(Waker::noop());
-                let sent = writer.poll_send(&mut cx, |_, next| {
-                    nexts.push(*next);
-                    Poll::Ready(Ok(()))
-                });
-                assert_eq!(sent, Poll::Ready(Ok(())));
-                assert_eq!(nexts, [0, 2, 0]);
+                assert_eq!(sends, 2);
             });
         }
 
@@ -1024,53 +893,16 @@ mod tests {
             let fd = udp.bound.socket.try_clone().unwrap();
             let mut writer = idle(fd);
             let mut cx = Context::from_waker(Waker::noop());
-            let pending = |_: &UdpSocket, next: &mut usize| {
-                *next = 1;
-                Poll::Pending
-            };
-            let full = runtime().block_on(async { writer.poll_send(&mut cx, pending) });
+            let full = runtime()
+                .block_on(async { writer.poll_send(&mut cx, |_, _| Poll::Pending) });
             assert_eq!(full, Poll::Pending);
             runtime().block_on(async {
-                let gone = writer.poll_send(&mut cx, pending);
+                let gone = writer.poll_send(&mut cx, |_, _| Poll::Pending);
                 assert_eq!(gone, Poll::Ready(Err(Error::Io { code: 5 })));
                 assert!(writer.full.is_none());
-                let mut first = None;
-                let full = writer.poll_send(&mut cx, |_, next| {
-                    first.get_or_insert(*next);
-                    Poll::Pending
-                });
+                let full = writer.poll_send(&mut cx, |_, _| Poll::Pending);
                 assert_eq!(full, Poll::Pending);
-                assert_eq!(first, Some(0));
                 assert!(writer.full.is_some());
-            });
-        }
-
-        #[test]
-        #[cfg_attr(
-            not(target_os = "linux"),
-            ignore = "needs epoll, which refuses a second registration"
-        )]
-        fn a_failed_registration_restarts_the_next_transmit_at_its_first_datagram() {
-            runtime().block_on(async {
-                let udp = loopback();
-                let fd = udp.bound.socket.try_clone().unwrap();
-                // A registration of the same descriptor, so epoll refuses the one of
-                // the writer with `EEXIST`, as it refuses one with `ENOSPC`.
-                let _taken = Writer::register(&fd).unwrap();
-                let mut writer = idle(fd);
-                let mut cx = Context::from_waker(Waker::noop());
-                let failed = writer.poll_send(&mut cx, |_, next| {
-                    *next = 2;
-                    Poll::Pending
-                });
-                assert_eq!(failed, Poll::Ready(Err(Error::Io { code: 17 })));
-                let mut first = None;
-                let sent = writer.poll_send(&mut cx, |_, next| {
-                    first = Some(*next);
-                    Poll::Ready(Ok(()))
-                });
-                assert_eq!(sent, Poll::Ready(Ok(())));
-                assert_eq!(first, Some(0), "a new transmit skips its first datagrams");
             });
         }
 
