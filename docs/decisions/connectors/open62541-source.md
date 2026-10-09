@@ -256,5 +256,7 @@
   2026-10-09 17:36 UTC). The sends between two passes, the passes before the value, and
   the order of a close: approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086204518,
-  2026-10-09 17:46 UTC). The moves of the woken connections
-  alone before the value: approval owed.
+  2026-10-09 17:46 UTC). The moves of the woken connections alone before the value:
+  approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086285343,
+  2026-10-09).
