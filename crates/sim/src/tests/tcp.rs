@@ -4,6 +4,7 @@ use std::future::{pending, poll_fn};
 use std::io::IoSlice;
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +54,7 @@ fn options() -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: 1 << 20,
         recv_buffer_bytes: 1 << 20,
-        unsent_bytes_max: 1 << 14,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
         delayed: false,
     }
 }
@@ -435,7 +436,7 @@ fn stalled(options: tcp::Options) -> (usize, usize) {
 fn a_peer_that_reads_nothing_stops_the_writer_when_both_buffers_are_full() {
     let options = tcp::Options {
         send_buffer_bytes: 1 << 16,
-        unsent_bytes_max: 1 << 16,
+        unsent_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
         ..options()
     };
     assert_eq!(stalled(options), (2 << 16, 1 << 18));
@@ -453,7 +454,7 @@ fn a_write_is_pending_while_the_send_buffer_is_full() {
         ..options()
     };
     let unsent = tcp::Options {
-        unsent_bytes_max: 1 << 20,
+        unsent_bytes_max: NonZeroUsize::new(1 << 20).unwrap(),
         ..options
     };
     assert_eq!(stalled(unsent), ((1 << 16) + (1 << 14), 1 << 18));
@@ -815,7 +816,7 @@ fn a_drop_after_close_still_sends_every_byte_and_the_end() {
     });
     let remote = at(&b, 4433);
     let unsent = tcp::Options {
-        unsent_bytes_max: 1 << 20,
+        unsent_bytes_max: NonZeroUsize::new(1 << 20).unwrap(),
         ..options()
     };
     start(&a, "client", move |node| async move {
@@ -1377,7 +1378,7 @@ fn a_power_cut_frees_the_port_of_an_orphan_for_a_connect_after_the_ports_wrap() 
     let (remote, closed) = (at(&b, 4433), at(&b, 9));
     start(&a, "client", move |node| async move {
         let queued = tcp::Options {
-            unsent_bytes_max: 1 << 20,
+            unsent_bytes_max: NonZeroUsize::new(1 << 20).unwrap(),
             ..options()
         };
         let mut tcp = connect(&node, remote, queued).await.unwrap();

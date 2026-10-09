@@ -152,7 +152,7 @@ fn apply(fd: BorrowedFd<'_>, options: &tcp::Options) -> Result<(), Errno> {
     sockopt::set_socket_send_buffer_size(fd, options.send_buffer_bytes)?;
     sockopt::set_socket_recv_buffer_size(fd, options.recv_buffer_bytes)?;
     sockopt::set_tcp_nodelay(fd, !options.delayed)?;
-    lowat::set(fd, options.unsent_bytes_max)
+    lowat::set(fd, options.unsent_bytes_max.get())
 }
 
 /// The OS code of `error`, or `EIO` when it has none.
@@ -188,6 +188,7 @@ fn stream_error(code: Errno, remote: SocketAddr) -> Error {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::num::NonZeroUsize;
 
     use super::*;
 
@@ -199,7 +200,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 16,
             recv_buffer_bytes: 1 << 15,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed,
         }
     }
@@ -241,7 +242,7 @@ mod tests {
         fn gives_the_code_of_a_refused_option() {
             let fd = listener::socket(loopback()).unwrap();
             let mut options = options(false);
-            options.unsent_bytes_max = usize::MAX;
+            options.unsent_bytes_max = NonZeroUsize::MAX;
             assert_eq!(apply(fd.as_fd(), &options), Err(Errno::INVAL));
         }
     }

@@ -508,6 +508,7 @@ pub trait Driver: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::task::Waker;
 
     use super::*;
@@ -603,7 +604,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 20,
             recv_buffer_bytes: 1 << 20,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: false,
         }
     }
