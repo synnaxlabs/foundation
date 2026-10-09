@@ -1155,6 +1155,61 @@ fn a_close_during_the_connect_gives_closing_and_no_stream() {
 }
 
 #[test]
+fn a_second_close_during_the_connect_gives_one_closing() {
+    let mut network = Network::new();
+    drop(network.serve(None));
+    let remote = network.remote();
+    let error = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            assert_eq!(side.close(1), Status::GOOD);
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            assert_eq!(side.states(), [ffi::OPENING, ffi::CLOSING]);
+        })
+        .expect_err("the peer gets no stream");
+    let threads = vec!["peer".to_owned()];
+    assert_eq!(error, sim::Error::Stuck { threads, seed: 0 });
+}
+
+/// A close drops the connection once the peer closes its side, not at a later wake.
+#[test]
+fn a_close_drops_the_connection_when_the_peer_closes_its_side() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let (closed, dropped) = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let closed = side.clock.now();
+            assert_eq!(side.close(1), Status::GOOD);
+            let mut end = side.clock.sleep(Span::SECOND);
+            let dropped = side
+                .manager
+                .drive(|cx| {
+                    side.run();
+                    if side.connections() == 0 {
+                        Poll::Ready(Some(side.clock.now()))
+                    } else {
+                        Pin::new(&mut end).poll(cx).map(|()| None)
+                    }
+                })
+                .await;
+            (closed, dropped)
+        })
+        .expect("the run ends");
+    assert_eq!(dropped, Some(closed + DELAY + DELAY));
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.ended, Some(closed + DELAY));
+}
+
+#[test]
 fn a_send_during_the_connect_is_refused() {
     let mut network = Network::new();
     let reads = network.serve(None);
@@ -1503,5 +1558,49 @@ fn a_send_past_the_bound_closes_the_connection_with_a_warning() {
         stderr("send_past_the_bound"),
         "connector-opcua: open62541 warning: connection 1: 256 sends wait, so it \
          closes\n"
+    );
+}
+
+/// The peer closes its side at 50 ms and drops the stream at 150 ms, and reads
+/// nothing, while the stream closes with sends that wait, when `child::running()`.
+#[test]
+fn reset_as_writing() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    network.accept(|mut stream, clock| async move {
+        clock.sleep(Span::from_nanos(50_000_000)).await;
+        poll_fn(|cx| stream.poll_close(cx))
+            .await
+            .expect("the close works");
+        clock.sleep(Span::from_nanos(100_000_000)).await;
+        drop(stream);
+    });
+    let remote = network.remote();
+    let states = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(10_000_000)).await;
+            for send in sends(10, 30_000) {
+                assert_eq!(side.send(1, &send), Status::GOOD);
+            }
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            side.states()
+        })
+        .expect("the run ends");
+    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+}
+
+#[test]
+fn a_write_to_a_reset_stream_gives_closing_and_a_warning() {
+    assert_eq!(
+        stderr("reset_as_writing"),
+        "connector-opcua: open62541 warning: connection 1: the write failed: \
+         10.0.0.2:4840 reset the stream\n"
     );
 }
