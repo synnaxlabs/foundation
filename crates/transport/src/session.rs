@@ -564,7 +564,7 @@ mod tests {
     }
 
     /// The read at the end of a half that its peer finished, or reset when `reset`.
-    fn end(reset: bool) -> Result<Option<Vec<u8>>, Error> {
+    fn ended(reset: bool) -> Result<Option<Vec<u8>>, Error> {
         if reset {
             Err(Error::Reset { code: Code(0) })
         } else {
@@ -584,7 +584,7 @@ mod tests {
                 let mut held = fill(&side).await;
                 let (mut sender, mut receiver) = held.remove(0);
                 let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
-                assert_eq!(read, end(reset));
+                assert_eq!(read, ended(reset));
                 // Past the delay of the ack of the reply's end.
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
                 let mut opened = pin!(side.session.open(Class::Complete));
@@ -603,14 +603,14 @@ mod tests {
             move |side| async move {
                 let mut held = accept_filled(&side).await;
                 let mut first = held.remove(0);
-                let reply = first.sender.as_mut().expect("a reply half");
                 if reset {
                     first.sender = None;
                 } else {
+                    let reply = first.sender.as_mut().expect("a reply half");
                     reply.finish().expect("finished");
                 }
                 let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
-                assert_eq!(read, end(reset));
+                assert_eq!(read, ended(reset));
                 drop(first);
                 accept_last(&side).await;
             },
