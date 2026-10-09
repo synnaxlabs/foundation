@@ -213,7 +213,7 @@ impl Reader {
     ) -> Result<Self, Error> {
         let (keys, index) = loop {
             let (_, index) = resolve(&state.borrow(), channels)?;
-            let away = match crate::home(state, index).await {
+            let away = match crate::homes(state, &[index]).await {
                 Ok(()) => None,
                 Err(Away::Remote(home)) => Some(home),
                 Err(Away::Mesh(stopped)) => return Err(Error::Mesh(stopped)),

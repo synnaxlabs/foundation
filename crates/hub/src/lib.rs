@@ -67,7 +67,8 @@ pub struct Config {
     pub tasks: env::tasks::Tasks,
     /// This node's key. A client's hello must name it as `via`.
     pub node: types::node::Key,
-    /// Mesh time, which the hub checks each hello and request against.
+    /// Mesh time, which the hub checks each hello and request against, and which
+    /// [`Hub::writer`] waits for: the reader that `home` was made with.
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
@@ -196,15 +197,17 @@ impl Hub {
         self.0.borrow_mut().set(&checked(&channels));
     }
 
-    /// Opens a writer session on `config.channels` and the index of each. While the
-    /// mesh names no home for an index, it waits for one.
+    /// Opens a writer session on `config.channels` and the index of each. It waits
+    /// for the node's first mesh time, and while the mesh names no home for an index,
+    /// for one.
     ///
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
     /// name that no channel has, then, for the first index whose home is not this
     /// node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the mesh
-    /// stopped. Else [`writer::Error::Home`] when the home refuses the writer.
+    /// stopped. Else [`writer::Error::Home`] for a lease that is not longer than zero:
+    /// never `Unsynced`.
     pub async fn writer(
         &self,
         config: writer::Config,
@@ -535,28 +538,38 @@ enum Away {
     Mesh(::mesh::Stopped),
 }
 
-/// Waits until the mesh names this node the home of `index`. With no mesh, this node
-/// is the home. It changes no state, so the caller checks its channels again, or reads
-/// its removal, after it, then carries `index` with no `await` between.
-async fn home(
+/// Waits until the mesh names this node the home of each of `indexes`, in one pass
+/// that waits for none, so a home that moves while it waits for another is seen. With
+/// no mesh, this node is the home. It changes no state, so the caller checks its
+/// channels again, or reads their removal, after it, then carries `indexes` with no
+/// `await` between.
+async fn homes(
     state: &Rc<RefCell<State>>,
-    index: types::channel::Key,
+    indexes: &[types::channel::Key],
 ) -> Result<(), Away> {
-    let (watch, node) = {
-        let state = state.borrow();
-        (
-            state.region.as_ref().map(|region| region.mesh.watch(index)),
-            state.node,
-        )
-    };
-    if let Some(mut watch) = watch {
-        loop {
-            match watch.next().await.map_err(Away::Mesh)? {
-                Some(home) if home == node => break,
-                Some(home) => return Err(Away::Remote(home)),
-                None => {}
+    loop {
+        let mut waited = false;
+        for &index in indexes {
+            let (watch, node) = {
+                let state = state.borrow();
+                (
+                    state.region.as_ref().map(|region| region.mesh.watch(index)),
+                    state.node,
+                )
+            };
+            let Some(mut watch) = watch else {
+                return Ok(());
+            };
+            loop {
+                match watch.next().await.map_err(Away::Mesh)? {
+                    Some(home) if home == node => break,
+                    Some(home) => return Err(Away::Remote(home)),
+                    None => waited = true,
+                }
             }
         }
+        if !waited {
+            return Ok(());
+        }
     }
-    Ok(())
 }
