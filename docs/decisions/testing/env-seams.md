@@ -271,3 +271,13 @@
   call, and `sim` never wrote. No caller gives 0.
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1940).
+  Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on
+  exec. On Linux, the call that opens the socket sets that and non-blocking, so a child
+  that another thread spawns never holds it. macOS has no such flag, and Tokio sets it
+  in a second call on an accepted stream too, so on macOS that child may hold the socket
+  and its port, as the doc of `os::net()` says. A Foundation node spawns no process, so
+  only tests see it, and CI runs on Linux. Lost: `POSIX_SPAWN_CLOEXEC_DEFAULT` on the
+  spawn side, which std does not set, and which needs a spawn seam and `unsafe` for
+  tests only; and a lock that holds each spawn out while `os` opens a socket, which is a
+  global and which Tokio's accept does not take. Decided by `laptop.architect-2`
+  (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000).
