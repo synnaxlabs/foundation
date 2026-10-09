@@ -296,17 +296,23 @@
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6054016051). A named
   reader has one session for each subject and name at the home of its index
   (`laptop.architect`, 2026-10-08T10:15:04Z:
-  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053): a later
+  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053, and
+  `laptop.architect`, 2026-10-09T21:04:47Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192): a later
   open takes over the session, which ends with `Ended::Replaced` before the frames that
-  wait for it, as the home closed it. A named complete reader that opens while the home
-  holds its position resumes where its last complete session opened, and ends with
-  `Ended::Behind` once a frame since then was released. Trigger: #1742 PR 3 adds
-  `Reader::ack`, and the reader then resumes past its last ack. A named open before mesh
-  time gives `Unsynced`. A hold on an unnamed or latest reader panics
+  wait for it, as the home closed it (`laptop.architect`, 2026-10-09T21:04:47Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192).
+  Supersedes the plan test of
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057332703. A named
+  complete reader that opens while the home holds its position resumes where its last
+  complete session opened, and ends with `Ended::Behind` when a frame was released
+  between that open and this one (`laptop.architect`, 2026-10-09T21:04:47Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192). Trigger:
+  #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack. A named
+  open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader panics
   (`laptop.architect`, 2026-10-08T10:01:19Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A named
   reader whose index has its home at another node gives `reader::Error::Remote { home }`
   (`laptop.architect`, 2026-10-09T19:33:23Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6087879895).
-  Trigger: #1155 removes `reader::Error::Remote` when a named reader opens across
-  nodes.
+  Trigger: #1155 removes `reader::Error::Remote` when a named reader opens across nodes.
