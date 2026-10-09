@@ -1,6 +1,7 @@
 //! The review check: the review of a PR is done at its head. The round comment format
 //! it parses is in `.claude/skills/review/SKILL.md`, "Round comment".
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
@@ -657,34 +658,38 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// The lines of text of `paragraph` as GitHub shows them: its text and code spans,
-/// each image as U+FFFC in place of its text, no invisible character (Unicode default
-/// ignorable), and each run of white space as one space, trimmed. A character that
-/// looks like another stays itself.
+/// each footnote reference as its number, each image as U+FFFC in place of its text
+/// and line breaks, no invisible character (Unicode default ignorable), and each run of
+/// white space as one space, trimmed. A character that looks like another stays
+/// itself.
 fn texts<'n>(paragraph: &'n AstNode<'n>) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut fresh = true;
+    let image =
+        |node: &'n AstNode<'n>| matches!(node.data.borrow().value, NodeValue::Image(_));
     for span in paragraph.descendants().skip(1) {
+        if span.ancestors().skip(1).any(image) {
+            continue;
+        }
         let data = span.data.borrow();
         let text = match &data.value {
             NodeValue::SoftBreak | NodeValue::LineBreak => {
                 fresh = true;
                 continue;
             }
-            NodeValue::Text(text) => text.as_ref(),
-            NodeValue::Code(code) => code.literal.as_str(),
-            NodeValue::Image(_) => "\u{FFFC}",
-            _ => "",
+            NodeValue::Text(text) => Cow::Borrowed(text.as_ref()),
+            NodeValue::Code(code) => Cow::Borrowed(code.literal.as_str()),
+            NodeValue::Image(_) => Cow::Borrowed("\u{FFFC}"),
+            NodeValue::FootnoteReference(reference) => {
+                Cow::Owned(reference.ix.to_string())
+            }
+            _ => Cow::Borrowed(""),
         };
         if fresh {
             lines.push(String::new());
             fresh = false;
         }
-        let image = |node: &'n AstNode<'n>| {
-            matches!(node.data.borrow().value, NodeValue::Image(_))
-        };
-        if let Some(line) = lines.last_mut()
-            && !span.ancestors().skip(1).any(image)
-        {
+        if let Some(line) = lines.last_mut() {
             line.extend(text.chars().filter(|&c| !ignorable(c)));
         }
     }
