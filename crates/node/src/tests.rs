@@ -2846,7 +2846,8 @@ mod port {
             let mut changed = own();
             changed[40] ^= 1;
             let short = own()[..LEN - 1].to_vec();
-            for bytes in [short, tag, changed] {
+            let long = [own(), vec![0]].concat();
+            for bytes in [short, long, tag, changed] {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 write_key(&mut sim, &host, bytes.clone());
