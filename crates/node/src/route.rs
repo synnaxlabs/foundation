@@ -42,11 +42,7 @@ pub(crate) async fn accept(
             Ok(session) => session,
             Err(error) => return error,
         };
-        let member = match (session.peer(), &mesh) {
-            (Peer::Node(key), Some(mesh)) => mesh.holder(key).is_some(),
-            (Peer::Node(_), None) | (Peer::Client, _) => false,
-        };
-        let held = if member {
+        let held = if member(session.peer(), mesh.as_ref()) {
             None
         } else if outside.get() < SESSIONS {
             Some(Outside::new(Rc::clone(&outside)))
@@ -134,15 +130,24 @@ async fn route(
             }
             (Peer::Client, _) | (_, None) => reject(incoming),
         },
-        Protocol::Hub => match (peer, mesh) {
-            (Peer::Node(key), Some(mesh)) if mesh.holder(key).is_some() => {
-                // `serve` stops the stream with the code of its error.
-                drop(link.serve(incoming).await);
-            }
-            // A program waits until `node` handles a `Served::Request` (#1744).
-            (Peer::Node(_) | Peer::Client, _) => reject(incoming),
-        },
-        Protocol::Clock | Protocol::Replica | Protocol::Blob => reject(incoming),
+        Protocol::Hub if member(peer, mesh.as_ref()) => {
+            // `serve` stops the stream with the code of its error.
+            drop(link.serve(incoming).await);
+        }
+        // A program's `Hub` stream waits until `node` handles a `Served::Request`
+        // (#1744).
+        Protocol::Hub | Protocol::Clock | Protocol::Replica | Protocol::Blob => {
+            reject(incoming);
+        }
+    }
+}
+
+/// Whether `peer` is a member of the region: a node whose key a member holds in the
+/// view of `mesh`.
+fn member(peer: Peer, mesh: Option<&Mesh>) -> bool {
+    match (peer, mesh) {
+        (Peer::Node(key), Some(mesh)) => mesh.holder(key).is_some(),
+        (Peer::Node(_), None) | (Peer::Client, _) => false,
     }
 }
 
