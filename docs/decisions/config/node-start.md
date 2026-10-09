@@ -54,7 +54,8 @@
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090417728;
   2026-10-09T23:14:43Z, the escape of `data` in the text form,
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090863425;
-  2026-10-09T23:23:21Z, why the escape stays, as the one form of each text line of
-  `ops`, https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090952680).
+  2026-10-09T23:23:21Z, why the escape stays: `Start::fail` and `Applied` give a path
+  in that form,
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090952680).
   `--listen`, and the files `address` and `admin.key`, come with #1744
   (https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6053227526).
