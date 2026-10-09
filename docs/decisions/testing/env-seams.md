@@ -278,9 +278,9 @@
   another thread spawns never holds it. macOS has no such flag, and Tokio sets it in a
   second call on an accepted stream too, so on macOS that child may hold the socket and
   its port, as the doc of `os::net()` says. On macOS, a child that another thread spawns
-  during a lookup may also hold the sockets that the C library opens for it, and each
-  child spawned after the first lookup holds a socket that the C library keeps open. A
-  Foundation node spawns no process, so only tests see it, and CI runs on Linux. Lost:
+  during a lookup may also hold the sockets that the C library opens for it, and a child
+  spawned after a lookup may hold a socket that the C library keeps open. A Foundation
+  node spawns no process, so only tests see it, and CI runs on Linux. Lost:
   `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn side, which std does not set, and which
   needs a spawn seam and `unsafe` for tests only. Decided by `laptop.architect-2`
   (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000). `os`
