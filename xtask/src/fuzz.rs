@@ -272,15 +272,15 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                 }
                 reported.push(copy.id);
                 problems.push(format!(
-                    "fuzz/Cargo.toml may not build `{}` `{}` of `{}` from the copy \
-                     `{}`: the requirement meets the copy and another package of its \
-                     name that fuzz/ builds. If fuzz/Cargo.toml does not have the \
-                     [patch.crates-io] table of the root Cargo.toml, give it that \
+                    "`{}` needs `{}` `{}`, which the copy `{}` and another package of \
+                     its name that fuzz/ builds both meet, so fuzz/ can build that \
+                     package in place of the copy. If fuzz/Cargo.toml does not have \
+                     the [patch.crates-io] table of the root Cargo.toml, give it that \
                      table. If it has the table, change the requirements of fuzz/ so \
                      that this requirement does not also meet the other package.",
+                    dependent.id,
                     copy.name,
                     requirement["req"].as_str().unwrap_or_default(),
-                    dependent.id,
                     copy.manifest
                 ));
             }
@@ -610,12 +610,13 @@ mod tests {
     /// The problem of the requirement `^1.3` of `types` on `noq-proto`.
     fn missed() -> String {
         format!(
-            "fuzz/Cargo.toml may not build `noq-proto` `^1.3` of `{TYPES}` from the \
-             copy `/w/patches/noq-proto/Cargo.toml`: the requirement meets the copy \
-             and another package of its name that fuzz/ builds. If fuzz/Cargo.toml \
-             does not have the [patch.crates-io] table of the root Cargo.toml, give it \
-             that table. If it has the table, change the requirements of fuzz/ so that \
-             this requirement does not also meet the other package."
+            "`{TYPES}` needs `noq-proto` `^1.3`, which the copy \
+             `/w/patches/noq-proto/Cargo.toml` and another package of its name that \
+             fuzz/ builds both meet, so fuzz/ can build that package in place of the \
+             copy. If fuzz/Cargo.toml does not have the [patch.crates-io] table of the \
+             root Cargo.toml, give it that table. If it has the table, change the \
+             requirements of fuzz/ so that this requirement does not also meet the \
+             other package."
         )
     }
 
@@ -638,9 +639,9 @@ mod tests {
     /// `patched`.
     fn unmet(req: &str, dependent: &str) -> String {
         format!(
-            "fuzz/Cargo.toml may not build `p` `{req}` of `{dependent}` from the copy \
-             `{}/patches/p/Cargo.toml`: the requirement meets the copy and another \
-             package of its name that fuzz/ builds. If fuzz/Cargo.toml does not have \
+            "`{dependent}` needs `p` `{req}`, which the copy `{}/patches/p/Cargo.toml` \
+             and another package of its name that fuzz/ builds both meet, so fuzz/ can \
+             build that package in place of the copy. If fuzz/Cargo.toml does not have \
              the [patch.crates-io] table of the root Cargo.toml, give it that table. \
              If it has the table, change the requirements of fuzz/ so that this \
              requirement does not also meet the other package.",
