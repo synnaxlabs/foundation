@@ -169,6 +169,93 @@ fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_another_home()
 }
 
 #[test]
+fn a_writer_does_not_open_at_a_home_that_moved_after_its_wait_in_the_same_pass() {
+    run(14, |test| async move {
+        let config = config("a", &["value", "value-b"]);
+        let mut opening = std::pin::pin!(test.hub.writer(config));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, NODE).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, OTHER).await;
+        let region = test.region.as_ref().expect("a region");
+        let named = region.mesh.watch(TIME).next().await;
+        assert_eq!(named, Ok(Some(OTHER)));
+        test.set_home(TIME_B, NODE).await;
+        let opened = opening.await;
+        let error = opened.expect_err("the mesh names OTHER as the home of time");
+        assert_eq!(error, writer::Error::Remote { home: OTHER });
+    });
+}
+
+#[test]
+fn a_writer_sees_its_channel_move_while_it_waits_for_mesh_time() {
+    unsynced(16, |mut test| async move {
+        test.set_home(TIME, NODE).await;
+        test.set_home(TIME_B, OTHER).await;
+        let hub = test.hub.clone();
+        let mut opening = std::pin::pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        let mut moved = super::channels();
+        moved.insert(
+            name("value"),
+            super::definition(2, DataType::Sample(I64), 3),
+        );
+        hub.set_definitions(&moved);
+        test.sync().await;
+        let opened = opening.await;
+        let error = opened.expect_err("the mesh names OTHER as the home of time-b");
+        assert_eq!(error, writer::Error::Remote { home: OTHER });
+    });
+}
+
+#[test]
+fn opens_no_writer_on_a_channel_removed_while_it_waits_for_mesh_time() {
+    unsynced(17, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = std::pin::pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        hub.set_definitions(&super::without(&["time", "value", "value-c"]));
+        test.sync().await;
+        test.clock.sleep(Span::from_nanos(5_000_000_000)).await;
+        let std::task::Poll::Ready(opened) = poll_once(opening.as_mut()) else {
+            panic!("the open still waits after its channel was removed");
+        };
+        let error = opened.expect_err("value was removed");
+        assert_eq!(error, writer::Error::Unknown(name("value")));
+    });
+}
+
+#[test]
+fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_a_middle_home() {
+    run(15, |test| async move {
+        let mut defs = super::channels();
+        defs.insert(
+            name("time-c"),
+            super::definition(6, DataType::Sample(super::STAMP), 6),
+        );
+        defs.insert(
+            name("value-d"),
+            super::definition(7, DataType::Sample(I64), 6),
+        );
+        test.hub.set_definitions(&defs);
+        let time_c = channel::Key::from_u128(6);
+        test.set_home(TIME, NODE).await;
+        test.set_home(time_c, NODE).await;
+        let config = config("a", &["value", "value-b", "value-d"]);
+        let mut opening = std::pin::pin!(test.hub.writer(config));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, OTHER).await;
+        let region = test.region.as_ref().expect("a region");
+        let named = region.mesh.watch(TIME).next().await;
+        assert_eq!(named, Ok(Some(OTHER)));
+        test.set_home(TIME_B, NODE).await;
+        let opened = opening.await;
+        let error = opened.expect_err("the mesh names OTHER as the home of time");
+        assert_eq!(error, writer::Error::Remote { home: OTHER });
+    });
+}
+
+#[test]
 fn a_writer_does_not_open_on_a_mesh_that_stopped_while_it_waits_for_mesh_time() {
     unsynced(12, |mut test| async move {
         let hub = test.hub.clone();
