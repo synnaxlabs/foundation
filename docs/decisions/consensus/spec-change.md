@@ -67,12 +67,11 @@
   refuses the other two cases. Each panic is a defect of the caller. `mesh` runs
   `spec::region::check` on the founding and on each committed spec before it puts it in
   use (#1741). `node` gives the hub only the specs of `Mesh::watch_spec` (#1957 PR 2)
-  and runs no check of its own. A spec with problems follows #1741: the node gives the
-  hub none of it and keeps the spec it uses, which is empty for a founding with
-  problems. So no spec from disk or a peer makes an open panic. A founding with
-  problems defines no channel, and `Config::region` has no panic (#1957 PR 2). The
-  check in the mesh only, by `laptop.architect`,
-  2026-10-09T20:52:20Z
+  and runs no check of its own. A spec with problems follows #1741: the mesh keeps the
+  spec it uses, which is empty for a founding with problems, and the hub gets none of
+  it. So no spec from disk or a peer makes an open panic. A founding with problems
+  defines no channel, and `Config::region` has no panic (#1957 PR 2). The check in the
+  mesh only, by `laptop.architect`, 2026-10-09T20:52:20Z
   (https://github.com/synnaxlabs/foundation/issues/2179#issuecomment-6089059684).
   Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
   2026-10-07T06:42:23Z

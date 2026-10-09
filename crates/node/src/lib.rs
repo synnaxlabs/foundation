@@ -789,7 +789,7 @@ impl Serve {
             region,
         });
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        let group = define(mesh.as_ref(), hub.clone()).await;
+        let group = follow(mesh.as_ref(), hub.clone()).await;
         // The port's future holds the mesh, so it drops before the wait.
         {
             let port =
@@ -854,29 +854,30 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
         .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
-/// Gives `hub` the channels of the spec that `mesh` uses, then returns a future that
-/// gives it those of each new spec in use and resolves with the stop of the group, or
-/// never resolves when the node has no mesh.
-async fn define(
+/// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives
+/// it that of each later spec in use and resolves with the stop of the group, or never
+/// resolves when the node has no mesh.
+async fn follow(
     mesh: Option<&mesh::Mesh>,
     hub: hub::Hub,
 ) -> impl Future<Output = mesh::Stopped> + use<> {
-    let set = move |spec: mesh::used::Spec| hub.set_definitions(&*spec.definitions);
+    let define = move |spec: mesh::used::Spec| hub.set_definitions(&*spec.definitions);
     let mut watch = mesh.map(mesh::Mesh::watch_spec);
     let first = match &mut watch {
-        Some(watch) => watch.next().await.map(&set),
+        Some(watch) => watch.next().await.map(&define),
         None => Ok(()),
     };
     async move {
         let Some(mut watch) = watch else {
             return std::future::pending().await;
         };
-        let mut next = first;
+        if let Err(stopped) = first {
+            return stopped;
+        }
         loop {
-            if let Err(stopped) = next {
+            if let Err(stopped) = watch.next().await.map(&define) {
                 return stopped;
             }
-            next = watch.next().await.map(&set);
         }
     }
 }

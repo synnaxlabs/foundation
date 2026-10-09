@@ -5148,25 +5148,21 @@ mod port {
         /// Applies the index `plant.<name>` homed on [`OWN`] through `ops`, and gives
         /// its key.
         async fn apply_index(ops: &ops::Node, name: &str) -> channel::Key {
-            let text = format!(
-                "channel \"plant.{name}\" {{ kind = \"index\" }}\n\
-                 placement \"plant\" {{\n  select = \"plant.*\"\n  home = \"plant.node{OWN}\"\n}}\n"
-            );
-            key_of(&apply(ops, text).await, name)
+            key_of(&apply(ops, text(name, &[])).await, name)
         }
 
-        /// The text of a spec with the index `plant.time` homed on [`OWN`] and an
+        /// The text of a spec with the index `plant.<index>` homed on [`OWN`] and an
         /// `i64` data channel `plant.<name>` on it for each of `data`.
-        fn text(data: &[&str]) -> String {
+        fn text(index: &str, data: &[&str]) -> String {
             use std::fmt::Write as _;
             let mut text = format!(
-                "channel \"plant.time\" {{ kind = \"index\" }}\n\
+                "channel \"plant.{index}\" {{ kind = \"index\" }}\n\
                  placement \"plant\" {{\n  select = \"plant.*\"\n  home = \"plant.node{OWN}\"\n}}\n"
             );
             for name in data {
                 writeln!(
                     text,
-                    "channel \"plant.{name}\" {{\n  data_type = \"i64\"\n  index = \"plant.time\"\n}}"
+                    "channel \"plant.{name}\" {{\n  data_type = \"i64\"\n  index = \"plant.{index}\"\n}}"
                 )
                 .unwrap();
             }
@@ -5224,7 +5220,7 @@ mod port {
             let host = keyed(&mut sim, 2);
             let founding = region(&[member(OWN, &KEY, &host)]);
             let (node, definitions) =
-                applied(&mut sim, &host, founding, text(&["value"]));
+                applied(&mut sim, &host, founding, text("time", &["value"]));
             let keys =
                 ["time", "value"].map(|name| key_of(&definitions, name).as_u128());
             let read = Arc::new(Mutex::new(None));
@@ -5253,7 +5249,7 @@ mod port {
             let host = keyed(&mut sim, 2);
             let founding = region(&[member(OWN, &KEY, &host)]);
             let (node, definitions) =
-                applied(&mut sim, &host, founding, text(&["value"]));
+                applied(&mut sim, &host, founding, text("time", &["value"]));
             let ended = Arc::new(Mutex::new(None));
             let out = Arc::clone(&ended);
             node.spawn(move |hub| async move {
@@ -5265,7 +5261,7 @@ mod port {
             assert_eq!(sim.run_for(TEN), Ok(()));
             assert_eq!(*ended.lock().unwrap(), None);
             node.operate(|ops| async move {
-                apply(&ops, text(&[])).await;
+                apply(&ops, text("time", &[])).await;
             });
             assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
             node.stop();
@@ -5281,7 +5277,8 @@ mod port {
         fn a_node_that_opens_again_after_an_apply_knows_the_applied_channels() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
-            let (node, _) = applied(&mut sim, &host, founded(&host), text(&["flow"]));
+            let (node, _) =
+                applied(&mut sim, &host, founded(&host), text("time", &["flow"]));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
