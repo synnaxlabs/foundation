@@ -26,10 +26,10 @@ const PARTS: usize = 1_024;
 /// so a stalled disk does not grow the queue.
 const DEPTH: usize = 64;
 
-/// The permissions of a new file: only the user that runs the node reads it.
+/// The mode of a new file: it gives the group and other users no access.
 const FILE: fs::Mode = fs::Mode::from_raw_mode(0o600);
 
-/// The permissions of a new directory: only the user that runs the node opens it.
+/// The mode of a new directory: it gives the group and other users no access.
 const DIR: fs::Mode = fs::Mode::from_raw_mode(0o700);
 
 /// The flags that open a directory to read.

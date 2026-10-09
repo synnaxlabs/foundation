@@ -75,8 +75,7 @@
   umask, the setgid bit, and a file that is there, by `laptop.architect-2` (23:24 UTC):
   https://github.com/synnaxlabs/foundation/pull/2028#issuecomment-6071026954, which
   https://github.com/synnaxlabs/foundation/pull/2028#issuecomment-6071534642 confirms
-  (00:09 UTC). The
-  time of a new key, by `laptop.architect-2` (20:10 UTC):
+  (00:09 UTC). The time of a new key, by `laptop.architect-2` (20:10 UTC):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The
   private pool and the rank above `Error::Blob` and `Error::Mesh` are the amendment
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068057306, which
