@@ -35,8 +35,8 @@
   `cargo xtask` set, replaces the flags of `.cargo/config.toml`. Decided by
   `laptop.architect-2` (2026-10-08T23:08:19Z, #871,
   https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264),
-  approved by `laptop.architect` (2026-10-09T00:26:41Z, #2033,
-  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6071732611).
+  approved by `laptop.architect` (2026-10-09T01:09:48Z, #2033,
+  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6072192755).
   `env::files` (#37) gives files under one data directory, with owned blocks and a
   sync that poisons the file on failure (S4). One handle at a time holds a file open
   to write, until it drops and its calls end; another write open fails with `Busy`
