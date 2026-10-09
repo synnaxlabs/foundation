@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::{self, Rc};
 use std::task::{Context, Poll, Waker, ready};
 
@@ -96,18 +97,22 @@ pub(crate) async fn dial(
             let carrier = table.carrier.clone();
             let this = rc::Weak::clone(&table.this);
             let addresses = addresses.to_vec();
-            // A strong handle would keep the result of an attempt that a session
-            // from the peer ended, and so that session, open while the dial runs.
-            let started = Rc::downgrade(&attempt);
+            let started = Rc::clone(&attempt);
             table.tasks.spawn(async move {
-                let dial = dial::dial(&carrier, node, &addresses).await;
-                let (Some(table), Some(started)) = (this.upgrade(), started.upgrade())
-                else {
+                let mut dial = pin!(dial::dial(&carrier, node, &addresses));
+                // A session from the peer that ends the attempt drops the dial.
+                let dialed = poll_fn(|cx| {
+                    if started.poll(cx).is_ready() {
+                        return Poll::Ready(None);
+                    }
+                    dial.as_mut().poll(cx).map(Some)
+                });
+                let (Some(dialed), Some(table)) = (dialed.await, this.upgrade()) else {
                     return;
                 };
                 table
                     .borrow_mut()
-                    .dialed(node, &started, dial.map(Session::new));
+                    .dialed(node, &started, dialed.map(Session::new));
             });
             attempt
         }
@@ -174,8 +179,7 @@ impl Table {
         Found::Start(attempt)
     }
 
-    /// Ends `attempt` to `node` with what its dial gave, unless a session from the
-    /// peer ended it first: then the dial's session drops. A session waits for
+    /// Ends `attempt` to `node` with what its dial gave. A session waits for
     /// `accept`, and closes the held one. After an error, the attempt gives the held
     /// session.
     fn dialed(
@@ -184,9 +188,6 @@ impl Table {
         attempt: &Rc<Attempt>,
         dialed: Result<Session, Error>,
     ) {
-        if attempt.ended() {
-            return;
-        }
         let entry = self.nodes.get_mut(&node);
         let entry = entry.expect("invariant: a dial keeps its entry");
         let dial = entry.dial.take().expect("invariant: one dial ends it");
@@ -357,11 +358,6 @@ impl Attempt {
         }
         wake::register(&mut state.waiting, cx.waker());
         Poll::Pending
-    }
-
-    /// Whether the attempt has its result.
-    fn ended(&self) -> bool {
-        self.0.borrow().result.is_some()
     }
 
     fn end(&self, result: Result<Session, Error>) {
@@ -1286,6 +1282,37 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // The client has the higher key and dials a dead address, then a second
+    // transport of the server after the stagger. The server's session ends that
+    // attempt first, so the client's dial stops and never reaches the second.
+    #[test]
+    fn a_session_from_the_peer_stops_the_dial_of_the_higher_key() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let second = SocketAddr::new(testing::address(&server).ip(), testing::PORT + 1);
+        let slow = [dead(&server)[0], Address::Udp(second)];
+        testing::start(&server, move |shard, node| async move {
+            let [transport, witness] = [testing::address(&node), second].map(|at| {
+                let part = testing::part(&node.net(), at);
+                let config = shard.config(SERVER, testing::IDLE);
+                Transport::new(config, part).expect("a transport")
+            });
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let dialed = dialed.expect("a session");
+            node.clock().sleep(Span::SECOND).await;
+            assert!(testing::poll_once(pin!(witness.accept())).await.is_none());
+            dialed.close(Code(1));
+            linger(&node).await;
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let (transport, _sessions) = accepting(config, &node);
+            let dialed = transport.dial(SERVER.public(), &slow).await;
+            let dialed = dialed.expect("the server's session");
+            assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(1) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
     // The server holds the client's second session, closes it once its own answers a
     // ping (after the peer's ack delay), then holds the third, and pings again.
     #[test]
@@ -1526,12 +1553,11 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The client dials a dead address first, so its first dial connects 250 ms
-    // later. The server's session ends that attempt, and then closes. A second dial
-    // starts, also slow, and the first dial's session comes while it runs: the
-    // second dial must still end.
+    // The client dials a dead address first, so its first dial would connect 250 ms
+    // later. The server's session ends that attempt, which stops the dial, and then
+    // closes. A second dial starts, also slow, and gives its own session.
     #[test]
-    fn a_late_session_of_an_ended_attempt_does_not_end_the_next_one() {
+    fn a_dial_after_an_attempt_that_the_peer_ended_gives_its_own_session() {
         let (mut sim, client, server) = testing::nodes(0);
         let slow = [dead(&server)[0], Address::Udp(testing::address(&server))];
         let back = [Address::Udp(testing::address(&client))];
