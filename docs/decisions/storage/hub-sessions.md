@@ -93,17 +93,25 @@
   reader gives `reader::Ended::Removed` before any frame that waits, and a reader that
   waits in `next` wakes; a served open stops with code `UNKNOWN`
   (`serve::Error::Removed`). Each names the key of the first channel of the session that
-  was removed. Each session reads a cell that it shares with the hub, never a map, so
-  its check costs the same while other sessions end. The home stops carrying an index
-  only when its key is not an index of the new definitions (`Shard::shed`, HOME
-  SURFACE), and carries it again when it returns. A served open checks each key as its
-  message arrives, and checks all of them again when it opens, since a call between two
-  messages of its keys run can remove one. The call checks the definitions before it
-  changes anything: two channels with one key or one name, or a data channel whose index
-  is not an index of the definitions, panic. Lost: a session ends at its next call,
-  under which a writer keeps the control of a removed index until it calls, and a reader
-  that waits in `next` needs a wake anyway; and the home ends the sessions in `shed`,
-  which knows no data channel, so a removed data channel needs a second path. Decided by
-  `laptop.architect` (2026-10-08T22:24:43Z:
+  was removed. Each per-call check of a session (`Writer::write`, `Session::take`,
+  `Credit::grant`) reads only a cell that the session shares with the hub, never a map,
+  so its cost stays the same while other sessions end. The hub finds a session by its
+  home key, as the shard never gives a key twice. The home stops carrying an index only
+  when its key is not an index of the new definitions (`Shard::shed`, HOME SURFACE), and
+  carries it again when it returns. The home carries each new index at once: the PR that
+  carries an index at the first session that finds this node is its home (#340,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511) changes
+  this (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071433041). A served
+  open checks each key as its message arrives, and checks all of them again when it
+  opens, since a call between two messages of its keys run can remove one. The call
+  checks the definitions before it changes anything: two channels with one key or one
+  name, or a data channel whose index is not an index of the definitions, panic. This
+  changes "A known key or name panics" of the #1917 amendment. Lost: a session ends at
+  its next call, under which a writer keeps the control of a removed index until it
+  calls, and a reader that waits in `next` needs a wake anyway; and the home ends the
+  sessions in `shed`, which knows no data channel, so a removed data channel needs a
+  second path; and a hub number for each session, a second key for the same fact.
+  Decided by `laptop.architect` (2026-10-08T22:24:43Z:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814;
   https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).
