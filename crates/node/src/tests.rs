@@ -2914,6 +2914,25 @@ mod port {
             );
         }
 
+        /// `create_key` writes its key into a `node.key` with no bytes, as into no
+        /// file.
+        #[test]
+        fn create_key_writes_into_an_empty_file() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            sim.run_on(&host, |host, _| async move {
+                let files = host.files();
+                let mode = env::files::Mode::Create { len: 0 };
+                let file = files.open(Path::new(FILE), mode).await.expect("opens");
+                file.sync().await.expect("syncs");
+                files.sync_dir(Path::new("")).await.expect("syncs");
+            })
+            .expect("the run ends");
+            assert_eq!(read(&mut sim, &host), Vec::<u8>::new());
+            assert_eq!(create(&mut sim, &host, KEY), Ok(()));
+            assert_eq!(read(&mut sim, &host), own());
+        }
+
         /// A power cut after `create_key` keeps the key.
         #[test]
         fn a_created_key_survives_a_power_cut() {

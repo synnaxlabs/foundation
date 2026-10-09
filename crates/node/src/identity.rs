@@ -66,14 +66,14 @@ pub(crate) async fn load(
     Ok(identity)
 }
 
-/// Writes `identity` to `node.key` in `files` when the file is not there or holds
-/// only zero bytes, and makes it durable.
+/// Writes `identity` to `node.key` in `files` when the file is not there, has no
+/// bytes, or holds only zero bytes, and makes it durable.
 ///
 /// # Errors
 ///
 /// [`Error::Directory`] with [`env::files::Error::Exists`] when the file holds 68
 /// bytes that are not all zero, with [`env::files::Error::Length`] when it has another
-/// length, and with the error of each other file call that fails.
+/// length that is not 0, and with the error of each other file call that fails.
 pub(crate) async fn store(files: &Files, identity: &Identity) -> Result<(), Error> {
     let pool = block::Pool::heap(POOL);
     let (file, bytes) = read(files, &pool).await.map_err(Error::Directory)?;
