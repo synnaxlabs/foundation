@@ -601,6 +601,20 @@ fn gives_a_reader_each_channel_that_its_selector_matches() {
 }
 
 #[test]
+fn leaves_a_channel_that_an_exclusion_matches_out_of_the_view() {
+    run(42, |test| async move {
+        let select = ["**", "!time-b", "!value-b", "!value-c"];
+        let mut reader = test.reader(&select, Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2]);
+        assert_eq!(samples(&received, 2), [7]);
+    });
+}
+
+#[test]
 fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after() {
     run(4, |test| async move {
         let mut complete = test.reader(&["time"], Mode::Complete).await;
