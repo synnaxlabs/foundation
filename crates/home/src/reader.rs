@@ -545,6 +545,16 @@ mod tests {
             let mut set = carried(1);
             set.carry(2, Slot::new(1), 0);
         }
+
+        /// The set keeps the number of a shed index only until it carries it again.
+        #[test]
+        fn drops_the_number_of_a_shed_index_that_it_carries_again() {
+            let mut set = carried(2);
+            set.shed(0);
+            assert_eq!(set.first.len(), 1);
+            set.carry(1, Slot::new(0), 0);
+            assert!(set.first.is_empty());
+        }
     }
 
     mod open_latest {
