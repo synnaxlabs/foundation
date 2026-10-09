@@ -359,9 +359,6 @@ impl State {
 
     /// Ends each session on a channel of `removed`, and closes it at the home.
     fn end(&mut self, removed: &hash::Set<Key>) {
-        if removed.is_empty() {
-            return;
-        }
         for key in self.writers.end(removed) {
             self.close_writer(key);
         }

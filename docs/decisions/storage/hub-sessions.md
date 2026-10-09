@@ -106,12 +106,15 @@
   open checks each key as its message arrives, and checks all of them again when it
   opens, since a call between two messages of its keys run can remove one. The call
   checks the definitions before it changes anything: two channels with one key or one
-  name, or a data channel whose index is not an index of the definitions, panic. This
-  changes "A known key or name panics" of the #1917 amendment. Lost: a session ends at
-  its next call, under which a writer keeps the control of a removed index until it
-  calls, and a reader that waits in `next` needs a wake anyway; and the home ends the
-  sessions in `shed`, which knows no data channel, so a removed data channel needs a
-  second path; and a hub number for each session, a second key for the same fact.
-  Decided by `laptop.architect` (2026-10-08T22:24:43Z:
+  name, or a data channel whose index is not an index of the definitions, panic.
+  Supersedes "A known key or name panics" and "The PR that defines channels at each new
+  spec decides what a known, renamed, or removed channel does" in
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
+  session ends at its next call, under which a writer keeps the control of a removed
+  index until it calls, and a reader that waits in `next` needs a wake anyway; and the
+  home ends the sessions in `shed`, which knows no data channel, so a removed data
+  channel needs a second path; and a hub number for each session, a second key for the
+  same fact. Decided by `laptop.architect` (2026-10-08T22:24:43Z:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814;
+  2026-10-08T22:09:38Z:
   https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).
