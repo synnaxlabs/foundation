@@ -59,7 +59,7 @@ pub struct Config {
     /// A named complete reader that opens while the home holds its position resumes at
     /// the position where its last complete session opened, and ends with
     /// [`Ended::Behind`] when a frame after that position was released, or dropped
-    /// while no complete session on its index was open.
+    /// because no complete session on its index was open.
     pub name: Option<Name>,
     /// How long the home holds a named complete reader's position after its session
     /// closes. Zero or more. It must be zero when the reader is unnamed or latest.
@@ -82,7 +82,7 @@ pub enum Ended {
     /// The shard's buffer failed.
     Buffer(env::files::Error),
     /// A complete reader missed a frame ([`Mode::Complete`]), or a named one resumed
-    /// before a released frame ([`Config::name`]).
+    /// before a frame that it can no longer get ([`Config::name`]).
     Behind,
     /// A channel of the reader was removed from the definitions.
     Removed(channel::Key),

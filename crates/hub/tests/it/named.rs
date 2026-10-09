@@ -185,6 +185,31 @@ fn ends_a_named_complete_reader_behind_on_a_frame_dropped_before_it_resumes() {
 }
 
 #[test]
+fn resumes_a_named_complete_reader_past_a_frame_lost_while_held() {
+    run(22, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let first = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        drop(first);
+        let draft = super::draft(&writer, &[(1, &[test.now()]), (2, &[7])]);
+        let blocks = super::fill(&test.pool);
+        let outcomes = writer.write(super::LIVE, draft).expect("taken").to_vec();
+        drop(blocks);
+        assert!(
+            matches!(outcomes[..], [hub::home::Outcome::Lost { .. }]),
+            "{outcomes:?}"
+        );
+        test.clock.sleep(SETTLE).await;
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[test.now()], &[8]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [8]);
+    });
+}
+
+#[test]
 fn resumes_each_later_open_of_a_named_complete_reader_at_the_same_position() {
     run(17, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
