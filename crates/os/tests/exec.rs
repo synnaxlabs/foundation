@@ -27,7 +27,7 @@ fn open(stop: &AtomicBool) {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "macOS opens a socket in two calls")]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
 fn no_child_holds_a_socket_that_another_thread_opens() {
     let threads = os::threads().expect("the OS gives the cores of this process");
     let stop = Arc::new(AtomicBool::new(false));
