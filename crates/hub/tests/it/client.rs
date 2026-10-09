@@ -3,8 +3,6 @@
 
 use std::cell::Cell;
 use std::future::poll_fn;
-use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -13,7 +11,7 @@ use std::task::Poll;
 use hub::client::{Client, Config, Error, LIFE};
 use hub::serve;
 use transport::stream::Incoming;
-use transport::{Address, Code, Port};
+use transport::{Address, Code};
 use types::ed25519::PrivateKey;
 use types::time::{Interval, Span, Stamp};
 use wire::header::MALFORMED;
@@ -26,7 +24,7 @@ use super::link::{
     AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
     serve_session, serve_session_on,
 };
-use super::serve::{HOME, PORT, own_pool, public_key, transport};
+use super::serve::{HOME, own_pool, public_key, transport};
 use super::{NODE, POOL};
 
 /// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`, with a
@@ -51,18 +49,14 @@ async fn connect_with(
     key: PrivateKey,
     pool: Rc<block::Pool>,
 ) -> Result<Client, Error> {
-    let own = SocketAddr::new(node.addresses()[0], PORT);
-    let mut parts = Port::bind(&node.net(), own)
-        .expect("binds")
-        .split(NonZeroUsize::MIN);
     let config = transport::client::Config {
+        net: node.net(),
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),
         pool: own_pool(),
     };
-    let transport = transport::Client::new(config, parts.pop().expect("one part"))
-        .expect("a client");
+    let transport = transport::Client::new(config).expect("a client");
     let config = Config {
         via: NODE,
         node: public_key(&HOME),
