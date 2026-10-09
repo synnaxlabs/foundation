@@ -179,8 +179,9 @@ again once to prove that the failure replays (r16 59).
   `Display`) and **coverage marks** that prove a test reached a branch. Both need a
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
-  for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
-  runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode with
+  for larger ones. A crate gates std types behind `cfg(loom)` only in code that a loom
+  model runs, and the gate swaps them for the `loom` types of the same name. Code with
+  `unsafe` runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode with
   `--cfg loom`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each test target that
   compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask
   shuttle` does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each
