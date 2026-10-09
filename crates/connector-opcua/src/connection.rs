@@ -34,9 +34,10 @@ const OPTIONS: tcp::Options = tcp::Options {
 const READ_BYTES: usize = 1 << 16;
 
 /// The most sends that wait on one connection. A send past it closes the connection.
-/// open62541 allocates each at the send buffer size of its channel, and gives each
-/// chunk of a message before a pass can write one, so a client or server on the
-/// manager keeps its `localMaxChunkCount` at most this.
+/// open62541 allocates each at most at the send buffer size of its channel. Sends
+/// wait from one pass to the next, so an owner keeps the chunks that it gives between
+/// two passes at most this: its requests in flight times the chunks of a message,
+/// plus what a stream has not taken yet.
 const SENDS: usize = 256;
 
 /// The most sends that one write takes.
@@ -111,7 +112,8 @@ impl Manager {
     /// server, and may poll its own sources with the context it gets. Between calls,
     /// the drive sleeps until the next timer of the loop or a wake, also from a send
     /// or a close that `run` or another task asks for. Before it gives the value, it
-    /// writes what the last call sent, as far as each stream takes it.
+    /// passes again while a connect, a send, or a close of the last call waits, so
+    /// it can also read and call open62541 back after that call.
     ///
     /// # Panics
     ///
@@ -264,28 +266,48 @@ impl State {
         unsafe { ffi::shim_log_warning(self.events, message.as_ptr(), message.len()) };
     }
 
-    /// Queues the `CLOSING` of `id` for the next run of the loop, once, and starts
-    /// the close of its stream.
+    /// Starts the close of the stream of `id`, and queues its `CLOSING` once.
     fn end(&self, id: usize) {
         {
             let mut table = self.table.borrow_mut();
             let Some(connection) = table.get_mut(&id) else {
                 return;
             };
-            if matches!(connection.stream, Stream::Closing { .. } | Stream::Closed) {
-                return;
-            }
-            if let Stream::Open(tcp) =
-                std::mem::replace(&mut connection.stream, Stream::Closed)
-            {
-                connection.stream = Stream::Closing {
-                    tcp,
-                    linger: self.clock.sleep_until(self.clock.now() + LINGER),
-                    shut: false,
-                    drained: false,
+            connection.stream =
+                match std::mem::replace(&mut connection.stream, Stream::Closed) {
+                    Stream::Connecting(_) => Stream::Closed,
+                    Stream::Open(tcp) => Stream::Closing {
+                        tcp,
+                        linger: self.clock.sleep_until(self.clock.now() + LINGER),
+                        shut: false,
+                        drained: false,
+                    },
+                    stream @ (Stream::Closing { .. } | Stream::Closed) => {
+                        connection.stream = stream;
+                        return;
+                    }
                 };
-            }
         }
+        self.closing(id);
+    }
+
+    /// Warns of `failure` on `id`, drops its stream and sends, and queues its
+    /// `CLOSING` unless a close queued it.
+    fn fail(&self, id: usize, failure: &Failure) {
+        self.warn(id, format_args!("{failure}"));
+        let stream = self
+            .table
+            .borrow_mut()
+            .get_mut(&id)
+            .expect("invariant: only a pass removes a connection")
+            .drop_stream();
+        if matches!(stream, Stream::Connecting(_) | Stream::Open(_)) {
+            self.closing(id);
+        }
+    }
+
+    /// Queues the `CLOSING` of `id` for the next run of the loop.
+    fn closing(&self, id: usize) {
         self.ends.borrow_mut().push_back(id);
         if !self.queued.replace(true) {
             // SAFETY: the loop lives, and the callback is not in its queue.
@@ -304,13 +326,7 @@ impl State {
             let step = match step {
                 Ok(step) => step,
                 Err(failure) => {
-                    self.warn(id, format_args!("{failure}"));
-                    self.end(id);
-                    self.table
-                        .borrow_mut()
-                        .get_mut(&id)
-                        .expect("invariant: only a pass removes a connection")
-                        .drop_stream();
+                    self.fail(id, &failure);
                     continue;
                 }
             };
@@ -538,11 +554,12 @@ impl Connection {
         }
     }
 
-    /// Drops the stream and what waits to be written.
-    fn drop_stream(&mut self) {
-        self.stream = Stream::Closed;
+    /// Drops what waits to be written, and gives the stream it puts `Closed` in place
+    /// of.
+    fn drop_stream(&mut self) -> Stream {
         self.sends.clear();
         self.sent = 0;
+        std::mem::replace(&mut self.stream, Stream::Closed)
     }
 }
 
