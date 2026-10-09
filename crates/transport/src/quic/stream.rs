@@ -7808,10 +7808,12 @@ mod tests {
         /// What [`lead`] measured after the pause.
         struct Lead {
             /// The bytes that `Complete` was owed as the pause ended, from the share.
-            /// STREAM WIRE states the lead from this credit.
+            /// STREAM WIRE states the lead from this credit, which no read shows.
             credit: usize,
             /// The bytes of `Complete` that noq-proto took before the first byte of
-            /// the `Latest` sample: the lead that STREAM WIRE states.
+            /// the `Latest` sample: the lead that STREAM WIRE states. `read` counts
+            /// only whole messages, so it can miss most of it: 98304 of 229376 B for
+            /// four streams of 32 KiB and a late server.
             ahead: usize,
             /// The most bytes of `Complete` that noq-proto took in one [`STEP`].
             took: usize,
