@@ -408,9 +408,9 @@ pub async fn create_key(
     identity::store(files, &identity::Identity { key, private_key }).await
 }
 
-/// The name of the node of `files`, the data directory of a node that has not
-/// started: the one that the file `name` holds, else `given`. Writes nothing, and
-/// reads also while another node runs on `files`.
+/// The name of the node of the data directory `files`: the one that the file `name`
+/// holds, else `given`. Writes nothing, and reads also while another node runs on
+/// `files`.
 ///
 /// # Errors
 ///
@@ -934,7 +934,7 @@ fn end(
     group.map(|stopped| Some(Error::Group(stopped)))
 }
 
-/// Why a node failed.
+/// Why a node failed, or why [`name`] gave no name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A shard could not start or pin.
@@ -1056,7 +1056,7 @@ impl fmt::Display for Error {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }
             Self::Name => f.write_str(
-                "the file name in the data directory is not a node name; restore it \
+                "the file `name` in the data directory is not a node name; restore it \
                  from a backup of this node",
             ),
             Self::Renamed { stored, given } => write!(

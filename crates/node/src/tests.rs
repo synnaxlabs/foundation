@@ -4972,7 +4972,7 @@ mod name {
         }
         assert_eq!(
             Error::Name.to_string(),
-            "the file name in the data directory is not a node name; restore it from \
+            "the file `name` in the data directory is not a node name; restore it from \
              a backup of this node"
         );
     }
