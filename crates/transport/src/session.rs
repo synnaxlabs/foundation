@@ -43,6 +43,11 @@ impl Session {
         Weak(Rc::downgrade(&self.0))
     }
 
+    /// The carrier's session under this one.
+    pub(crate) fn quic(&self) -> &quic::Session {
+        &self.0
+    }
+
     /// Who is on the other end.
     ///
     /// ```
@@ -199,6 +204,11 @@ impl Weak {
             .upgrade()
             .filter(|session| session.live())
             .map(Session)
+    }
+
+    /// Whether this is a handle to `session`.
+    pub(crate) fn is(&self, session: &Session) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Rc::as_ptr(&session.0))
     }
 }
 

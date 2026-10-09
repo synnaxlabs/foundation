@@ -3,6 +3,7 @@
 //! ends. `frame::check` refuses exactly the ends that do not fit a body.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use std::sync::Arc;
 
