@@ -322,11 +322,10 @@
   (2026-10-09, #2108): an `os` listener stops its listen at once on Linux when it drops
   or its registration fails, also while a child holds a copy of the socket, from its
   fork to its exec. macOS has no call that stops the listen of a copy, so there a
-  connect in that window succeeds and resets at the exec. With no free descriptor for
-  its copy, a listener whose registration fails closes with no shutdown
-  (`laptop.architect-2`, 2026-10-09T04:57:56Z:
+  connect in that window succeeds and resets at the exec (`laptop.architect-2`,
+  2026-10-09T04:57:56Z:
   https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669; the failed
   registration, 2026-10-09T05:02:07Z:
-  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714; the gap
-  with no free descriptor, 2026-10-09T05:11:51Z:
-  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074731187).
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714; the
+  registration that gives the socket back, 2026-10-09T05:25:55Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074885496).
