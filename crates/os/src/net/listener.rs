@@ -99,8 +99,10 @@ impl Drop for Listener {
 )]
 fn stop(fd: BorrowedFd<'_>) {
     #[cfg(target_os = "linux")]
-    if let Err(e) = rustix::net::shutdown(fd, rustix::net::Shutdown::Read) {
-        panic!("invariant: the listener {fd:?} stops its listen once, not {e:?}");
+    match rustix::net::shutdown(fd, rustix::net::Shutdown::Read) {
+        // An operator aborted the socket (`ss -K`), which stopped its listen.
+        Ok(()) | Err(Errno::NOTCONN) => {}
+        Err(e) => panic!("invariant: the listener {fd:?} stops its listen once: {e:?}"),
     }
 }
 
