@@ -23,8 +23,8 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// # Errors
 ///
 /// [`Error::Network`] when the socket is broken, or breaks before an attempt connects,
-/// [`Error::Closed`] with code 0 when the carrier dropped, unless an attempt in flight
-/// connected first, or [`Error::Unreachable`] with each attempt's cause, in the order
+/// [`Error::Closed`] with code 0 when the carrier dropped, unless an attempt connected
+/// before the drop, or [`Error::Unreachable`] with each attempt's cause, in the order
 /// started, when none connects.
 pub(crate) async fn dial(
     dialer: &quic::Dialer,
@@ -659,9 +659,10 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The handshake takes 100 ms over the link, and ends after the drop.
+    // The handshake takes 100 ms over the link, so it would finish before the next
+    // poll if the drop did not close it.
     #[test]
-    fn an_attempt_in_flight_when_the_carrier_drops_gives_its_session() {
+    fn an_attempt_in_flight_when_the_carrier_drops_closes_with_code_0() {
         let (mut sim, client, server) = nodes(0);
         let link = sim::link::Config {
             delay: spans(Span::MILLISECOND, 50),
@@ -680,8 +681,8 @@ mod tests {
             assert!(testing::poll_once(dial.as_mut()).await.is_none());
             drop(carrier);
             node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
-            let peer = dial.await.map(|session| session.peer());
-            assert_eq!(peer, Ok(Peer::Node(SERVER.public())));
+            let closed = Error::Closed { code: Code(0) };
+            assert_eq!(dial.await.err(), Some(closed));
         });
         assert_eq!(sim.run(), Ok(()));
     }

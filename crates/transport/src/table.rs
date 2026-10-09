@@ -483,13 +483,13 @@ mod tests {
     }
 
     #[test]
-    fn a_dial_that_connects_after_its_transport_dropped_closes_its_session() {
+    fn a_dial_in_flight_when_its_transport_drops_never_connects() {
         let (mut sim, client, server) = testing::nodes(0);
         let at = [Address::Udp(testing::address(&server))];
-        testing::transport(&server, SERVER, |transport, _| async move {
-            let session = transport.accept().await.expect("a session");
-            let closed = Error::PeerClosed { code: Code(0) };
-            assert_eq!(session.closed().await, closed);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            let mut accept = pin!(transport.accept());
+            node.clock().sleep(testing::IDLE).await;
+            assert!(testing::poll_once(accept.as_mut()).await.is_none());
         });
         testing::transport(&client, CLIENT, move |transport, node| async move {
             {

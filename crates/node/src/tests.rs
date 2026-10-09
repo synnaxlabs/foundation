@@ -4101,6 +4101,29 @@ mod port {
             .expect("the probe ends")
         }
 
+        /// The peer runs no node, so a dial of the mesh to it is in flight at the stop.
+        /// The stop closes that dial, and holds the lock for at most 3 s of its drain
+        /// and less than 1 ms for its other steps.
+        #[test]
+        fn a_dial_to_a_peer_that_is_down_holds_the_lock_at_most_3_s() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            let waited = sim
+                .run_on(&hosts[0], |host, _| async move {
+                    let before = host.clock().now();
+                    drop(take_lock(&host).await);
+                    host.clock().now() - before
+                })
+                .expect("the probe ends");
+            let bound = Span::from_nanos(3001 * Span::MILLISECOND.nanos());
+            assert!(waited <= bound, "the stop held the lock {waited:?}");
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
         /// Starts the peer [`OTHER`] of `members` on `host`, which sets a home in the
         /// mesh, one after another, until a set waits [`TEN`].
         fn set_homes(host: &sim::node::Node, members: Vec<Member>) {

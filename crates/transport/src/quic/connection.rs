@@ -248,15 +248,29 @@ impl Connection {
         }
     }
 
-    /// Closes with code 0 a connection that a peer dialed and whose handshake is in
-    /// flight, which the caller does not know. Gives whether it did.
-    pub(super) fn refuse(&mut self, now: Instant) -> bool {
-        if !matches!(self.state, State::Accepting) {
-            return false;
+    /// Whether the handshake is in flight.
+    pub(super) fn handshaking(&self) -> bool {
+        matches!(self.state, State::Dialing { .. } | State::Accepting)
+    }
+
+    /// Closes with code 0 a connection whose handshake is in flight, and gives the
+    /// [`Event::Closed`] of a dial.
+    ///
+    /// # Panics
+    ///
+    /// When the handshake is not in flight.
+    pub(super) fn refuse(&mut self, now: Instant) -> Option<Event> {
+        match self.state {
+            State::Dialing { .. } => self.close(now, Code(0)),
+            State::Accepting => {
+                self.end();
+                self.inner.close(now, VarInt::from_u32(0), Bytes::new());
+                None
+            }
+            State::Open | State::Ended => {
+                panic!("invariant: the handshake is in flight")
+            }
         }
-        self.end();
-        self.inner.close(now, VarInt::from_u32(0), Bytes::new());
-        true
     }
 
     /// Ends a live connection after the socket broke, and gives its

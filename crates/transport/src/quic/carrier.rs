@@ -1251,7 +1251,7 @@ mod tests {
                 reason: reason.into(),
             };
             assert_eq!(session.closed().await, closed);
-            assert!(node.clock().now() - before < IDLE);
+            assert!(node.clock().now() - before < spans(Span::MILLISECOND, 200));
         });
         assert_eq!(sim.run(), Ok(()));
     }

@@ -107,12 +107,13 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// A session that a dial made stays open until `accept` takes it, also when each caller
 /// of `dial` dropped it. Dropping the transport closes with `Code(0)` each session that
 /// no caller accepted, and the sessions it gave stay open. It also closes each
-/// handshake that a peer started, and that peer gets [`Error::Broken`], as for a
-/// refused dial, because QUIC sends no code before the handshake is confirmed. It
-/// refuses each dial from a peer until each session ended and each close drained. A
-/// close drains in about 3 PTO, and the transport waits at most 3 s for the drains
-/// after the last session ended. Then it frees its [`port::Part`], so a later dial gets
-/// no answer, and [`Transport::ended`] resolves.
+/// handshake in flight, also that of a dial that each caller dropped. A peer whose dial
+/// it closes gets [`Error::Broken`], as for a refused dial, because QUIC sends no code
+/// before the handshake is confirmed. It refuses each dial from a peer until each
+/// session ended and each close drained. A close drains in about 3 PTO, and the
+/// transport waits at most 3 s for the drains after the last session ended. Then it
+/// frees its [`port::Part`], so a later dial gets no answer, and [`Transport::ended`]
+/// resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
@@ -784,6 +785,40 @@ mod tests {
             let session = dialed.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// The drop closes the dial, whose handshake gets no answer, so the stop does not
+    /// wait for its idle time.
+    #[test]
+    fn ended_resolves_in_3_s_while_a_dial_gets_no_answer() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let cut = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &server, cut);
+        let at = [Address::Udp(testing::address(&server))];
+        let idle = testing::spans(Span::SECOND, 30);
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            {
+                let dial = pin!(transport.dial(SERVER.public(), &at));
+                assert!(testing::poll_once(dial).await.is_none());
+            }
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 500))
+                .await;
+            let ended = transport.ended();
+            let before = node.clock().now();
+            drop(transport);
+            ended.await;
+            let waited = node.clock().now() - before;
+            let bound = testing::spans(Span::SECOND, 3);
+            assert!(waited <= bound, "the stop waited {waited:?}");
         });
         assert_eq!(sim.run(), Ok(()));
     }
