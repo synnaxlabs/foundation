@@ -15,7 +15,7 @@ use types::node;
 use crate::change::Unknown;
 use crate::member::Member;
 use crate::region::{self, Unfit};
-use crate::{claim, log};
+use crate::{claim, file, log};
 
 /// Why a mesh call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,6 +361,15 @@ impl fmt::Display for Keys<'_> {
 impl From<log::Error> for Error {
     fn from(error: log::Error) -> Self {
         Self::Log(error)
+    }
+}
+
+impl From<file::Failed> for Error {
+    fn from(failed: file::Failed) -> Self {
+        match failed {
+            file::Failed::Files(error) => Self::Files(error),
+            file::Failed::Pool(error) => Self::Pool(error),
+        }
     }
 }
 

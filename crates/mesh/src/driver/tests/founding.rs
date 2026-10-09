@@ -5,7 +5,7 @@ use env::files::{self, Mode};
 
 use super::*;
 
-const FILE: &str = "founding";
+use crate::driver::founding::FILE;
 
 /// The founding of node 1 with the members and voters `IDS`.
 async fn create_region(node: &sim::node::Node, tasks: &Tasks) -> region::Founding {

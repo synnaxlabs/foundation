@@ -35,15 +35,14 @@ use std::rc::Rc;
 use block::Pool;
 use env::files::{self, File, Files, Mode};
 use raft::{Entry, Hard, Term};
-use types::digest::Digest;
 
 use crate::bytes::{
     block, put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
+use crate::file::{self, CHECK, check, chunk, narrow, read, wide};
 
 const VERSION: u16 = 1;
-const CHECK: usize = 8;
 /// The bytes of a record before its body: the header check, the version, the number,
 /// the body length, and the body check.
 const HEADER: usize = 34;
@@ -51,8 +50,6 @@ const HEADER: usize = 34;
 const SECTOR: usize = files::SECTOR;
 /// The length of a file, unless the record that the log made it for needs more.
 const SEGMENT: u64 = 1 << 20;
-/// The most bytes in one block of a read or a write.
-const CHUNK: usize = 64 << 10;
 /// The name of the file that a log holds open while it lives.
 const LOCK: &str = "lock";
 
@@ -139,6 +136,15 @@ impl std::error::Error for Error {}
 impl From<files::Error> for Error {
     fn from(error: files::Error) -> Self {
         Self::Files(error)
+    }
+}
+
+impl From<file::Failed> for Error {
+    fn from(failed: file::Failed) -> Self {
+        match failed {
+            file::Failed::Files(error) => Self::Files(error),
+            file::Failed::Pool(error) => Self::Pool(error),
+        }
     }
 }
 
@@ -358,22 +364,6 @@ fn path(dir: &Path, number: u64) -> PathBuf {
     dir.join(format!("log-{number}"))
 }
 
-fn wide(len: usize) -> u64 {
-    u64::try_from(len).expect("invariant: a length fits in 64 bits")
-}
-
-// A file is read whole into memory, so each offset in it fits.
-fn narrow(offset: u64) -> usize {
-    usize::try_from(offset).expect("invariant: a file offset fits in memory")
-}
-
-// The most bytes in one block of a read or a write: `CHUNK`, or less when the pool has
-// no such block. It is whole sectors, and an open refuses a pool that gives 0.
-fn chunk(pool: &Pool) -> usize {
-    let largest = pool.largest();
-    largest.saturating_sub(largest % SECTOR).min(CHUNK)
-}
-
 // Where the record after one that ends at `end` starts: the next sector when the
 // header would cross a sector boundary.
 fn start(end: usize) -> usize {
@@ -403,18 +393,6 @@ fn sequence(dir: &Path, mut names: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> 
         }
     }
     Ok(paths.into_iter().flatten().collect())
-}
-
-async fn read(file: &File, pool: &Pool) -> Result<Vec<u8>, Error> {
-    let chunk = chunk(pool);
-    let mut bytes = Vec::new();
-    while wide(bytes.len()) < file.len() {
-        let offset = wide(bytes.len());
-        let len = narrow(file.len().saturating_sub(offset)).min(chunk);
-        let block = file.read_at(offset, pool.alloc(len)?).await?;
-        bytes.extend_from_slice(&block);
-    }
-    Ok(bytes)
 }
 
 // Writes `bytes` at `at` of `file`, one block at a time, from the end of `bytes` to
@@ -561,14 +539,6 @@ fn records(
         *next = next.saturating_add(1);
     }
     Ok((end, None))
-}
-
-// The check of some bytes: the first bytes of their digest.
-fn check(bytes: &[u8]) -> [u8; CHECK] {
-    let digest = Digest::of(bytes).0;
-    *digest
-        .first_chunk()
-        .expect("invariant: a digest has 32 bytes")
 }
 
 // What is where a record should start.
@@ -807,6 +777,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Poll;
 
+    use crate::file::CHUNK;
     use env::files::Operation;
     use proptest::prelude::*;
     use raft::{Change, Data, Grant, Proof, Signature, Voters};
