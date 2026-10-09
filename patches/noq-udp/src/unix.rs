@@ -667,6 +667,15 @@ fn prepare_msg(
     }
 
     if let Some(ip) = &transmit.src_ip {
+        // For an IPv4 destination on an IPv6 socket, macOS reads only IPPROTO_IP
+        // messages, and ignores IPV6_PKTINFO with no error.
+        #[cfg(apple)]
+        let ip = &match ip {
+            IpAddr::V6(v6) if is_ipv4(transmit.destination) => {
+                v6.to_ipv4_mapped().map_or(*ip, IpAddr::V4)
+            }
+            _ => *ip,
+        };
         match ip {
             IpAddr::V4(v4) => {
                 // macOS ignores the source in IP_RECVDSTADDR, with no error.
