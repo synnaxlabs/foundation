@@ -53,13 +53,16 @@
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
   readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
-  sender registers for writable at its first poll and at the next `EAGAIN` after a send
-  ends, and drops the registration at each send that ends, with or without an error,
-  also when its wait for writable fails: Linux wakes each `EPOLLOUT` registration of
-  a socket for each datagram that the socket sends (1,000 wakes for 1,000 sends on
-  box2), so a sender that stays registered on each shard would wake each parked shard.
-  Decided by `laptop.architect-2` (2026-10-08 18:27 UTC, #119,
-  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541).
+  sender registers for writable at its first poll and after `EAGAIN`, and drops the
+  registration when the send ends: Linux wakes each `EPOLLOUT` registration of a socket
+  for each datagram that the socket sends (1,000 wakes for 1,000 sends on box2), so a
+  sender that stays registered on each shard would wake each parked shard. Decided by
+  `laptop.architect-2` (2026-10-08 18:27 UTC, #119,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). A send
+  ends at its first `Ready`, also with an error or a failed wait for writable. A send
+  that the caller drops while it waits keeps the registration until the next send of
+  that sender ends. Supersedes "the next send that succeeds deregisters it" of item 3
+  of https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541.
   The first poll of a UDP half binds it to its thread, whatever its result. A failed
   `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
   nothing stores a failure. For a source that is not local or is of the other family,

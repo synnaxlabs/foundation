@@ -114,9 +114,10 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 /// first poll, at the first poll that needs the socket. A stream write of no bytes
 /// does not, and a UDP poll that fails before it registers leaves that to the next
 /// poll. A UDP sender drops its registration at each send that ends, with or without
-/// an error, and registers again at the next poll that finds the send buffer full.
-/// Each thread that `os` starts has a runtime with an I/O driver. Needs the cargo
-/// feature `net`.
+/// an error, and registers again at the next poll that finds the send buffer full. A
+/// send that the caller drops while it waits keeps the registration until the next
+/// send of that sender ends. Each thread that `os` starts has a runtime with an I/O
+/// driver. Needs the cargo feature `net`.
 ///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
