@@ -14,8 +14,8 @@
   period, or semicolon removed, is the word that is checked. Decided by the director at
   2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
-  check reads the comment as GitHub does, by `comrak` (chosen by the person at
-  2026-10-09T01:15:32Z,
+  check reads the comment as GitHub does, by `comrak` (chosen by the person, as
+  `laptop.monitor` relayed it at 2026-10-09T01:15:32Z,
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072253988), with the
   spaces and tabs at the end of each line removed, and each tab in the spaces, tabs, and
   `>` at the start of a line replaced by spaces to the next multiple of 4 columns: as
@@ -56,8 +56,8 @@
   (https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522), and
   2026-10-09T00:29:41Z
   (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
-  approved by the director at 2026-10-09T00:50:43Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6071991379).
+  approved by the director at 2026-10-09T01:42:04Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072526251).
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
