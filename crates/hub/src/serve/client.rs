@@ -11,7 +11,7 @@ use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
 use wire::hub::client::{Challenge, Refusal, Response, Signed};
 
-use super::{Error, alloc, halves, stop};
+use super::{BODIES_BYTES_MAX, Error, alloc, halves, stop};
 use crate::State;
 use crate::link::{Served, Session};
 
@@ -55,7 +55,7 @@ impl Reply {
             receiver,
             open,
         } = self;
-        let state = Rc::clone(&open.0.state);
+        let state = Rc::clone(&open.session.state);
         drop(open);
         let sent = respond(&state, &mut sender, body).await;
         if let Err(error) = &sent {
@@ -83,13 +83,44 @@ impl Gate {
     }
 }
 
-/// Holds the one open request of a link, until it drops.
+/// Holds the one open request of a link and the bytes its body reserved, until it
+/// drops.
 #[derive(Debug)]
-struct Open(Rc<Session>);
+struct Open {
+    session: Rc<Session>,
+    bytes: u64,
+}
+
+impl Open {
+    /// Opens the request of `session` and reserves `bytes` for its body.
+    fn new(session: &Rc<Session>, bytes: u64) -> Result<Self, Error> {
+        if session.client.open.get() {
+            return Err(Error::Pending);
+        }
+        {
+            let state = session.state.borrow();
+            let held = state.bodies.get();
+            if held + bytes > BODIES_BYTES_MAX {
+                return Err(Error::Bodies {
+                    length: bytes,
+                    held,
+                });
+            }
+            state.bodies.set(held + bytes);
+        }
+        session.client.open.set(true);
+        Ok(Self {
+            session: Rc::clone(session),
+            bytes,
+        })
+    }
+}
 
 impl Drop for Open {
     fn drop(&mut self) {
-        self.0.client.open.set(false);
+        self.session.client.open.set(false);
+        let state = self.session.state.borrow();
+        state.bodies.set(state.bodies.get() - self.bytes);
     }
 }
 
@@ -265,10 +296,7 @@ async fn read(
         return Ok(None);
     };
     let request = wire::hub::client::Request::decode(&message)?;
-    if session.client.open.replace(true) {
-        return Err(Error::Pending);
-    }
-    let open = Open(Rc::clone(session));
+    let open = Open::new(session, request.length)?;
     let mut rest = request.body();
     let mut body = Vec::with_capacity(rest.remain());
     while rest.remain() > 0 {

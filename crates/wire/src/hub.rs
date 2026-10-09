@@ -53,9 +53,9 @@ pub const UNKNOWN: u32 = 16;
 pub const NOT_HOME: u32 = 17;
 /// Stop code: the home's buffer failed, or its mesh stopped.
 pub const FAILED: u32 = 18;
-/// Stop code: the side that stops the stream had no block for the session. A later
-/// open can succeed, but not when the block is larger than each block of that side's
-/// pool.
+/// Stop code: the side that stops had no block for a stream's session, or no room for
+/// a request body under its cap. A later open or request can succeed, but not when
+/// the block is larger than each block of that side's pool.
 pub const BUSY: u32 = 19;
 
 /// A code of HUB WIRE that ends a session, from the side that stops the stream.

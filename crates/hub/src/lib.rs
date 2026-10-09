@@ -112,6 +112,10 @@ struct State {
     region: Option<Region>,
     /// Where the hub spawns the task of each remote reader.
     tasks: env::tasks::Tasks,
+    /// The bytes of request bodies that open requests reserved, at most
+    /// [`serve::BODIES_BYTES_MAX`]. A `Cell`, so the drop of a reply needs only a shared
+    /// borrow.
+    bodies: Cell<u64>,
 }
 
 impl Hub {
@@ -150,6 +154,7 @@ impl Hub {
             rules: access::Rules::default(),
             region,
             tasks: tasks.clone(),
+            bodies: Cell::new(0),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)

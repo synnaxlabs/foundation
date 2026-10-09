@@ -17,13 +17,19 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
-use wire::hub::client::Refusal;
+use wire::hub::client::{BODY_BYTES_MAX, Refusal};
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
 use crate::reader::{Credit, Session, Stop};
 use crate::{Away, State};
 
 pub use client::{Reply, Request};
+
+/// The most bytes of client request bodies that one hub holds at once, over each of
+/// its links: each from the decode of its request until the caller sends or drops
+/// its [`Reply`]. A request whose body does not fit stops with `BUSY` before the
+/// hub reads a byte of it.
+pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +72,15 @@ pub enum Error {
     /// A request stream while another request of the link waits for its reply. Code
     /// `MALFORMED`.
     Pending,
+    /// The open requests of the hub hold so many body bytes that a body of `length`
+    /// more is over [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed
+    /// once enough open requests reply.
+    Bodies {
+        /// The body length of the refused request.
+        length: u64,
+        /// The body bytes that the open requests of the hub held.
+        held: u64,
+    },
 }
 
 impl Error {
@@ -84,7 +99,7 @@ impl Error {
             Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
             Self::NotHome => Some(Code(NOT_HOME)),
             Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
-            Self::Pool(_) => Some(Code(BUSY)),
+            Self::Pool(_) | Self::Bodies { .. } => Some(Code(BUSY)),
             Self::Stream(_) => None,
         }
     }
@@ -136,6 +151,12 @@ impl fmt::Display for Error {
             ),
             Self::Pending => f.write_str(
                 "the program sent a request while another request waits for its reply",
+            ),
+            Self::Bodies { length, held } => write!(
+                f,
+                "a request body of {length} bytes does not fit under the cap of \
+                 {BODIES_BYTES_MAX} bytes: the open requests of the hub hold {held} \
+                 bytes"
             ),
         }
     }
