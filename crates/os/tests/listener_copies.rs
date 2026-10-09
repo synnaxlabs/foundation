@@ -5,27 +5,17 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
-use std::net::{Ipv4Addr, SocketAddr};
-use std::num::NonZeroUsize;
+#[path = "common/sockets.rs"]
+#[expect(dead_code, reason = "this binary only listens and connects")]
+mod sockets;
+
+use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::task::{Context, Poll, Waker};
 
 use env::net::{Error, tcp};
-
-const OPTIONS: tcp::Options = tcp::Options {
-    send_buffer_bytes: 1 << 16,
-    recv_buffer_bytes: 1 << 16,
-    unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
-    delayed: false,
-};
-
-fn listen_config() -> tcp::Listen {
-    tcp::Listen {
-        local: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
-        backlog: 1,
-        options: OPTIONS,
-    }
-}
+use rustix::io::Errno;
+use sockets::{LISTEN, OPTIONS};
 
 fn connect_config(remote: SocketAddr) -> tcp::Config {
     tcp::Config {
@@ -52,12 +42,15 @@ fn copy_of(local: SocketAddr) -> OwnedFd {
         let pidfd = pidfd_open(getpid(), PidfdFlags::empty()).unwrap();
         for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
             let name = entry.unwrap().file_name();
-            let Ok(fd) = name.to_string_lossy().parse() else {
-                continue;
-            };
-            // A descriptor that another test closed since the read gives an error.
-            let Ok(copy) = pidfd_getfd(&pidfd, fd, PidfdGetfdFlags::empty()) else {
-                continue;
+            let fd = name
+                .to_string_lossy()
+                .parse()
+                .expect("a descriptor is a number");
+            let copy = match pidfd_getfd(&pidfd, fd, PidfdGetfdFlags::empty()) {
+                Ok(copy) => copy,
+                // Another test, or the read of the directory, closed it since.
+                Err(Errno::BADF) => continue,
+                Err(e) => panic!("a copy of descriptor {fd}: {e:?}"),
             };
             let name = rustix::net::getsockname(&copy).ok();
             if name.and_then(|n| SocketAddr::try_from(n).ok()) == Some(local) {
@@ -75,7 +68,7 @@ fn copy_of(local: SocketAddr) -> OwnedFd {
 )]
 fn a_dropped_listener_refuses_while_a_copy_of_it_is_open() {
     let net = os::net();
-    let mut listener = net.listen(&listen_config()).unwrap();
+    let mut listener = net.listen(&LISTEN).unwrap();
     let local = listener.local();
     let _copy = copy_of(local);
     let runtime = runtime();
@@ -96,7 +89,7 @@ fn a_dropped_listener_refuses_while_a_copy_of_it_is_open() {
 )]
 fn a_listener_with_a_failed_registration_refuses_while_a_copy_is_open() {
     let net = os::net();
-    let mut listener = net.listen(&listen_config()).unwrap();
+    let mut listener = net.listen(&LISTEN).unwrap();
     let local = listener.local();
     let _copy = copy_of(local);
     let handle = runtime().handle().clone();
@@ -105,7 +98,12 @@ fn a_listener_with_a_failed_registration_refuses_while_a_copy_is_open() {
     let Poll::Ready(Err(failed)) = listener.poll_accept(&mut cx) else {
         panic!("the registration fails");
     };
-    assert_eq!(failed, Error::Io { code: 5 });
+    assert_eq!(
+        failed,
+        Error::Io {
+            code: Errno::IO.raw_os_error()
+        }
+    );
     drop((entered, listener));
     let outcome = runtime().block_on(net.connect(&connect_config(local)));
     assert_eq!(outcome.map(|_| ()), Err(Error::Refused { remote: local }));
