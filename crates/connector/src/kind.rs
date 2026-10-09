@@ -110,7 +110,8 @@ pub struct Context<C> {
     config: C,
     cancel: cancel::Token,
     tasks: Tasks,
-    // Its `tasks` counts no task: spawn through `tasks`.
+    // Its `tasks` field is the shard's, which no run counts: spawn only through
+    // `self.tasks`.
     inputs: Rc<supervisor::Config>,
 }
 
