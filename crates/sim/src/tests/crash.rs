@@ -1605,3 +1605,14 @@ fn a_crash_closes_each_file_that_its_node_holds() {
     });
     assert_eq!(node.file_closes(), ["a", "b"].map(PathBuf::from));
 }
+
+#[test]
+fn a_crash_closes_a_leaked_file_and_gives_its_path() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            Box::leak(Box::new(create(&node, "a", 0).await));
+        });
+        assert_eq!(node.file_closes(), [PathBuf::from("a")], "{crash:?}");
+    }
+}
