@@ -8,15 +8,19 @@
   on a running node. The first start on a data directory needs `--name`, and a later one
   reads the name there (NODE NAME). Once the node has claimed the data directory, a
   thread of `main` writes `Start::line`: `node edge runs in foundation-data. Stop it
-  with Ctrl-C.`, or `{"name":"edge","data":"foundation-data"}` with `--json`. Each form
-  writes `data` lossily, with one U+FFFD for each sequence of bytes that is not UTF-8,
-  as `Path::display` does. The text form also escapes it as `Start::fail` does, each
-  character but a quote as `char::escape_debug` does, so a newline in it adds no line,
-  and a backslash or a combining mark shows escaped. Lost: the path as given, which a
-  newline splits into two lines. A write that fails changes nothing. A node that stops
-  before the thread writes can exit with no line. `Start::fail` writes an `ops::Failure
-  { code, message, fix }` as `cli` writes its own errors, and gives exit status 1. So
-  `ops` keeps the one output form, and `main` gives the facts. The codes: `node.busy`,
+  with Ctrl-C.`, or `{"name":"edge","data":"foundation-data"}` with `--json`. `data` is
+  the path as given, not made absolute, so `cli` stays a function of its arguments. Each
+  form writes it lossily, with one U+FFFD for each sequence of bytes that is not UTF-8,
+  as `Path::to_string_lossy` does. The text form also escapes it as `Start::fail` does,
+  each character but a quote as `char::escape_debug` does, so a newline in it adds no
+  line, and a backslash or a combining mark shows escaped. A literal `\n` in a path then
+  reads apart from a newline, and the line matches the `node.data` message for the same
+  path. Lost: the raw path in the text form, which a newline splits into two lines;
+  `escape_controls`, as `Config` errors use, which keeps each backslash, so a literal
+  `\n` reads as a newline. A write that fails changes nothing. A node that stops before
+  the thread writes can exit with no line. `Start::fail` writes an `ops::Failure { code,
+  message, fix }` as `cli` writes its own errors, and gives exit status 1. So `ops`
+  keeps the one output form, and `main` gives the facts. The codes: `node.busy`,
   `node.data`, `node.unnamed`, `node.renamed`, `node.name`, and `node.failed`.
   `node.data` is "this user cannot write the data directory": `os::Error::Dir`, and each
   `env::files::Error::Io` whose code is `EACCES`, `EPERM`, or `EROFS`, in
