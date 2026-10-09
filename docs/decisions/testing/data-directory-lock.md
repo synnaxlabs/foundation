@@ -5,8 +5,7 @@
   03:37 UTC:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475), and
   once the transport has freed the port (NODE PORT; #2017, by `laptop.architect-2`,
-  2026-10-09 02:17 UTC:
-  https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717). `Busy`
+  2026-10-08 21:57 UTC: https://github.com/synnaxlabs/foundation/issues/2017). `Busy`
   on `lock` stops the start with `Error::Directory`, before any name is read. The node
   never removes `lock`, so an open cannot race with a remove. A crash frees the lock
   (`env::files`, #392). Lost: no lock, with the `Busy` of each ring only, because two
