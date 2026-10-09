@@ -7,4 +7,4 @@ publish = false
 [workspace]
 
 [dependencies]
-l = { path = "../../other/l" }
+p = { path = "../../other/l" }

@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
-name = "l"
-version = "0.1.0"
-
-[[package]]
 name = "libname"
 version = "0.0.0"
 dependencies = [
- "l",
+ "p",
 ]
+
+[[package]]
+name = "p"
+version = "0.1.0"

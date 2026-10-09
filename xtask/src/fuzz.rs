@@ -233,7 +233,7 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// that the `root` graph does not build, and for each edge of the `fuzz` graph that
 /// resolves a requirement on crates.io, which a copy that the `root` graph builds
 /// meets, to another package. Cargo applies a patch to each such requirement. It fails
-/// on an edge that no requirement resolves.
+/// on an edge to a release with the name of a copy that no requirement resolves.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
@@ -266,11 +266,14 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         let dependent = find(field::text(node, "id")?)?;
         for edge in field::list(node, "deps")? {
             let dependency = find(field::text(edge, "pkg")?)?;
-            let resolved = dependent.requirements(dependency, edge)?;
-            if dependency.copied {
+            // Cargo pairs no requirement with an edge from a package to itself.
+            if dependency.copied
+                || dependency.id == dependent.id
+                || !built.iter().any(|(copy, _)| copy.name == dependency.name)
+            {
                 continue;
             }
-            for requirement in resolved {
+            for requirement in dependent.requirements(dependency, edge)? {
                 if requirement["source"].as_str() != Some(CRATES_IO) {
                     continue;
                 }
@@ -334,8 +337,7 @@ impl<'a> Package<'a> {
 
     /// The requirements of the package that `edge` of its node in the resolve, to
     /// `dependency`, resolves: those on `dependency` under the name of the edge, of a
-    /// kind and target of the edge. Cargo names an edge from a package to itself by the
-    /// lib target, whatever the rename. It fails when none is.
+    /// kind and target of the edge. It fails when none is.
     fn requirements(
         &self,
         dependency: &Package<'_>,
@@ -349,10 +351,8 @@ impl<'a> Package<'a> {
                 continue;
             }
             let named = match requirement["rename"].as_str() {
-                Some(rename) if dependency.id != self.id => {
-                    rename.replace('-', "_") == name
-                }
-                _ => dependency.lib()? == name,
+                Some(rename) => rename.replace('-', "_") == name,
+                None => dependency.lib()? == name,
             };
             let kind = kinds.iter().any(|kind| {
                 kind["kind"] == requirement["kind"]
@@ -675,8 +675,8 @@ mod tests {
     }
 
     #[test]
-    fn passes_a_renamed_dev_requirement_on_the_package_itself() {
-        assert_eq!(patched("selfdev"), Ok(Vec::new()));
+    fn passes_a_self_edge_beside_a_patched_requirement_of_the_same_name() {
+        assert_eq!(patched("selfname"), Ok(Vec::new()));
     }
 
     #[test]
@@ -857,8 +857,14 @@ mod tests {
     fn names_an_edge_that_no_requirement_names() {
         let fuzz = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
         assert_eq!(unpatched(&root(), &fuzz), Err(unresolved(&id("1.3.0"))));
-        let copied = self::fuzz(&[types(), copy()], &[(TYPES, PATCHED)]);
-        assert_eq!(unpatched(&root(), &copied), Err(unresolved(PATCHED)));
+    }
+
+    #[test]
+    fn passes_an_edge_that_no_requirement_names_to_a_copy_or_another_name() {
+        let copied = fuzz(&[types(), copy()], &[(TYPES, PATCHED)]);
+        assert_eq!(unpatched(&root(), &copied), Ok(Vec::new()));
+        let other = fuzz(&[types(), crc()], &[(TYPES, CRC)]);
+        assert_eq!(unpatched(&root(), &other), Ok(Vec::new()));
     }
 
     /// The error for an edge `noq_proto` of `types` to `to` that nothing resolves.
