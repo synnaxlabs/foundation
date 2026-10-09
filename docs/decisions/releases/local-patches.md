@@ -35,10 +35,12 @@
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076247492, and
   `laptop.architect-2` at 2026-10-09T07:14:50Z,
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076285542).
-  Supersedes the pair by edge name of
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391 and
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166, and limit
-  2 of https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462.
+  Supersedes the text, item 2 (an optional dependency that is off passes), and item 3
+  (the pair by edge name) of
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, the text
+  of https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166, and
+  limit 2 of
+  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462.
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests
   (`laptop.architect-2`, 2026-10-09T04:27:21Z,
