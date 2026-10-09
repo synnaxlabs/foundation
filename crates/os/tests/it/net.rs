@@ -807,7 +807,6 @@ fn a_refused_connect_to_a_mapped_address_names_the_ipv4_address() {
 }
 
 #[test]
-#[cfg(target_pointer_width = "64")]
 fn an_unsent_bound_past_a_c_int_fails_the_listen_and_the_connect() {
     on_thread("net-bad-option", || async {
         let net = net();
