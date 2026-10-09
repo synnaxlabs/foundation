@@ -11,21 +11,20 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-#[path = "../common/shard.rs"]
-mod shard;
+#[path = "../common/node.rs"]
+mod node;
 #[path = "../common/woken.rs"]
 mod woken;
 
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use common::{SETTLE, hub};
+use common::{SETTLE, hub, name};
 use home::reader::Next;
 use home::reader::complete::Charge;
 use hub::Hub;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
-use shard::name;
 use types::authority::Authority;
 use woken::Woken;
 

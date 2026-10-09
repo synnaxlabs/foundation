@@ -35,6 +35,8 @@ use types::time::{Span, Stamp};
 mod client;
 mod definitions;
 mod link;
+#[path = "../common/node.rs"]
+mod node;
 mod region;
 mod remote;
 mod serve;

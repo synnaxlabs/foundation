@@ -283,7 +283,6 @@ async fn recorded(node: &sim::node::Node, kept: &Kept, accepted: usize) {
     }
 }
 
-/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
 /// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
 /// session of the first program that dials it, with its link.
 pub(super) async fn accept(
@@ -294,15 +293,28 @@ pub(super) async fn accept(
     rules: Option<access::Rules>,
 ) -> (Test, Session, hub::Link) {
     let test = home(node, tasks, pool, synced).await;
-    if let Some(rules) = rules {
-        test.hub.set_rules(rules);
-    }
-    let transport = transport(node, tasks, &own_pool(), HOME, 1 << 16);
-    let session = transport.accept().await.expect("a session");
-    let link = test.hub.link(session.clone());
+    let (session, link) = accept_on(&test.hub, node, tasks, rules).await;
     (test, session, link)
 }
 
+/// Sets `rules` on `hub` unless `None`, and gives the session of the first program
+/// that dials the node, with its link on `hub`.
+async fn accept_on(
+    hub: &hub::Hub,
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    rules: Option<access::Rules>,
+) -> (Session, hub::Link) {
+    if let Some(rules) = rules {
+        hub.set_rules(rules);
+    }
+    let transport = transport(node, tasks, &own_pool(), HOME, 1 << 16);
+    let session = transport.accept().await.expect("a session");
+    let link = hub.link(session.clone());
+    (session, link)
+}
+
+/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
 pub(super) async fn home(
     node: &sim::node::Node,
     tasks: &env::tasks::Tasks,
@@ -744,6 +756,34 @@ fn refuses_a_hello_through_another_node() {
         peer: NODE,
     };
     assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+}
+
+#[test]
+fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
+    let other = node::Key::from_u128(2);
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&served);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let (hub, _) = hub::testing::open(crate::node::env(&node, tasks.clone())).await;
+        let (session, link) = accept_on(&hub, &node, &tasks, Some(rules())).await;
+        let accepted = Rc::new(Cell::new(0));
+        serve_each(&session, &link, &tasks, &node.clock(), &kept, &accepted).await;
+        recorded(&node, &kept, accepted.get()).await;
+    };
+    run(88, home, move |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.via = other;
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(VIA));
+    });
+
+    let refusal = Refusal::Via {
+        via: other,
+        peer: node::Key::from_u128(1),
+    };
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    assert_eq!(served, [Err(serve::Error::Access(refusal))]);
 }
 
 /// A node with no mesh time sends no challenge, and closes the session.
