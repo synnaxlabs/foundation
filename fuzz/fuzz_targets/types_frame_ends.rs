@@ -44,7 +44,9 @@ fn narrow(interner: &mut Interner) -> Arc<KeySet> {
 /// The group of `narrow` with its first data channel at entry 0, before its index.
 fn late(interner: &mut Interner) -> Arc<KeySet> {
     interner.slots().data(key(1), F64);
-    narrow(interner)
+    let set = narrow(interner);
+    assert_eq!(set.entries()[0].key, key(1), "the data is before its index");
+    set
 }
 
 /// `GROUPS` groups of two data channels. The indexes are the first entries. The first
@@ -67,7 +69,11 @@ fn wide(interner: &mut Interner) -> Arc<KeySet> {
             data,
         })
         .collect();
-    interner.intern(&groups)
+    let set = interner.intern(&groups);
+    let keys: Vec<_> = set.entries().iter().map(|entry| entry.key).collect();
+    let alternate: Vec<_> = (0..3 * GROUPS).map(key).collect();
+    assert_eq!(keys, alternate, "the data of the groups alternate");
+    set
 }
 
 /// Where a series starts when the series bytes before it end at `last`.
