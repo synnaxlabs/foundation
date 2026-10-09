@@ -62,8 +62,8 @@
   1, with its `Display` as the message and the fix `Fix the cause in the message, then
   plan and apply again`. There is no `ops.reserved-change`: `Plan::definitions` refuses
   a change at a reserved label (FIRST ADMIN). After `definitions`, each problem of
-  `config::plan::check` is a `Config` problem with its own code and no place (PLAN
-  FILE): plan
+  `config::plan::check` is a `Config` problem with its own code and no place, status 2
+  (PLAN FILE): plan
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071877567, approved
   by `laptop.architect-2` (2026-10-09T00:48:39Z,
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
