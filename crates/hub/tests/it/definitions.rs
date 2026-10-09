@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 use hub::home::Outcome;
 use hub::reader::{self, Ended, Mode};
 use hub::writer::{self, Failure, Writer};
+use spec::channel::{Channel, Data, Kind};
 use spec::data_type::DataType;
+use spec::definition::Definition;
+use spec::unit::Unit;
 use types::channel::Key;
 use types::frame::{Form, Range};
 use types::sample::{Scalar, Type};
@@ -192,6 +195,46 @@ fn ends_the_sessions_of_a_data_channel_that_moves_to_another_index() {
         let entries = writer.set().entries();
         let keys: Vec<_> = entries.iter().map(|entry| entry.key.as_u128()).collect();
         assert_eq!(keys, [3, 2, 4]);
+    });
+}
+
+#[test]
+fn ends_the_sessions_of_a_data_channel_whose_unit_changes() {
+    run(47, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let unit = Unit::new("kPa").expect("a unit");
+        let data =
+            Data::new(Key::from_u128(1), None, DataType::Sample(I64), Some(unit));
+        let value = Channel {
+            key: Key::from_u128(2),
+            kind: Kind::Data(data.expect("a number")),
+        };
+        let mut changed = channels();
+        changed.insert(name("value"), Definition::Channel(value));
+        test.hub.set_definitions(&changed);
+        let now = test.now();
+        let failure = written(&mut writer, &[(1, &[now]), (2, &[20])]);
+        let failure = failure.expect_err("the writer ended");
+        assert_eq!(failure, Failure::Removed(Key::from_u128(2)));
+    });
+}
+
+#[test]
+fn ends_the_sessions_of_an_index_whose_control_edge_changes() {
+    run(48, |test| async move {
+        let mut reader = test.reader(&["time"], Mode::Latest).await;
+        let time = Channel {
+            key: Key::from_u128(1),
+            kind: Kind::Index {
+                error: None,
+                control: Some(Key::from_u128(5)),
+            },
+        };
+        let mut changed = channels();
+        changed.insert(name("time"), Definition::Channel(time));
+        test.hub.set_definitions(&changed);
+        let ended = reader.next().await.expect_err("the reader ended");
+        assert_eq!(ended, Ended::Removed(Key::from_u128(1)));
     });
 }
 
