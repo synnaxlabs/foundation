@@ -54,6 +54,7 @@ impl env::files::Driver for Node {
             let Done::Open { handle, len } = done else {
                 unreachable!("invariant: an open gives a file")
             };
+            lock(&self.shared).files().opened(self.node, handle, path);
             let node = self.clone();
             let path = RefCell::new(path.to_path_buf());
             let descriptor: Box<dyn env::files::Descriptor> = Box::new(Descriptor {
@@ -218,11 +219,9 @@ impl Drop for Descriptor {
         // No drop follows the crash that released the hold: a descriptor is `!Send`,
         // no target holds a `thread_local!`, and a crash drops every task of its
         // node.
-        let unused = lock(&self.node.shared).files().release(
-            self.node.node,
-            self.handle,
-            &self.path.borrow(),
-        );
+        let unused = lock(&self.node.shared)
+            .files()
+            .release(self.node.node, self.handle);
         drop(unused);
     }
 }

@@ -56,6 +56,8 @@ pub(crate) struct Disk {
     /// The changes of entries that no `sync_dir` covered, in the order that their calls
     /// ended.
     log: Vec<Change>,
+    /// The path of each open descriptor, by the key of its handle.
+    pub(crate) open: BTreeMap<u64, PathBuf>,
     /// The path of each descriptor closed, in order.
     pub(crate) closed: Vec<PathBuf>,
 }
@@ -137,6 +139,7 @@ impl Disk {
             used: 0,
             inodes: BTreeMap::from([(ROOT, Inode::Dir(Dir::default()))]),
             log: Vec::new(),
+            open: BTreeMap::new(),
             closed: Vec::new(),
         }
     }

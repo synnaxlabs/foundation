@@ -1652,3 +1652,29 @@ fn an_open_whose_future_dropped_closes_no_descriptor() {
         assert_eq!(node.file_closes(), Vec::<PathBuf>::new(), "ended: {ended}");
     }
 }
+
+#[test]
+fn a_dropped_rename_that_ends_gives_the_path_of_the_rename() {
+    for value in 0..8 {
+        let mut sim = sim(value);
+        let node = sim.node(node::Config {
+            disk_bytes: MIB,
+            ..node::Config::default()
+        });
+        let names = sim
+            .run_on(&node, |node, _| async move {
+                let files = node.files();
+                let mut file = create(&node, "a", KIB).await;
+                let mut rename = Box::pin(file.rename(Path::new("b")));
+                pend(rename.as_mut()).await;
+                node.clock().sleep(Span::from_nanos(200_000)).await;
+                pend(rename.as_mut()).await;
+                drop(rename);
+                file.close().await;
+                files.list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
+        assert_eq!(names, [Path::new("b")], "value {value}");
+        assert_eq!(node.file_closes(), [PathBuf::from("b")], "value {value}");
+    }
+}

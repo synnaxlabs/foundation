@@ -330,7 +330,13 @@ impl Files {
                 Ok(Done::Unit)
             }
             Call::Rename { handle, to } => {
-                disk.rename(handle.inode, &path, to).map(|()| Done::Unit)
+                let renamed = disk.rename(handle.inode, &path, to);
+                // A descriptor that closed before the rename ended keeps its path.
+                if let (Ok(()), Some(open)) = (&renamed, disk.open.get_mut(&handle.key))
+                {
+                    *open = disk::normal(to);
+                }
+                renamed.map(|()| Done::Unit)
             }
             Call::Unlink { handle } => {
                 disk.unlink(handle.inode, &path).map(|()| Done::Unit)
@@ -434,7 +440,10 @@ impl Files {
         for (_, (_, ended)) in leaked {
             orphans.extend(self.discard(node, ended));
         }
-        let kept = self.disks[node].crash(crash, &mut self.rng);
+        // The descriptors left are leaked: the crash closes them.
+        let disk = &mut self.disks[node];
+        disk.closed.extend(mem::take(&mut disk.open).into_values());
+        let kept = disk.crash(crash, &mut self.rng);
         kept.hash(&mut self.digest);
         (closes, orphans)
     }
@@ -457,16 +466,19 @@ impl Files {
         (Poll::Pending, self.closes.insert(handle.key, waker))
     }
 
-    /// Closes descriptor `handle` of `node`, of the file at `path`. Returns the waker
-    /// of its close, to drop after the lock is released.
-    pub(crate) fn release(
-        &mut self,
-        node: usize,
-        handle: Handle,
-        path: &Path,
-    ) -> Option<Waker> {
-        self.disks[node].release(handle);
-        self.disks[node].closed.push(disk::normal(path));
+    /// Makes `handle`, which an open of `path` on `node` gave, a descriptor.
+    pub(crate) fn opened(&mut self, node: usize, handle: Handle, path: &Path) {
+        self.disks[node].open.insert(handle.key, disk::normal(path));
+    }
+
+    /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
+    /// after the lock is released.
+    pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
+        let disk = &mut self.disks[node];
+        disk.release(handle);
+        let path = (disk.open.remove(&handle.key))
+            .expect("invariant: a descriptor has a path");
+        disk.closed.push(path);
         self.closes.remove(&handle.key)
     }
 
