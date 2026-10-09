@@ -746,6 +746,44 @@ fn refuses_a_hello_through_another_node() {
     assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
 }
 
+#[test]
+fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
+    let other = node::Key::from_u128(2);
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&served);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let env = hub::testing::Env {
+            files: node.files(),
+            clock: node.clock(),
+            wall: node.wall(),
+            entropy: node.entropy(),
+            tasks: tasks.clone(),
+        };
+        let (hub, _) = hub::testing::open(env).await;
+        hub.set_rules(rules());
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = hub.link(session.clone());
+        let accepted = Rc::new(Cell::new(0));
+        serve_each(&session, &link, &tasks, &node.clock(), &kept, &accepted).await;
+        recorded(&node, &kept, accepted.get()).await;
+    };
+    run(88, home, move |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.via = other;
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(VIA));
+    });
+
+    let refusal = Refusal::Via {
+        via: other,
+        peer: node::Key::from_u128(1),
+    };
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    assert_eq!(served, [Err(serve::Error::Access(refusal))]);
+}
+
 /// A node with no mesh time sends no challenge, and closes the session.
 #[test]
 fn closes_the_session_as_unsynced_when_the_node_has_no_mesh_time() {
