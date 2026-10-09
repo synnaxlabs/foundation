@@ -109,7 +109,8 @@ impl Connection {
         }
     }
 
-    /// When [`Connection::timeout`] must next run, if ever.
+    /// When [`Endpoint::timeout`](super::Endpoint::timeout) must next run for it, if
+    /// ever.
     pub(super) fn deadline(&self) -> Option<Instant> {
         self.inner
             .poll_timeout()
