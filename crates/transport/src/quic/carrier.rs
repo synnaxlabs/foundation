@@ -178,7 +178,8 @@ impl Dialer {
 
     /// Starts a dial to `remote` that `peer` must answer, and gives its session,
     /// which [`Session::poll_connected`] waits on. Dropping the session closes the
-    /// dial.
+    /// dial. `remote` is never IPv4-mapped, as `dial::route` gives: each reply comes
+    /// from the IPv4 form, so the dial of a mapped `remote` times out.
     ///
     /// # Errors
     ///
