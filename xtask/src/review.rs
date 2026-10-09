@@ -34,7 +34,8 @@ enum Cause {
     /// `[^` in a span of text before the last line of its paragraph: GitHub reads a `]`
     /// on a later line as the end of a footnote reference.
     Bracket,
-    /// The first line of a paragraph that comrak places in the wrong lines
+    /// A link or an image with a line break after its text, or a link reference
+    /// definition, in a paragraph: comrak then places its text in the wrong lines
     /// ([`misplaced`]).
     Misplaced,
 }
@@ -516,20 +517,13 @@ impl<'a> Shown<'a> {
         let root = parse_document(&arena, body, &options());
         // The code blocks of a footnote that GitHub does not show still hold its lines.
         let mut codes = Vec::new();
-        let mut notes = Vec::new();
         for node in root.descendants() {
             let data = node.data.borrow();
-            match &data.value {
-                NodeValue::CodeBlock(_) => {
-                    codes.push(at(data.sourcepos.start)..source(data.sourcepos).end);
-                }
-                NodeValue::FootnoteDefinition(note) => {
-                    notes.push((node, note.name.clone(), note.total_references));
-                }
-                _ => {}
+            if let NodeValue::CodeBlock(_) = data.value {
+                codes.push(at(data.sourcepos.start)..source(data.sourcepos).end);
             }
         }
-        footnotes(root, &notes);
+        footnotes(root);
         let mut hiding = Vec::new();
         for node in root.descendants() {
             let data = node.data.borrow();
@@ -552,9 +546,10 @@ impl<'a> Shown<'a> {
                 }
                 NodeValue::Paragraph => {
                     let last = data.sourcepos.end.line;
-                    let bracket = bracket(node, last)
-                        .map(|line| (line_start(line), Cause::Bracket));
-                    hiding.extend(bracket);
+                    hiding.extend(
+                        bracket(node, last)
+                            .map(|line| (line_start(line), Cause::Bracket)),
+                    );
                     shown.text.push(texts(body, node, at));
                 }
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
@@ -616,15 +611,25 @@ fn misplaced<'n>(paragraph: &'n AstNode<'n>, last: usize) -> bool {
 }
 
 /// Moves to the end of `root` the first definition of each footnote label with a
-/// reference, as GitHub shows it, and detaches each other one. `notes` holds each
-/// definition in order, with its label and the references that comrak counts.
-fn footnotes<'n>(root: &'n AstNode<'n>, notes: &[(&'n AstNode<'n>, String, u32)]) {
+/// reference, as GitHub shows it, and detaches each other one.
+fn footnotes<'n>(root: &'n AstNode<'n>) {
+    let notes: Vec<_> = root
+        .descendants()
+        .filter_map(|node| match &node.data.borrow().value {
+            NodeValue::FootnoteDefinition(note) => {
+                Some((node, note.name.clone(), note.total_references))
+            }
+            _ => None,
+        })
+        .collect();
     // comrak counts the references of the last definition of a label, and GitHub
     // shows the first.
     for (i, (node, name, _)) in notes.iter().enumerate() {
         let label = |(_, other, _): &(_, String, _)| same(name, other);
         let first = !notes[..i].iter().any(label);
-        let referenced = notes[i..].iter().any(|n| n.2 > 0 && label(n));
+        let referenced = notes[i..]
+            .iter()
+            .any(|note @ (_, _, references)| *references > 0 && label(note));
         if first && referenced {
             root.append(node);
         } else {
