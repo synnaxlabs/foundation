@@ -58,6 +58,12 @@ pub(super) struct Session {
 impl Readers {
     /// Starts an unnamed latest session, which gets the index's newest live frame, if
     /// any, at once. A latest session holds nothing and writes no record.
+    ///
+    /// ```compile_fail
+    /// #![deny(unused_must_use)]
+    /// let mut readers = delivery::Readers::new(0);
+    /// readers.open_latest();
+    /// ```
     #[must_use]
     pub fn open_latest(&mut self) -> Key {
         self.push_latest(None)
