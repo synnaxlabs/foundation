@@ -42,10 +42,10 @@ fn build() {
     let compiler::Builds {
         mut library,
         shim,
-        asan,
+        address_sanitized,
     } = compiler::configure(&copy, &read("flags.txt"), &read("sources.txt"), env)
         .unwrap_or_else(|e| panic!("{e}"));
-    if asan {
+    if address_sanitized {
         println!("cargo::rustc-cfg=asan");
     }
     // The copy and the shim call each other, so they share one archive: a linker that

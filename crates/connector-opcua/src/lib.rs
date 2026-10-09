@@ -126,6 +126,8 @@ mod tests {
     const SANITIZE: &str = "CARGO_CFG_SANITIZE";
     const FUZZING: (&str, &str) = ("CARGO_CFG_FUZZING", "");
 
+    /// Outside `cargo xtask sanitizers`, only this read of `address_sanitized` sees a
+    /// wrong value. There, the `link` test of the address sanitizer also fails.
     #[test]
     fn sanitize_follows_the_rust_build() {
         let address = [
@@ -149,8 +151,8 @@ mod tests {
             let (mut plain, mut sanitized) =
                 (builds("/missing/clang"), builds("/missing/clang"));
             assert_eq!(sanitized.sanitize(env(vars)), Ok(()), "{vars:?}");
-            let asan = expected.contains(&address[0]);
-            assert_eq!(sanitized.asan, asan, "{vars:?}");
+            let address_sanitized = expected.contains(&address[0]);
+            assert_eq!(sanitized.address_sanitized, address_sanitized, "{vars:?}");
             let pairs = [
                 (&mut sanitized.library, &mut plain.library),
                 (&mut sanitized.shim, &mut plain.shim),
@@ -201,7 +203,7 @@ mod tests {
                 Err(refusal(name)),
                 "{sanitize}"
             );
-            assert!(!sanitized.asan, "{sanitize}");
+            assert!(!sanitized.address_sanitized, "{sanitize}");
             let tool = child::tool(&mut sanitized.library, TARGET);
             assert_eq!(tool.path(), Path::new("/missing/gcc"));
             assert_eq!(args(&tool), args(&child::tool(&mut plain.library, TARGET)));
@@ -212,10 +214,10 @@ mod tests {
     fn sanitize_moves_gcc_to_clang() {
         let cases: [(Vars<'_>, bool); 2] =
             [(&[(SANITIZE, "address")], true), (&[FUZZING], false)];
-        for (vars, asan) in cases {
+        for (vars, address_sanitized) in cases {
             let mut builds = builds("/missing/gcc");
             assert_eq!(builds.sanitize(env(vars)), Ok(()), "{vars:?}");
-            assert_eq!(builds.asan, asan, "{vars:?}");
+            assert_eq!(builds.address_sanitized, address_sanitized, "{vars:?}");
             for build in [&mut builds.library, &mut builds.shim] {
                 assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
             }
@@ -228,7 +230,7 @@ mod tests {
         for vars in cases {
             let mut builds = builds("/missing/gcc");
             assert_eq!(builds.sanitize(env(vars)), Ok(()), "{vars:?}");
-            assert!(!builds.asan, "{vars:?}");
+            assert!(!builds.address_sanitized, "{vars:?}");
             for build in [&mut builds.library, &mut builds.shim] {
                 let path = child::tool(build, TARGET).path().to_owned();
                 assert_eq!(path, Path::new("/missing/gcc"), "{vars:?}");
@@ -245,7 +247,7 @@ mod tests {
         }
         let configure = |vars| {
             let builds = compiler::configure(Path::new("/copy"), "", "a.c", env(vars));
-            builds.map(|builds| builds.asan)
+            builds.map(|builds| builds.address_sanitized)
         };
         assert_eq!(
             configure(&[]),
@@ -260,7 +262,9 @@ mod tests {
     }
 
     /// `configure` checks the compiler that `sanitize` picks, so a sanitizer moves a
-    /// `CC` like MSVC to clang, which builds.
+    /// `CC` like MSVC to clang, which builds. `build.rs` is the only caller of
+    /// `configure`, and a build script has no test harness, so no other test sees the
+    /// order of `sanitize` and `check`.
     #[test]
     fn configure_checks_the_compiler_after_sanitize() {
         child::run(

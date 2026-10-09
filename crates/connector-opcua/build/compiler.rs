@@ -15,14 +15,14 @@ pub(crate) fn check(tool: &Tool) -> Result<(), String> {
     ))
 }
 
-/// The two builds of `build.rs`.
+/// The two builds of `build.rs`, and whether they build with the address sanitizer.
 pub(crate) struct Builds {
     /// The open62541 copy, with its warnings off.
     pub(crate) library: Build,
     /// `src/shim.c`, our code, so its warnings are errors.
     pub(crate) shim: Build,
     /// Whether the C builds with the address sanitizer.
-    pub(crate) asan: bool,
+    pub(crate) address_sanitized: bool,
 }
 
 /// Gives the builds of [`builds`] under the sanitizers of the Rust build, as
@@ -75,14 +75,14 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     Builds {
         library,
         shim,
-        asan: false,
+        address_sanitized: false,
     }
 }
 
 impl Builds {
-    /// Gives both builds the sanitizers of the Rust build, and sets `asan`. `env` gives
-    /// the variables of a build script.
-    /// When `cfg(sanitize)` holds `address`, the C runs under the address and undefined
+    /// Gives both builds the sanitizers of the Rust build, and sets
+    /// `address_sanitized`. `env` gives the variables of a build script. When
+    /// `cfg(sanitize)` holds `address`, the C runs under the address and undefined
     /// behavior sanitizers, and stops at the first error. Under `cfg(fuzzing)`, it
     /// gives libFuzzer its coverage.
     ///
@@ -105,8 +105,8 @@ impl Builds {
                  the Rust build; it follows only `address` and `leak`"
             ));
         }
-        self.asan = names.any(|name| name == "address");
-        if self.asan {
+        self.address_sanitized = names.any(|name| name == "address");
+        if self.address_sanitized {
             // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
             // function type, which `-fsanitize=function` stops on.
             self.add(&[
