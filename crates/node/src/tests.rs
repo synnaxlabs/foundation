@@ -4422,14 +4422,16 @@ mod port {
             assert_eq!(node.join(), Ok(()));
         }
 
-        /// A restart with another region stops the node, and `join` gives the region
-        /// that the first start kept.
+        /// A restart with another region, after the log holds a record, stops the
+        /// node, and `join` gives the region that the first start kept.
         #[test]
         fn a_restart_with_another_region_stops_the_node() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
             let node = start_alone(&hosts[0]);
-            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            // Past the longest election timeout, so the node votes for itself.
+            let elected = Span::from_nanos(3 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(elected), Ok(()));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));

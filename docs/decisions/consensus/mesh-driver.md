@@ -326,10 +326,13 @@
   bytes of `types::digest::Digest::of`), the format version (1), and
   `region::Founding::encode`: the prefix, a count and each member in key order, the
   voters, a count and each definition in name order, and a count and each home in
-  channel key order. The open takes the lock of the log, then writes `founding.new`,
-  renames it to `founding`, and syncs the directory, before `raft` writes a record. So
-  a crash leaves `founding` whole or absent, and a log with no record and no `founding`
-  is a first open. Each later open compares `founding` with `Config::founding`, its
+  channel key order. An open whose log holds no record is a first open: it takes the
+  lock of the log, removes `founding`, writes `founding.new`, renames it to `founding`,
+  and syncs the directory, before `raft` writes a record. So a crash before the first
+  record leaves a first open, also with another founding (`laptop.architect`,
+  2026-10-09:
+  https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). Each
+  later open compares `founding` with `Config::founding`, its
   members in key order, before `raft` starts. Another value gives
   `Error::Founding { stored, given }`, each a `Box<region::Founding>`. Its text names
   the first field that differs: the prefix and the voters in the form "the mesh was
@@ -340,8 +343,9 @@
   mesh was founded with another home of index {name}", "... with a home of index
   {name}, which the config lacks", and "... with no home of index {name}"
   (`laptop.architect`, 2026-10-09:
-  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6090902577). A log with a record and no `founding`, or a `founding` that fails its
-  check, its version, or its decode, gives `Error::Unfounded { path }`. A failed file
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6090902577). A
+  log with a record and no `founding`, or a `founding` that fails its check, its
+  version, or its decode, gives `Error::Unfounded { path }`. A failed file
   call on `founding` gives `Error::Files`, and a pool with no block for it gives
   `Error::Pool`, not `Error::Log`, which names a part that did not fail
   (`laptop.architect`, 2026-10-08T16:10:01Z:

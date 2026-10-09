@@ -86,13 +86,14 @@ pub struct Config<M> {
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
     /// `node`, and the `acceptance` lab, which writes the file first with
-    /// [`create_key`], give `Some`. The first start with a region keeps it in the data
-    /// directory. A later start with another region stops the node, and [`Node::join`]
-    /// gives [`Error::Mesh`] with [`mesh::Error::Founding`]. A patch until the node
-    /// reads its region from its data directory at each start (#1744). The hub of each
-    /// task knows each channel of the region's spec in use, at the open and after each
-    /// spec change that takes effect. At the first start, that is the founding's
-    /// `definitions`, or no channel when `spec::region::check` gives them problems.
+    /// [`create_key`], give `Some`. A start whose mesh log holds no record keeps the
+    /// region in the data directory. A later start with another region stops the node,
+    /// and [`Node::join`] gives [`Error::Mesh`] with [`mesh::Error::Founding`]. A patch
+    /// until the node reads its region from its data directory at each start (#1744).
+    /// The hub of each task knows each channel of the region's spec in use, at the open
+    /// and after each spec change that takes effect. At the first start, that is the
+    /// founding's `definitions`, or no channel when `spec::region::check` gives them
+    /// problems.
     pub region: Option<mesh::region::Founding>,
 }
 

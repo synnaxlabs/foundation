@@ -77,8 +77,8 @@ pub struct Config {
     pub key: node::Key,
     /// This node's private key. It signs the node's claims.
     pub private_key: PrivateKey,
-    /// The region before the first entry of its log, the same at each open. The first
-    /// open of `dir` keeps it there, and a later open checks it.
+    /// The region before the first entry of its log, the same at each open. An open
+    /// whose log holds no record keeps it in `dir`, and a later open checks it.
     pub founding: region::Founding,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
@@ -170,9 +170,8 @@ impl Mesh {
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
     /// - [`Error::Files`] when a call on the founding file, on `<config.dir>/spec`, or
-    ///   on its files fails, and
-    ///   [`Error::Stray`] when that directory holds a file that does not name a
-    ///   pointer.
+    ///   on its files fails, and [`Error::Stray`] when that directory holds a file
+    ///   that does not name a pointer.
     ///
     /// # Panics
     ///

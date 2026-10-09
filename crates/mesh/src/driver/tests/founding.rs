@@ -176,22 +176,40 @@ fn a_reopen_with_a_member_more_or_less_is_refused() {
 
 #[test]
 fn a_reopen_with_other_definitions_is_refused() {
-    let (mut sim, node, region) = founded(0);
     let name = |label: &str| spec::definition::Kind::Subject.key(label).unwrap();
     let subject = |id: u8| {
         Definition::Subject(spec::subject::Subject::new(vec![public(id)]).unwrap())
     };
-    let more = region::Founding {
-        definitions: [(name("plant.app"), subject(1))].into(),
-        ..region.clone()
-    };
-    let error = refused(&mut sim, &node, more.clone());
-    assert_eq!(error, mismatch(&region, &more));
-    let text = "the mesh was founded with no definition plant.app.@subject";
-    assert_eq!(error.to_string(), text);
-
-    let error = refused(&mut sim, &node, more.clone());
-    assert_eq!(error, mismatch(&region, &more), "a second refused open");
+    let stored: BTreeMap<_, _> = [(name("plant.app"), subject(1))].into();
+    let (mut sim, node, region) = founded_with(0, stored.clone(), BTreeMap::new());
+    let founded = "the mesh was founded with";
+    let cases = [
+        (
+            [(name("plant.app"), subject(2))].into(),
+            format!("{founded} another definition plant.app.@subject"),
+        ),
+        (
+            BTreeMap::new(),
+            format!("{founded} definition plant.app.@subject, which the config lacks"),
+        ),
+        (
+            [
+                (name("plant.app"), subject(1)),
+                (name("plant.ops"), subject(1)),
+            ]
+            .into(),
+            format!("{founded} no definition plant.ops.@subject"),
+        ),
+    ];
+    for (definitions, text) in cases {
+        let given = region::Founding {
+            definitions,
+            ..region.clone()
+        };
+        let error = refused(&mut sim, &node, given.clone());
+        assert_eq!(error, mismatch(&region, &given));
+        assert_eq!(error.to_string(), text);
+    }
 }
 
 /// Each text names the index by the tree key of its channel definition, or by its key
@@ -388,10 +406,10 @@ fn a_founding_of_another_version_or_form_is_refused() {
     }
 }
 
-/// A power cut in a first open before `founding` is in the directory leaves a first
-/// open, also with another founding. After it, an open with another one is refused.
+/// A power cut in a first open, before the log holds a record, leaves a first open,
+/// also with another founding, and the next open keeps it.
 #[test]
-fn a_power_cut_in_the_first_open_keeps_a_whole_founding_or_none() {
+fn a_power_cut_in_the_first_open_leaves_a_first_open() {
     let (mut cut_before, mut cut_after) = (0_usize, 0_usize);
     for step in 0..64 {
         let mut sim = Sim::new(sim::Config {
@@ -428,22 +446,46 @@ fn a_power_cut_in_the_first_open_keeps_a_whole_founding_or_none() {
                 node.files().list(Path::new("")).await.unwrap()
             })
             .unwrap();
+        if kept.contains(&PathBuf::from(FILE)) {
+            cut_after = cut_after.saturating_add(1);
+        } else {
+            cut_before = cut_before.saturating_add(1);
+        }
+        assert_eq!(
+            logged(&mut sim, &node),
+            log::Stored::default(),
+            "step {step}"
+        );
         let other = region::Founding {
             voters: [key(1)].into(),
             ..region.clone()
         };
-        let (stored, given) = if kept.contains(&PathBuf::from(FILE)) {
-            cut_after = cut_after.saturating_add(1);
-            (region, other)
-        } else {
-            cut_before = cut_before.saturating_add(1);
-            run_with(&mut sim, &node, other.clone());
-            (other, region)
-        };
-        let error = refused(&mut sim, &node, given.clone());
-        assert_eq!(error, mismatch(&stored, &given), "step {step}");
-        run_with(&mut sim, &node, stored);
+        run_with(&mut sim, &node, other.clone());
+        write_record(&mut sim, &node);
+        let error = refused(&mut sim, &node, region.clone());
+        assert_eq!(error, mismatch(&other, &region), "step {step}");
     }
     assert_ne!(cut_before, 0, "no cut came before the founding was kept");
     assert_ne!(cut_after, 0, "no cut came after the founding was kept");
+}
+
+#[test]
+fn memory_that_the_system_refuses_for_the_founding_file_gives_the_pool_error() {
+    solo(|node, tasks| async move {
+        let budget = block::Config { budget: 4 << 20 };
+        let (memory, switch) = Scarce::new(budget.reservation());
+        let config = Config {
+            pool: Rc::new(Pool::new(budget, memory)),
+            ..config(&node, &tasks, 1, &IDS, &IDS).await
+        };
+        switch.refuse();
+        let error = Mesh::start(config).await.err().unwrap();
+        let cause = block::Error::Refused { requested: 831 };
+        assert_eq!(error, Error::Pool(cause));
+        assert_eq!(
+            error.to_string(),
+            "the pool has no block for the mesh now: the system refused memory for a \
+             block of 831 bytes"
+        );
+    });
 }
