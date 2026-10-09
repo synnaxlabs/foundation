@@ -126,9 +126,9 @@ impl Connection {
         if ran {
             self.inner.handle_timeout(now);
         }
-        if self.connected()
+        if let Err(Fault(reason)) = self.streams.timeout(now, || self.idle())
+            && self.connected()
             && !self.inner.is_closed()
-            && let Err(Fault(reason)) = self.streams.timeout(now, || self.idle())
         {
             events.extend(self.fault(now, reason));
             return true;
