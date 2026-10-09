@@ -365,7 +365,8 @@ static UA_Boolean
 testStoppedCondition(UA_Server *server);
 
 /* A server on an external EventLoop is STOPPED when its last component stops.
- * Only UA_Server_run_shutdown stops a component. */
+ * A component stops only in UA_Server_run_shutdown, or in a failed
+ * UA_Server_run_startup, where the server is STOPPED already. */
 static void
 notifyServerComponentState(UA_ServerComponent *sc, UA_LifecycleState state) {
     if(testStoppedCondition(sc->server))
