@@ -130,17 +130,17 @@
   UTC): https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
   the ruling of `laptop.architect` (20:08 UTC):
   https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791.
-  Amended (2026-10-09, #1628, by `laptop.architect-2`):
+  Amended (2026-10-09, #1628, by `laptop.architect-2`, 13:35 UTC):
   https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858, on the
-  plan https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6081954276.
-  Two bounds, patches until #1662 as the limits above are. A stream whose header has not
+  plan https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6081954276. Two
+  bounds, patches until #1662 as the limits above are. A stream whose header has not
   arrived 10 s after the stream did is rejected as a header that does not decode is. A
   test cannot open a stream with no bytes, because the transport queues a stream at its
   first byte, so a first message that is still arriving at 10 s tests the wait. Shard 0
   holds at most 256 sessions of peers outside the region (`Peer::Client`, and a
   `Peer::Node` whose key no member holds in this node's view) and closes each next one
   at once with `Code(wire::session::REFUSED)`. It never refuses a member, so a flood of
-  programs cannot lock the region out. Trigger: the change kind that removes a member
-  (MESH DRIVER) also closes each session of that node, with the code of a refused
-  session, and so ends its `Hub` and `Mesh` streams. The node then admits it again as
-  any other peer.
+  programs cannot lock the region out. Trigger: the PR that adds the change kind that
+  removes a member (MESH DRIVER). That change also closes each session of that node,
+  with the code of a refused session, and so ends its `Hub` and `Mesh` streams. The node
+  then admits it again as any other peer.
