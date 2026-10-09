@@ -39,7 +39,7 @@ pub(super) struct Influx {
     address: Option<SocketAddr>,
     /// The token that stops the shard that serves, and that shard. The panic tests put
     /// a shard that panics or blocks here, since no input to [`Influx::serve`] makes
-    /// it do so, and read the token that a drop cancels.
+    /// it do so.
     serving: Option<(Token, Handle)>,
 }
 
@@ -248,16 +248,28 @@ fn a_dropped_influx_does_not_join_its_server_when_the_test_panics() {
 }
 
 #[test]
-fn a_dropped_influx_cancels_its_server_when_the_test_panics() {
+fn a_dropped_influx_stops_its_server_when_the_test_panics() {
     let mut influx = Influx::default();
-    influx.serve();
-    let stop = influx.serving.as_ref().expect("it serves").0.clone();
+    let address = influx.serve();
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _influx = influx;
         panic!("the test broke");
     }));
     unwound.expect_err("the test panics");
-    assert!(stop.cancelled(), "the server serves on");
+    // The drop does not join, and on macOS a child can hold the port until its exec.
+    let mut written = String::new();
+    for _ in 0..50 {
+        written = write(address, "m f=1 1");
+        if written == refused(address) {
+            return;
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the server stops on its own shard in real time"
+        )]
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("the server serves on: {written}");
 }
 
 #[test]
