@@ -216,9 +216,9 @@ impl Node {
         env::files::Files::new(self.0.clone())
     }
 
-    /// The path of each file that the node closed, in the order of the closes, since
-    /// the run started: by a drop, `close`, or `remove` of its descriptor, or by a
-    /// crash. A path is the one the file had at its close: a rename changes it.
+    /// The path of each file descriptor that the node closed or dropped, in order,
+    /// since the run started: the path of its open, or of its last rename. A crash
+    /// drops each descriptor that a task of the node holds.
     #[must_use]
     pub fn file_closes(&self) -> Vec<PathBuf> {
         lock(&self.0.shared).files().closed(self.0.node)

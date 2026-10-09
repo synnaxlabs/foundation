@@ -1607,3 +1607,19 @@ fn the_node_gives_the_path_of_each_file_that_it_closed_in_order() {
     .unwrap();
     assert_eq!(node.file_closes(), ["c", "a", "d"].map(PathBuf::from));
 }
+
+#[test]
+fn a_file_removed_while_open_gives_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let a = create(&node, "a", 0).await;
+        node.files().remove(Path::new("a")).await.unwrap();
+        drop(a);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), [PathBuf::from("a")]);
+}
