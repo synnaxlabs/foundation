@@ -16,7 +16,12 @@
   that refuses it. Decided by the architect on #1062:
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
   The default is a quarter of the available memory, up to 1 GiB, and a quarter of
-  the free disk of the data directory, up to 8 GiB. The node keeps its budgets in
+  the free disk of the data directory, up to 8 GiB. Decided by `laptop.architect-2`
+  on #1732 (2026-10-09T18:30:45Z,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545).
+  On Linux the available memory counts the memory cgroup: it is the lesser of
+  `MemAvailable` and the room left in the memory cgroup of the process and in each
+  cgroup above it (`os::memory::available`). The node keeps its budgets in
   the file `budget` of its data directory: one sector with the tag
   `foundation/budget/1`, the two budgets as `u64`, and a CRC32C. `node::budget`
   reads it outside the lock. Under the lock, once each shard has opened its buffer,
@@ -24,9 +29,10 @@
   is never kept. A file that is there stays as it is, also when it holds other
   budgets. A file that a node did not write stops the start with `Error::Budget`.
   Later work: the first `node_settings` policy that a node applies writes over the
-  file `budget`. Decided by `laptop.architect-2` on #1732:
-  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863 and
-  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089288397.
+  file `budget`. Decided by `laptop.architect-2` on #1732 (2026-10-09T20:14:29Z,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863;
+  2026-10-09T21:08:23Z,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089288397).
   A budget that gives a shard too little stops the start with `node.disk` or
   `node.memory`, whose message names where the budget came from (the file `budget`,
   the most that a first start gives, or a quarter of the free resource) and whose fix
@@ -35,5 +41,6 @@
   fix "Free memory on this host". Each other buffer error is `node.failed`. Lost: one
   text for each budget, also at the most, which tells the operator to free memory
   that does not raise the budget; and `Refused` as `node.failed`, which gives no fix
-  for a cause that has one. Decided by `laptop.architect-2` on #1732:
-  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601.
+  for a cause that has one. Decided by `laptop.architect-2` on #1732
+  (2026-10-09T21:35:43Z,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601).

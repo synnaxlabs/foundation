@@ -13,10 +13,11 @@
   fails changes nothing. `Start::fail` writes an `ops::Failure { code, message, fix }`
   as `cli` writes its own errors, and gives exit status 1. So `ops` keeps the one output
   form, and `main` gives the facts. The codes: `node.busy`, `node.data`, `node.unnamed`,
-  `node.renamed`, `node.name`, and `node.failed`. `Node::stopper` gives a `Stopper` that
-  stops the node from another thread. A stop after the node ended does nothing. Lost: a
-  line that `node` writes itself, a second owner of the output form; an entry of the
-  table with a flag that each of its four users skips. Decided by `laptop.architect-2`
+  `node.renamed`, `node.name`, `node.budget`, `node.disk`, `node.memory` (NODE
+  SETTINGS), and `node.failed`. `Node::stopper` gives a `Stopper` that stops the node
+  from another thread. A stop after the node ended does nothing. Lost: a line that
+  `node` writes itself, a second owner of the output form; an entry of the table with a
+  flag that each of its four users skips. Decided by `laptop.architect-2`
   (2026-10-08T02:21:16Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6050855867;
   2026-10-08T05:00:46Z, `--name` and the line,
