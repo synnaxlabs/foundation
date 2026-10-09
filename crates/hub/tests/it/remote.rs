@@ -2799,6 +2799,46 @@ fn a_reader_that_drops_after_no_room_for_its_credit_stops_the_stream_with_busy()
 }
 
 #[test]
+fn the_task_yields_after_a_streak_when_the_home_stops_reading_credits() {
+    const FRAMES: usize = 300;
+    remote(
+        56,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, receiver) = fake_open(&transport).await;
+            for n in 0..32 {
+                send_credit_frame(&mut sender, n).await;
+            }
+            until(&node.clock(), &steps.full).await;
+            // The home stops reading credits.
+            drop(receiver);
+            for _ in 0..FRAMES {
+                send_frame(&mut sender, 16).await.expect("sends");
+            }
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..32 {
+                reader.next().await.expect("a frame");
+            }
+            test.paused.pause();
+            steps.full.store(true, Ordering::Relaxed);
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            // Gives the 32nd frame back, so a credit falls due.
+            assert!(super::poll_once(reader.next()).is_pending());
+            let polls = test.polls.get();
+            test.paused.resume();
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            assert_eq!(test.polls.get() - polls, 3, "128, 128, and 44 frames");
+            for _ in 0..FRAMES {
+                reader.next().await.expect("a frame");
+            }
+        },
+    );
+}
+
+#[test]
 fn a_session_that_ends_with_a_refusal_while_a_credit_is_due_sends_no_credit() {
     let body = |n: usize| if n == 31 { 14_272 } else { 16_320 };
     remote(
