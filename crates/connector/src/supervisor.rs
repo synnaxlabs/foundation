@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -64,13 +65,14 @@ impl Supervisor {
     /// as the connector: the whole status at each start and change of state, and a
     /// change of counts alone at most once each second.
     ///
-    /// Returns `Ok` when `run` returns `Ok`, when `cancel` is cancelled and the run
-    /// returned, or when the mesh stopped before the status channels opened. It
-    /// returns, with `Ok` or an error, only once each task of
-    /// its last run ended, and the home applied its last status frame or `cancel` is
-    /// cancelled. A drop of the future cancels the run and does not wait for its
-    /// tasks: to wait, cancel `cancel` and await the future. The future is not `Send`:
-    /// call it on a shard.
+    /// The status channels open once the node has mesh time, and no run starts before.
+    /// Returns `Ok` when `run` returns `Ok`, when the mesh stopped before the status
+    /// channels opened, or when `cancel` is cancelled: at once while the channels are
+    /// not open, and otherwise once the run returned. It returns, with `Ok` or an
+    /// error, only once each task of its last run ended, and the home applied its last
+    /// status frame or `cancel` is cancelled. A drop of the future cancels the run and
+    /// does not wait for its tasks: to wait, cancel `cancel` and await the future. The
+    /// future is not `Send`: call it on a shard.
     ///
     /// # Errors
     ///
@@ -98,11 +100,18 @@ impl Supervisor {
             .check(kind, None, config)
             .map_err(Error::Config)?
             .counts;
-        let open = status::Writer::open(hub, &name, counts, clock.clone());
-        let (writer, status) = match open.await {
-            Ok(opened) => opened,
-            Err(hub::writer::Error::Mesh(_)) => return Ok(()),
-            Err(error) => {
+        let mut open = pin!(status::Writer::open(hub, &name, counts, clock.clone()));
+        let mut cancelled = pin!(cancel.wait());
+        // An open that is ready at once wins, so a cancel before the call still
+        // writes `state` 2.
+        let opened = poll_fn(|cx| match open.as_mut().poll(cx) {
+            Poll::Ready(opened) => Poll::Ready(Some(opened)),
+            Poll::Pending => cancelled.as_mut().poll(cx).map(|()| None),
+        });
+        let (writer, status) = match opened.await {
+            None | Some(Err(hub::writer::Error::Mesh(_))) => return Ok(()),
+            Some(Ok(opened)) => opened,
+            Some(Err(error)) => {
                 panic!(
                     "the status channels of the connector {name} do not open: {error}"
                 )
@@ -1386,6 +1395,72 @@ mod tests {
     #[should_panic(expected = "the kind did not name the count `other` in its check")]
     fn panics_on_a_count_that_the_kind_did_not_name() {
         tally(Tally::new("other"));
+    }
+
+    #[test]
+    fn returns_at_a_cancel_while_the_status_channels_wait_to_open() {
+        let (returned, runs, _) =
+            unsynced(Span::from_nanos(30_000_000_000), Span::SECOND);
+        assert_eq!(returned, Span::SECOND, "the call returns at the cancel");
+        assert_eq!(runs, []);
+    }
+
+    #[test]
+    fn starts_the_first_run_once_the_node_has_mesh_time() {
+        let two = Span::from_nanos(2_000_000_000);
+        let (returned, runs, statuses) = unsynced(two, Span::from_nanos(3_000_000_000));
+        assert_eq!(runs, [two]);
+        assert_eq!(returned, Span::from_nanos(3_000_000_000));
+        assert_eq!(states(&statuses), [(0, 0, 0), (3, 0, 0), (2, 0, 0)]);
+    }
+
+    /// Runs a `Script` connector with no step on a node whose mesh time starts `delay`
+    /// after the call, and cancels it at `cancel`. Checks that the call returns `Ok`, and
+    /// gives when it returned and when each run started, and the status frames.
+    fn unsynced(delay: Span, cancel: Span) -> (Span, Vec<Span>, Vec<Written>) {
+        run_on(move |node, tasks| async move {
+            let env = hub::testing::Env {
+                files: node.files(),
+                clock: node.clock(),
+                wall: node.wall(),
+                entropy: node.entropy(),
+                tasks: tasks.clone(),
+            };
+            let hub = hub::testing::open_unsynced(env, delay).await;
+            let status = create_status("plant.script");
+            hub.set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let statuses = read_status(&hub, "plant.script", &[], &tasks).await;
+            let script = Script::default();
+            let runs = Arc::clone(&script.runs);
+            let clock = node.clock();
+            let inputs = Config {
+                kinds: Arc::new(Table::new().with("script", script)),
+                clock: clock.clone(),
+                entropy: node.entropy(),
+                net: node.net(),
+                tasks: tasks.clone(),
+                hub,
+            };
+            let token = Token::new();
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(cancel).await;
+                canceller.cancel();
+            });
+            let start = clock.now();
+            let name = name("plant.script");
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("the call returns ok");
+            let returned = clock.now() - start;
+            let runs: Vec<_> = {
+                let runs = runs.lock().expect("no panic under the lock");
+                runs.iter().map(|(from, _)| *from - start).collect()
+            };
+            clock.sleep(Span::SECOND).await;
+            let statuses = statuses.borrow().clone();
+            (returned, runs, statuses)
+        })
     }
 
     #[test]
