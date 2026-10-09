@@ -103,7 +103,8 @@ impl Status {
         Self(Rc::clone(&self.0))
     }
 
-    /// The count `name`, to set from the kind's data path.
+    /// The count `name`, to set from the kind's data path. The call searches the names
+    /// of the counts, so take each count once, before the data path.
     ///
     /// # Panics
     ///
@@ -125,7 +126,8 @@ impl Status {
     }
 }
 
-/// One count of a kind, `<connector>.status.<count>`.
+/// One count of a kind, `<connector>.status.<count>`. It is not `Send`: as `Context`,
+/// it stays on the shard of its run.
 #[derive(Debug)]
 pub struct Count {
     values: Rc<Values>,
