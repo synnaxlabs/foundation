@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use document::diagnostic::Code;
-use serde::Serialize;
+use serde_json::Value;
 use types::name::Name;
 
 use crate::error::Error;
@@ -38,12 +38,10 @@ impl Start {
     /// U+FFFD.
     pub fn running(&self, name: &Name, mut output: impl Write) {
         let text = if self.json {
-            let line = Line {
-                name: name.as_str(),
-                data: &self.data.to_string_lossy(),
-            };
-            let line = serde_json::to_string(&line).expect("invariant: two strings");
-            format!("{line}\n")
+            // By hand, as a `json!` object sorts its keys.
+            let name = Value::from(name.as_str());
+            let data = Value::from(self.data.to_string_lossy());
+            format!("{{\"name\":{name},\"data\":{data}}}\n")
         } else {
             let data = self.data.display();
             format!("node {name} runs in {data}. Stop it with Ctrl-C.\n")
@@ -60,11 +58,4 @@ impl Start {
     pub fn fail(&self, failure: &Failure, errors: impl Write) -> u8 {
         crate::report(&Error::Node(failure.clone()), self.json, errors)
     }
-}
-
-/// The JSON line of [`Start::running`], in the order of its fields.
-#[derive(Serialize)]
-struct Line<'a> {
-    name: &'a str,
-    data: &'a str,
 }
