@@ -1309,16 +1309,15 @@ fn a_watch_of_the_spec_gives_the_cause_when_each_mesh_drops() {
         let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
         let mut watch = mesh.watch_spec();
         assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
-        let given = Rc::new(RefCell::new(None));
-        let slot = Rc::clone(&given);
-        tasks.spawn(async move {
-            *slot.borrow_mut() = Some(watch.next().await);
-        });
-        node.clock().sleep(TICK).await;
-        assert_eq!(*given.borrow(), None);
-        drop(mesh);
-        node.clock().sleep(TICK).await;
-        assert_eq!(given.take(), Some(Err(Stopped::Dropped)));
+        {
+            let mut waits = pin!(watch.next());
+            assert!(now(waits.as_mut()).await.is_pending());
+            drop(mesh);
+            assert_eq!(waits.await, Err(Stopped::Dropped));
+        }
+        assert_eq!(watch.next().await, Err(Stopped::Dropped));
+        let after = now(pin!(watch.next())).await;
+        assert_eq!(after, Poll::Ready(Err(Stopped::Dropped)));
     });
 }
 
@@ -1328,17 +1327,16 @@ fn a_watch_of_the_spec_gives_the_cause_on_each_call_after_the_group_stops() {
         let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
         let mut watch = mesh.watch_spec();
         assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
-        let given = Rc::new(RefCell::new(None));
-        let slot = Rc::clone(&given);
-        tasks.spawn(async move {
-            *slot.borrow_mut() = Some(watch.next().await);
-            *slot.borrow_mut() = Some(watch.next().await);
-        });
-        node.clock().sleep(TICK).await;
-        assert_eq!(*given.borrow(), None);
-        let stopped = super::send::stop(&node, &mesh);
-        node.clock().sleep(TICK).await;
-        assert_eq!(given.take(), Some(Err(stopped)));
+        let stopped = {
+            let mut waits = pin!(watch.next());
+            assert!(now(waits.as_mut()).await.is_pending());
+            let stopped = super::send::stop(&node, &mesh);
+            assert_eq!(waits.await, Err(stopped.clone()));
+            stopped
+        };
+        assert_eq!(watch.next().await, Err(stopped.clone()));
+        let after = now(pin!(watch.next())).await;
+        assert_eq!(after, Poll::Ready(Err(stopped)));
     });
 }
 
