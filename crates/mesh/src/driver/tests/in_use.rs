@@ -1270,6 +1270,8 @@ fn a_watch_of_the_spec_gives_the_spec_in_use_and_then_the_newest_new_one() {
         assert_eq!(mesh.spec().await, Ok(in_use(third, &c)));
         assert_eq!(watch.next().await, Ok(in_use(third, &c)));
         assert!(now(pin!(watch.next())).await.is_pending());
+        let debug = format!("Watch {{ given: {:?}, .. }}", Some(third));
+        assert_eq!(format!("{watch:?}"), debug);
     });
 }
 
