@@ -1,16 +1,20 @@
-//! The inputs of a supervisor, for the tests of `connector` and of the kinds.
+//! The inputs of a supervisor and the status channels of a connector, for the tests
+//! of `connector` and of the kinds.
 
 use std::sync::Arc;
 
 use env::net::Net;
-use types::time::Stamp;
+use spec::channel::{Channel, Data, Kind};
+use spec::data_type::DataType;
+use spec::definition::Definition;
+use types::channel;
+use types::name::Name;
 
 use crate::kind::Table;
-use crate::supervisor;
+use crate::{status, supervisor};
 
 /// A supervisor's inputs for the tests of `connector` and the kinds: `kinds`, the
-/// seams of `env` and `net`, and a hub on a new shard in `env`. Also gives the mesh
-/// time once the clock has one.
+/// seams of `env` and `net`, and a hub on a new shard in `env`.
 ///
 /// # Panics
 ///
@@ -19,17 +23,46 @@ pub async fn create_config(
     env: hub::testing::Env,
     net: Net,
     kinds: Table,
-) -> (supervisor::Config, Stamp) {
+) -> supervisor::Config {
     let (clock, entropy, tasks) =
         (env.clock.clone(), env.entropy.clone(), env.tasks.clone());
-    let (hub, now) = hub::testing::open(env).await;
-    let config = supervisor::Config {
+    let (hub, _) = hub::testing::open(env).await;
+    supervisor::Config {
         kinds: Arc::new(kinds),
         clock,
         entropy,
         net,
         tasks,
         hub,
+    }
+}
+
+/// The definitions of the status channels of `connector`, whose kind names `counts`,
+/// with keys from `first` on, the index first. A test passes them to
+/// [`hub::Hub::set_definitions`] with its own.
+///
+/// # Panics
+///
+/// As [`status::channels`].
+#[must_use]
+pub fn create_status(
+    connector: &Name,
+    counts: &[Name],
+    first: u128,
+) -> Vec<(Name, Definition)> {
+    let (time, channels) = status::channels(connector, counts);
+    let index = channel::Key::from_u128(first);
+    let kind = Kind::Index {
+        error: None,
+        control: None,
     };
-    (config, now)
+    let time = (time, Definition::Channel(Channel { key: index, kind }));
+    let channels = (first + 1..).zip(channels).map(|(key, (name, sample))| {
+        let data = Data::new(index, None, DataType::Sample(sample), None);
+        let data = data.expect("invariant: a status channel has no unit");
+        let key = channel::Key::from_u128(key);
+        let kind = Kind::Data(data);
+        (name, Definition::Channel(Channel { key, kind }))
+    });
+    std::iter::once(time).chain(channels).collect()
 }

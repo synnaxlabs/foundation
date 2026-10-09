@@ -270,14 +270,14 @@ fn connector_run(config: Document) -> Result<(), Error> {
             tasks,
         };
         let kinds = Table::new().with("influx", Kind);
-        let (inputs, _) = testing::create_config(env, node.net(), kinds).await;
+        let inputs = testing::create_config(env, node.net(), kinds).await;
+        let connector = "influx".parse().expect("a name");
+        let status = testing::create_status(&connector, &[], 1);
+        inputs
+            .hub
+            .set_definitions(status.iter().map(|(name, def)| (name, def)));
         Supervisor::new(inputs)
-            .run(
-                "influx",
-                "influx".parse().expect("a name"),
-                &config,
-                &cancel::Token::new(),
-            )
+            .run("influx", connector, &config, &cancel::Token::new())
             .await
     })
 }

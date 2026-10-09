@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-sim = ["hyper/server", "hub/sim"]
+sim = ["hyper/server", "hub/sim", "dep:spec"]
 
 [dependencies]
 bytes.workspace = true
@@ -16,6 +16,7 @@ hyper.workspace = true
 env = { path = "../env" }
 hub = { path = "../hub" }
 document = { path = "../document" }
+spec = { path = "../spec", optional = true }
 types = { path = "../types" }
 
 [dev-dependencies]

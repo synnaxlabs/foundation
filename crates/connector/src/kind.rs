@@ -115,6 +115,7 @@ pub struct Context<C> {
     config: C,
     cancel: cancel::Token,
     tasks: Tasks,
+    status: status::Status,
     // Its `tasks` field is the shard's, which no run counts: spawn only through
     // `self.tasks`.
     inputs: Rc<supervisor::Config>,
@@ -127,6 +128,7 @@ impl<C> Context<C> {
         config: C,
         cancel: cancel::Token,
         tasks: Tasks,
+        status: status::Status,
         inputs: Rc<supervisor::Config>,
     ) -> Self {
         Self {
@@ -134,6 +136,7 @@ impl<C> Context<C> {
             config,
             cancel,
             tasks,
+            status,
             inputs,
         }
     }
@@ -145,6 +148,7 @@ impl<C> Context<C> {
             config,
             cancel: self.cancel,
             tasks: self.tasks,
+            status: self.status,
             inputs: self.inputs,
         }
     }
@@ -198,6 +202,12 @@ impl<C> Context<C> {
             channels,
         };
         self.inputs.hub.writer(config).await
+    }
+
+    /// The connector's status channels.
+    #[must_use]
+    pub fn status(&self) -> &status::Status {
+        &self.status
     }
 
     /// Connects streams and datagrams.
@@ -693,12 +703,13 @@ mod tests {
         let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
             let inputs =
-                Rc::new(create_config(&node, tasks.clone(), Table::new()).await.0);
+                Rc::new(create_config(&node, tasks.clone(), Table::new(), "a").await);
             let ctx = Context::new(
                 name("plant.counter"),
                 3,
                 token.clone(),
                 tasks.clone(),
+                status::Status::new(Vec::new()),
                 inputs,
             );
             let clock = node.clock();
@@ -725,8 +736,9 @@ mod tests {
     fn gives_a_new_random_source_on_each_call() {
         let (a, b) = run_on(|node, tasks| async move {
             let inputs =
-                Rc::new(create_config(&node, tasks.clone(), Table::new()).await.0);
-            let ctx = Context::new(name("a"), (), Token::new(), tasks, inputs);
+                Rc::new(create_config(&node, tasks.clone(), Table::new(), "a").await);
+            let status = status::Status::new(Vec::new());
+            let ctx = Context::new(name("a"), (), Token::new(), tasks, status, inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
         assert_ne!(a, b);

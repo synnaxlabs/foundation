@@ -3,7 +3,8 @@
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::tasks::Tasks;
-use types::time::Stamp;
+use spec::definition::Definition;
+use types::name::Name;
 
 use crate::kind::Table;
 use crate::{supervisor, testing};
@@ -34,12 +35,14 @@ where
 }
 
 /// The inputs of a supervisor of `kinds` on a shard of `node`, with a hub on a new
-/// shard, and the mesh time once the clock has one.
+/// shard that defines the status channels of `connector` with keys from
+/// [`STATUS`] on.
 pub(crate) async fn create_config(
     node: &sim::node::Node,
     tasks: Tasks,
     kinds: Table,
-) -> (supervisor::Config, Stamp) {
+    connector: &str,
+) -> supervisor::Config {
     let env = hub::testing::Env {
         files: node.files(),
         clock: node.clock(),
@@ -47,5 +50,20 @@ pub(crate) async fn create_config(
         entropy: node.entropy(),
         tasks,
     };
-    testing::create_config(env, node.net(), kinds).await
+    let config = testing::create_config(env, node.net(), kinds).await;
+    let status = create_status(connector);
+    config
+        .hub
+        .set_definitions(status.iter().map(|(name, def)| (name, def)));
+    config
+}
+
+/// The first key of the status channels that [`create_config`] defines.
+pub(crate) const STATUS: u128 = 100;
+
+/// The definitions of the status channels of `connector`, with no count, with keys
+/// from [`STATUS`] on.
+pub(crate) fn create_status(connector: &str) -> Vec<(Name, Definition)> {
+    let connector = connector.parse().expect("a valid name");
+    testing::create_status(&connector, &[], STATUS)
 }

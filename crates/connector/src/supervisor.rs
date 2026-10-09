@@ -1,7 +1,8 @@
 //! Runs connectors and restarts them after errors.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -15,6 +16,7 @@ use types::name::Name;
 use types::time::Span;
 
 use crate::kind::{self, Context, Error};
+use crate::status::{self, Class, State};
 use crate::{cancel, retry};
 
 /// The waits between restarts.
@@ -59,10 +61,13 @@ impl Supervisor {
     /// backoff after any error but `Config`. The waits start again from the first
     /// after a run that lasted at least a minute. Within one call, never starts a run
     /// before the last one returned and each task it spawned through [`Context::tasks`]
-    /// ended, or after `cancel` is cancelled.
+    /// ended, or after `cancel` is cancelled. Writes the connector's status channels
+    /// as the connector: the whole status at each start and change of state, and a
+    /// change of counts alone at most once each second.
     ///
-    /// Returns `Ok` when `run` returns `Ok`, or when `cancel` is cancelled and the
-    /// run returned. It returns, with `Ok` or an error, only once each task of its
+    /// Returns `Ok` when `run` returns `Ok`, when `cancel` is cancelled and the run
+    /// returned, or when the mesh stopped before the status channels opened. It
+    /// returns, with `Ok` or an error, only once each task of its
     /// last run ended. A drop of the future cancels the run and does not wait for its
     /// tasks: to wait, cancel `cancel` and await the future. The future is not
     /// `Send`: call it on a shard.
@@ -71,6 +76,11 @@ impl Supervisor {
     ///
     /// [`Error::Config`], without a restart, when the kind is unknown, the config
     /// does not parse, or `run` returns it.
+    ///
+    /// # Panics
+    ///
+    /// When the status channels of `name` do not open for a reason other than a
+    /// stopped mesh: `node` did not define them, or homed them on another node.
     pub async fn run(
         &self,
         kind: &str,
@@ -79,14 +89,60 @@ impl Supervisor {
         cancel: &cancel::Token,
     ) -> Result<(), Error> {
         let Config {
+            kinds, clock, hub, ..
+        } = &*self.0;
+        let counts = kinds
+            .check(kind, None, config)
+            .map_err(Error::Config)?
+            .counts;
+        let (writer, status) = match status::Writer::open(hub, &name, counts).await {
+            Ok(opened) => opened,
+            Err(hub::writer::Error::Mesh(_)) => return Ok(()),
+            Err(error) => {
+                panic!(
+                    "the status channels of the connector {name} do not open: {error}"
+                )
+            }
+        };
+        let writer = RefCell::new(writer);
+        let mut runs = pin!(self.runs(kind, &name, config, cancel, &writer, &status));
+        let mut flush = pin!(status::flush(&writer, clock));
+        poll_fn(|cx| {
+            if let Poll::Ready(never) = flush.as_mut().poll(cx) {
+                match never {}
+            }
+            runs.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    /// Runs the connector and restarts it, as [`Self::run`] says, and writes its
+    /// status through `writer` at each change of state.
+    async fn runs(
+        &self,
+        kind: &str,
+        name: &Name,
+        config: &Document,
+        cancel: &cancel::Token,
+        writer: &RefCell<status::Writer>,
+        status: &status::Status,
+    ) -> Result<(), Error> {
+        let Config {
             kinds,
             clock,
             entropy,
             tasks,
             ..
         } = &*self.0;
+        let set = |state, class, restarts| {
+            writer.borrow_mut().set(state, class, restarts, clock.now());
+        };
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
+        let (mut class, mut started) = (Class::None, 0_u64);
         while !cancel.cancelled() {
+            let restarts = started;
+            started = started.strict_add(1);
+            set(State::Running, class, restarts);
             let token = Ended(cancel.child());
             let live = Rc::new(Live::default());
             let count = Count {
@@ -98,25 +154,34 @@ impl Supervisor {
                 (),
                 token.0.clone(),
                 Tasks::new(count),
+                status.share(),
                 Rc::clone(&self.0),
             );
             let start = clock.now();
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
             let lasted = clock.now() - start;
             drop(token);
-            // This wait reaches the connector's status as `state` 3 in #1731.
+            class = Class::of(&end);
+            set(State::Ending, class, restarts);
             live.ended().await;
             match end {
-                Ok(()) => return Ok(()),
-                Err(error @ Error::Config(_)) => return Err(error),
+                Ok(()) | Err(Error::Config(_)) => {
+                    set(State::Stopped, class, restarts);
+                    return end;
+                }
                 // These reach the connector's status in #420.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
+            if cancel.cancelled() {
+                break;
+            }
+            set(State::Waiting, class, restarts);
             if lasted >= HEALTHY {
                 backoff.reset();
             }
             backoff.wait(cancel).await;
         }
+        set(State::Stopped, class, started.saturating_sub(1));
         Ok(())
     }
 }
@@ -198,8 +263,9 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{create_config, run_on};
+    use crate::common::{STATUS, create_config, create_status, run_on};
     use crate::kind::{Channels, Kind, Table};
+    use crate::testing;
     use hub::home::Refusal;
     use hub::reader::{Mode, Received};
     use spec::channel::{Channel, Data};
@@ -339,12 +405,52 @@ mod tests {
         Span::from_nanos(n * 1_000_000)
     }
 
-    /// The outcome of [`supervise`]: the result, when it returned, and each run's
-    /// start and end, all from the start.
+    /// The outcome of [`supervise`]: the result, when it returned, each run's start
+    /// and end, all from the start, and each status frame.
     struct Outcome {
         result: Result<(), Error>,
         returned: Span,
         runs: Vec<(Span, Option<Span>)>,
+        statuses: Vec<Written>,
+    }
+
+    /// One status frame: its stamp from the first, and the sample of each status
+    /// channel but the index, in the order of [`status::channels`].
+    type Written = (Span, Vec<i64>);
+
+    /// Reads the status frames of `connector` with `counts`, whose status channels
+    /// have keys from [`STATUS`] on, into the vector it gives, in a task on `tasks`.
+    async fn read_status(
+        hub: &hub::Hub,
+        connector: &str,
+        counts: &[Name],
+        tasks: &env::tasks::Tasks,
+    ) -> Rc<RefCell<Vec<Written>>> {
+        let connector = connector.parse().expect("a valid name");
+        let (_, channels) = status::channels(&connector, counts);
+        let names: Vec<_> = channels.into_iter().map(|(name, _)| name).collect();
+        let keys = 1..=u128::try_from(names.len()).expect("a few channels");
+        let reader = hub.reader(&names, Mode::Complete).await;
+        let mut reader = reader.expect("the reader opens");
+        let statuses = Rc::new(RefCell::new(Vec::new()));
+        let into = Rc::clone(&statuses);
+        tasks.spawn(async move {
+            let mut first = None;
+            while let Ok(received) = reader.next().await {
+                let stamps = series(&received, STATUS);
+                let samples: Vec<_> = keys
+                    .clone()
+                    .map(|key| series(&received, STATUS + key))
+                    .collect();
+                let mut into = into.borrow_mut();
+                for (i, stamp) in stamps.into_iter().enumerate() {
+                    let first = *first.get_or_insert(stamp);
+                    let at = Span::from_nanos(stamp - first);
+                    into.push((at, samples.iter().map(|series| series[i]).collect()));
+                }
+            }
+        });
+        statuses
     }
 
     /// Supervises one connector of [`Script`] with `steps` and `config`, and
@@ -362,8 +468,10 @@ mod tests {
             };
             let runs = Arc::clone(&script.runs);
             let kinds = Table::new().with("script", script);
-            let supervisor =
-                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let supervisor = Supervisor::new(inputs);
             let clock = node.clock();
             let token = Token::new();
             if cancel == Some(Span::ZERO) {
@@ -380,15 +488,19 @@ mod tests {
             let name = "plant.script".parse().expect("a valid name");
             let result = supervisor.run(kind, name, &config, &token).await;
             let returned = clock.now() - start;
-            let runs = runs.lock().expect("no panic under the lock");
             let runs = runs
+                .lock()
+                .expect("no panic under the lock")
                 .iter()
                 .map(|(from, to)| (*from - start, to.map(|to| to - start)))
                 .collect();
+            clock.sleep(Span::SECOND).await;
+            let statuses = statuses.borrow().clone();
             Outcome {
                 result,
                 returned,
                 runs,
+                statuses,
             }
         })
     }
@@ -409,6 +521,145 @@ mod tests {
         let out = supervise("script", vec![Step::Done], config(), None);
         out.result.expect("ok");
         assert_eq!(out.runs, [(Span::ZERO, Some(Span::ZERO))]);
+    }
+
+    /// The `(state, class, restarts)` of each of `statuses`.
+    fn states(statuses: &[Written]) -> Vec<(i64, i64, i64)> {
+        let state = |samples: &[i64]| {
+            let [state, class, restarts, ..] = samples[..] else {
+                panic!("the samples of the supervisor's channels: {samples:?}");
+            };
+            (state, class, restarts)
+        };
+        statuses.iter().map(|(_, samples)| state(samples)).collect()
+    }
+
+    #[test]
+    fn writes_the_status_of_each_start_and_end_after_a_device_error() {
+        let steps = vec![Step::Device(ms(10))];
+        let out = supervise("script", steps, config(), Some(ms(5_000)));
+        let [(_, Some(ended)), (again, _)] = out.runs[..] else {
+            panic!("two runs, the first ended: {:?}", out.runs);
+        };
+        let ns = |span: Span| Span::from_nanos(span.nanos() + 1);
+        let want = [
+            (Span::ZERO, (0, 0, 0)),
+            (ended, (3, 2, 0)),
+            (ns(ended), (1, 2, 0)),
+            (again, (0, 2, 1)),
+            (ms(5_000), (3, 0, 1)),
+            (ns(ms(5_000)), (2, 0, 1)),
+        ];
+        let at = out.statuses.iter().map(|(at, _)| *at);
+        let got: Vec<_> = at.zip(states(&out.statuses)).collect();
+        assert_eq!(got, want);
+        out.result.expect("ok after a cancel");
+    }
+
+    #[test]
+    fn writes_the_class_of_a_retry_error() {
+        let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
+        let want = [
+            (0, 0, 0),
+            (3, 3, 0),
+            (1, 3, 0),
+            (0, 3, 1),
+            (3, 0, 1),
+            (2, 0, 1),
+        ];
+        assert_eq!(states(&out.statuses), want);
+    }
+
+    #[test]
+    fn writes_stopped_after_a_config_error_from_run() {
+        let out = supervise("script", vec![Step::Config], config(), None);
+        assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 1, 0), (2, 1, 0)]);
+    }
+
+    #[test]
+    fn writes_stopped_after_a_run_returns_ok() {
+        let out = supervise("script", vec![Step::Done], config(), None);
+        assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 0, 0), (2, 0, 0)]);
+    }
+
+    #[test]
+    fn writes_only_stopped_when_cancelled_before_the_call() {
+        let out = supervise("script", vec![Step::Done], config(), Some(Span::ZERO));
+        assert_eq!(states(&out.statuses), [(2, 0, 0)]);
+    }
+
+    #[test]
+    fn writes_stopped_when_cancelled_during_the_backoff() {
+        let steps = vec![Step::Device(Span::ZERO)];
+        let out = supervise("script", steps, config(), Some(Span::from_nanos(1)));
+        let want = [(0, 0, 0), (3, 2, 0), (1, 2, 0), (2, 2, 0)];
+        assert_eq!(states(&out.statuses), want);
+    }
+
+    #[test]
+    fn writes_ending_until_the_tasks_of_a_run_end() {
+        let steps = vec![Step::Hold(ms(2_000)), Step::Done];
+        let out = supervise("script", steps, config(), None);
+        let at = |i: usize| out.statuses[i].0;
+        let want = [
+            (0, 0, 0),
+            (3, 2, 0),
+            (1, 2, 0),
+            (0, 2, 1),
+            (3, 0, 1),
+            (2, 0, 1),
+        ];
+        assert_eq!(states(&out.statuses), want);
+        assert_eq!((at(1), at(2)), (Span::from_nanos(1), ms(2_000)));
+    }
+
+    #[test]
+    fn writes_a_status_that_the_home_refused_again_a_second_later() {
+        let statuses = run_on(|node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Hold(ms(2_000))].into()),
+                ..Script::default()
+            };
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let holder = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority::ABSOLUTE,
+                lease: None,
+                channels: vec![name("plant.script.status.state")],
+            };
+            let holder = inputs.hub.writer(holder).await.expect("opens");
+            let (token, clock) = (Token::new(), node.clock());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(500)).await;
+                drop(holder);
+                sleeper.sleep(ms(4_500)).await;
+                canceller.cancel();
+            });
+            let supervisor = Supervisor::new(inputs);
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("ok after a cancel");
+            clock.sleep(Span::SECOND).await;
+            statuses.borrow().clone()
+        });
+        let at = |i: usize| statuses[i].0;
+        let want = [(3, 2, 0), (1, 2, 0), (0, 2, 1), (3, 0, 1), (2, 0, 1)];
+        assert_eq!(states(&statuses), want, "the frames of 0 s were refused");
+        assert_eq!(
+            at(1),
+            Span::SECOND,
+            "written again at 1 s, the tasks ended at 2 s"
+        );
+    }
+
+    #[test]
+    fn writes_no_status_for_a_config_that_does_not_parse() {
+        let out = supervise("modbus", vec![Step::Done], config(), None);
+        assert!(out.statuses.is_empty(), "{:?}", out.statuses);
     }
 
     #[test]
@@ -654,8 +905,8 @@ mod tests {
         let result = sim
             .run_on(&client, move |node, tasks| async move {
                 let kinds = Table::new().with("dial", dial);
-                let supervisor =
-                    Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
+                let inputs = create_config(&node, tasks.clone(), kinds, "plant.dial");
+                let supervisor = Supervisor::new(inputs.await);
                 let token = Token::new();
                 let canceller = token.clone();
                 let clock = node.clock();
@@ -741,8 +992,9 @@ mod tests {
             };
             let (seen, live) = (Arc::clone(&kind.seen), Arc::clone(&kind.live));
             let kinds = Table::new().with("spawner", kind);
-            let supervisor =
-                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
+            let supervisor = Supervisor::new(
+                create_config(&node, tasks.clone(), kinds, "plant.spawner").await,
+            );
             let token = Token::new();
             let canceller = token.clone();
             let clock = node.clock();
@@ -815,8 +1067,9 @@ mod tests {
             let kind = Spawner::default();
             let live = Arc::clone(&kind.live);
             let kinds = Table::new().with("spawner", kind);
-            let supervisor =
-                Supervisor::new(create_config(&node, tasks, kinds).await.0);
+            let supervisor = Supervisor::new(
+                create_config(&node, tasks, kinds, "plant.spawner").await,
+            );
             let token = Token::new();
             let name = "plant.spawner".parse().expect("a valid name");
             let config = config();
@@ -839,8 +1092,9 @@ mod tests {
             };
             let seen = Arc::clone(&kind.seen);
             let kinds = Table::new().with("spawner", kind);
-            let supervisor =
-                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
+            let supervisor = Supervisor::new(
+                create_config(&node, tasks.clone(), kinds, "plant.spawner").await,
+            );
             let (token, config) = (Token::new(), config());
             let name: Name = "plant.spawner".parse().expect("a valid name");
             let clock = node.clock();
@@ -865,12 +1119,181 @@ mod tests {
         );
     }
 
+    /// A kind with the count `samples`. Each run sets the count `count` to each of 1
+    /// to `n`, `gap` apart, then returns `Ok`.
+    struct Tally {
+        count: &'static str,
+        n: u64,
+        gap: Span,
+    }
+
+    impl Tally {
+        /// Sets `count` once, at once.
+        fn new(count: &'static str) -> Self {
+            Self {
+                count,
+                n: 1,
+                gap: Span::ZERO,
+            }
+        }
+    }
+
+    impl Kind for Tally {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels {
+                counts: vec![name("samples")],
+                ..Channels::default()
+            })
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let count = ctx.status().count(self.count);
+            for i in 1..=self.n {
+                ctx.clock().sleep(self.gap).await;
+                count.set(i);
+            }
+            Ok(())
+        }
+    }
+
+    /// A kind with the count `samples`. Its run sets it to 1 at 500 ms and returns
+    /// `Ok` at 600 ms. A task of the run sets it to 2 at 800 ms and ends at 2 s.
+    struct Late;
+
+    impl Kind for Late {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Tally::check(&Tally::new("samples"), &())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let (late, clock) = (ctx.status().count("samples"), ctx.clock().clone());
+            ctx.tasks().spawn(async move {
+                clock.sleep(ms(800)).await;
+                late.set(2);
+                clock.sleep(ms(1_200)).await;
+            });
+            ctx.clock().sleep(ms(500)).await;
+            ctx.status().count("samples").set(1);
+            ctx.clock().sleep(ms(100)).await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writes_a_change_of_counts_alone_a_second_after_a_write_of_the_supervisor() {
+        let statuses = tally(Late);
+        let got: Vec<_> = statuses
+            .iter()
+            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .collect();
+        let want = [
+            (Span::ZERO, 0, 0),
+            (ms(600), 3, 1),
+            (ms(1_600), 3, 2),
+            (ms(2_000), 2, 2),
+        ];
+        assert_eq!(got, want);
+    }
+
+    /// The status frames of one connector of `kind`, `plant.tally`, with the count
+    /// `samples`.
+    fn tally(kind: impl Kind + 'static) -> Vec<Written> {
+        run_on(|node, tasks| async move {
+            let kinds = Table::new().with("tally", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let statuses =
+                read_status(&inputs.hub, "plant.tally", &counts, &tasks).await;
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            node.clock().sleep(Span::SECOND).await;
+            statuses.borrow().clone()
+        })
+    }
+
+    #[test]
+    fn writes_a_change_of_counts_alone_at_most_once_each_second() {
+        // Off the whole seconds, so no set is at the time of a flush.
+        let gap = Span::from_nanos(999_999);
+        let statuses = tally(Tally {
+            count: "samples",
+            n: 10_000,
+            gap,
+        });
+        let end = Span::from_nanos(gap.nanos() * 10_000);
+        let mut want = vec![(Span::ZERO, 0)];
+        want.extend((1..=9).map(|s| (ms(s * 1_000), s * 1_000)));
+        want.extend([(end, 10_000), (Span::from_nanos(end.nanos() + 1), 10_000)]);
+        let got = statuses.iter().map(|(at, samples)| (*at, samples[3]));
+        assert_eq!(got.collect::<Vec<_>>(), want);
+        let states = states(&statuses);
+        assert_eq!(states[..10], [(0, 0, 0); 10]);
+        assert_eq!(states[10..], [(3, 0, 0), (2, 0, 0)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the kind did not name the count `other` in its check")]
+    fn panics_on_a_count_that_the_kind_did_not_name() {
+        tally(Tally::new("other"));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the status channels of the connector plant.script do not \
+                               open: no channel is named plant.script.status.time"
+    )]
+    fn panics_when_the_status_channels_are_not_defined() {
+        run_on(|node, tasks| async move {
+            let kinds = Table::new().with("script", Script::default());
+            let inputs = create_config(&node, tasks, kinds, "plant.other").await;
+            let name = name("plant.script");
+            let supervisor = Supervisor::new(inputs);
+            drop(
+                supervisor
+                    .run("script", name, &config(), &Token::new())
+                    .await,
+            );
+        });
+    }
+
     /// A kind that writes one sample of `plant.value` for each of `values`, `gap`
     /// apart, through a writer of its context at `authority` with `lease`, stamped
-    /// from `start` on. It keeps the refusal of each write in `refusals`, or `None`
+    /// with mesh time. It keeps the refusal of each write in `refusals`, or `None`
     /// when the home applied it.
     struct Write {
-        start: i64,
         values: Vec<i64>,
         authority: Authority,
         lease: Option<Span>,
@@ -879,11 +1302,9 @@ mod tests {
     }
 
     impl Write {
-        /// One write of each of `values` at `start`, with no gap, at authority 1 and no
-        /// lease.
-        fn new(start: i64, values: Vec<i64>) -> Self {
+        /// One write of each of `values`, with no gap, at authority 1 and no lease.
+        fn new(values: Vec<i64>) -> Self {
             Self {
-                start,
                 values,
                 authority: Authority(1),
                 lease: None,
@@ -924,13 +1345,14 @@ mod tests {
             };
             let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
             let group = entries[time].group;
-            let clock = ctx.clock();
-            let began = clock.now();
-            for (i, sample) in (0..).zip(&self.values) {
+            let mut last = None;
+            for (i, sample) in self.values.iter().enumerate() {
                 if i > 0 {
-                    clock.sleep(self.gap).await;
+                    ctx.clock().sleep(self.gap).await;
                 }
-                let stamp = self.start + (clock.now() - began).nanos() + i;
+                let now = writer.now().nanos();
+                let stamp = last.map_or(now, |last: i64| now.max(last + 1));
+                last = Some(stamp);
                 let mut series = [(time, 8), (value, 8)];
                 series.sort_unstable();
                 let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
@@ -959,7 +1381,8 @@ mod tests {
         text.parse().expect("a valid name")
     }
 
-    /// Defines `plant.time` (key 1) and `plant.value` (key 2, `i64`) on `hub`.
+    /// Defines `plant.time` (key 1), `plant.value` (key 2, `i64`), and the status
+    /// channels of `plant.write` on `hub`.
     fn define(hub: &hub::Hub) {
         let time = Channel {
             key: channel::Key::from_u128(1),
@@ -975,16 +1398,20 @@ mod tests {
             kind: spec::channel::Kind::Data(data),
         };
         let (time, value) = (Definition::Channel(time), Definition::Channel(value));
-        hub.set_definitions([
-            (&name("plant.time"), &time),
-            (&name("plant.value"), &value),
-        ]);
+        let mut definitions = create_status("plant.write");
+        definitions.extend([(name("plant.time"), time), (name("plant.value"), value)]);
+        hub.set_definitions(definitions.iter().map(|(name, def)| (name, def)));
     }
 
     /// The `i64` samples of the channel of key 2 in `received`.
     fn values(received: &Received<'_>) -> Vec<i64> {
+        series(received, 2)
+    }
+
+    /// The samples of the channel of `key` in `received`, each widened to `i64`.
+    fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
         let set = received.set;
-        let key = channel::Key::from_u128(2);
+        let key = channel::Key::from_u128(key);
         let entry = set.entries().iter().position(|entry| entry.key == key);
         let entry = entry.expect("the set holds the channel");
         let range = received.view.range(set.entries()[entry].group);
@@ -995,22 +1422,26 @@ mod tests {
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");
-        let mut out = vec![0; count * 8];
         let data_type = set.entries()[entry].data_type;
+        let width = data_type.width().expect("a fixed width");
+        let mut out = vec![0; count * width];
         codec::decode(data_type, count, bytes, &mut out).expect("decodes");
-        let (chunks, _) = out.as_chunks::<8>();
-        chunks
-            .iter()
-            .map(|chunk| i64::from_le_bytes(*chunk))
+        out.chunks(width)
+            .map(|chunk| {
+                let mut sample = [0; 8];
+                sample[..width].copy_from_slice(chunk);
+                i64::from_le_bytes(sample)
+            })
             .collect()
     }
 
     #[test]
     fn gives_a_kind_a_writer_whose_samples_a_hub_reader_gets_in_order() {
         let got = run_on(|node, tasks| async move {
-            let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
+            let mut inputs =
+                create_config(&node, tasks, Table::new(), "plant.write").await;
             define(&inputs.hub);
-            let write = Write::new(now.nanos(), vec![30, 10, 20]);
+            let write = Write::new(vec![30, 10, 20]);
             let refusals = Arc::clone(&write.refusals);
             inputs.kinds = Arc::new(Table::new().with("write", write));
             let mut reader = inputs
@@ -1033,17 +1464,14 @@ mod tests {
         assert_eq!(got, [30, 10, 20]);
     }
 
-    /// Runs `write(now)` as `plant.write` on a new shard, while a writer as
+    /// Runs `write` as `plant.write` on a new shard, while a writer as
     /// `plant.other` at `holder` holds `plant.value` when it is some. Gives the
     /// refusal of each write, or `None` for one the home applied.
-    fn refusals(
-        holder: Option<Authority>,
-        write: impl FnOnce(i64) -> Write + Send + 'static,
-    ) -> Vec<Option<Refusal>> {
+    fn refusals(holder: Option<Authority>, write: Write) -> Vec<Option<Refusal>> {
         run_on(move |node, tasks| async move {
-            let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
+            let mut inputs =
+                create_config(&node, tasks, Table::new(), "plant.write").await;
             define(&inputs.hub);
-            let write = write(now.nanos());
             let refusals = Arc::clone(&write.refusals);
             inputs.kinds = Arc::new(Table::new().with("write", write));
             let mut other = None;
@@ -1076,21 +1504,23 @@ mod tests {
             (255, 254, None),
             (255, 255, Some(Refusal::Waiting)),
         ] {
-            let refusals = refusals(Some(Authority(holder)), move |start| Write {
+            let write = Write {
                 authority: Authority(kind),
-                ..Write::new(start, vec![7])
-            });
+                ..Write::new(vec![7])
+            };
+            let refusals = refusals(Some(Authority(holder)), write);
             assert_eq!(refusals, [want], "kind {kind}, holder {holder}");
         }
     }
 
     /// The refusals of two writes of a kind with `lease`, `gap` apart.
     fn two_writes(lease: Option<Span>, gap: Span) -> Vec<Option<Refusal>> {
-        refusals(None, move |start| Write {
+        let write = Write {
             lease,
             gap,
-            ..Write::new(start, vec![7, 8])
-        })
+            ..Write::new(vec![7, 8])
+        };
+        refusals(None, write)
     }
 
     #[test]
