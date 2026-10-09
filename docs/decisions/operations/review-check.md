@@ -19,12 +19,11 @@
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072253988), with the
   spaces and tabs at the end of each line removed, and each tab in the spaces, tabs, and
   `>` at the start of a line replaced by spaces to the next multiple of 4 columns: as
-  CommonMark with the GitHub extensions tables, footnotes, strikethrough, task lists,
-  extended autolinks, and quote kinds. The tag filter acts only on raw HTML, which fails
-  (corrected by the director at 2026-10-08T21:55:15Z,
-  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069788449). A
-  line ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at
-  2026-10-08T04:42:33Z,
+  CommonMark with the GitHub extensions tables, footnotes, and task lists. The tag
+  filter acts only on raw HTML, which fails (corrected by the director at
+  2026-10-08T21:55:15Z,
+  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069788449). A line
+  ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at 2026-10-08T04:42:33Z,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
   round heading is the first top-level `## Review round <n>` heading. In a round
   posted after the cutoff with no such heading, it is the first line in a top-level
@@ -41,23 +40,30 @@
   that is not an autolink, also when the line starts inside a code span, a link, or a
   link definition. GitHub reads some of these lines in a different way, and an open
   `<!--` or `<details>` hides the text after it. A footnote label here is `[^`, one or
-  more characters other than `]`, space, or tab, then `]:`. The message names the
-  line. A round comment that fails by these rules gets an edit that puts the line in a
-  code span, and the cutoff stays. In an old round, a `Hot path:` line, or a
-  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
-  line of text of a paragraph, at any depth and any indent. A line of a code block or an
-  HTML block does not count. Changed by
+  more characters other than `]`, space, or tab, then `]:`. It also fails when a span of
+  text, as `comrak` reads it, holds `[^` with no `]` after it in the span: GitHub reads
+  a `]` on a later line as the end of a footnote reference and hides the text between
+  them. It also fails when `comrak` places the text of a paragraph before the last line
+  of the paragraph, as it does after a link or an image with a line break after its text
+  and after a link reference definition in the paragraph, since each line that it then
+  gives is wrong. The message names the first line with one of these causes, or the
+  first line of the paragraph. A round comment that fails by these rules gets an edit
+  that puts the line in a code span, and the cutoff stays. In an old round, a
+  `Hot path:` line, or a `Reviewers:` line of a round that does not parse, counts where
+  GitHub shows it as a line of text of a paragraph, at any depth and any indent. A line
+  of a code block or an HTML block does not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
   at 2026-10-08T21:47:24Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
-  2026-10-08T23:46:02Z
-  (https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522), and
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983) and
   2026-10-09T00:29:41Z
   (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
   approved by the director at 2026-10-09T01:42:04Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072526251).
+  Supersedes the footnote label rule of
+  https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522
+  (2026-10-08T23:46:02Z), since `comrak` reads footnote labels as GitHub does.
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
