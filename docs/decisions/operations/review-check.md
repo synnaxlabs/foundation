@@ -55,8 +55,8 @@
   wrong lines fails in any round, also in one posted before the cutoff, since the
   check cannot read it. In an old round, a `Hot path:` line, or a `Reviewers:` line of
   a round that does not parse, counts where GitHub shows it as a line of text of a
-  paragraph, at any depth and any indent. A line of a code block or an HTML block does
-  not count. Changed by
+  paragraph, at any depth and any indent, except in a paragraph that `comrak` places
+  in the wrong lines. A line of a code block or an HTML block does not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
