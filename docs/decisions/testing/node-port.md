@@ -76,11 +76,13 @@
   does not open, so a restart at once binds the port under `os` too. Each close leaves
   before `lock` is free. A peer whose one-way delay is under 3 s sees its close first,
   unless the link loses it, and a peer with a delay of 4 s sees it after, which a test
-  pins for each. Each clone of the transport and each session lives in a future that
-  shard 0 drops, or in a task of the mesh that it waits for, before it waits for the
-  port, so a leak holds the stop. The drop of each session closes it. The drop of the
-  transport closes each session that no caller accepted and each handshake in flight,
-  its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
+  pins for each (`laptop.architect`, 04:36 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6074355159). Each
+  clone of the transport and each session lives in a future that shard 0 drops, or in a
+  task of the mesh that it waits for, before it waits for the port, so a leak holds the
+  stop. The drop of each session closes it. The drop of the transport closes each
+  session that no caller accepted and each handshake in flight, its own dials too
+  (#2084, by `laptop.architect-2`, 02:57 UTC:
   https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
   drain, in about 3 PTO, and at most 3 s after the last one ended, because a peer's
   round trip sets the PTO with no bound (`laptop.architect`, 03:46 UTC:
