@@ -1541,6 +1541,45 @@ fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
     }
 }
 
+/// Whether a create of `b` ended before a call on `a` whose future dropped in flight:
+/// a write when not `renamed`, else a rename of `a` to `c`.
+fn create_before_dropped_call(value: u64, renamed: bool) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", KIB).await;
+        if renamed {
+            let mut rename = Box::pin(file.rename(Path::new("c")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+        } else {
+            let parts = [block(&pool, &[1; 512])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+        }
+        drop(create(&node, "b", KIB).await);
+        if renamed {
+            return files
+                .list(Path::new(""))
+                .await
+                .unwrap()
+                .contains(&"a".into());
+        }
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        read(&reader, &pool, 0, 512).await != [1; 512]
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_dropped_call_on_another_path() {
+    for renamed in [false, true] {
+        let runs: Vec<_> = (0..32)
+            .map(|value| create_before_dropped_call(value, renamed))
+            .collect();
+        assert!(runs.contains(&true), "renamed {renamed}: {runs:?}");
+    }
+}
+
 #[test]
 fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
     run(0, MIB, |node, _| async move {
