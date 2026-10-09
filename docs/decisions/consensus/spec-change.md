@@ -49,12 +49,17 @@
   https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
   supersedes the `mesh::Pointer` of
   https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836.
-  `Mesh::open` runs no check of the founding definitions: the founding is agreed region
-  state, and a check at each open stops a node on a later build whose checks find more
+  `Mesh::open` refuses no founding definitions: the founding is agreed region state,
+  and a refusal at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
-  problems (#1741). Decided by `laptop.architect`: chunks through
+  problems (#1741). No refusal of the founding at open decided by `laptop.architect`,
+  2026-10-08T15:42:09Z
+  (https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498), which
+  changes "runs no check of `Config::founding`" in
+  https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151. Decided
+  by `laptop.architect`: chunks through
   `blob` and no BQ12 check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
@@ -63,8 +68,10 @@
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
   the move of `Pointer` to a layer 1 crate, 2026-10-08T08:22:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
-  check of the founding at open, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); the
+  founding as agreed region state, and that a check at each open stops a node on a later
+  build whose checks find more problems, the check of the founding by the node that
+  founds the region, and a founding with problems at a later build, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
   bound of an `Append` in bytes, 2026-10-08T08:44:55Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with

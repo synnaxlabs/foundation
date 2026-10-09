@@ -3039,7 +3039,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_792_458_154;
+        const WRITE: i64 = 1_792_553_323;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -3494,28 +3494,19 @@ mod port {
             assert_eq!(node.join(), Err(Error::Group(write_failed())));
         }
 
-        /// A task that panics one yield after the instant of the write that fails,
-        /// before the group stops: `join` gives the panic.
+        /// A task that panics one nanosecond before the group stops: `join` gives the
+        /// panic.
         #[test]
         fn a_panic_before_the_group_stops_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
-            let at =
-                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            let at = sim::node::Config::default().monotonic
+                + OPEN
+                + Span::from_nanos(WRITE - 1);
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;
-                let mut yielded = false;
-                poll_fn(|cx| {
-                    if yielded {
-                        return Poll::Ready(());
-                    }
-                    yielded = true;
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                })
-                .await;
                 panic!("a task panics");
             });
             assert_eq!(sim.run_for(OPEN), Ok(()));
@@ -3538,19 +3529,14 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. The seed and the instant are ones where the sim
-        /// runs the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], the sim runs the group's stop first.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
-            let mut sim = sim::Sim::new(sim::Config {
-                seed: 22,
-                ..sim::Config::default()
-            });
+            let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
-            let at = sim::node::Config::default().monotonic
-                + OPEN
-                + Span::from_nanos(1_592_294_695);
+            let at =
+                sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;
@@ -3563,7 +3549,7 @@ mod port {
                 Err(sim::Error::Panicked {
                     thread: "shard-0".into(),
                     message: "a task panics".into(),
-                    seed: 22,
+                    seed: 0,
                 })
             );
             assert_eq!(sim.run(), Ok(()));

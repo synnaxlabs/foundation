@@ -1024,6 +1024,7 @@ dependencies = [
  "blob",
  "block",
  "clock",
+ "counting",
  "env",
  "proptest",
  "raft",
