@@ -195,7 +195,8 @@
   `Credit::grant`) reads only a cell that the session shares with the hub, never a map,
   so its cost stays the same while other sessions end. The hub finds a local writer or
   reader by its home key, as the shard never gives a key twice, a remote reader by a
-  scan of its keys, and a served open by a count of the opens. The home stops carrying an index only when its key is not an index
+  scan of its keys, and a served open by a count of the opens. The home stops carrying
+  an index only when its key is not an index
   of the new definitions (`Shard::shed`, HOME SURFACE), and carries it again when it
   returns. A key holds at most two slots (`channel::Slots`): its slot as an index, which
   never changes, as the buffer keys its tails by slot (X42), and its slot as a data
@@ -221,8 +222,8 @@
   removed index can get no home. It reads its removal before it checks each later key
   and after the wait, and then carries the index and opens with no `await` between. So
   its index changes only at a removal, and it waits once. A key that a call changes
-  before the open checks it is checked against the new definitions. A local open by
-  name checks its names again after it waits for the home, then carries each index and opens
+  before the open checks it is checked against the new definitions. A local open by name
+  checks its names again after it waits for the home, then carries each index and opens
   with no `await` between, and when the check gives another index, it waits again
   (`laptop.architect`, 2026-10-09T05:24:32Z:
   https://github.com/synnaxlabs/foundation/issues/2112#issuecomment-6074871156;
