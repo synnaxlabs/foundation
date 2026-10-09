@@ -406,6 +406,26 @@ fn stops_an_open_of_a_channel_retyped_while_it_waits_with_unknown() {
     assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
 }
 
+/// As above, while a call changes the data type of `value` after the home is named
+/// and before the open runs again: the open reads its removal after the wait.
+#[test]
+fn stops_an_open_of_a_channel_retyped_after_its_home_is_named_with_unknown() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            changing.set_home(TIME, NODE).await;
+            let mut retyped = channels();
+            let f64 = types::sample::Type::Scalar(types::sample::Scalar::F64);
+            retyped.insert(name("value"), definition(2, DataType::Sample(f64), 1));
+            changing.hub.set_definitions(&retyped);
+        });
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
 /// An open that waits for the home of `time` stops when a call removes `time`, with
 /// no home named after the call.
 #[test]
