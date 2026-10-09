@@ -91,13 +91,12 @@ pub fn plan(
 ///
 /// # Errors
 ///
-/// The problems of the first stage that has any. Only a problem in a connector config
-/// has a span: the span that the config holds.
+/// The problems of the first stage that has any, with no span:
 ///
 /// 1. `config.private-key` for each string of a definition that holds a private key.
 /// 2. The diagnostics of `kinds` for each connector whose kind or config it refuses,
-///    then `config.duplicate-name` and `config.subject-is-connector` as [`crate::check`]
-///    gives them.
+///    then `config.duplicate-name` and `config.subject-is-connector` as
+///    [`crate::check`] gives them.
 /// 3. Each problem of the rules of [`plan`] from `config.unplaced` to
 ///    `config.unknown-node`.
 pub fn check(
@@ -105,24 +104,39 @@ pub fn check(
     members: &BTreeSet<Name>,
     kinds: &Table,
 ) -> Result<(), Vec<Diagnostic>> {
+    let mut diagnostics = problems(definitions, members, kinds);
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    // A connector config that `plan` read holds the spans of files that the caller
+    // of `check` does not have.
+    for diagnostic in &mut diagnostics {
+        diagnostic.span = None;
+        diagnostic.notes.clear();
+    }
+    Err(diagnostics)
+}
+
+/// The problems of the first stage of [`check`] that has any.
+fn problems(
+    definitions: &BTreeMap<Name, definition::Definition>,
+    members: &BTreeSet<Name>,
+    kinds: &Table,
+) -> Vec<Diagnostic> {
     let alarms = private_key::in_definitions(definitions);
     if !alarms.is_empty() {
-        return Err(alarms);
+        return alarms;
     }
     let mut diagnostics = Vec::new();
     let writes = writes(definitions, kinds, &mut diagnostics);
     diagnostics.extend(duplicate::in_definitions(definitions));
     diagnostics.extend(subject::not_connectors(definitions));
     if !diagnostics.is_empty() {
-        return Err(diagnostics);
+        return diagnostics;
     }
     let model = Model::definitions(definitions, &writes);
     rules(&model, members, &mut diagnostics);
-    if diagnostics.is_empty() {
-        Ok(())
-    } else {
-        Err(diagnostics)
-    }
+    diagnostics
 }
 
 /// The change that an apply makes, and the spec it was planned on.

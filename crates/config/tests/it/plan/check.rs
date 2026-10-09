@@ -4,7 +4,6 @@
 use std::collections::BTreeSet;
 use std::slice;
 
-use document::Source;
 use document::encoding::Checked;
 use spec::access::Action;
 use spec::channel::{Data, Kind as ChannelKind};
@@ -283,20 +282,22 @@ fn marked() -> Vec<(Name, Stored)> {
 fn gives_only_one_private_key_problem_for_a_mark_in_any_string_of_a_definition() {
     for definition in marked() {
         let at = format!("{definition:?}");
-        let mut found = checked([definition, connector("y", "nothing", "n", "")]);
-        for problem in &mut found {
-            problem.1 = None;
-        }
+        let found = checked([definition, connector("y", "nothing", "n", "")]);
         assert_eq!(found, [alarm()], "{at}");
     }
 }
 
 #[test]
-fn gives_a_private_key_problem_in_a_connector_config_at_its_span() {
-    let found = checked([connector("x", "writer", "n", "note = \"PRIVATE KEY\"")]);
-    let mut expected = alarm();
-    expected.1 = Some((Source(0), 7));
-    assert_eq!(found, [expected]);
+fn gives_no_span_for_a_problem_in_a_connector_config_that_holds_spans() {
+    let alarm_found =
+        checked([connector("x", "writer", "n", "note = \"PRIVATE KEY\"")]);
+    assert_eq!(alarm_found, [alarm()]);
+    let refused = checked([connector("x", "writer", "n", "writes = 1")]);
+    assert!(!refused.is_empty());
+    assert!(
+        refused.iter().all(|problem| problem.1.is_none()),
+        "{refused:?}"
+    );
 }
 
 #[test]
