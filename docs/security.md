@@ -305,10 +305,9 @@ state on `main`.
   through `hub`. Not built. Each parser gets a fuzz target when it lands.
 - `connector-opcua` decodes OPC UA with the C code of open62541. Fuzzed:
   `connector_opcua_decode`. Its chunk processing is not fuzzed yet (#1990).
-- The random generator of the open62541 copy is PCG32
-  (`UA_ENABLE_DETERMINISTIC_RNG`), which a peer can predict. So no nonce, key, or
-  session token may come from `UA_UInt32_random` or `UA_Guid_random`. A security
-  policy that encrypts, and an OPC UA server of Foundation, are not built.
+- The random generator of the open62541 copy is PCG32, which a peer can predict.
+  OPEN62541 SOURCE bars it for each nonce, key, and session token. A security policy
+  that encrypts, and an OPC UA server of Foundation, are not built.
 
 ### Encoded series
 

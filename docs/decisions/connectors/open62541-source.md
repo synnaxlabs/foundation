@@ -89,6 +89,9 @@
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  The generator is PCG32 (`UA_ENABLE_DETERMINISTIC_RNG`), which a peer can predict.
+  So no nonce, key, or session token comes from `UA_UInt32_random` or
+  `UA_Guid_random`. Decided by `laptop.architect-2` (approval owed).
   A second change of `src/util/ua_util.c` keeps a flag for each thread, which
   `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
   `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
