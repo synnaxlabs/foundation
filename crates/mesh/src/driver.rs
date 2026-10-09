@@ -217,8 +217,9 @@ impl Mesh {
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let files = config.files.clone();
-        let (log, stored) =
-            open_log(config.files, &config.dir, config.pool, &config.founding).await?;
+        let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
+        let logged = stored != log::Stored::default();
+        founding::keep(&files, &config.dir, &pool, &config.founding, logged).await?;
         let used = used::open(Opening {
             files: &files,
             dir: &config.dir,
@@ -1113,24 +1114,17 @@ async fn put(
     Ok(())
 }
 
-// Makes `dir`, durable in its parent, opens the log in `LOG` in it, and keeps the
-// founding `given` in it. The log holds its lock while the founding is kept.
+// Makes `dir`, durable in its parent, and opens the log in `LOG` in it.
 async fn open_log(
     files: Files,
     dir: &Path,
     pool: Rc<Pool>,
-    given: &region::Founding,
-) -> Result<(Log, log::Stored), Error> {
-    files.create_dir(dir).await.map_err(log::Error::from)?;
+) -> Result<(Log, log::Stored), log::Error> {
+    files.create_dir(dir).await?;
     files
         .sync_dir(dir.parent().unwrap_or(Path::new("")))
-        .await
-        .map_err(log::Error::from)?;
-    let (log, stored) =
-        Log::open(files.clone(), dir.join(LOG), Rc::clone(&pool)).await?;
-    let logged = stored != log::Stored::default();
-    founding::keep(&files, dir, &pool, given, logged).await?;
-    Ok((log, stored))
+        .await?;
+    Log::open(files, dir.join(LOG), pool).await
 }
 
 // Ticks the group and does what each `Ready` says, in the order that `raft` needs:
@@ -5949,7 +5943,7 @@ mod tests {
                 .unwrap();
             let kept = (
                 names(&[BLOB, "region"]),
-                names(&["founding", LOG, used::SPEC]),
+                names(&[super::founding::FILE, LOG, used::SPEC]),
             );
             assert_eq!(listed, kept, "seed {seed}");
         }
