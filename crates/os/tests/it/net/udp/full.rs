@@ -67,12 +67,19 @@ fn batch<'a>(receiver: &Receiver, contents: &'a [u8]) -> Transmit<'a> {
     }
 }
 
+/// Sends `transmit` within 5 s.
+///
+/// Unlike `timeout`, it gives no last poll at the deadline, which would hide a lost
+/// wake.
 async fn send(sender: &mut Sender, transmit: &Transmit<'_>) {
-    let sent = poll_fn(|cx| sender.poll_send(cx, transmit));
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), sent).await,
-        Ok(Ok(()))
-    );
+    let mut late = std::pin::pin!(tokio::time::sleep(Duration::from_secs(5)));
+    let sent = poll_fn(|cx| {
+        if late.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        sender.poll_send(cx, transmit).map(Some)
+    });
+    assert_eq!(sent.await, Some(Ok(())));
 }
 
 /// Receives each datagram until none comes for [`SILENCE`].
