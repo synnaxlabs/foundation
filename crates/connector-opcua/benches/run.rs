@@ -26,7 +26,11 @@ const CLIENTS: usize = 16;
 
 /// One input for each sample: a batch of inputs would move the clock before the first
 /// run, so the later runs of the batch would find no timer due.
-#[divan::bench(args = [1, 100, 1_000, 4_000, 10_000], sample_size = 1, sample_count = 1000)]
+#[divan::bench(
+    args = [1, 100, 1_000, 4_000, 10_000],
+    sample_size = 1,
+    sample_count = 1000
+)]
 fn run(bencher: Bencher<'_, '_>, timers: usize) {
     let (mut sim, clock) = sim();
     let mut clients: Vec<_> = (0..CLIENTS)
