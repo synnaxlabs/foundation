@@ -282,8 +282,8 @@ impl Mesh {
         self.group.borrow().state.member(key).cloned()
     }
 
-    /// The name of each member in this node's view of the region. It answers also after
-    /// the group stops, from the view at the stop.
+    /// The name of each member in this node's view of the region. No two members share a
+    /// name. It answers also after the group stops, from the view at the stop.
     #[must_use]
     pub fn names(&self) -> BTreeSet<Name> {
         self.group.borrow().state.names()
@@ -2427,6 +2427,15 @@ mod tests {
             let stopped = Stopped::Change { at: bad, cause };
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
             assert_eq!(mesh.holder(public(1)), Some(key(1)));
+        });
+    }
+
+    #[test]
+    fn names_gives_the_name_of_each_founding_member() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let names = IDS.map(|id| format!("plant.node{id}").parse().unwrap());
+            assert_eq!(mesh.names(), BTreeSet::from(names));
         });
     }
 
