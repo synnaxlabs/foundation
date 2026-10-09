@@ -3091,7 +3091,11 @@ fn an_open_that_finds_an_invalid_record_leaves_a_zero_header_block_as_read() {
             shard.create_two_records().await;
             shard.put(lost, &[0; SECTOR]).await;
             shard.tamper_record(2 * BLOCK, 4 + 16, &[2]).await;
-            shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+            let invalid = Error::Invalid { offset: 2 * BLOCK };
+            let case = format!("the zero block at {lost}");
+            shard
+                .open_refused(layout(AREA, BODY_MAX), invalid, &case)
+                .await;
         });
     }
 }
