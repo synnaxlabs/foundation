@@ -61,7 +61,7 @@ mod linux {
             // A kernel with no cgroups.
             return Ok(least);
         };
-        let cgroups: ProcessCGroups = parse(&file, &cgroups)?;
+        let cgroups = cgroups_of(&file, &cgroups)?;
         let file = root.join("proc/self/mountinfo");
         for line in read(&file)?.lines() {
             // Its error names a file of `procfs_core` as a bug, and no field.
@@ -182,9 +182,9 @@ mod linux {
         Ok(number(file, kib)?.saturating_mul(1024))
     }
 
-    /// The value that `procfs_core` parses from `text`, the text of `file`.
-    fn parse<T: FromBufRead>(file: &Path, text: &str) -> io::Result<T> {
-        T::from_buf_read(text.as_bytes()).map_err(|error| {
+    /// The cgroups that `text`, the text of `file`, lists.
+    fn cgroups_of(file: &Path, text: &str) -> io::Result<ProcessCGroups> {
+        ProcessCGroups::from_buf_read(text.as_bytes()).map_err(|error| {
             let error = match error {
                 // Its text calls a line of `procfs_core` a bug.
                 ProcError::InternalError(error) => error.msg,
