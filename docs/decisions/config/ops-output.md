@@ -77,10 +77,12 @@
   `homes` counts the homes that the plan lists. Its text is `Applied <file>: <a> added,
   <c> changed, <r> removed, <h> homes listed.`, with each count of 0 left out and `1
   home listed` for one home, and `no change` only for a plan with no change and no home.
-  The text without `homes` and the rule that leaves out a count of 0 are step 5 of
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586, approved
-  by `laptop.architect-2` (2026-10-08T16:00:18Z,
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). `homes`,
-  its text, and the `no change` rule decided by `laptop.architect-2`
+  The text without `homes` and the rule that leaves out a count of 0 are step 5 of the
+  plan https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586.
+  `homes`, its text, and the `no change` rule decided by `laptop.architect-2`
   (2026-10-09T00:42:24Z,
-  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071903259).
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071903259). The whole
+  text approved by `laptop.architect-2` (2026-10-09T01:02:46Z,
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6072118033) and, for
+  the contract with `mesh`, by `laptop.architect` (2026-10-09T00:57:47Z,
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6072065332).
