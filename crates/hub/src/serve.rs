@@ -70,9 +70,9 @@ pub enum Error {
     /// A request stream while another request of the link waits for its reply. Code
     /// `MALFORMED`.
     Pending,
-    /// The open requests of the hub hold so many body bytes that this body is over
-    /// [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed once an open
-    /// request replies.
+    /// The open requests of the hub hold so many body bytes that a body of `length`
+    /// more is over [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed
+    /// once an open request replies.
     Bodies {
         /// The body length of the refused request.
         length: u64,

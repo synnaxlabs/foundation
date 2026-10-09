@@ -83,9 +83,8 @@
   side that stops had no block for a stream's session, in both directions, or no room
   for a request body under its cap; a later open or request can succeed, but not when
   the block is larger than each block of that side's pool; `laptop.architect`,
-  2026-10-09,
-  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074),
-  and 2
+  2026-10-09T00:12:49Z,
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074), and 2
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
   or breaks a rule above), which every protocol may use. A reset drops the frames in
   flight, which is correct for `FAILED`, since the session cannot go on (lost: a
