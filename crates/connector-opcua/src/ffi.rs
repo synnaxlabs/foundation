@@ -287,6 +287,7 @@ pub(crate) struct Hooks {
     ) -> u32,
     pub(crate) listen: unsafe extern "C" fn(
         state: *mut c_void,
+        host: Bytes,
         port: u16,
         application: *mut c_void,
         context: *mut c_void,
@@ -354,7 +355,6 @@ unsafe extern "C" {
         application: *mut c_void,
         context: *mut *mut c_void,
         callback: ConnectionCallback,
-        key: *const c_char,
         address: *const u8,
         length: usize,
         port: *const u16,
@@ -501,6 +501,12 @@ pub(crate) mod test {
             kind: *const c_void,
         ) -> u32;
         pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
+        pub(crate) fn shim_map_set_strings(
+            map: *mut KeyValueMap,
+            key: *const std::ffi::c_char,
+            strings: *const *const std::ffi::c_char,
+            size: usize,
+        ) -> u32;
         pub(crate) fn UA_KeyValueMap_getScalar(
             map: *const KeyValueMap,
             key: QualifiedName,
@@ -508,7 +514,11 @@ pub(crate) mod test {
         ) -> *const c_void;
         pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
 
-        pub(crate) fn shim_server_new(el: *mut EventLoop, port: u16) -> *mut Server;
+        pub(crate) fn shim_server_new(
+            el: *mut EventLoop,
+            port: u16,
+            url: *const std::ffi::c_char,
+        ) -> *mut Server;
         pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;

@@ -380,7 +380,8 @@ void shim_loop_free(UA_EventLoop *el) {
 typedef struct {
     UA_StatusCode (*open)(void *state, UA_String host, UA_UInt16 port, void *application,
                           void *context, UA_ConnectionManager_connectionCallback callback);
-    UA_StatusCode (*listen)(void *state, UA_UInt16 port, void *application, void *context,
+    UA_StatusCode (*listen)(void *state, UA_String host, UA_UInt16 port,
+                            void *application, void *context,
                             UA_ConnectionManager_connectionCallback callback);
     UA_StatusCode (*send)(void *state, uintptr_t id, UA_ByteString *buffer);
     UA_StatusCode (*close)(void *state, uintptr_t id);
@@ -432,7 +433,9 @@ static UA_StatusCode cm_free(UA_EventSource *es) {
 }
 
 /* Listens on the `port` of `params`, or opens a client connection to its `address`
- * and `port`. The listener of the manager sets the address of a listen. */
+ * and `port`. The listener of the manager sets the address of a listen, which names
+ * its host in `address` as a string or an array of at most one, since the manager
+ * has one listener. */
 static UA_StatusCode cm_open(UA_ConnectionManager *cm, const UA_KeyValueMap *params,
                              void *application, void *context,
                              UA_ConnectionManager_connectionCallback callback) {
@@ -443,8 +446,19 @@ static UA_StatusCode cm_open(UA_ConnectionManager *cm, const UA_KeyValueMap *par
         params, UA_QUALIFIEDNAME(0, "port"), &UA_TYPES[UA_TYPES_UINT16]);
     if(!port)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    if(listen && *listen)
-        return s->hooks->listen(s->state, *port, application, context, callback);
+    if(listen && *listen) {
+        UA_String host = UA_STRING_NULL;
+        const UA_Variant *hosts =
+            UA_KeyValueMap_get(params, UA_QUALIFIEDNAME(0, "address"));
+        if(hosts) {
+            size_t size = UA_Variant_isScalar(hosts) ? 1 : hosts->arrayLength;
+            if(hosts->type != &UA_TYPES[UA_TYPES_STRING] || size > 1)
+                return UA_STATUSCODE_BADINVALIDARGUMENT;
+            if(size == 1)
+                host = *(const UA_String *)hosts->data;
+        }
+        return s->hooks->listen(s->state, host, *port, application, context, callback);
+    }
     const UA_String *address = (const UA_String *)UA_KeyValueMap_getScalar(
         params, UA_QUALIFIEDNAME(0, "address"), &UA_TYPES[UA_TYPES_STRING]);
     if(!address)
@@ -529,18 +543,18 @@ void shim_cm_free(UA_ConnectionManager *cm) {
     UA_free(cm);
 }
 
-/* Calls `callback` with `ESTABLISHED`, no message, and the params `key`, a string of
- * the `length` bytes at `address`, and `listen-port` when `port` is not NULL. A
- * `length` of 0 gives no params. The params live on the stack. */
+/* Calls `callback` with `ESTABLISHED`, no message, and the string of the `length`
+ * bytes at `address`: as `listen-address` with `port` as `listen-port` when `port`
+ * is not NULL, else as `remote-address`. A `length` of 0 gives no params. The params
+ * live on the stack. */
 void shim_establish(UA_ConnectionManager *cm, uintptr_t id, void *application,
                     void **context, UA_ConnectionManager_connectionCallback callback,
-                    const char *key, const UA_Byte *address, size_t length,
-                    const UA_UInt16 *port) {
+                    const UA_Byte *address, size_t length, const UA_UInt16 *port) {
     UA_String text = {length, (UA_Byte *)(uintptr_t)address};
     UA_KeyValuePair pairs[2];
     UA_KeyValueMap params = {0, pairs};
     if(length > 0) {
-        pairs[0].key = UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key);
+        pairs[0].key = UA_QUALIFIEDNAME(0, port ? "listen-address" : "remote-address");
         UA_Variant_setScalar(&pairs[0].value, &text, &UA_TYPES[UA_TYPES_STRING]);
         params.mapSize = 1;
         if(port) {
@@ -569,8 +583,9 @@ UA_Client *shim_client_new(UA_EventLoop *el) {
     return UA_Client_newWithConfig(&config);
 }
 
-/* Gives a server on `el` with the minimal config for `port`, or NULL on a failure. */
-UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port) {
+/* Gives a server on `el` with the minimal config for `port` and the one server URL
+ * `url`, or NULL on a failure. */
+UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url) {
     UA_ServerConfig config;
     memset(&config, 0, sizeof(config));
     config.logging = &loop_of(el)->logger;
@@ -580,7 +595,32 @@ UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port) {
         UA_ServerConfig_clear(&config);
         return NULL;
     }
+    UA_Array_delete(config.serverUrls, config.serverUrlsSize, &UA_TYPES[UA_TYPES_STRING]);
+    config.serverUrlsSize = 0;
+    UA_String text = UA_STRING((char *)(uintptr_t)url);
+    if(UA_Array_copy(&text, 1, (void **)&config.serverUrls, &UA_TYPES[UA_TYPES_STRING]) !=
+       UA_STATUSCODE_GOOD) {
+        config.serverUrls = NULL;
+        UA_ServerConfig_clear(&config);
+        return NULL;
+    }
+    config.serverUrlsSize = 1;
     return UA_Server_newWithConfig(&config);
+}
+
+/* Sets `key` of `map` to an array of the `size` strings at `strings`, at most 4. */
+UA_StatusCode shim_map_set_strings(UA_KeyValueMap *map, const char *key,
+                                   const char *const *strings, size_t size) {
+    UA_String texts[4];
+    if(size > 4)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    for(size_t i = 0; i < size; i++)
+        texts[i] = UA_STRING((char *)(uintptr_t)strings[i]);
+    UA_Variant value;
+    /* An empty array points at the sentinel, else it reads as a scalar. */
+    UA_Variant_setArray(&value, size > 0 ? texts : UA_EMPTY_ARRAY_SENTINEL, size,
+                        &UA_TYPES[UA_TYPES_STRING]);
+    return UA_KeyValueMap_set(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key), &value);
 }
 
 /* Gives discovery URL `index` of `server`, or NULL past the last. */

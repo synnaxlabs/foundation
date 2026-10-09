@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -22,6 +22,7 @@ use crate::event::Loop;
 use crate::ffi::test::{
     Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_clear,
     UA_KeyValueMap_getScalar, UA_KeyValueMap_setScalar, UA_findDataType,
+    shim_map_set_strings,
 };
 use crate::ffi::{self, Bytes, ConnectionState, KeyValueMap, Status};
 
@@ -45,10 +46,13 @@ const UINT16: u32 = 5;
 const STRING: u32 = 12;
 
 /// A value of the parameters of `openConnection`.
+#[derive(Clone, Copy)]
 enum Value<'a> {
     Boolean(bool),
     UInt16(u16),
     String(&'a str),
+    /// An array of strings.
+    Strings(&'a [&'a CStr]),
 }
 
 /// Gives a map of `values`. Free it with `UA_KeyValueMap_clear`.
@@ -64,6 +68,21 @@ fn map(values: &[(&str, Value<'_>)]) -> KeyValueMap {
             Value::String(v) => {
                 let string = text(v);
                 set(&mut map, key, ptr::from_ref(&string).cast(), STRING);
+            }
+            Value::Strings(v) => {
+                let key = CString::new(*key).expect("no NUL");
+                let strings: Vec<*const c_char> =
+                    v.iter().map(|v| v.as_ptr()).collect();
+                // SAFETY: the map copies the key and the strings.
+                let status = Status(unsafe {
+                    shim_map_set_strings(
+                        &raw mut map,
+                        key.as_ptr(),
+                        strings.as_ptr(),
+                        v.len(),
+                    )
+                });
+                assert_eq!(status, Status::GOOD);
             }
         }
     }
@@ -1922,9 +1941,18 @@ unsafe extern "C" fn note(
     calls.borrow_mut().push((id, state, notes.join(&b' ')));
 }
 
-/// Gives the calls of [`note`] on a side that listens at `local` and accepts one
-/// stream from the peer.
+/// Gives the calls of [`note`] on a side that listens at `local` with no `address`
+/// and accepts one stream from the peer.
 fn notes(local: IpAddr) -> Vec<(usize, ConnectionState, String)> {
+    notes_of(local, &[])
+}
+
+/// Gives the calls of [`note`] on a side that listens at `local` with the extra
+/// params `params` and accepts one stream from the peer.
+fn notes_of(
+    local: IpAddr,
+    params: &'static [(&'static str, Value<'static>)],
+) -> Vec<(usize, ConnectionState, String)> {
     let mut network = Network::new();
     network.dial(Span::MILLISECOND, b"");
     network
@@ -1938,7 +1966,12 @@ fn notes(local: IpAddr) -> Vec<(usize, ConnectionState, String)> {
             let listener = node.net().listen(&listen).expect("the port is free");
             let mut side = Side::listening(&node, listener);
             side.callback = note;
-            assert_eq!(side.listen(PORT), Status::GOOD);
+            let mut all = vec![
+                ("listen", Value::Boolean(true)),
+                ("port", Value::UInt16(PORT)),
+            ];
+            all.extend_from_slice(params);
+            assert_eq!(side.open(&all), Status::GOOD);
             side.drive(Span::from_nanos(100_000_000)).await;
             side.calls()
         })
@@ -1982,6 +2015,86 @@ fn a_listen_on_each_address_gives_no_address_or_port() {
             (2, ffi::ESTABLISHED, format!("remote-address={peer}")),
         ]
     );
+}
+
+#[test]
+fn a_listen_gives_the_host_of_its_address_as_its_listen_address() {
+    let network = Network::new();
+    let local = network.local.addresses()[0];
+    drop(network);
+    let listen = format!("listen-address=plc.example listen-port={PORT}");
+    let scalar = notes_of(local, &[("address", Value::String("plc.example"))]);
+    assert_eq!(scalar[0], (1, ffi::ESTABLISHED, listen.clone()));
+    let array = notes_of(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        &[("address", Value::Strings(&[c"plc.example"]))],
+    );
+    assert_eq!(array[0], (1, ffi::ESTABLISHED, listen));
+    let empty = notes_of(local, &[("address", Value::Strings(&[]))]);
+    assert_eq!(
+        empty[0],
+        (
+            1,
+            ffi::ESTABLISHED,
+            format!("listen-address={local} listen-port={PORT}")
+        )
+    );
+}
+
+#[test]
+fn a_listen_with_two_addresses_or_one_that_is_not_a_string_is_refused() {
+    let mut network = Network::new();
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let listen = |address| {
+                side.open(&[
+                    ("listen", Value::Boolean(true)),
+                    ("port", Value::UInt16(PORT)),
+                    ("address", address),
+                ])
+            };
+            let statuses = [
+                listen(Value::Strings(&[c"10.0.0.1", c"plc.example"])),
+                listen(Value::UInt16(1)),
+            ];
+            assert_eq!(statuses, [Status::BAD_INVALID_ARGUMENT; 2]);
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.calls()
+        })
+        .expect("the run ends");
+    assert_eq!(calls, [(1, ffi::ESTABLISHED, Vec::new())]);
+}
+
+#[test]
+fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let url = c"opc.tcp://plc.example:4840";
+            // SAFETY: the loop outlives the server, which the test leaks.
+            let server = unsafe {
+                ffi::test::shim_server_new(side.events().raw(), PORT, url.as_ptr())
+            };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: the server lives.
+            let first = unsafe { ffi::test::shim_server_discovery_url(server, 0) };
+            assert_eq!(string(first), url.to_bytes());
+            // SAFETY: the server lives.
+            let second = unsafe { ffi::test::shim_server_discovery_url(server, 1) };
+            assert!(second.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
 }
 
 /// Records a call as [`record`] does, with the context that the call saw as the
@@ -2276,8 +2389,13 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             // SAFETY: the loop outlives the server, which the test deletes.
-            let server =
-                unsafe { ffi::test::shim_server_new(side.events().raw(), PORT) };
+            let server = unsafe {
+                ffi::test::shim_server_new(
+                    side.events().raw(),
+                    PORT,
+                    c"opc.tcp://:4840".as_ptr(),
+                )
+            };
             assert!(!server.is_null());
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });

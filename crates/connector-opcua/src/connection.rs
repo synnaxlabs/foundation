@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{IoSlice, Write as _};
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
@@ -445,7 +445,8 @@ impl State {
             );
         let peer = tcp.peer();
         let id = self.insert(callback, Stream::Open(tcp));
-        self.establish(id, Params::Remote(peer));
+        let mut text = [0; ADDRESS_BYTES];
+        self.establish(id, Params::Remote(ip_text(peer.ip(), &mut text)));
         self.wake(id);
     }
 
@@ -456,7 +457,7 @@ impl State {
 
     /// Calls the connection callback of `id` with `ESTABLISHED`, `params`, and no
     /// message, as the first callback of a connection that a listen made.
-    fn establish(&self, id: usize, params: Params) {
+    fn establish(&self, id: usize, params: Params<'_>) {
         self.callback(id).establish(self.raw.get(), id, params);
     }
 
@@ -493,20 +494,18 @@ struct Callback {
 impl Callback {
     /// Calls the callback with `ESTABLISHED`, `params`, and no message. It
     /// allocates nothing.
-    fn establish(&self, cm: *mut ffi::ConnectionManager, id: usize, params: Params) {
-        let (key, address, port) = match params {
-            Params::Listen(local) => {
-                (c"listen-address", local.ip(), Some(local.port()))
-            }
-            Params::Remote(peer) => (c"remote-address", peer.ip(), None),
+    fn establish(
+        &self,
+        cm: *mut ffi::ConnectionManager,
+        id: usize,
+        params: Params<'_>,
+    ) {
+        let (address, port) = match params {
+            Params::Listen { host, port } => (host, Some(port)),
+            Params::Remote(address) => (address, None),
         };
-        let mut text = [0; ADDRESS_BYTES];
-        let mut cursor = &mut text[..];
-        write!(cursor, "{address}").expect("invariant: an IP address fits");
-        let length = ADDRESS_BYTES - cursor.len();
-        let length = if address.is_unspecified() { 0 } else { length };
         // SAFETY: open62541 gave the callback with its application, and C reads the
-        // key and the text only during the call.
+        // address only during the call.
         unsafe {
             ffi::shim_establish(
                 cm,
@@ -514,9 +513,8 @@ impl Callback {
                 self.application,
                 self.context.as_ptr(),
                 self.function,
-                key.as_ptr(),
-                text.as_ptr(),
-                length,
+                address.as_ptr(),
+                address.len(),
                 port.as_ref().map_or(ptr::null(), ptr::from_ref),
             );
         }
@@ -559,20 +557,30 @@ impl Callback {
 }
 
 /// The parameters of the first callback of a connection that a listen made, as the
-/// POSIX manager gives them.
+/// POSIX manager gives them. An empty address gives none.
 #[derive(Clone, Copy)]
-enum Params {
-    /// `listen-address` and `listen-port` of the address of a listen, from which a
-    /// server makes its discovery URL. None when the listen is on each address,
-    /// which names no host.
-    Listen(SocketAddr),
-    /// `remote-address` of an accepted stream from the address, which a server
-    /// gives its channel.
-    Remote(SocketAddr),
+enum Params<'a> {
+    /// `listen-address` and `listen-port` of a listen, from which a server makes its
+    /// discovery URL.
+    Listen { host: &'a [u8], port: u16 },
+    /// `remote-address` of an accepted stream, which a server gives its channel.
+    Remote(&'a [u8]),
 }
 
 /// The longest text of an IP address: an IPv6 address that holds an IPv4 address.
 const ADDRESS_BYTES: usize = 45;
+
+/// Writes `ip` into `text` and gives the bytes written, or none when `ip` is
+/// unspecified.
+fn ip_text(ip: IpAddr, text: &mut [u8; ADDRESS_BYTES]) -> &[u8] {
+    if ip.is_unspecified() {
+        return &[];
+    }
+    let mut cursor = &mut text[..];
+    write!(cursor, "{ip}").expect("invariant: an IP address fits");
+    let length = ADDRESS_BYTES - cursor.len();
+    &text[..length]
+}
 
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
@@ -835,9 +843,10 @@ unsafe extern "C" fn open(
 }
 
 /// The hook of `openConnection` for a server: takes the listener of the manager into
-/// a new connection, and gives `ESTABLISHED` before it returns. Each stream it accepts
-/// is a new connection that gets `ESTABLISHED`, with the context of the listen
-/// connection at the accept.
+/// a new connection, and gives `ESTABLISHED` before it returns, with `host` as
+/// `listen-address`, or the address of the listener when `host` is empty. Each stream
+/// it accepts is a new connection that gets `ESTABLISHED`, with the context of the
+/// listen connection at the accept.
 ///
 /// # Panics
 ///
@@ -845,6 +854,7 @@ unsafe extern "C" fn open(
 /// listener is not on `port`. A panic in a hook aborts.
 unsafe extern "C" fn listen(
     state: *mut c_void,
+    host: Bytes,
     port: u16,
     application: *mut c_void,
     context: *mut c_void,
@@ -867,7 +877,14 @@ unsafe extern "C" fn listen(
         function: callback,
     };
     let id = state.insert(callback, Stream::Listening(listener));
-    state.establish(id, Params::Listen(local));
+    let mut text = [0; ADDRESS_BYTES];
+    let host = if host.length == 0 {
+        ip_text(local.ip(), &mut text)
+    } else {
+        // SAFETY: C gives a string of `length` bytes, which it holds during the call.
+        unsafe { std::slice::from_raw_parts(host.data, host.length) }
+    };
+    state.establish(id, Params::Listen { host, port });
     state.wake(id);
     Status::GOOD.0
 }
