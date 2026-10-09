@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use env::thread;
 use sim::shard::Fault;
@@ -501,7 +501,7 @@ struct Probe(Arc<Mutex<Fate>>);
 
 impl Drop for Probe {
     fn drop(&mut self) {
-        let mut fate = self.0.lock().unwrap();
+        let mut fate = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if *fate == Fate::Waiting {
             *fate = Fate::Dropped;
         }
@@ -517,6 +517,22 @@ fn probe(node: &Node) -> Arc<Mutex<Fate>> {
         async {}
     });
     fate
+}
+
+#[test]
+fn a_probe_with_a_poisoned_lock_does_not_abort_a_test_that_panics() {
+    let fate = Arc::new(Mutex::new(Fate::Waiting));
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = fate.lock().unwrap();
+        panic!("poison the lock");
+    }));
+    poisoned.expect_err("the lock is poisoned");
+    let probe = Probe(fate);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _probe = probe;
+        panic!("the test broke");
+    }));
+    unwound.expect_err("the test panics");
 }
 
 fn fate(fate: &Mutex<Fate>) -> Fate {
