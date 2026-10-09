@@ -9,8 +9,8 @@
 //!
 //! The C code gets no coverage or AddressSanitizer flags from cargo-fuzz or, until
 //! #1912, from the `fuzz` jobs. libFuzzer then sees no coverage of the C code. ASan
-//! checks its memory access only in calls to `memcpy` and the other libc functions
-//! that ASan intercepts. Build with
+//! checks the memory access of the C code only in calls to `memcpy` and the other libc
+//! functions that ASan intercepts. Build with
 //! `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`.
 
 #![no_main]
