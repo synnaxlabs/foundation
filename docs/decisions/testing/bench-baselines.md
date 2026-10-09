@@ -10,3 +10,29 @@
   Supersedes the runs by the coordinator in
   https://github.com/synnaxlabs/foundation/pull/894. Patch; #715 is the long-term fix.
   The person decided on 2026-10-06 ("I am ok with deferring #715").
+  Amended (2026-10-09): a PR that closes or builds part of an issue on the FIRST SLICE
+  milestone merges with no rerun on a quiet host. After it merges, its author sends
+  `laptop.monitor` the PR number, and `laptop.monitor` runs the hot-path benchmarks on a
+  quiet Linux host at the merge commit and at its parent on `main`. A slowdown over 5%
+  is an issue for the PR's author, who fixes it next. The daily run stays. Each other PR
+  keeps the rule above. Decided by the person, as `laptop.coordinator` recorded it from
+  `laptop.monitor` (2026-10-09T01:05:23Z,
+  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6072145282).
+  Amended (2026-10-09, #2044): when each changed hot function compiles only on an OS for
+  which no quiet host exists, the PR gives a diff of the disassembly in place of the
+  rerun. It covers each such function, with its inlined callers, at `main` and at the PR
+  head, built with the toolchain and profile of the bench binaries, and names the target
+  and both commits. The diff only removes instructions: no added instruction, call,
+  loop, or memory access. The runs with the machine named stay in the PR. A change that
+  adds anything on such a path waits for a quiet host of its OS. Decided by
+  `laptop.director`, 2026-10-09T00:55:15Z:
+  https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072038524.
+  Amended (2026-10-09): each one-host quiet-host run builds both commits with
+  `RUSTFLAGS="-C target-cpu=x86-64-v2 -C llvm-args=-align-all-functions=6"`, and its
+  result names these flags beside the machine. The two builds of one comparison, also
+  in the daily run against its fixed commit, use the same flags. An aligned result over
+  5% still needs the P1 judgment. The two-host carrier bench builds as
+  `bench/carrier/run.sh` does. Decided by `laptop.director`, 2026-10-09T02:44:36Z:
+  https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937, with its
+  scope at 2026-10-09T02:50:37Z:
+  https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073252079.

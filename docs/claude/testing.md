@@ -157,7 +157,11 @@ again once to prove that the failure replays (r16 59).
   yet. The PR that closes such an issue removes it from each reason, and removes the
   `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
   runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
-  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason.
+  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason. A test
+  of a behavior that differs by OS runs on each OS that the crate builds for, with
+  `#[cfg(target_os = ...)]` on its expected value, as `UNLINK_DIRECTORY` in
+  `crates/os/tests/it/files.rs` does. Only a test whose code calls an item that exists
+  on one OS, such as a seccomp filter, is `#[cfg(target_os = ...)]`.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
@@ -189,7 +193,8 @@ again once to prove that the failure replays (r16 59).
   process (the descriptor table, the thread count, a resource limit, a seccomp filter,
   the first-lookup state of the C library) gets a binary of its own with that one test,
   as a counting allocator does. Its module doc names that state. Helpers that binaries
-  share go in `tests/common/mod.rs`.
+  share go in `tests/common/`: `mod.rs`, and a file for a helper that only some binaries
+  use, which each of them mounts with `#[path]`.
 
 ## Oracles
 
