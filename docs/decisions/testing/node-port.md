@@ -126,8 +126,9 @@
   runs no check of the spec: `mesh` uses only a spec with no problems (SPEC IN USE), so
   a founding with problems gives no spec in use and the hub knows no channel, by
   `laptop.architect-2` (2026-10-09, #1957 PR 2):
-  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6088900310. This supersedes the panic of a founding with a dangling index or two
-  channels of one key, and the check in `node` that was to end it, by
+  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6088900310. This
+  supersedes the panic of a founding with a dangling index or two channels of one key,
+  and the check in `node` that was to end it, by
   `laptop.architect-2` (2026-10-08 20:08 UTC):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on the
   ruling of `laptop.architect` (20:08 UTC):
