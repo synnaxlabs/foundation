@@ -60,8 +60,9 @@ impl Supervisor {
     /// after `cancel` is cancelled.
     ///
     /// Returns `Ok` when `run` returns `Ok`, or when `cancel` is cancelled and the
-    /// run returned, in each case once the run's tasks ended. The future is not
-    /// `Send`: call it on a shard.
+    /// run returned, in each case once the run's tasks ended. A drop of the future
+    /// cancels the run and does not wait for its tasks: to wait, cancel `cancel` and
+    /// await the future. The future is not `Send`: call it on a shard.
     ///
     /// # Errors
     ///
@@ -98,8 +99,9 @@ impl Supervisor {
             );
             let start = clock.now();
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
+            let lasted = clock.now() - start;
             drop(token);
-            // The status shows this wait as `state` 3 (#420).
+            // This wait reaches the connector's status as `state` 3 in #1731.
             live.ended().await;
             match end {
                 Ok(()) => return Ok(()),
@@ -107,7 +109,7 @@ impl Supervisor {
                 // These reach the connector's status in #420.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
-            if clock.now() - start >= HEALTHY {
+            if lasted >= HEALTHY {
                 backoff.reset();
             }
             backoff.wait(cancel).await;
@@ -215,6 +217,9 @@ mod tests {
         Abort,
         /// Waits for the cancel, then the span, then returns a device error.
         Linger(Span),
+        /// Spawns a task that ends the span after the cancel, then returns a device
+        /// error at once.
+        Hold(Span),
     }
 
     /// When each run started and ended.
@@ -278,6 +283,14 @@ mod tests {
                     ctx.cancel().wait().await;
                     clock.sleep(span).await;
                     Err(Error::Device("stopped late".into()))
+                }
+                Some(Step::Hold(span)) => {
+                    let (token, clock) = (ctx.cancel().clone(), clock.clone());
+                    ctx.tasks().spawn(async move {
+                        token.wait().await;
+                        clock.sleep(span).await;
+                    });
+                    Err(Error::Device("left a task".into()))
                 }
                 None => {
                     ctx.cancel().wait().await;
@@ -496,6 +509,22 @@ mod tests {
         // reset, each would be up to a minute.
         let gap = between(first, last);
         assert!(gap <= ms(15_000), "{gap:?}");
+    }
+
+    #[test]
+    fn counts_no_wait_for_the_tasks_toward_a_long_run() {
+        let mut steps = vec![Step::Device(Span::ZERO); 8];
+        steps.push(Step::Hold(ms(61_000)));
+        steps.extend([Step::Device(Span::ZERO); 3]);
+        steps.push(Step::Done);
+        let out = supervise("script", steps, config(), None);
+        out.result.expect("ok");
+        let held = out.runs.get(8).and_then(|run| run.1).expect("run 8 ended");
+        let last = out.runs.last().expect("13 runs").0;
+        // Each of the four waits after run 8 has a cap of a minute. A reset would
+        // make them at most 1 + 2 + 4 + 8 s after the 61 s wait for the task.
+        let gap = between(held, last);
+        assert!(gap > ms(61_000 + 15_000), "{gap:?}");
     }
 
     const OPTIONS: tcp::Options = tcp::Options {

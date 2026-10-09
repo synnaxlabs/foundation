@@ -6,7 +6,9 @@
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff or returns.
-  A task that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
+  The wait does not count toward the run's length. A drop of the future of `run` does
+  not wait: a caller that must wait cancels and awaits it. A task that does not end at
+  the cancel is a defect of its kind (`laptop.architect-2`,
   2026-10-08T19:04:20Z:
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6067043337). One
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
