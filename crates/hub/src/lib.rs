@@ -133,7 +133,9 @@ impl Hub {
     /// removed, and each session on it ends at once: [`writer::Failure::Removed`],
     /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. Then each new
     /// channel is defined. The home carries each new index at once, and stops
-    /// carrying each index whose key is not an index of `definitions`.
+    /// carrying each index whose key is not an index of `definitions`. The home drops
+    /// the newest frame of each index that a removed channel was on, so a latest
+    /// reader that opens on that index waits for the next frame.
     ///
     /// # Panics
     ///
@@ -337,6 +339,19 @@ impl State {
         for key in shed {
             let slot = self.interner.slots().assign(key);
             self.home.shed(slot);
+        }
+        let mut dropped: Vec<Key> = self
+            .channels
+            .values()
+            .filter(|known| removed.contains(&known.key()))
+            .map(Channel::index)
+            .filter(|index| after.contains(index))
+            .collect();
+        dropped.sort_unstable();
+        dropped.dedup();
+        for key in dropped {
+            let slot = self.interner.slots().assign(key);
+            self.home.drop_newest(slot);
         }
         self.channels
             .retain(|_, known| !removed.contains(&known.key()));

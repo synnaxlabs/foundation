@@ -5,15 +5,18 @@ use std::sync::atomic::Ordering;
 
 use hub::home::Outcome;
 use hub::reader::{self, Ended, Mode};
-use hub::writer::{self, Failure};
+use hub::writer::{self, Failure, Writer};
 use spec::data_type::DataType;
 use types::channel::Key;
-use types::frame::Range;
+use types::frame::{Form, Range};
+use types::sample::{Scalar, Type};
 
 use super::{
-    I64, applied, channels, config, definition, name, poll_flagged, run, samples,
-    without, write, write_series, written,
+    I64, LIVE, applied, channels, config, definition, entry, name, poll_flagged,
+    poll_once, run, samples, without, write, write_series, written,
 };
+
+const I32: Type = Type::Scalar(Scalar::I32);
 
 /// The seq of the one frame that `outcomes` applied.
 fn seq(outcomes: &[Outcome]) -> u64 {
@@ -232,5 +235,73 @@ fn keeps_each_session_through_a_call_that_panics() {
         );
         let now = test.now();
         assert_eq!(write(&mut writer, &[now], &[10]), [applied(0)]);
+    });
+}
+
+/// Writes `value` to `value` as an I32 at `stamp`.
+fn write_i32(writer: &mut Writer, stamp: i64, value: i32) -> Vec<Outcome> {
+    let set = writer.set();
+    let (time, entry) = (entry(set, 1), entry(set, 2));
+    let group = set.entries()[time].group;
+    let mut draft = writer
+        .draft(Form::Raw, &[(time, 8), (entry, 4)])
+        .expect("a frame");
+    let series = draft.series_mut(time).expect("the series is present");
+    series.copy_from_slice(&stamp.to_le_bytes());
+    let series = draft.series_mut(entry).expect("the series is present");
+    series.copy_from_slice(&value.to_le_bytes());
+    draft.set_count(group, 1);
+    writer
+        .write(LIVE, draft)
+        .map(<[_]>::to_vec)
+        .expect("the home takes it")
+}
+
+/// A latest reader on a channel whose type changed at its key takes no frame of the
+/// old type: it waits for the next frame.
+#[test]
+fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
+    run(34, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        assert_eq!(write(&mut writer, &[now], &[10]), [applied(0)]);
+        let mut changed = channels();
+        changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
+        test.hub.set_definitions(&changed);
+        let mut reader = test.reader(&["value"], Mode::Latest).await;
+        assert!(poll_once(reader.next()).is_pending(), "no frame waits");
+        let mut writer = test.writer("b", &["value"]).await;
+        assert_eq!(write_i32(&mut writer, now + 1, 20), [applied(1)]);
+        let received = reader.next().await.expect("a frame");
+        let at = entry(received.set, 2);
+        assert_eq!(received.set.entries()[at].data_type, I32);
+        let (_, bytes) = received
+            .view
+            .iter()
+            .find(|&(present, _)| present == at)
+            .expect("the view holds the series");
+        let mut out = [0; 4];
+        codec::decode(I32, 1, bytes, &mut out).expect("decodes");
+        assert_eq!(i32::from_le_bytes(out), 20);
+    });
+}
+
+/// A data channel that moves to another index and back with a new type leaves no
+/// frame of its old type on its first index.
+#[test]
+fn gives_a_latest_reader_no_series_of_a_channel_that_moved_away_and_back() {
+    run(37, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        assert_eq!(write(&mut writer, &[now], &[10]), [applied(0)]);
+        drop(writer);
+        let mut moved = channels();
+        moved.insert(name("value"), definition(2, DataType::Sample(I64), 3));
+        test.hub.set_definitions(&moved);
+        let mut back = channels();
+        back.insert(name("value"), definition(2, DataType::Sample(I32), 1));
+        test.hub.set_definitions(&back);
+        let mut reader = test.reader(&["value"], Mode::Latest).await;
+        assert!(poll_once(reader.next()).is_pending(), "no frame waits");
     });
 }

@@ -102,7 +102,16 @@
   carries an index at the first session that finds this node is its home (#340,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511) changes
   this (`laptop.architect`,
-  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071433041). A served
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071433041). The home
+  then drops the newest frame of each index that it keeps and that a removed channel was
+  on (`Shard::drop_newest`, HOME SURFACE), before the first new channel, so a latest
+  reader that opens on that index waits for the next frame. So the newest frame of an
+  index holds a series of a key only while that key keeps the definition it had at the
+  write. Lost: a drop at a type change only, as a data channel that moves to another
+  index and back with a new type keeps the old series; and a check of each frame in each
+  session, a cost per frame for a change that comes at an apply (`laptop.architect`,
+  2026-10-09T00:08:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071529705). A served
   open checks each key as its message arrives, and checks all of them again when it
   opens, since a call between two messages of its keys run can remove one. The call
   checks the definitions before it changes anything: two channels with one key or one
