@@ -33,6 +33,7 @@ fn an_accept_with_no_free_descriptor_is_emfile_and_leaves_the_listener_usable() 
     let mut listener = os::net().listen(&config).unwrap();
     let first = std::net::TcpStream::connect(listener.local()).unwrap();
     let second = std::net::TcpStream::connect(listener.local()).unwrap();
+    let third = std::net::TcpStream::connect(listener.local()).unwrap();
     // The first accept makes the listener ready, and a success keeps it so.
     let accepted = runtime.block_on(poll_fn(|cx| listener.poll_accept(cx)));
     assert_eq!(accepted.unwrap().peer(), first.local_addr().unwrap());
@@ -50,7 +51,7 @@ fn an_accept_with_no_free_descriptor_is_emfile_and_leaves_the_listener_usable() 
     drop(held);
     // macOS closes the connection that the failed accept took off the queue.
     let next = if cfg!(target_os = "macos") {
-        std::net::TcpStream::connect(listener.local()).unwrap()
+        third
     } else {
         second
     };
