@@ -11,5 +11,9 @@ fuzz_target!(|bytes: &[u8]| {
         return;
     };
     let mut out = [0; clock::MAX_LEN];
-    assert_eq!(clock::encode(&message, &mut out), bytes, "the message changed");
+    assert_eq!(
+        clock::encode(&message, &mut out),
+        bytes,
+        "the message changed"
+    );
 });

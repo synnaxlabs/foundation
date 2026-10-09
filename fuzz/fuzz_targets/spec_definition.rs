@@ -10,5 +10,9 @@ fuzz_target!(|bytes: &[u8]| {
     let Ok(definition) = Definition::decode(bytes) else {
         return;
     };
-    assert_eq!(definition.encode(), bytes, "two encodings read as one definition");
+    assert_eq!(
+        definition.encode(),
+        bytes,
+        "two encodings read as one definition"
+    );
 });

@@ -22,7 +22,11 @@ fuzz_target!(|bytes: &[u8]| {
         assert_eq!(len, out.len(), "validate gives another length");
     }
     let decoded = codec::decode(data_type, count, series, &mut out);
-    assert_eq!(validated.map(|_| ()), decoded, "validate and decode disagree");
+    assert_eq!(
+        validated.map(|_| ()),
+        decoded,
+        "validate and decode disagree"
+    );
     let mut decoder = codec::Decoder::new(scalar, count, series);
     let mut vector = vec![0; codec::VECTOR_LEN * scalar.width()];
     let mut joined = Vec::new();
