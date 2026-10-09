@@ -236,16 +236,20 @@ impl Drop for Process {
         // `kill` gives `Ok` for a command that exited. No wait: while the thread
         // panics, a wait can block, and `run` waits for its command itself.
         match self.0.kill() {
-            // A panic out of this drop aborts the test binary, and `eprintln!`
-            // panics when stderr is closed. Only the macro writes to the output
-            // that the test harness captures for the report of the test.
+            // Only `eprintln!` writes to the output that the test harness captures
+            // for the report of the test.
             Err(error) if std::thread::panicking() => {
                 let line = format!("kill the command: {error}");
                 #[expect(
                     clippy::print_stderr,
                     reason = "a second panic aborts the test binary"
                 )]
-                let _printed = std::panic::catch_unwind(move || eprintln!("{line}"));
+                match std::panic::catch_unwind(move || eprintln!("{line}")) {
+                    // An `Err` is the panic of `eprintln!` on a closed stderr. The
+                    // test fails already, and a panic out of this drop aborts the
+                    // test binary.
+                    Ok(()) | Err(_) => {}
+                }
             }
             kill => kill.expect("kill the command"),
         }
