@@ -105,11 +105,11 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// `node` binds one [`Port`] and splits it into one part for each shard.
 ///
 /// A session that a dial made stays open until `accept` takes it, also when each caller
-/// of `dial` dropped it. Dropping the transport closes each session that no caller
-/// accepted with `Code(0)`, and the sessions it gave stay open. It refuses each dial
-/// from a peer until each of its connections drained: each session ended, and each
-/// handshake in flight finished or timed out. Then it frees its [`port::Part`], so a
-/// later dial gets no answer, and [`Transport::ended`] resolves.
+/// of `dial` dropped it. Dropping the transport closes with `Code(0)` each session that
+/// no caller accepted and each handshake that a peer started, and the sessions it gave
+/// stay open. It refuses each dial from a peer until each of its connections drained:
+/// each session ended, and each close finished, in about 3 PTO. Then it frees its
+/// [`port::Part`], so a later dial gets no answer, and [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
