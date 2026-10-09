@@ -417,7 +417,7 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
     let unlisted: Vec<&str> = outside
         .into_iter()
-        .filter(|name| !(OUTSIDE.contains(name) || cfg!(asan) && sanitizer(name)))
+        .filter(|name| !(OUTSIDE.contains(name) || (cfg!(asan) && sanitizer(name))))
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }
