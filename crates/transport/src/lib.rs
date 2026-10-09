@@ -700,10 +700,11 @@ mod tests {
     }
 
     /// Drops a transport while the handshake of a peer that gets no answer is in
-    /// flight, and asserts that `ended` resolves within 3 PTO with no round-trip
-    /// sample, not at the idle time. Each PTO is 1024 ms: 333 ms, 4 times its half,
-    /// and the ack delay of 25 ms. When `silent`, the peer sends nothing after its
-    /// first packet; else it sends that packet again on each PTO.
+    /// flight, and asserts that `ended` resolves at the cut, 3 s after the drop, not
+    /// at the idle time. The cut comes first: the drain takes 3 PTO with no round-trip
+    /// sample, 3072 ms, as each PTO is 333 ms, 4 times its half, and the ack delay of
+    /// 25 ms. When `silent`, the peer sends nothing after its first packet; else it
+    /// sends that packet again on each PTO.
     fn ended_after_a_handshake_in_flight(silent: bool) {
         let (mut sim, client, server) = testing::nodes(0);
         let cut = sim::link::Config {
@@ -725,8 +726,7 @@ mod tests {
             drop(transport);
             ended.await;
             let waited = node.clock().now() - before;
-            let drain = testing::spans(Span::MILLISECOND, 3 * 1024);
-            assert!(waited <= drain, "the stop waited {waited:?}");
+            assert_eq!(waited, testing::spans(Span::SECOND, 3));
         });
         testing::shard(&client, CLIENT, move |config, node| async move {
             let part = testing::part(&node.net(), testing::address(&node));

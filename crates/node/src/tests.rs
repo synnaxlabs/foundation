@@ -2876,8 +2876,8 @@ mod port {
 
     /// A program with no key starts a handshake that gets no answer, and sends its
     /// first packet again on each PTO, which keeps the handshake from the idle time.
-    /// The stop holds the lock only for the drain of that handshake, 3 PTO of 1024
-    /// ms, and less than 1 ms for its other steps.
+    /// The stop holds the lock for the cut of 3 s, which ends the drain of that
+    /// handshake before its 3 PTO of 1024 ms, and less than 1 ms for its other steps.
     #[test]
     fn a_handshake_in_flight_holds_the_lock_only_for_its_drain() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -2914,8 +2914,8 @@ mod port {
                 host.clock().now() - before
             })
             .expect("the probe ends");
-        let drain = Span::from_nanos((3 * 1024 + 1) * Span::MILLISECOND.nanos());
-        assert!(waited <= drain, "the stop held the lock {waited:?}");
+        let bound = Span::from_nanos(3001 * Span::MILLISECOND.nanos());
+        assert!(waited <= bound, "the stop held the lock {waited:?}");
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
     }
