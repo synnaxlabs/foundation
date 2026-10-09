@@ -76,7 +76,7 @@ fn parse_host(output: &Output) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::output;
+    use crate::common::{output, stable_root};
     use crate::fixture;
 
     #[test]
@@ -117,19 +117,7 @@ mod tests {
 
     #[test]
     fn reads_the_host_of_the_pin() {
-        let root = std::env::temp_dir()
-            .join(format!("xtask-nightly-host-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let toolchain = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-toolchain.toml"),
-        )
-        .unwrap();
-        let channel = toolchain
-            .lines()
-            .find_map(|line| line.strip_prefix("channel = "))
-            .unwrap()
-            .trim_matches('"');
-        std::fs::write(root.join("rust-toolchain-nightly"), channel).unwrap();
+        let root = stable_root("xtask-nightly-host");
         let host = Toolchain::read(&root).unwrap().host();
         std::fs::remove_dir_all(&root).unwrap();
         let host = host.unwrap();

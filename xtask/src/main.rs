@@ -170,7 +170,26 @@ fn fixture() -> std::path::PathBuf {
 #[cfg(test)]
 mod common {
     use std::os::unix::process::ExitStatusExt;
+    use std::path::{Path, PathBuf};
     use std::process::{ExitStatus, Output};
+
+    /// A new folder named `name` in the temp folder whose `rust-toolchain-nightly`
+    /// pins the installed toolchain of `rust-toolchain.toml`. The caller removes it.
+    pub(crate) fn stable_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let toolchain = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        let channel = toolchain
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        std::fs::write(root.join("rust-toolchain-nightly"), channel).unwrap();
+        root
+    }
 
     /// An output of a process that exits with `code`.
     pub(crate) fn output(code: i32, stdout: &str, stderr: &str) -> Output {

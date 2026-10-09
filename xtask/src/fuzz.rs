@@ -1304,6 +1304,28 @@ mod tests {
     }
 
     #[test]
+    fn new_builds_for_the_host_of_the_pin() {
+        let root = crate::common::stable_root("xtask-fuzz-host");
+        let cargo = Cargo::new(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        let build = cargo.unwrap().build();
+        let args: Vec<_> = build.get_args().filter_map(|a| a.to_str()).collect();
+        let [.., "--target", host] = args[..] else {
+            panic!("{args:?}");
+        };
+        assert!(host.starts_with(std::env::consts::ARCH), "{host}");
+    }
+
+    #[test]
+    fn new_names_rustup_and_the_pin_when_the_pin_is_not_installed() {
+        let Err(error) = Cargo::new(&crate::fixture()) else {
+            panic!("the pin of the fixture is not installed");
+        };
+        let command = "`rustup run nightly-2000-01-01 rustc -vV`: exit status: 1: ";
+        assert!(error.starts_with(command), "{error}");
+    }
+
+    #[test]
     fn builds_for_the_host_of_the_nightly() {
         let command = arm().build();
         let args: Vec<_> = command.get_args().collect();
