@@ -147,7 +147,7 @@ where
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
         let accepted = Rc::new(Cell::new(0));
-        serve_each(&session, &link, &tasks, &node, &kept, &accepted).await;
+        serve_each(&session, &link, &tasks, &node.clock(), &kept, &accepted).await;
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
         recorded(&node, &kept, accepted.get()).await;
         drop((link, test));
@@ -183,7 +183,14 @@ where
         for _ in 0..count {
             let session = transport.accept().await.expect("a session");
             let link = test.hub.link(session.clone());
-            tasks.spawn(serve_each(&session, &link, &tasks, &node, &kept, &accepted));
+            tasks.spawn(serve_each(
+                &session,
+                &link,
+                &tasks,
+                &node.clock(),
+                &kept,
+                &accepted,
+            ));
             ends.push(session);
         }
         for session in ends {
@@ -207,6 +214,18 @@ where
     std::mem::take(&mut *served.lock().expect("not poisoned"))
 }
 
+/// `asserted`, then the close of each stream still open when [`sessions`] closed its
+/// `count` sessions: `stalled` requests and the hello stream of each session.
+fn closed_after(
+    mut asserted: Vec<Result<Got, serve::Error>>,
+    count: u16,
+    stalled: usize,
+) -> Vec<Result<Got, serve::Error>> {
+    let open = usize::from(count) + stalled;
+    asserted.extend((0..open).map(|_| Err(serve::Error::Stream(closed_with(0)))));
+    asserted
+}
+
 /// What `serve` gave for each stream, in the order they ended.
 type Kept = Arc<Mutex<Vec<Result<Got, serve::Error>>>>;
 
@@ -217,7 +236,7 @@ fn serve_each(
     session: &Session,
     link: &hub::Link,
     tasks: &env::tasks::Tasks,
-    node: &sim::node::Node,
+    clock: &env::clock::Clock,
     kept: &Kept,
     accepted: &Rc<Cell<usize>>,
 ) -> impl Future<Output = ()> + 'static {
@@ -225,7 +244,7 @@ fn serve_each(
         session.clone(),
         link.clone(),
         tasks.clone(),
-        node.clock(),
+        clock.clone(),
         Arc::clone(kept),
         Rc::clone(accepted),
     );
@@ -1037,20 +1056,22 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
         length: BODY_BYTES_MAX,
         held: BODY_BYTES_MAX + 1,
     };
-    let mut each = vec![
-        Err(over.clone()),
-        Ok(Got::Request(name(SUBJECT), b"y".to_vec())),
-    ];
-    // Two stalled requests, and the hello stream of each session.
-    each.resize_with(7, || Err(serve::Error::Stream(closed_with(0))));
+    let each = closed_after(
+        vec![
+            Err(over.clone()),
+            Ok(Got::Request(name(SUBJECT), b"y".to_vec())),
+        ],
+        3,
+        2,
+    );
     assert_eq!(
         served, each,
         "the request that fills the cap exactly is not refused"
     );
     assert_eq!(
         over.to_string(),
-        "a request body of 16777216 bytes does not fit under the cap of 33554432 bytes: \
-         the open requests of the hub hold 16777217 bytes"
+        "a request body of 16777216 bytes does not fit under the cap of 33554432 \
+         bytes: the open requests of the hub hold 16777217 bytes"
     );
 }
 
@@ -1074,12 +1095,14 @@ fn reserves_no_body_for_a_second_request_of_a_link() {
         let _fits = third.unfinished(BODY_BYTES_MAX, &[]).await;
         third.sleep(QUIET).await;
     });
-    let mut each = vec![
-        Err(serve::Error::Pending),
-        Ok(Got::Request(name(SUBJECT), b"a".to_vec())),
-    ];
-    // Two stalled requests, and the hello stream of each session.
-    each.resize_with(7, || Err(serve::Error::Stream(closed_with(0))));
+    let each = closed_after(
+        vec![
+            Err(serve::Error::Pending),
+            Ok(Got::Request(name(SUBJECT), b"a".to_vec())),
+        ],
+        3,
+        2,
+    );
     assert_eq!(served, each);
 }
 
