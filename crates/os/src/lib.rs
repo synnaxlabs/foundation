@@ -109,19 +109,23 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
 }
 
-/// The network of this machine. A stream or listener registers at its first poll,
-/// other than a write of no bytes, with the I/O driver of the Tokio runtime current
-/// on that thread. Each thread that `os` starts has one.
+/// The network of this machine. A stream, listener, UDP sender, or UDP receiver
+/// registers with the I/O driver of the Tokio runtime current on the thread of its
+/// first poll, at the first poll that needs the socket. A stream write of no bytes
+/// does not, and a UDP poll that fails before it registers leaves that to the next
+/// poll. A UDP sender drops its registration at each send that ends, with or without
+/// an error, and registers again at the next poll that finds the send buffer full. A
+/// send that the caller drops while it waits keeps the registration until the next
+/// send of that sender ends. Each thread that `os` starts has a runtime with an I/O
+/// driver. Needs the cargo feature `net`.
 ///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
 ///
 /// # Panics
 ///
-/// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener
-///   other than a write of no bytes, on a thread with no Tokio runtime or with no I/O
-///   driver.
-/// - [`env::net::Net::udp`]: this driver has no UDP yet.
+/// A poll of [`env::net::Net::connect`], or a poll that registers a socket, on a
+/// thread with no Tokio runtime or with no I/O driver.
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
 pub fn net() -> env::net::Net {

@@ -85,7 +85,7 @@ impl Stream {
         socket: &mut Socket<std::net::TcpStream, TcpStream>,
     ) -> Result<Pin<&mut TcpStream>, Error> {
         let stream = socket
-            .live("stream", TcpStream::from_std)
+            .live("TCP stream", TcpStream::from_std)
             .map_err(io_error)?;
         Ok(Pin::new(stream))
     }
@@ -150,7 +150,7 @@ impl tcp::Driver for Stream {
             .count();
         let buffers = &buffers[skip..];
         if buffers.is_empty() {
-            self.socket.bind("stream");
+            self.socket.bind("TCP stream");
             return Poll::Ready(Ok(0));
         }
         let peer = self.peer;

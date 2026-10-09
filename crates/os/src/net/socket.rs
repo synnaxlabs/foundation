@@ -42,12 +42,8 @@ impl<Idle, Live> Socket<Idle, Live> {
     ///
     /// A poll on a thread other than that of the first poll.
     pub(super) fn bind(&mut self, kind: &str) {
-        let current = thread::current().id();
-        let thread = *self.thread.get_or_insert(current);
-        assert_eq!(
-            thread, current,
-            "a TCP {kind} polls only on the thread of its first poll"
-        );
+        let thread = *self.thread.get_or_insert_with(|| thread::current().id());
+        on_thread(kind, thread);
     }
 
     /// The live socket, for a poll. It binds the socket as [`Socket::bind`] does,
@@ -94,6 +90,19 @@ impl<Idle, Live> Socket<Idle, Live> {
             State::Lost { .. } => None,
         }
     }
+}
+
+/// Checks the thread rule of a socket of `kind` that first polled on `thread`.
+///
+/// # Panics
+///
+/// On a thread other than `thread`.
+pub(super) fn on_thread(kind: &str, thread: ThreadId) {
+    assert_eq!(
+        thread,
+        thread::current().id(),
+        "a {kind} polls only on the thread of its first poll"
+    );
 }
 
 #[cfg(test)]
