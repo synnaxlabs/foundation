@@ -4,6 +4,7 @@
 
 mod build;
 mod cfg;
+mod feature;
 mod field;
 mod files;
 mod fuzz;
@@ -63,7 +64,8 @@ fn main() -> ExitCode {
 }
 
 /// Checks every dependency of the workspace at `root` against the crate map in
-/// `map.rs`.
+/// `map.rs`, and that no feature other than `sim` and no normal dependency turns on a
+/// `sim` feature.
 fn layers(root: &Path) -> Result<(), Vec<String>> {
     let metadata = metadata(root).map_err(|e| vec![e])?;
     let packages = metadata["packages"].as_array().cloned().unwrap_or_default();
@@ -83,6 +85,7 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
         if name == "xtask" || bench {
             continue;
         }
+        problems.extend(feature::check(package));
         let Some(entry) = map::find(name) else {
             problems.push(format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
@@ -233,6 +236,17 @@ mod tests {
         assert_eq!(
             layers(&fixture()),
             Err(vec![missing("a"), missing("globals"), missing("model")])
+        );
+    }
+
+    #[test]
+    fn layers_reports_a_product_feature_that_turns_on_sim() {
+        let problems = layers(&fixture().join("features")).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.starts_with(
+                "`own` turns on `sim` in its feature `default`. A `sim` feature"
+            )),
+            "{problems:?}"
         );
     }
 

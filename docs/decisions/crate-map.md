@@ -45,6 +45,11 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6030590185). Lost:
    `buffer` in the `hub` row (hub code could call the ring), the hub tests in `node`,
    and a builder that takes a `sim::node::Node`, which adds an edge on `sim`.
+9. A crate's `sim` feature is test-only: only a dev-dependency, the fuzz crate, or
+   another `sim` feature turns it on. The BQ19 feature is `simulate`; it turns on
+   `dep:sim` and other `simulate` features, never a `sim` feature. `cargo xtask`
+   checks this (#1570) (`laptop.architect`, 2026-10-08T02:11:30Z:
+   https://github.com/synnaxlabs/foundation/issues/1570#issuecomment-6050751380).
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2

@@ -1,0 +1,4 @@
+# A workspace for the tests of the `sim` feature check: one crate per case.
+[workspace]
+members = ["own", "weak", "strong", "normal", "pass"]
+resolver = "3"
