@@ -223,20 +223,21 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 }
 
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/`, or
-/// that is a release compatible with a copy that the `root` graph builds, when the
-/// `root` graph has no package of its key.
+/// that is a release compatible with a copy that the `root` graph builds and the
+/// `fuzz` graph does not, when the `root` graph has no package of its key.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
+    let fuzz = Package::all(fuzz, &copies)?;
     let mut problems = Vec::new();
-    for package in Package::all(fuzz, &copies)? {
+    for package in &fuzz {
         let Package {
             id,
             name,
             version,
             manifest,
             copy,
-        } = package;
+        } = *package;
         if root.iter().any(|p| p.id == id) {
             continue;
         }
@@ -247,10 +248,13 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                  [patch.crates-io] table of the root Cargo.toml."
             ));
         }
-        if root
-            .iter()
-            .any(|p| p.copy && p.name == name && compatible(version, p.version))
-        {
+        // Beside the copy, a release meets a requirement that the copy cannot.
+        if root.iter().any(|p| {
+            p.copy
+                && p.name == name
+                && compatible(version, p.version)
+                && !fuzz.iter().any(|f| f.id == p.id)
+        }) {
             problems.push(format!(
                 "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the copy \
                  in patches/ that the root Cargo.toml builds. Give fuzz/Cargo.toml the \
@@ -262,6 +266,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
 }
 
 /// The fields of a package of `cargo metadata` that [`unpatched`] reads.
+#[derive(Clone, Copy)]
 struct Package<'a> {
     id: &'a str,
     name: &'a str,
@@ -470,6 +475,19 @@ mod tests {
                 "noq-proto",
                 "registry+https://github.com/rust-lang/crates.io-index#noq-proto@0.9.0",
                 "/r/noq-proto-0.9.0/Cargo.toml",
+            ),
+        ]);
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn passes_a_release_of_the_series_of_the_copy_beside_the_copy() {
+        let fuzz = fuzz(&[
+            package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml"),
+            package(
+                "noq-proto",
+                "registry+https://github.com/rust-lang/crates.io-index#noq-proto@1.5.0",
+                "/r/noq-proto-1.5.0/Cargo.toml",
             ),
         ]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
