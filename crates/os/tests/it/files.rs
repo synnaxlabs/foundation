@@ -326,12 +326,24 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
         for path in ["b/", "a"] {
             results.push(files.remove(Path::new(path)).await);
         }
+        // A create with a trailing slash: Linux gives `EISDIR`, macOS gives
+        // `ENOTDIR` for a file and `ENOENT` for no file.
+        #[cfg(target_os = "macos")]
+        let [file, none] = [
+            Err(io("a/", Operation::Open, 20)),
+            Err(Error::NotFound { path: "b/".into() }),
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let [file, none] = [
+            Err(io("a/", Operation::Open, 21)),
+            Err(io("b/", Operation::Open, 21)),
+        ];
         let expected = [
             Err(io("a/", Operation::Open, 20)),
             Err(io("a/.", Operation::Open, 20)),
             Err(io("a//", Operation::Open, 20)),
-            Err(io("a/", Operation::Open, 21)),
-            Err(io("b/", Operation::Open, 21)),
+            file,
+            none,
             Err(Error::NotFound { path: "b/".into() }),
             Err(Error::NotFound { path: "b/.".into() }),
             Err(io("a/", Operation::Remove, 20)),
@@ -341,6 +353,12 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
         assert_eq!(results, expected);
     });
 }
+
+/// What `unlink` of a directory gives.
+#[cfg(target_os = "macos")]
+const UNLINK_DIRECTORY: i32 = 1;
+#[cfg(not(target_os = "macos"))]
+const UNLINK_DIRECTORY: i32 = 21;
 
 #[test]
 fn a_path_of_the_data_directory_names_no_file() {
@@ -360,7 +378,7 @@ fn a_path_of_the_data_directory_names_no_file() {
             Err(io("./", Operation::Open, 21)),
             Err(io(".", Operation::Open, 21)),
             Err(io(".", Operation::Open, 21)),
-            Err(io(".", Operation::Remove, 21)),
+            Err(io(".", Operation::Remove, UNLINK_DIRECTORY)),
         ];
         assert_eq!(results, expected);
     });

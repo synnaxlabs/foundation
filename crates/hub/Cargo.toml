@@ -11,6 +11,7 @@ block = { path = "../block" }
 clock = { path = "../clock" }
 env = { path = "../env" }
 home = { path = "../home" }
+mesh = { path = "../mesh" }
 spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
@@ -18,6 +19,7 @@ wire = { path = "../wire" }
 
 [dev-dependencies]
 aws-lc-rs.workspace = true
+blob = { path = "../blob" }
 buffer = { path = "../buffer" }
 codec = { path = "../codec" }
 counting = { path = "../counting" }

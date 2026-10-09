@@ -107,7 +107,7 @@ impl Node {
     ///   last connect, from 49152. A listen conflicts only with other listens.
     /// - A peer sends at most `recv_buffer_bytes` past the bytes read, and a stream
     ///   holds at most `send_buffer_bytes` that its peer has not received. A write
-    ///   after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
+    ///   of bytes after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
     /// - TCP panics on a link with loss, on `delayed` sends, on a connect to an
     ///   address that no node has, and on a connect to a full backlog.
     /// - A socket half, a stream, or a listener panics when it polls outside the

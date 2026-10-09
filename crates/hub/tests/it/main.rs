@@ -23,6 +23,7 @@ use hub::reader::{self, Ended, Mode, Reader, Received};
 use hub::writer::{self, Writer};
 use spec::channel::{Data, Kind};
 use spec::data_type::DataType;
+use spec::definition::Definition;
 use types::authority::Authority;
 use types::channel::{self, Slot};
 use types::frame::key_set::Interner;
@@ -32,6 +33,7 @@ use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
 mod client;
+mod region;
 mod serve;
 
 /// The node key of the hub under test.
@@ -88,17 +90,20 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
+    /// The mesh of the node's region, which the hub holds too.
+    region: Option<mesh::Mesh>,
     hub: Hub,
 }
 
 impl Test {
-    /// A hub on a new ring of `node` with `layout` and a pool of `pool` bytes, whose
-    /// mesh clock does not run yet.
+    /// A hub on a new ring of `node` with `layout`, a pool of `pool` bytes, and
+    /// `region`, whose mesh clock does not run yet.
     async fn new(
         node: sim::node::Node,
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
+        region: Option<mesh::Mesh>,
     ) -> Self {
         let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -138,12 +143,13 @@ impl Test {
             node: NODE,
             time: mesh.clone(),
             entropy: node.entropy(),
+            mesh: region.clone(),
         });
         let channels: BTreeMap<_, _> = CHANNELS
             .into_iter()
             .map(|(key, channel, data_type, index)| {
                 let data_type = DataType::Sample(data_type);
-                (name(channel), spec_channel(key, data_type, index))
+                (name(channel), definition(key, data_type, index))
             })
             .collect();
         hub.define(&channels);
@@ -158,6 +164,7 @@ impl Test {
             paused,
             unsynced: Some(unsynced),
             commit,
+            region,
             hub,
         }
     }
@@ -311,7 +318,7 @@ fn unsynced_on<F>(
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let layout = buffer::Layout::new(area, body_max).expect("a ring");
-        main(Test::new(node, tasks, layout, POOL).await).await;
+        main(Test::new(node, tasks, layout, POOL, None).await).await;
     })
     .expect("the run ends");
 }
@@ -928,7 +935,7 @@ fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
 #[test]
 fn writes_and_reads_a_channel_of_a_variable_type() {
     run(19, |test| async move {
-        let text = spec_channel(6, DataType::Sample(Type::String), 1);
+        let text = definition(6, DataType::Sample(Type::String), 1);
         test.hub.define([(&name("text"), &text)]);
         let mut reader = test.reader(&["text"], Mode::Complete).await;
         let mut writer = test.writer("a", &["text"]).await;
@@ -968,7 +975,7 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
 #[test]
 fn refuses_a_string_sample_that_is_not_utf8() {
     run(19, |test| async move {
-        let text = spec_channel(6, DataType::Sample(Type::String), 1);
+        let text = definition(6, DataType::Sample(Type::String), 1);
         test.hub.define([(&name("text"), &text)]);
         let mut writer = test.writer("a", &["text"]).await;
         let now = test.now();
@@ -1021,7 +1028,7 @@ fn opens_a_writer_on_each_channel_once_with_its_index() {
 
 /// The channel `key` of the spec: an index when `index` is `key`, else a data channel
 /// of `data_type` on `index`.
-fn spec_channel(key: u128, data_type: DataType, index: u128) -> spec::channel::Channel {
+fn definition(key: u128, data_type: DataType, index: u128) -> Definition {
     let kind = if key == index {
         Kind::Index {
             error: None,
@@ -1031,10 +1038,10 @@ fn spec_channel(key: u128, data_type: DataType, index: u128) -> spec::channel::C
         let index = channel::Key::from_u128(index);
         Kind::Data(Data::new(index, None, data_type, None).expect("no unit"))
     };
-    spec::channel::Channel {
+    Definition::Channel(spec::channel::Channel {
         key: channel::Key::from_u128(key),
         kind,
-    }
+    })
 }
 
 /// Defines `channels`, each `(key, name, index)` and of `I64`, in one call to a new
@@ -1045,7 +1052,7 @@ fn define(channels: Vec<(u128, &'static str, u128)>) {
             .into_iter()
             .map(|(key, channel, index)| {
                 let data_type = DataType::Sample(I64);
-                (name(channel), spec_channel(key, data_type, index))
+                (name(channel), definition(key, data_type, index))
             })
             .collect();
         test.hub
@@ -1099,13 +1106,34 @@ fn defines_a_data_channel_before_its_index_in_one_call() {
     run(18, |test| async move {
         let (temp, time) = (name("plant.temp"), name("plant.time"));
         let channels = [
-            (&temp, &spec_channel(7, DataType::Sample(I64), 6)),
-            (&time, &spec_channel(6, DataType::Sample(STAMP), 6)),
+            (&temp, &definition(7, DataType::Sample(I64), 6)),
+            (&time, &definition(6, DataType::Sample(STAMP), 6)),
         ];
         test.hub.define(channels);
         let writer = test.writer("a", &["plant.temp"]).await;
         let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
         assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+    });
+}
+
+#[test]
+fn defines_each_channel_and_no_other_kind_of_definition() {
+    run(2, |test| async move {
+        let select = types::name::Selector::new(["plant.**"]).expect("a selector");
+        let policy = spec::time::Policy::new(select, spec::time::Peers::Voters);
+        let (other, temp, time) =
+            (name("plant.clock"), name("plant.temp"), name("plant.time"));
+        test.hub.define([
+            (&other, &Definition::Time(policy)),
+            (&temp, &definition(7, DataType::Sample(I64), 6)),
+            (&time, &definition(6, DataType::Sample(STAMP), 6)),
+        ]);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+        let writer = test.hub.writer(config("a", &["plant.clock"])).await;
+        let error = writer.expect_err("an error");
+        assert_eq!(error, writer::Error::Unknown(other));
     });
 }
 
@@ -1128,6 +1156,7 @@ fn defines_channels_with_edges_it_does_not_read() {
             kind: Kind::Data(data.expect("no unit")),
         };
         let (temp_name, time_name) = (name("plant.temp"), name("plant.time"));
+        let (temp, time) = (Definition::Channel(temp), Definition::Channel(time));
         test.hub.define([(&temp_name, &temp), (&time_name, &time)]);
         let writer = test.writer("a", &["plant.temp"]).await;
         let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
@@ -1145,7 +1174,7 @@ fn gives_a_writer_the_sample_type_of_each_data_channel() {
         let channels: BTreeMap<_, _> = types
             .into_iter()
             .map(|(key, channel, data_type)| {
-                (name(channel), spec_channel(key, data_type, 1))
+                (name(channel), definition(key, data_type, 1))
             })
             .collect();
         test.hub.define(&channels);

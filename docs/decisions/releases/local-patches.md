@@ -28,3 +28,17 @@
   how a test outside the copy checks each changed line, for the approval of the
   architect of `connector-opcua` (#435; `laptop.architect-2`, 2026-10-08T11:24:06Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
+  A change of a file that the copy command of a C copy generates (the thread-local
+  block of the open62541 `config.h`) is made again after each run of that command, as
+  a change of a release file is, and a test fails when it is lost (`laptop.architect-2`,
+  2026-10-08 20:03 UTC,
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912; this
+  text approved by `laptop.architect` at 2026-10-08 21:42 UTC,
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069607884, and
+  `laptop.architect-2` at 2026-10-08 21:24 UTC,
+  https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793).
+  Supersedes, for that block, "unchanged, plus the files that its build generates" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. The
+  same holds for the branch of that `config.h` that sets `UA_FLOAT_LITTLE_ENDIAN` on
+  little-endian 64-bit Arm, which Clang needs (`laptop.architect-2`, 2026-10-08 23:26
+  UTC, https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895).

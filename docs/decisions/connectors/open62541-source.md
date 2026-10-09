@@ -157,6 +157,34 @@
   2026-10-08 21:46 UTC, and the list for 64-bit Arm at 586e8089:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069858320,
   2026-10-08 22:00 UTC).
+  The copy builds with `UA_MULTITHREADING` 0, so it takes no `UA_LOCK` and links no
+  `pthread_mutex_*` symbol: each server and each client runs on one thread. Level 0
+  alone makes `UA_THREAD_LOCAL` empty, so two threads would share `UA_rng` and the
+  `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
+  So our change of `src_generated/open62541/config.h` moves its thread-local block out
+  of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
+  control, and the test of the archives fails on each `pthread_mutex_*` symbol: the
+  closed list holds none. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
+  2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
+  0 is the fix, as its own change" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211.
+  It is the one file outside the release that we edit by hand. Supersedes, for this
+  block, "never edited by hand. Our change (PR 3, `UA_rng`) edits only release files"
+  of https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. This
+  text approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069607884,
+  2026-10-08 21:42 UTC) and `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793,
+  2026-10-08 21:24 UTC).
+  A second change of that file adds a branch that sets `UA_FLOAT_LITTLE_ENDIAN` when
+  the target is 64-bit Arm and `__BYTE_ORDER__` is little-endian. Clang defines no
+  `__FLOAT_WORD_ORDER__`, so without it a Clang build for 64-bit Arm encodes each float
+  on the slow path of `pack754`, which links the `long double` helpers. On 64-bit Arm
+  the float order is the byte order. The test of `connector-opcua` that preprocesses
+  `config.h` for each target is its check. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895,
+  2026-10-08 23:26 UTC).
   The event loop of `connector-opcua` is a `UA_EventLoop` that `shim.c` fills and
   `event::Loop` owns, on one thread. Its monotonic time is the clock of `env`.
   `dateTime_now` gives that time counted from the Unix epoch, and the UTC offset is 0,

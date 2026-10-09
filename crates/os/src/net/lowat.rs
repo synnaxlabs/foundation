@@ -1,4 +1,5 @@
-//! `TCP_NOTSENT_LOWAT`, the one socket option `rustix` has no call for.
+//! `TCP_NOTSENT_LOWAT`, the one socket option `rustix` has no call for, and for tests
+//! `TCP_MAXSEG`.
 
 use std::ffi::c_int;
 use std::io;
@@ -42,6 +43,19 @@ pub(super) fn set(fd: BorrowedFd<'_>, bytes: usize) -> Result<(), Errno> {
 /// The bound of unsent bytes of `fd`.
 #[cfg(test)]
 pub(super) fn get(fd: BorrowedFd<'_>) -> Result<c_int, Errno> {
+    read(fd, TCP_NOTSENT_LOWAT)
+}
+
+/// The largest segment `fd` sends.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+pub(super) fn segment(fd: BorrowedFd<'_>) -> Result<c_int, Errno> {
+    read(fd, libc::TCP_MAXSEG)
+}
+
+/// The TCP option `name` of `fd`.
+#[cfg(test)]
+fn read(fd: BorrowedFd<'_>, name: c_int) -> Result<c_int, Errno> {
     let mut value: c_int = 0;
     let mut len = C_INT_LEN;
     // SAFETY: `fd` is open, and the pointers are those of `value` and `len`.
@@ -49,7 +63,7 @@ pub(super) fn get(fd: BorrowedFd<'_>) -> Result<c_int, Errno> {
         libc::getsockopt(
             fd.as_raw_fd(),
             libc::IPPROTO_TCP,
-            TCP_NOTSENT_LOWAT,
+            name,
             (&raw mut value).cast(),
             &raw mut len,
         )
