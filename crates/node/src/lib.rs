@@ -741,10 +741,10 @@ impl Serve {
     /// transport or a group that ends it goes into `failed` before it drops the tasks
     /// given that still run. Before it returns, it drops the tasks, the hub, `home`,
     /// `guard`, each session and stream future, the operations on the mesh, the mesh,
-    /// and the transport, and waits for each task of the mesh to end, with a mesh, and
-    /// for the transport to free the port. Runs no task and takes no session when a
-    /// shard did not open, or when the identity did not load or the mesh did not open,
-    /// which goes into `failed`.
+    /// and the transport, and waits for each task of the mesh and of a remote reader
+    /// of the hub to end, with a mesh, and for the transport to free the port. Runs no
+    /// task and takes no session when a shard did not open, or when the identity did
+    /// not load or the mesh did not open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -780,7 +780,8 @@ impl Serve {
         let freed = transport.ended();
         let (inbox, time) = (self.inbox, self.time);
         // Each part that holds the transport or the node's stop drops as this block
-        // ends, on each path, so that the port is freed before `lock` drops.
+        // ends, on each path, or is a hub task of a remote reader, which ends at its
+        // next poll after its reader drops. So the port is freed before `lock` drops.
         let served = async move {
             let mesh = match mesh {
                 Ok(mesh) => mesh,
