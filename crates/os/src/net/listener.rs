@@ -96,9 +96,9 @@ impl Drop for Listener {
     expect(unused_variables, reason = "macOS has no call that stops the listen")
 )]
 fn stop(fd: BorrowedFd<'_>) {
+    // The close follows, so nothing can act on a failure here.
     #[cfg(target_os = "linux")]
-    rustix::net::shutdown(fd, rustix::net::Shutdown::Read)
-        .expect("a listening socket shuts down");
+    let _stopped = rustix::net::shutdown(fd, rustix::net::Shutdown::Read);
 }
 
 /// Registers `listener` with the I/O driver of this thread. A failed registration
@@ -232,6 +232,7 @@ mod tests {
     }
 
     /// A child that another thread spawns holds a copy of each socket until its exec.
+    /// No public call gives the descriptor for the copy.
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs the shutdown of a listener")]
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
@@ -252,7 +253,8 @@ mod tests {
         );
     }
 
-    /// The runtime of the thread shut down, so the registration fails.
+    /// The runtime of the thread shut down, so the registration fails. No public call
+    /// gives the descriptor for the copy.
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs the shutdown of a listener")]
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
