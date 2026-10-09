@@ -342,6 +342,69 @@ fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
     });
 }
 
+/// `planned` with an add of `definition` at `at`, made from its add at `plc`.
+fn added(
+    planned: &config::plan::Plan,
+    at: Name,
+    definition: Definition,
+) -> config::plan::Plan {
+    let mut planned = planned.clone();
+    let mut change = planned.changes[&name("plc")].clone();
+    let entry = change.new.as_mut().expect("an add");
+    entry.definition = config::Definition::Spec(definition);
+    planned.changes.insert(at, change);
+    planned
+}
+
+#[test]
+fn refuses_a_plan_that_breaks_a_rule_on_names_or_private_keys() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let entry = planned.changes[&name("plc")].new.as_ref().expect("an add");
+        let config::Definition::Spec(plc) = entry.definition.clone() else {
+            panic!("plc is in the spec");
+        };
+        let holders = vec![PrivateKey([8; 32]).public()];
+        let subject = Definition::Subject(Subject::new(holders).expect("a subject"));
+        let at = Kind::Subject.key("plc").expect("a tree key");
+        let cases = [
+            (
+                rogue(&planned, "opcua", "b3BlbnNzaC1rZXktdjEA"),
+                problem(
+                    "config.private-key",
+                    "the value is a private key, which must never be in a file",
+                    "Remove the private key from this file now, and use the one line \
+                     of its `.pub` file",
+                ),
+            ),
+            (
+                added(&planned, name("PLC"), plc),
+                problem(
+                    "config.duplicate-name",
+                    "the name \"plc\" repeats the earlier `connector` name \"PLC\"",
+                    "Give each `connector` block a name that differs by more than case",
+                ),
+            ),
+            (
+                added(&planned, at, subject),
+                problem(
+                    "config.subject-is-connector",
+                    "the subject \"plc\" has the name of a connector",
+                    "Rename the subject or the connector",
+                ),
+            ),
+        ];
+        for (planned, problem) in cases {
+            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+                .await
+                .expect_err("a plan that check refuses");
+            assert_eq!(error, Error::Config(vec![problem]));
+            assert_eq!(mesh.pointer(), base);
+        }
+    });
+}
+
 /// A kind that refuses each config.
 struct Refuser;
 
