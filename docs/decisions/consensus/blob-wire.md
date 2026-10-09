@@ -12,8 +12,7 @@
   starts a new message, and a chunk of 0 bytes has no body message. Each decoder
   (`wire::blob::Server` for the requester's messages, `wire::blob::Requester` for the
   server's) takes from its caller the most bytes a chunk may have, refuses a longer
-  chunk at its length field, and refuses a body message longer than the rest of the
-  body; `body` gives where in the chunk the next body message starts. The receiver, not
+  chunk at its length field. The receiver, not
   `wire`, checks the digest over the whole chunk. Stop codes: 16 `MISMATCH` (the bytes
   do not hash to the digest), 17 `TOO_LARGE` (the chunk is longer than the largest block
   of the node), 18 `FULL` (a put would leave the disk under the free floor of the
@@ -23,7 +22,7 @@
   queue of its open requests, and a reply that does not answer the oldest open request
   is `MALFORMED`. Each reply names its digest. The check lives in `blob` (#1229), and
   `wire` keeps no queue. The sides are `Requester` and `Server`, and the decoded
-  messages `FromRequester` and `FromServer`. Lost: a count field in the get (the length
+  messages `FromRequester` and `Reply`. Lost: a count field in the get (the length
   gives it); a run state for the get as the hub keys have (a get is one message); a
   length prefix on each body message (the stream frames it); a digest check in `wire`
   (the decoder sees parts, and the receiver has the whole chunk). Decided by
@@ -55,3 +54,15 @@
   2026-10-08T06:29:55Z):
   https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053784863 and
   https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053878785.
+  Each decoder reads only heads. `Put::body` and `Reply::body` give the
+  `wire::blob::Body` that the caller counts the body with: `take` refuses an empty
+  message and a message longer than the rest, `remain` gives the bytes to come (0 for
+  absent and stored, and the next message is a head), and `end` gives
+  `Error::Unfinished` (`MALFORMED`) when the stream ends with bytes to come. This is the
+  shape of CLIENT HELLO, and the counter is one crate-private type in `wire::common`
+  that the hub bodies also use. Supersedes `FromRequester::Body`, `FromServer`, and
+  `body` of each decoder. Lost: decoders that give a head or a body (a head-or-body enum
+  where the caller knows which comes, lost in CLIENT HELLO); one public body type for
+  `hub` and `blob` (each caller matches a third error type, and the texts of
+  `hub::Error` change). Decided by `laptop.architect` (2026-10-08T16:52:55Z):
+  https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697.

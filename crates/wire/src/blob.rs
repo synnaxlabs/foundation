@@ -11,10 +11,11 @@
 //! No message of a body is empty, and the body starts a new message. A chunk of 0
 //! bytes has no body message.
 //!
-//! [`Server`] decodes the messages from the requester, and [`Requester`] those from the
-//! server. Each takes from its caller the most bytes a chunk may have, refuses a longer
-//! chunk at its head, and checks that a body holds exactly the bytes of its head. The
-//! receiver checks the digest over the whole chunk.
+//! [`Server`] decodes the heads from the requester, and [`Requester`] those from the
+//! server. Each takes from its caller the most bytes a chunk may have, and refuses a
+//! longer chunk at its head. The caller counts each body with the [`Body`] of its
+//! head, which checks that the body holds exactly the bytes of the head. The receiver
+//! checks the digest over the whole chunk.
 //!
 //! A message that a decoder refuses stops the stream with [`Error::code`] of its error.
 //!
@@ -30,7 +31,7 @@ use std::fmt;
 
 use types::digest::Digest;
 
-use crate::common::{Fields, Writer};
+use crate::common::{self, Fields, Writer};
 use crate::header;
 
 const GET: u8 = 1;
@@ -148,6 +149,12 @@ impl Put {
         fields.end()?;
         Ok(Self { digest, len })
     }
+
+    /// The body that follows this put.
+    #[must_use]
+    pub fn body(&self) -> Body {
+        Body::new(self.len)
+    }
 }
 
 /// A message from the server to the requester.
@@ -206,6 +213,16 @@ impl Reply {
         }
     }
 
+    /// The body that follows this reply: the bytes of a chunk, and 0 bytes for absent
+    /// and stored.
+    #[must_use]
+    pub fn body(&self) -> Body {
+        match *self {
+            Self::Chunk { len, .. } => Body::new(len),
+            Self::Absent { .. } | Self::Stored { .. } => Body::new(0),
+        }
+    }
+
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
@@ -227,183 +244,128 @@ impl Reply {
     }
 }
 
-/// The decoder at the server: it takes each message from the requester, in order, and
-/// checks the chunk limit and the body of each put.
+/// The decoder at the server: it takes each head from the requester and checks the
+/// chunk limit of each put.
 #[derive(Debug)]
 pub struct Server {
-    transit: Transit,
+    chunk_bytes_max: usize,
 }
 
-/// A message from the requester, decoded.
+/// A head from the requester, decoded.
 #[derive(Clone, Debug)]
 pub enum FromRequester<'m> {
     /// The digests the requester wants.
     Get(get::Digests<'m>),
-    /// A chunk to store. Its body follows, unless `len` is 0.
+    /// A chunk to store. Its body follows, unless `len` is 0: count it with
+    /// [`Put::body`].
     Put(Put),
-    /// One message of the body of the last put. It starts where [`Server::body`] was
-    /// before the call.
-    Body {
-        /// The bytes of the message.
-        bytes: &'m [u8],
-        /// The body ends with this message.
-        last: bool,
-    },
 }
 
 impl Server {
     /// A decoder that takes a chunk of at most `chunk_bytes_max` bytes.
     #[must_use]
     pub fn new(chunk_bytes_max: usize) -> Self {
-        Self {
-            transit: Transit::new(chunk_bytes_max),
-        }
+        Self { chunk_bytes_max }
     }
 
-    /// Decodes the next message from the requester.
+    /// Decodes the next head from the requester.
     ///
     /// # Errors
     ///
-    /// The [`Error`] of a message that does not decode, or that breaks the session:
-    /// [`Error::TooLarge`] for a put longer than the limit, and [`Error::Body`] for a
-    /// message longer than the rest of the body. A message of a body has no kind, so a
-    /// message where the body continues is read as one. The caller then stops the
-    /// session with [`Error::code`].
-    pub fn decode<'m>(
-        &mut self,
-        message: &'m [u8],
-    ) -> Result<FromRequester<'m>, Error> {
-        if self.transit.in_body() {
-            let (bytes, last) = self.transit.part(message)?;
-            return Ok(FromRequester::Body { bytes, last });
-        }
+    /// The [`Error`] of a message that does not decode, and [`Error::TooLarge`] for a
+    /// put longer than the limit. The caller then stops the session with
+    /// [`Error::code`].
+    pub fn decode<'m>(&self, message: &'m [u8]) -> Result<FromRequester<'m>, Error> {
         let (&kind, rest) = message.split_first().ok_or(Error::Empty)?;
         match kind {
             GET => Ok(FromRequester::Get(get::decode(rest, message.len())?)),
             PUT => {
                 let put = Put::fields(rest, message.len())?;
-                self.transit.start(put.len)?;
+                fits(put.len, self.chunk_bytes_max)?;
                 Ok(FromRequester::Put(put))
             }
             kind => Err(Error::Kind { kind }),
         }
     }
-
-    /// Where in the chunk the next message starts, when the next message is body
-    /// bytes. Read it before [`Server::decode`] takes that message.
-    #[must_use]
-    pub fn body(&self) -> Option<usize> {
-        self.transit.body()
-    }
 }
 
-/// The decoder at the requester: it takes each message from the server, in order, and
-/// checks the chunk limit and the body of each chunk.
+/// The decoder at the requester: it takes each head from the server and checks the
+/// chunk limit of each chunk.
 #[derive(Debug)]
 pub struct Requester {
-    transit: Transit,
-}
-
-/// A message from the server, decoded.
-#[derive(Clone, Debug)]
-pub enum FromServer<'m> {
-    /// A reply. The body of a chunk follows, unless its `len` is 0.
-    Reply(Reply),
-    /// One message of the body of the last chunk. It starts where [`Requester::body`]
-    /// was before the call.
-    Body {
-        /// The bytes of the message.
-        bytes: &'m [u8],
-        /// The body ends with this message.
-        last: bool,
-    },
+    chunk_bytes_max: usize,
 }
 
 impl Requester {
     /// A decoder that takes a chunk of at most `chunk_bytes_max` bytes.
     #[must_use]
     pub fn new(chunk_bytes_max: usize) -> Self {
-        Self {
-            transit: Transit::new(chunk_bytes_max),
-        }
+        Self { chunk_bytes_max }
     }
 
-    /// Decodes the next message from the server.
+    /// Decodes the next reply from the server. The body of a chunk follows, unless
+    /// its `len` is 0: count it with [`Reply::body`].
     ///
     /// # Errors
     ///
-    /// The [`Error`] of a message that does not decode, or that breaks the session:
-    /// [`Error::TooLarge`] for a chunk longer than the limit, and [`Error::Body`] for
-    /// a message longer than the rest of the body. A message of a body has no kind, so
-    /// a message where the body continues is read as one. The caller then stops the
-    /// session with [`Error::code`].
-    pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<FromServer<'m>, Error> {
-        if self.transit.in_body() {
-            let (bytes, last) = self.transit.part(message)?;
-            return Ok(FromServer::Body { bytes, last });
-        }
+    /// The [`Error`] of a message that does not decode, and [`Error::TooLarge`] for a
+    /// chunk longer than the limit. The caller then stops the session with
+    /// [`Error::code`].
+    pub fn decode(&self, message: &[u8]) -> Result<Reply, Error> {
         let reply = Reply::decode(message)?;
         if let Reply::Chunk { len, .. } = reply {
-            self.transit.start(len)?;
+            fits(len, self.chunk_bytes_max)?;
         }
-        Ok(FromServer::Reply(reply))
-    }
-
-    /// Where in the chunk the next message starts, when the next message is body
-    /// bytes. Read it before [`Requester::decode`] takes that message.
-    #[must_use]
-    pub fn body(&self) -> Option<usize> {
-        self.transit.body()
+        Ok(reply)
     }
 }
 
-/// The chunk limit and the body in transit, which both decoders keep.
-#[derive(Debug)]
-struct Transit {
-    chunk_bytes_max: usize,
-    len: usize,
-    remain: usize,
-}
-
-impl Transit {
-    fn new(chunk_bytes_max: usize) -> Self {
-        Self {
-            chunk_bytes_max,
-            len: 0,
-            remain: 0,
-        }
-    }
-
-    /// Starts the body of a chunk of `len` bytes, after its head.
-    fn start(&mut self, len: u32) -> Result<(), Error> {
-        let max = self.chunk_bytes_max;
-        let fits = usize::try_from(len).ok().filter(|&len| len <= max);
-        self.len = fits.ok_or(Error::TooLarge { len, max })?;
-        self.remain = self.len;
+/// Checks that a chunk of `len` bytes is at most `max`.
+fn fits(len: u32, max: usize) -> Result<(), Error> {
+    if usize::try_from(len).is_ok_and(|len| len <= max) {
         Ok(())
+    } else {
+        Err(Error::TooLarge { len, max })
+    }
+}
+
+/// The rest of the body of one put or chunk.
+#[derive(Debug)]
+pub struct Body(common::Body);
+
+impl Body {
+    fn new(len: u32) -> Self {
+        let len = usize::try_from(len).expect("invariant: a usize holds a u32");
+        Self(common::Body::new(len))
     }
 
-    fn in_body(&self) -> bool {
-        self.remain > 0
+    /// Takes the next message of the body and gives its bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`] for an empty message, and [`Error::Body`] for more bytes than
+    /// remain.
+    pub fn take<'m>(&mut self, message: &'m [u8]) -> Result<&'m [u8], Error> {
+        self.0.take(message)?;
+        Ok(message)
     }
 
-    /// Takes `message` as the next part of the body.
-    fn part<'m>(&mut self, message: &'m [u8]) -> Result<(&'m [u8], bool), Error> {
-        let len = message.len();
-        if len == 0 {
-            return Err(Error::Empty);
+    /// The bytes that remain. The body ended at 0, and the next message is a head.
+    #[must_use]
+    pub fn remain(&self) -> usize {
+        self.0.remain()
+    }
+
+    /// Checks that the body ended, when its stream ends.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unfinished`] when bytes of the body remain.
+    pub fn end(&self) -> Result<(), Error> {
+        match self.0.remain() {
+            0 => Ok(()),
+            remain => Err(Error::Unfinished { remain }),
         }
-        let remain = self.remain;
-        self.remain = remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
-        Ok((message, self.remain == 0))
-    }
-
-    fn body(&self) -> Option<usize> {
-        self.in_body().then(|| {
-            self.len
-                .checked_sub(self.remain)
-                .expect("invariant: the rest of the body is no longer than the body")
-        })
     }
 }
 
@@ -437,6 +399,11 @@ pub enum Error {
         /// The bytes that remain in the body.
         remain: usize,
     },
+    /// The stream ended before the body of its last put or chunk.
+    Unfinished {
+        /// The bytes of the body that did not come.
+        remain: usize,
+    },
 }
 
 impl Error {
@@ -450,7 +417,8 @@ impl Error {
             Self::Empty
             | Self::Kind { .. }
             | Self::Length { .. }
-            | Self::Body { .. } => header::MALFORMED,
+            | Self::Body { .. }
+            | Self::Unfinished { .. } => header::MALFORMED,
         }
     }
 }
@@ -475,11 +443,24 @@ impl fmt::Display for Error {
                 f,
                 "the body message has {len} bytes, and {remain} remain in the body"
             ),
+            Self::Unfinished { remain } => write!(
+                f,
+                "the stream ended with {remain} bytes of its body to come"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<common::Refusal> for Error {
+    fn from(refusal: common::Refusal) -> Self {
+        match refusal {
+            common::Refusal::Empty => Self::Empty,
+            common::Refusal::Over { len, remain } => Self::Body { len, remain },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -539,32 +520,35 @@ mod tests {
         Get(Vec<Digest>),
         Put(Put),
         Reply(Reply),
-        Body(Vec<u8>, bool),
     }
 
-    fn from_requester(server: &mut Server, message: &[u8]) -> Result<Event, Error> {
+    fn from_requester(server: &Server, message: &[u8]) -> Result<Event, Error> {
         server.decode(message).map(|event| match event {
             FromRequester::Get(digests) => Event::Get(digests.collect()),
             FromRequester::Put(put) => Event::Put(put),
-            FromRequester::Body { bytes, last } => Event::Body(bytes.to_vec(), last),
         })
     }
 
-    fn from_server(requester: &mut Requester, message: &[u8]) -> Result<Event, Error> {
-        requester.decode(message).map(|event| match event {
-            FromServer::Reply(reply) => Event::Reply(reply),
-            FromServer::Body { bytes, last } => Event::Body(bytes.to_vec(), last),
-        })
+    fn from_server(requester: &Requester, message: &[u8]) -> Result<Event, Error> {
+        requester.decode(message).map(Event::Reply)
     }
 
-    /// The event of `message` at a server between puts.
+    /// The event of `message` at a server.
     fn server(message: &[u8]) -> Result<Event, Error> {
-        from_requester(&mut Server::new(MAX), message)
+        from_requester(&Server::new(MAX), message)
     }
 
-    /// The event of `message` at a requester between chunks.
+    /// The event of `message` at a requester.
     fn requester(message: &[u8]) -> Result<Event, Error> {
-        from_server(&mut Requester::new(MAX), message)
+        from_server(&Requester::new(MAX), message)
+    }
+
+    /// The put that `server` decodes from `message`.
+    fn decode_put(server: &Server, message: &[u8]) -> Put {
+        match server.decode(message) {
+            Ok(FromRequester::Put(put)) => put,
+            other => panic!("the put did not decode: {other:?}"),
+        }
     }
 
     /// `decode` gives [`Error::Length`] for a message of `kind` with each length in
@@ -614,8 +598,7 @@ mod tests {
         #[test]
         fn counts_its_digests() {
             let bytes = encode_get(&[digest(1), digest(2)]);
-            let mut server = Server::new(MAX);
-            match server.decode(&bytes) {
+            match Server::new(MAX).decode(&bytes) {
                 Ok(FromRequester::Get(digests)) => assert_eq!(digests.len(), 2),
                 other => panic!("the get did not decode: {other:?}"),
             }
@@ -656,113 +639,77 @@ mod tests {
         }
 
         #[test]
-        fn decodes_a_put_and_its_body() {
-            let mut server = Server::new(MAX);
-            assert_eq!(server.body(), None);
-            let bytes = encode_put(put(7, 13));
+        fn decodes_a_put_and_counts_its_body() {
+            let server = Server::new(MAX);
+            let decoded = decode_put(&server, &encode_put(put(7, 13)));
+            assert_eq!(decoded, put(7, 13));
+            let mut body = decoded.body();
+            assert_eq!(body.remain(), 13);
+            assert_eq!(body.take(&[1; 9]), Ok([1; 9].as_slice()));
+            assert_eq!(body.remain(), 4);
+            assert_eq!(body.take(&[2; 4]), Ok([2; 4].as_slice()));
+            assert_eq!(body.remain(), 0);
+            assert_eq!(body.end(), Ok(()));
             assert_eq!(
-                from_requester(&mut server, &bytes),
-                Ok(Event::Put(put(7, 13)))
-            );
-            assert_eq!(server.body(), Some(0));
-            assert_eq!(
-                from_requester(&mut server, &[1; 9]),
-                Ok(Event::Body(vec![1; 9], false))
-            );
-            assert_eq!(server.body(), Some(9));
-            assert_eq!(
-                from_requester(&mut server, &[2; 4]),
-                Ok(Event::Body(vec![2; 4], true))
-            );
-            assert_eq!(server.body(), None);
-            let bytes = encode_put(put(8, 1));
-            assert_eq!(
-                from_requester(&mut server, &bytes),
+                from_requester(&server, &encode_put(put(8, 1))),
                 Ok(Event::Put(put(8, 1)))
             );
         }
 
         #[test]
         fn takes_a_body_in_one_message() {
-            let mut server = Server::new(MAX);
-            server
-                .decode(&encode_put(put(7, 3)))
-                .expect("the put decodes");
-            assert_eq!(
-                from_requester(&mut server, &[1, 2, 3]),
-                Ok(Event::Body(vec![1, 2, 3], true))
-            );
-            assert_eq!(server.body(), None);
+            let mut body = put(7, 3).body();
+            assert_eq!(body.take(&[1, 2, 3]), Ok([1, 2, 3].as_slice()));
+            assert_eq!(body.remain(), 0);
         }
 
         #[test]
         fn a_put_of_0_bytes_has_no_body() {
-            let mut server = Server::new(MAX);
-            assert_eq!(
-                from_requester(&mut server, &encode_put(put(7, 0))),
-                Ok(Event::Put(put(7, 0)))
-            );
-            assert_eq!(server.body(), None);
+            let server = Server::new(MAX);
+            let decoded = decode_put(&server, &encode_put(put(7, 0)));
+            assert_eq!(decoded.body().remain(), 0);
+            assert_eq!(decoded.body().end(), Ok(()));
             let get = encode_get(&[digest(1)]);
             assert_eq!(
-                from_requester(&mut server, &get),
+                from_requester(&server, &get),
                 Ok(Event::Get(vec![digest(1)]))
             );
         }
 
         #[test]
         fn takes_a_chunk_at_the_limit_and_refuses_one_over_it() {
-            let mut server = Server::new(16);
+            let server = Server::new(16);
             assert_eq!(
-                from_requester(&mut server, &encode_put(put(7, 16))),
+                from_requester(&server, &encode_put(put(7, 16))),
                 Ok(Event::Put(put(7, 16)))
             );
             assert_eq!(
-                from_requester(&mut server, &[0; 16]),
-                Ok(Event::Body(vec![0; 16], true))
-            );
-            assert_eq!(
-                from_requester(&mut server, &encode_put(put(7, 17))),
+                from_requester(&server, &encode_put(put(7, 17))),
                 Err(Error::TooLarge { len: 17, max: 16 })
             );
-            assert_eq!(server.body(), None);
         }
 
         #[test]
         fn refuses_a_body_message_past_the_rest() {
-            let mut server = Server::new(MAX);
-            server
-                .decode(&encode_put(put(7, 4)))
-                .expect("the put decodes");
-            server.decode(&[0; 2]).expect("the first part decodes");
-            assert_eq!(
-                from_requester(&mut server, &[0; 3]),
-                Err(Error::Body { len: 3, remain: 2 })
-            );
-            assert_eq!(server.body(), Some(2));
+            let mut body = put(7, 4).body();
+            body.take(&[0; 2]).expect("the first part fits");
+            assert_eq!(body.take(&[0; 3]), Err(Error::Body { len: 3, remain: 2 }));
+            assert_eq!(body.remain(), 2);
         }
 
         #[test]
         fn refuses_an_empty_body_message() {
-            let mut server = Server::new(MAX);
-            server
-                .decode(&encode_put(put(7, 4)))
-                .expect("the put decodes");
-            assert_eq!(from_requester(&mut server, &[]), Err(Error::Empty));
-            assert_eq!(server.body(), Some(0));
+            let mut body = put(7, 4).body();
+            assert_eq!(body.take(&[]), Err(Error::Empty));
+            assert_eq!(body.remain(), 4);
         }
 
         #[test]
-        fn reads_a_head_in_a_body_as_body_bytes() {
-            let mut server = Server::new(MAX);
-            server
-                .decode(&encode_put(put(7, 40)))
-                .expect("the put decodes");
+        fn takes_a_head_in_a_body_as_body_bytes() {
+            let mut body = put(7, 40).body();
             let head = encode_put(put(8, 1));
-            assert_eq!(
-                from_requester(&mut server, &head),
-                Ok(Event::Body(head.clone(), false))
-            );
+            assert_eq!(body.take(&head), Ok(head.as_slice()));
+            assert_eq!(body.remain(), 3);
         }
 
         #[test]
@@ -807,83 +754,61 @@ mod tests {
         }
 
         #[test]
-        fn decodes_a_chunk_and_its_body() {
-            let mut requester = Requester::new(MAX);
-            assert_eq!(requester.body(), None);
-            let bytes = encode_reply(chunk(7, 13));
-            assert_eq!(
-                from_server(&mut requester, &bytes),
-                Ok(Event::Reply(chunk(7, 13)))
-            );
-            assert_eq!(requester.body(), Some(0));
-            assert_eq!(
-                from_server(&mut requester, &[1; 9]),
-                Ok(Event::Body(vec![1; 9], false))
-            );
-            assert_eq!(requester.body(), Some(9));
-            assert_eq!(
-                from_server(&mut requester, &[2; 4]),
-                Ok(Event::Body(vec![2; 4], true))
-            );
-            assert_eq!(requester.body(), None);
+        fn decodes_a_chunk_and_counts_its_body() {
+            let requester = Requester::new(MAX);
+            let reply = requester
+                .decode(&encode_reply(chunk(7, 13)))
+                .expect("the chunk decodes");
+            assert_eq!(reply, chunk(7, 13));
+            let mut body = reply.body();
+            assert_eq!(body.take(&[1; 9]), Ok([1; 9].as_slice()));
+            assert_eq!(body.remain(), 4);
+            assert_eq!(body.take(&[2; 4]), Ok([2; 4].as_slice()));
+            assert_eq!(body.remain(), 0);
         }
 
         #[test]
         fn absent_and_stored_have_no_body() {
-            let mut requester = Requester::new(MAX);
+            let requester = Requester::new(MAX);
             for reply in [
                 Reply::Absent { digest: digest(1) },
                 Reply::Stored { digest: digest(2) },
                 chunk(3, 0),
             ] {
                 assert_eq!(
-                    from_server(&mut requester, &encode_reply(reply)),
+                    from_server(&requester, &encode_reply(reply)),
                     Ok(Event::Reply(reply))
                 );
-                assert_eq!(requester.body(), None);
+                assert_eq!(reply.body().remain(), 0);
             }
         }
 
         #[test]
         fn takes_a_chunk_at_the_limit_and_refuses_one_over_it() {
-            let mut requester = Requester::new(16);
+            let requester = Requester::new(16);
             assert_eq!(
-                from_server(&mut requester, &encode_reply(chunk(7, 16))),
+                from_server(&requester, &encode_reply(chunk(7, 16))),
                 Ok(Event::Reply(chunk(7, 16)))
             );
             assert_eq!(
-                from_server(&mut requester, &[0; 16]),
-                Ok(Event::Body(vec![0; 16], true))
-            );
-            assert_eq!(
-                from_server(&mut requester, &encode_reply(chunk(7, 17))),
+                from_server(&requester, &encode_reply(chunk(7, 17))),
                 Err(Error::TooLarge { len: 17, max: 16 })
             );
-            assert_eq!(requester.body(), None);
         }
 
         #[test]
         fn refuses_a_body_message_past_the_rest() {
-            let mut requester = Requester::new(MAX);
-            requester
-                .decode(&encode_reply(chunk(7, 4)))
-                .expect("the chunk decodes");
-            requester.decode(&[0; 2]).expect("the first part decodes");
-            assert_eq!(
-                from_server(&mut requester, &[0; 3]),
-                Err(Error::Body { len: 3, remain: 2 })
-            );
-            assert_eq!(requester.body(), Some(2));
+            let mut body = chunk(7, 4).body();
+            body.take(&[0; 2]).expect("the first part fits");
+            assert_eq!(body.take(&[0; 3]), Err(Error::Body { len: 3, remain: 2 }));
+            assert_eq!(body.remain(), 2);
         }
 
         #[test]
         fn refuses_an_empty_body_message() {
-            let mut requester = Requester::new(MAX);
-            requester
-                .decode(&encode_reply(chunk(7, 4)))
-                .expect("the chunk decodes");
-            assert_eq!(from_server(&mut requester, &[]), Err(Error::Empty));
-            assert_eq!(requester.body(), Some(0));
+            let mut body = chunk(7, 4).body();
+            assert_eq!(body.take(&[]), Err(Error::Empty));
+            assert_eq!(body.remain(), 4);
         }
 
         #[test]
@@ -910,6 +835,42 @@ mod tests {
         }
     }
 
+    mod body {
+        use super::*;
+
+        #[test]
+        fn ends_unfinished_while_bytes_remain() {
+            let mut body = chunk(7, 4).body();
+            assert_eq!(body.end(), Err(Error::Unfinished { remain: 4 }));
+            body.take(&[0; 3]).expect("the first part fits");
+            assert_eq!(body.end(), Err(Error::Unfinished { remain: 1 }));
+            body.take(&[0]).expect("the last part fits");
+            assert_eq!(body.end(), Ok(()));
+        }
+
+        #[test]
+        fn refuses_a_message_after_the_end() {
+            let mut body = put(7, 2).body();
+            body.take(&[0; 2]).expect("the body fits");
+            assert_eq!(body.take(&[0]), Err(Error::Body { len: 1, remain: 0 }));
+            assert_eq!(body.end(), Ok(()));
+        }
+
+        #[test]
+        fn absent_and_stored_end_at_once() {
+            for reply in [
+                Reply::Absent { digest: digest(1) },
+                Reply::Stored { digest: digest(2) },
+            ] {
+                assert_eq!(reply.body().end(), Ok(()));
+                assert_eq!(
+                    reply.body().take(&[0]),
+                    Err(Error::Body { len: 1, remain: 0 })
+                );
+            }
+        }
+    }
+
     #[test]
     fn pins_the_stop_codes() {
         assert_eq!((MISMATCH, TOO_LARGE, FULL), (16, 17, 18));
@@ -926,6 +887,7 @@ mod tests {
                 len: 11,
                 remain: 10,
             },
+            Error::Unfinished { remain: 3 },
         ];
         for error in errors {
             let code = match error {
@@ -933,7 +895,8 @@ mod tests {
                 Error::Empty
                 | Error::Kind { .. }
                 | Error::Length { .. }
-                | Error::Body { .. } => 2,
+                | Error::Body { .. }
+                | Error::Unfinished { .. } => 2,
             };
             assert_eq!(error.code(), code, "{error}");
         }
@@ -961,6 +924,10 @@ mod tests {
                     remain: 10,
                 },
                 "the body message has 11 bytes, and 10 remain in the body",
+            ),
+            (
+                Error::Unfinished { remain: 3 },
+                "the stream ended with 3 bytes of its body to come",
             ),
         ];
         for (error, text) in cases {
@@ -1000,18 +967,16 @@ mod tests {
         #[test]
         fn round_trips_a_put(digest in any_digest(), len in any::<u32>()) {
             let put = Put { digest, len };
-            let mut server = Server::new(usize::MAX);
             prop_assert_eq!(
-                from_requester(&mut server, &encode_put(put)),
+                from_requester(&Server::new(usize::MAX), &encode_put(put)),
                 Ok(Event::Put(put))
             );
         }
 
         #[test]
         fn round_trips_a_reply(reply in reply()) {
-            let mut requester = Requester::new(usize::MAX);
             prop_assert_eq!(
-                from_server(&mut requester, &encode_reply(reply)),
+                from_server(&Requester::new(usize::MAX), &encode_reply(reply)),
                 Ok(Event::Reply(reply))
             );
         }
@@ -1026,19 +991,31 @@ mod tests {
                 Ok(FromRequester::Put(put)) => {
                     prop_assert_eq!(&encode_put(put), &bytes);
                 }
-                Ok(FromRequester::Body { .. }) => {
-                    prop_assert!(false, "a body with no put");
-                }
                 Err(_) => {}
             }
-            match Requester::new(usize::MAX).decode(&bytes) {
-                Ok(FromServer::Reply(reply)) => {
-                    prop_assert_eq!(&encode_reply(reply), &bytes);
-                }
-                Ok(FromServer::Body { .. }) => {
-                    prop_assert!(false, "a body with no chunk");
-                }
-                Err(_) => {}
+            if let Ok(reply) = Requester::new(usize::MAX).decode(&bytes) {
+                prop_assert_eq!(&encode_reply(reply), &bytes);
+            }
+        }
+
+        #[test]
+        fn counts_a_body_cut_in_any_parts(
+            parts in proptest::collection::vec(1..40_usize, 1..8),
+        ) {
+            let mut rest: usize = parts.iter().sum();
+            let len = u32::try_from(rest).expect("the body fits a u32");
+            let mut body = chunk(7, len).body();
+            for (byte, &part) in (0..).zip(&parts) {
+                let message = vec![byte; part];
+                prop_assert_eq!(body.take(&message), Ok(message.as_slice()));
+                rest = rest.checked_sub(part).expect("each part is in the body");
+                prop_assert_eq!(body.remain(), rest);
+                let end = if rest == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::Unfinished { remain: rest })
+                };
+                prop_assert_eq!(body.end(), end);
             }
         }
     }

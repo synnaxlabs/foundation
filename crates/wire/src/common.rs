@@ -151,12 +151,12 @@ mod tests {
         ) {
             let len = parts.iter().sum();
             let mut body = Body::new(len);
-            let mut at = 0;
-            for (i, &part) in parts.iter().enumerate() {
-                prop_assert_eq!(body.at(), at);
-                prop_assert_eq!(body.take(&vec![0; part]), Ok(i == parts.len() - 1));
-                at += part;
-                prop_assert_eq!(body.remain(), len - at);
+            let mut rest = len;
+            for &part in &parts {
+                prop_assert_eq!(body.at(), len.checked_sub(rest).expect("rest fits"));
+                rest = rest.checked_sub(part).expect("each part is in the body");
+                prop_assert_eq!(body.take(&vec![0; part]), Ok(rest == 0));
+                prop_assert_eq!(body.remain(), rest);
             }
         }
     }
