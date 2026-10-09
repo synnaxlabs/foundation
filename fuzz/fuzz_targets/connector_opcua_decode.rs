@@ -11,6 +11,7 @@
 //! `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"`.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 
