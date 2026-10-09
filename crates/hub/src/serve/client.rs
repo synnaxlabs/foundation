@@ -98,7 +98,11 @@ pub(crate) struct Bodies {
 
 impl Bodies {
     /// Reserves `bytes` for a body of `subject`. Checks the share of `subject` first.
+    /// An empty body holds nothing, so it makes no entry for `subject`.
     fn reserve(&self, subject: &Name, bytes: u64) -> Result<(), Error> {
+        if bytes == 0 {
+            return Ok(());
+        }
         let mut subjects = self.subjects.borrow_mut();
         let share = subjects.get(subject).copied().unwrap_or(0);
         if share + bytes > BODY_BYTES_MAX {
@@ -116,12 +120,20 @@ impl Bodies {
             });
         }
         self.held.set(held + bytes);
-        subjects.insert(subject.clone(), share + bytes);
+        match subjects.get_mut(subject) {
+            Some(share) => *share += bytes,
+            None => {
+                subjects.insert(subject.clone(), bytes);
+            }
+        }
         Ok(())
     }
 
     /// Gives back `bytes` that [`Bodies::reserve`] reserved for `subject`.
     fn free(&self, subject: &Name, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
         self.held.set(self.held.get() - bytes);
         let mut subjects = self.subjects.borrow_mut();
         let share = subjects
@@ -146,15 +158,15 @@ struct Open {
 impl Open {
     /// Opens the request of `session`, whose hello admitted `subject`, and reserves
     /// `bytes` for its body.
-    fn new(session: &Rc<Session>, subject: &Name, bytes: u64) -> Result<Self, Error> {
+    fn new(session: &Rc<Session>, subject: Name, bytes: u64) -> Result<Self, Error> {
         if session.client.open.get() {
             return Err(Error::Pending);
         }
-        session.state.borrow().bodies.reserve(subject, bytes)?;
+        session.state.borrow().bodies.reserve(&subject, bytes)?;
         session.client.open.set(true);
         Ok(Self {
             session: Rc::clone(session),
-            subject: subject.clone(),
+            subject,
             bytes,
         })
     }
@@ -333,21 +345,21 @@ async fn read(
     session: &Rc<Session>,
     receiver: &mut Receiver,
 ) -> Result<Option<(Signed, Vec<u8>, [u8; 64], Open)>, Error> {
-    if session.client.admitted.borrow().is_none() {
-        return Err(Error::Unadmitted);
-    }
-    let Some(message) = receiver.recv().await? else {
-        return Ok(None);
-    };
-    let request = wire::hub::client::Request::decode(&message)?;
-    let subject = session
+    // A renewal never changes the subject, so the one of the first hello holds.
+    let Some(subject) = session
         .client
         .admitted
         .borrow()
         .as_ref()
         .map(|(admitted, _)| admitted.hello().subject.clone())
-        .expect("invariant: a link keeps the hello that it admitted");
-    let open = Open::new(session, &subject, request.length)?;
+    else {
+        return Err(Error::Unadmitted);
+    };
+    let Some(message) = receiver.recv().await? else {
+        return Ok(None);
+    };
+    let request = wire::hub::client::Request::decode(&message)?;
+    let open = Open::new(session, subject, request.length)?;
     let mut rest = request.body();
     let mut body = Vec::with_capacity(rest.remain());
     while rest.remain() > 0 {
@@ -455,6 +467,17 @@ mod tests {
         assert_eq!(bodies.subjects.borrow().get(&a), Some(&5));
         bodies.free(&a, 5);
         bodies.free(&b, BODY_BYTES_MAX);
+        assert!(bodies.subjects.borrow().is_empty());
+        for _ in 0..2 {
+            bodies.reserve(&a, 0).expect("fits");
+        }
+        assert!(bodies.subjects.borrow().is_empty());
+        bodies.free(&a, 0);
+        bodies.free(&a, 0);
+        bodies.reserve(&a, 5).expect("fits");
+        bodies.reserve(&a, 0).expect("fits");
+        bodies.free(&a, 5);
+        bodies.free(&a, 0);
         assert!(bodies.subjects.borrow().is_empty());
         assert_eq!(bodies.reserve(&a, BODY_BYTES_MAX), Ok(()));
         assert_eq!(bodies.reserve(&b, BODY_BYTES_MAX), Ok(()));

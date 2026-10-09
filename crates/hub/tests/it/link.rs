@@ -211,9 +211,7 @@ where
     run_program(seed, home, move |node, tasks, at| async move {
         let mut agents = Vec::new();
         for subject in subjects {
-            let mut agent = Agent::dial(&node, tasks.clone(), at).await;
-            agent.subject = name(subject);
-            agents.push(agent);
+            agents.push(Agent::dial(&node, tasks.clone(), at, name(subject)).await);
         }
         let ends: Vec<_> = agents.iter().map(|agent| agent.session.clone()).collect();
         program(agents.try_into().ok().expect("an agent for each session")).await;
@@ -364,7 +362,7 @@ async fn as_agent<P>(
 ) where
     P: Future<Output = ()>,
 {
-    let agent = Agent::dial(&node, tasks, at).await;
+    let agent = Agent::dial(&node, tasks, at, name(SUBJECT)).await;
     let session = agent.session.clone();
     program(agent).await;
     session.close(Code(0));
@@ -516,11 +514,13 @@ struct Agent {
 }
 
 impl Agent {
-    /// Dials the home at `at` from `node` as a program, and opens the hello stream.
+    /// Dials the home at `at` from `node` as a program of `subject`, and opens the hello
+    /// stream.
     async fn dial(
         node: &sim::node::Node,
         tasks: env::tasks::Tasks,
         at: Address,
+        subject: Name,
     ) -> Self {
         let pool = own_pool();
         let config = transport::client::Config {
@@ -541,7 +541,7 @@ impl Agent {
         hello.send(&wire::header::encode(Protocol::Hub)).await;
         Self {
             node: node.clone(),
-            subject: name(SUBJECT),
+            subject,
             pool,
             session,
             hello,
@@ -1246,6 +1246,35 @@ fn takes_a_request_of_another_subject_while_a_body_trickles() {
         "a request body of 1 bytes does not fit under the share of 16777216 bytes of \
          subject ops.agent: its open requests hold 16777216 bytes"
     );
+}
+
+/// Two open requests of one subject with empty bodies, over two links, each get their
+/// response.
+#[test]
+fn answers_two_empty_requests_of_one_subject() {
+    let served = sessions(
+        111,
+        [SUBJECT, SUBJECT],
+        |[mut first, mut second]| async move {
+            for agent in [&mut first, &mut second] {
+                agent.admit().await;
+            }
+            let mut a = first.request(0, b"").await;
+            first.sleep(Span::MILLISECOND).await;
+            let mut b = second.request(0, b"").await;
+            assert_eq!(a.response().await, b"");
+            assert_eq!(b.response().await, b"");
+        },
+    );
+    let each = closed_after(
+        vec![
+            Ok(Got::Request(name(SUBJECT), Vec::new())),
+            Ok(Got::Request(name(SUBJECT), Vec::new())),
+        ],
+        2,
+        0,
+    );
+    assert_eq!(served, each);
 }
 
 /// A hello stream that the program finishes before its first hello gives `Ended`, and
