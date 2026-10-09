@@ -18,6 +18,9 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # The run needs the pinned nightly, which the mutants job does not install. A planted
+  # overflow in the shim fails the sanitizers job.
+  'xtask/src/sanitizers\.rs:.*(replace run ->| in run$)',
   # The build and the runs need the pinned nightly and cargo-fuzz, which no test has. A
   # crash planted in a target must fail the `fuzz` job of `ci.yaml` (#2105).
   'xtask/src/fuzz\.rs:.*(replace run_one ->| in run$)',
@@ -32,11 +35,12 @@ exclude_re = [
   # The stub is built only under loom, so no test of another build sees its mutant.
   # The real `net` has no mutant that builds.
   'crates/node/src/main\.rs:.*replace net -> env::net::Net with Default::default\(\)$',
-  # Empty outside a build with the address sanitizer, which no CI job makes until
-  # #1912. In a C ASan build, `asan_reports_a_write_before_a_block` fails without it.
+  # Empty outside a build with the address sanitizer, which `cargo xtask sanitizers`
+  # and the fuzz builds make. In `cargo xtask sanitizers`,
+  # `asan_reports_a_write_before_a_block` fails without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace poison with \(\)$',
-  # Empty outside a build with the address sanitizer. Only the Rust ASan build of
-  # #1912 reads the header in `block`, and its alloc tests fail without it.
+  # Empty outside a build with the address sanitizer. In `cargo xtask sanitizers`,
+  # `block` reads the header, and the alloc tests fail without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
   # `moves` is a `sim` hook, so no caller or peer sees it. Only the private reads of
   # `sends_from_one_run_on_one_connection_ask_for_one_move` and

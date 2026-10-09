@@ -1,6 +1,6 @@
 //! `foundation start`: a node on a data directory until SIGTERM.
 
-use crate::rig::Rig;
+use crate::rig::{Process, Rig};
 use crate::text;
 
 /// The exit status, the standard output, and the standard error of `output`.
@@ -205,4 +205,119 @@ fn a_kept_pool_budget_that_gives_a_shard_too_little_fails() {
         "fix: Remove the file `budget` in foundation-data, and the next start \
          computes the budgets again from the free memory and disk\n"
     );
+}
+
+#[test]
+fn a_data_directory_that_the_user_cannot_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new();
+    let data = rig.dir.join("foundation-data/data");
+    let mode = |mode| std::fs::Permissions::from_mode(mode);
+    std::fs::create_dir_all(&data).expect("make the directory");
+    std::fs::set_permissions(&data, mode(0o555)).expect("make it read-only");
+    let output = rig.run(&["start", "--name", "edge"], b"");
+    std::fs::set_permissions(&data, mode(0o755)).expect("make it writable");
+    assert_eq!(
+        ended(&output),
+        (
+            Some(1),
+            "",
+            "error[node.data]: cannot use the data directory foundation-data: open of \
+             lock failed with OS error 13\n\
+             fix: Give with `--data` a directory that this user can make and write\n"
+        )
+    );
+}
+
+#[test]
+fn a_new_data_directory_in_a_directory_that_the_user_cannot_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = Rig::new();
+    let read = rig.dir.join("read");
+    let mode = |mode| std::fs::Permissions::from_mode(mode);
+    std::fs::create_dir(&read).expect("make the directory");
+    std::fs::set_permissions(&read, mode(0o555)).expect("make it read-only");
+    let output = rig.run(&["start", "--data", "read", "--name", "edge"], b"");
+    std::fs::set_permissions(&read, mode(0o755)).expect("make it writable");
+    assert_eq!(
+        ended(&output),
+        (
+            Some(1),
+            "",
+            "error[node.data]: cannot open or make the data directory read: \
+             Permission denied (os error 13)\n\
+             fix: Give with `--data` a directory that this user can make and write\n"
+        )
+    );
+}
+
+#[test]
+fn a_key_file_that_holds_no_key_fails() {
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    std::fs::write(rig.dir.join("foundation-data/data/node.key"), [0xff; 7])
+        .expect("write the key file");
+    assert_eq!(
+        ended(&rig.run(&["start"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.failed]: the file `node.key` in the data directory is not a \
+             node key; restore it from a backup of this node\n\
+             fix: Fix the cause that the message states, then start the node again\n"
+        )
+    );
+}
+
+/// Linux only: the test reads where each thread waits from `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let rig = Rig::new();
+    let (reader, mut writer) = std::io::pipe().expect("make a pipe");
+    let stdout = writer.try_clone().expect("clone the pipe");
+    // It fills the pipe long before the node starts, and ends when the test drops
+    // `reader`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a process test fills a pipe of another process"
+    )]
+    std::thread::spawn(move || while writer.write_all(&[0; 4096]).is_ok() {});
+    let node = Command::new(env!("CARGO_BIN_EXE_foundation"))
+        .args(["start", "--name", "edge"])
+        .current_dir(&rig.dir)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the node");
+    let mut node = Process(node);
+    let pid = node.0.id().to_string();
+    rig.wait(
+        "a thread of the node waits in its write of the line",
+        || {
+            let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("list");
+            let waits: Vec<String> = (tasks.map(|task| task.expect("read").path()))
+                .filter_map(|task| std::fs::read_to_string(task.join("wchan")).ok())
+                .collect();
+            let blocked = waits.iter().any(|wait| wait.contains("pipe_write"));
+            blocked.then_some(()).ok_or_else(|| waits.join("\n"))
+        },
+    );
+    let sent = Command::new("kill").arg(&pid).status().expect("run kill");
+    assert!(sent.success(), "send SIGTERM to {pid}");
+    let status = rig.wait("the node exits at SIGTERM", || {
+        node.0
+            .try_wait()
+            .expect("check the node")
+            .ok_or_else(String::new)
+    });
+    drop(reader);
+    assert_eq!(status.code(), Some(0));
 }

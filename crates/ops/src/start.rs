@@ -8,7 +8,7 @@ use types::name::Name;
 use crate::error::Error;
 
 /// The arguments of `foundation start`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Start {
     /// `--data`, else `foundation-data` in the working directory.
@@ -56,6 +56,6 @@ impl Start {
     /// Writes `failure` to `errors` as [`crate::cli`] writes its own errors, and gives
     /// exit status 1.
     pub fn fail(&self, failure: &Failure, errors: impl Write) -> u8 {
-        crate::report(&Error::Node(failure.clone()), self.json, errors)
+        crate::report(&Error::Start(failure.clone()), self.json, errors)
     }
 }

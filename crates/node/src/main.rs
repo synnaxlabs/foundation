@@ -1,8 +1,9 @@
 //! The `foundation` binary. It runs the command line, and `foundation start` runs a
 //! node until SIGINT or SIGTERM.
 
-use std::io;
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
@@ -27,6 +28,9 @@ const DISK: Code = Code::new("node.disk");
 const MEMORY: Code = Code::new("node.memory");
 const BUDGET: Code = Code::new("node.budget");
 const FAILED: Code = Code::new("node.failed");
+/// The fix of [`DATA`].
+const WRITABLE: &str =
+    "Give with `--data` a directory that this user can make and write";
 
 fn main() -> ExitCode {
     let run = ops::cli(
@@ -50,13 +54,29 @@ fn node(start: &Start) -> Result<(), Failure> {
     let interrupt = os::interrupt().map_err(failed)?;
     let threads = os::threads().map_err(failed)?;
     let Read { name, budget, kept } = read(start, &threads)?;
+    let (called, call) = mpsc::channel();
+    let mut line = Vec::new();
+    start.running(&name, &mut line);
+    // Its own thread, which lives until the process ends, so a standard output that
+    // nobody reads blocks neither shard 0 nor the stop.
+    let show = threads.start("show", move || async move {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the thread has no other work than this wait"
+        )]
+        let called = call.recv();
+        if called.is_ok() {
+            io::stdout().lock().write_all(&line).unwrap_or(());
+        }
+    });
+    let show = show.map_err(failed)?;
     let shards = os::shards().map_err(failed)?;
     let wall = os::wall().map_err(failed)?;
     let mut disks = Vec::new();
     let mut handles = Vec::new();
     for core in 0..shards.cores().get() {
         let (disk, handle) = os::files(&start.data, &threads, &format!("files-{core}"))
-            .map_err(|error| data(start, error))?;
+            .map_err(|error| data(&start.data, error))?;
         disks.push(disk);
         handles.push(handle);
     }
@@ -83,21 +103,30 @@ fn node(start: &Start) -> Result<(), Failure> {
         stopper.stop();
     });
     if stop.is_ok() {
-        let start = start.clone();
         node.spawn(move |_| {
-            start.running(&name, io::stdout().lock());
+            called
+                .send(())
+                .expect("invariant: the thread `show` waits for the call");
             async {}
         });
     } else {
         node.stop();
     }
-    let joined = node.join();
-    for handle in handles {
-        handle.join().map_err(failed)?;
-    }
-    // The thread lives until the process ends: a node that fails gets no signal.
-    drop(stop.map_err(failed)?);
-    joined.map_err(|error| failure(start, &error, budget, kept))
+    let joined = node
+        .join()
+        .map_err(|error| failure(&start.data, &error, budget, kept));
+    let closed = handles.into_iter().try_for_each(env::thread::Handle::join);
+    let ended = match stop {
+        // Only the thread stops a node that ends with no failure.
+        Ok(stop) if joined.is_ok() => stop.join().map_err(failed),
+        // The thread lives until the process ends: a node that fails gets no signal.
+        Ok(_) => Ok(()),
+        Err(error) => Err(failed(error)),
+    };
+    // The thread lives until the process ends: a standard output that nobody reads
+    // takes no line.
+    drop(show);
+    joined.and(closed.map_err(failed)).and(ended)
 }
 
 /// The network of the node.
@@ -129,17 +158,17 @@ struct Read {
 )]
 fn read(start: &Start, threads: &Threads) -> Result<Read, Failure> {
     let (disk, handle) = os::files(&start.data, threads, "files-read")
-        .map_err(|error| data(start, error))?;
+        .map_err(|error| data(&start.data, error))?;
     let (send, receive) = mpsc::channel();
-    let own = start.clone();
+    let dir = start.data.clone();
+    let given = start.name.clone();
     let read = threads.start("read", move || async move {
         let files = env::files::Files::new(disk);
         let read = async {
-            let given = own.name.clone();
             let name = node::name(&files, given)
                 .await
-                .map_err(|e| unread(&own, &e))?;
-            let kept = node::budget(&files).await.map_err(|e| unread(&own, &e))?;
+                .map_err(|e| unread(&dir, &e))?;
+            let kept = node::budget(&files).await.map_err(|e| unread(&dir, &e))?;
             let budget = match kept {
                 Some(budget) => budget,
                 None => Budget {
@@ -172,25 +201,24 @@ fn quarter(free: u64, most: Size) -> Size {
 }
 
 /// The failure of a read before the start, which gave `error`.
-fn unread(start: &Start, error: &node::Error) -> Failure {
+fn unread(dir: &Path, error: &node::Error) -> Failure {
     let none = Budget {
         pool: Size::ZERO,
         disk: Size::ZERO,
     };
-    failure(start, error, none, false)
+    failure(dir, error, none, false)
 }
 
 /// The failure of a data directory that `os` could not open or make.
-fn data(start: &Start, error: os::Error) -> Failure {
+fn data(dir: &Path, error: os::Error) -> Failure {
     match error {
         os::Error::Dir(error) => Failure {
             code: DATA,
             message: format!(
                 "cannot open or make the data directory {}: {error}",
-                start.data.display()
+                dir.display()
             ),
-            fix: "Give with `--data` a directory that this user can make and write"
-                .to_owned(),
+            fix: WRITABLE.to_owned(),
         },
         error => failed(error),
     }
@@ -198,13 +226,18 @@ fn data(start: &Start, error: os::Error) -> Failure {
 
 /// The failure of a node that stopped with `error`, on `budget`, which the data
 /// directory keeps when `kept`.
-fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Failure {
-    let data = start.data.display();
+fn failure(dir: &Path, error: &node::Error, budget: Budget, kept: bool) -> Failure {
+    let data = dir.display();
     let (code, message, fix) = match error {
         node::Error::Directory(env::files::Error::Busy { .. }) => (
             BUSY,
             format!("another node runs in {data}"),
             "Stop that node, or give another data directory with `--data`".to_owned(),
+        ),
+        node::Error::Directory(error) => (
+            DATA,
+            format!("cannot use the data directory {data}: {error}"),
+            WRITABLE.to_owned(),
         ),
         node::Error::Unnamed => (
             UNNAMED,
@@ -237,7 +270,7 @@ fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Fa
                 "Free space on that disk, or give a data directory on another disk \
                  with `--data`",
             );
-            let (from, fix) = source(start, kept, *disk == DISK_MOST, free);
+            let (from, fix) = source(dir, kept, *disk == DISK_MOST, free);
             let message = format!(
                 "the disk budget {disk}, {from}, holds no ring on each of {cores} \
                  shards; it needs at least {min}"
@@ -247,7 +280,7 @@ fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Fa
         node::Error::Buffer {
             core,
             error: error @ buffer::Error::Pool(pool),
-        } => return memory(start, *core, error, pool, budget, kept),
+        } => return memory(dir, *core, error, pool, budget, kept),
         error => return failed(error),
     };
     Failure { code, message, fix }
@@ -256,7 +289,7 @@ fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Fa
 /// The failure of shard `core`, whose buffer gave `error`, a pool error `pool`, on
 /// `budget`, which the data directory keeps when `kept`.
 fn memory(
-    start: &Start,
+    dir: &Path,
     core: usize,
     error: &buffer::Error,
     pool: &block::Error,
@@ -277,7 +310,7 @@ fn memory(
                 "a quarter of the available memory".to_owned(),
                 "Free memory on this host",
             );
-            let (from, fix) = source(start, kept, budget == POOL_MOST, free);
+            let (from, fix) = source(dir, kept, budget == POOL_MOST, free);
             let message = format!(
                 "the pool budget {budget}, {from}, gives shard-{core} too little: \
                  {error}"
@@ -293,16 +326,16 @@ fn memory(
 }
 
 /// Where a budget that gives the node too little came from, and its fix: the data
-/// directory of `start` when it `kept` the budget, else the most that a first start
+/// directory `dir` when it `kept` the budget, else the most that a first start
 /// gives when the budget is at its `most`, else `free`, the source and fix of a
 /// quarter of the free resource.
 fn source(
-    start: &Start,
+    dir: &Path,
     kept: bool,
     most: bool,
     free: (String, &str),
 ) -> (String, String) {
-    let data = start.data.display();
+    let data = dir.display();
     if kept {
         let fix = format!(
             "Remove the file `budget` in {data}, and the next start computes the \
@@ -335,13 +368,9 @@ fn failed(error: impl std::fmt::Display) -> Failure {
 mod tests {
     use super::*;
 
-    /// The start of `foundation start`, as the command line gives it.
-    fn start() -> Start {
-        let args = ["foundation", "start"].map(std::ffi::OsString::from);
-        match ops::cli(args, io::empty(), io::sink(), io::sink()) {
-            Run::Start(start) => start,
-            Run::Exit(status) => panic!("exit {status}"),
-        }
+    /// The data directory of `foundation start` with no `--data`.
+    fn dir() -> &'static Path {
+        Path::new("foundation-data")
     }
 
     /// The failure of a disk budget `disk` that holds no ring on each of `cores`
@@ -357,7 +386,7 @@ mod tests {
             pool: Size::GIBIBYTE,
             disk,
         };
-        failure(&start(), &error, budget, kept)
+        failure(dir(), &error, budget, kept)
     }
 
     /// What the pool of a test gives for a block that it cannot hold.
@@ -378,7 +407,7 @@ mod tests {
             pool,
             disk: DISK_MOST,
         };
-        failure(&start(), &error, budget, kept)
+        failure(dir(), &error, budget, kept)
     }
 
     /// The failure of a pool budget `pool` too small for a block of shard 3.
@@ -507,7 +536,7 @@ mod tests {
             disk: Size::ZERO,
         };
         assert_eq!(
-            failure(&start(), &node::Error::Budget, budget, false),
+            failure(dir(), &node::Error::Budget, budget, false),
             Failure {
                 code: BUDGET,
                 message:
@@ -570,6 +599,6 @@ mod tests {
             pool: POOL_MOST,
             disk: DISK_MOST,
         };
-        assert_eq!(failure(&start(), &error, budget, false), failed(&error));
+        assert_eq!(failure(dir(), &error, budget, false), failed(&error));
     }
 }

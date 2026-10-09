@@ -19,6 +19,9 @@ const BAD_PLAN: Code = Code::new("ops.bad-plan");
 const BEHIND: Code = Code::new("ops.behind");
 const STALE_PLAN: Code = Code::new("ops.stale-plan");
 const APPLY: Code = Code::new("ops.apply");
+/// The fix of [`ARGUMENT`].
+const HELP: &str =
+    "Match the arguments to `foundation --help` or `foundation <operation> --help`";
 
 /// Why a command line did not run to its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,7 +51,7 @@ pub(crate) enum Error {
     /// The region did not apply the plan.
     Apply(mesh::Error),
     /// The node did not start, or stopped with an error.
-    Node(Failure),
+    Start(Failure),
 }
 
 impl Error {
@@ -63,7 +66,7 @@ impl Error {
             | Self::Behind(_)
             | Self::Stale { .. }
             | Self::Apply(_)
-            | Self::Node(_) => 1,
+            | Self::Start(_) => 1,
         }
     }
 
@@ -71,11 +74,8 @@ impl Error {
     pub(crate) fn problems(&self) -> Cow<'_, [Problem]> {
         let (code, fix) = match self {
             Self::Config(problems) => return Cow::Borrowed(problems),
-            Self::Node(failure) => (failure.code, failure.fix.clone()),
-            Self::Argument { .. } => (
-                ARGUMENT,
-                "Match the arguments to the operation in `foundation docs`".to_owned(),
-            ),
+            Self::Start(failure) => (failure.code, failure.fix.clone()),
+            Self::Argument { .. } => (ARGUMENT, HELP.to_owned()),
             Self::Unknown {
                 closest: Some(closest),
                 ..
@@ -285,7 +285,7 @@ impl fmt::Display for Error {
                  of the plan"
             ),
             Self::Apply(error) => error.fmt(f),
-            Self::Node(failure) => f.write_str(&failure.message),
+            Self::Start(failure) => f.write_str(&failure.message),
         }
     }
 }

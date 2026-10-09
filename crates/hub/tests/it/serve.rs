@@ -387,6 +387,25 @@ fn stops_an_open_session_with_unknown_when_its_channel_is_removed() {
     );
 }
 
+/// The home forgets a channel at its removal, so a later open of it is unknown.
+#[test]
+fn stops_an_open_of_a_removed_channel_with_unknown() {
+    let result = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&result);
+    let home = move |test: Test, link: Link, incoming| async move {
+        test.hub.set_definitions(&without(&["value"]));
+        *kept.lock().expect("not poisoned") =
+            Some(link.serve(incoming).await.map(drop));
+    };
+    session(73, Class::Complete, false, home, |mut peer| async move {
+        peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 2]).await;
+        stopped_as_unknown(&mut peer).await;
+    });
+    let served = result.lock().expect("not poisoned").take();
+    let unknown = serve::Error::Unknown(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(unknown)));
+}
+
 /// Sends the open of `[value, time]` and the first message of its keys run, which
 /// holds `value`.
 async fn open_first_of_two(peer: &mut Peer) {
