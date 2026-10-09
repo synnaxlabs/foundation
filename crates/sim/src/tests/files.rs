@@ -1148,7 +1148,6 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_removed_file() {
     }
 }
 
-/// What a write open of `b` gives after a drop of a write handle that a rename moved
 /// What a write open of `a` gives after the drop of a handle with two writes in
 /// flight.
 fn open_after_two_dropped_writes(value: u64) -> Option<Error> {
@@ -1175,6 +1174,7 @@ fn a_write_open_waits_for_the_last_dropped_write_of_a_handle() {
     }
 }
 
+/// What a write open of `b` gives after a drop of a write handle that a rename moved
 /// from `a` to `b`, with a write dropped in flight before the rename.
 fn open_after_rename_with_dropped_write(value: u64) -> Option<Error> {
     run(value, MIB, |node, _| async move {
