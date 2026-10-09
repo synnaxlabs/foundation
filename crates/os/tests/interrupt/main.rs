@@ -146,7 +146,7 @@ fn early() {
     kill_process(getpid(), Signal::INT).expect("the process signals itself");
     // The signal thread takes SIGINT again only after it fires the future.
     let taken = async {
-        while serving_blocks_sigint() {
+        while untaken() {
             sleep(Duration::from_millis(1)).await;
         }
     };
@@ -158,23 +158,31 @@ fn early() {
     writeln!(output, "{}", polled.is_ready()).expect("a write to the test");
 }
 
-/// Whether the thread `signal` of this process has not named itself yet or blocks
-/// SIGINT.
+/// Whether SIGINT is pending in this process, or the thread `signal` has not named
+/// itself yet or blocks SIGINT. During `sigwait`, the thread does not block it, so the
+/// pending set tells that it is not yet taken.
 #[cfg(target_os = "linux")]
-fn serving_blocks_sigint() -> bool {
+fn untaken() -> bool {
+    let has_sigint = |status: &str, field: &str| {
+        let mask = status
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .expect("a signal mask");
+        let mask = u64::from_str_radix(mask.trim(), 16).expect("a hex mask");
+        mask & (1 << (libc::SIGINT - 1)) != 0
+    };
+    let process = std::fs::read_to_string("/proc/self/status").expect("a status");
+    if has_sigint(&process, "ShdPnd:") {
+        return true;
+    }
     for task in std::fs::read_dir("/proc/self/task").expect("the tasks list") {
         let task = task.expect("a task").path();
         let name = std::fs::read_to_string(task.join("comm")).expect("a name");
-        if name.trim_end() != "signal" {
-            continue;
+        if name.trim_end() == "signal" {
+            let status =
+                std::fs::read_to_string(task.join("status")).expect("a status");
+            return has_sigint(&status, "SigBlk:");
         }
-        let status = std::fs::read_to_string(task.join("status")).expect("a status");
-        let mask = status
-            .lines()
-            .find_map(|line| line.strip_prefix("SigBlk:"))
-            .expect("a signal mask");
-        let mask = u64::from_str_radix(mask.trim(), 16).expect("a hex mask");
-        return mask & (1 << (libc::SIGINT - 1)) != 0;
     }
     true
 }

@@ -56,9 +56,13 @@ fn an_interrupt_whose_thread_cannot_start_keeps_the_mask() {
     seccomp::answer_calls(&[libc::SYS_clone3, libc::SYS_clone], |_, _| {
         Some(libc::EAGAIN)
     });
-    let found = os::interrupt().map(drop).map_err(|e| e.to_string());
+    let found = os::interrupt().map(drop).unwrap_err();
     let refused = "cannot start thread signal: Resource temporarily unavailable (os \
                    error 11)";
-    assert_eq!(found, Err(refused.to_owned()));
+    assert_eq!(found.to_string(), refused);
+    assert!(matches!(
+        found,
+        os::Error::Thread(env::thread::Error::Start { .. })
+    ));
     assert_eq!(blocked(signals), [libc::SIGTERM]);
 }
