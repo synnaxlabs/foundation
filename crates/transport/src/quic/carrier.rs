@@ -1614,6 +1614,9 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // No caller sees this error: the carrier drops only with its `Transport` or
+    // `Client`, which drops each task that holds a dialer. So the test calls the
+    // dialer itself.
     #[test]
     fn a_dial_after_the_carrier_dropped_gives_closed_with_code_0() {
         let (mut sim, client, server) = nodes(0);
@@ -1629,6 +1632,9 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    // No caller sees this order: the carrier drops only with its `Transport` or
+    // `Client`, which drops each task that holds a dialer. So the test calls the
+    // dialer itself.
     #[test]
     fn a_dialer_gives_the_broken_socket_after_the_carrier_dropped() {
         let (mut sim, client, _) = nodes(0);
