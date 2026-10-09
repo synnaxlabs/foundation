@@ -112,9 +112,20 @@
   stream on the session that `transport::Transport::dial` gives at that open, the one
   session of the shard to the home (ONE SESSION PER PEER). A complete reader sends
   `Credit` once its grant is half a window (512 KiB) short of the frames given back
-  plus a window. The new errors: `reader::Error::{Transport, Refused, Message, Pool}`
-  and `reader::Ended::{Stream, Refused, Message, Frame, Pool}`. Each `Refused` holds a
-  `wire::hub::Refusal`, the code of HUB WIRE that stopped or reset the stream. A code
+  plus a window. A task on `hub::Config::tasks` takes each frame off the stream of a
+  remote reader as it arrives, so the node takes each byte that it let the home send
+  (STREAM WIRE), and an idle caller never holds the window of its session. A complete
+  reader queues at most its grant, and a frame that starts once the charges that arrived
+  reach the grant ends the session with `Refusal::Malformed`. A latest reader keeps only
+  the newest frame. Lost: a bound on the sum of the credit at one home; a receive window
+  for each stream in `transport`; one task for each session. Trigger: a link that a
+  remote latest reader with an idle caller fills, as measured, then a credit of one
+  frame for a latest reader (HUB WIRE). Decided by `laptop.architect`
+  (2026-10-09T03:24:37Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073632038). The new
+  errors: `reader::Error::{Transport, Refused, Message, Pool}` and
+  `reader::Ended::{Stream, Refused, Message, Frame, Pool, Credit}`. Each `Refused` holds
+  a `wire::hub::Refusal`, the code of HUB WIRE that stopped or reset the stream. A code
   outside HUB WIRE and a failed dial are `Transport` or `Stream`. A stream that the
   home finishes before it ends the session is `Message(Unfinished)` inside a body and
   `Message(Finished)` at each other point, which `wire::hub::Reader::end` gives.
@@ -139,5 +150,5 @@
   allocation. Accepted until #2025 by `laptop.architect`
   (2026-10-08T22:34:29Z:
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6070407790). Trigger:
-  when #2025 merges, #2031 steps the remote reader's stream with the poll forms, and
-  `complete wait` is at most 5% over 27 ns on a quiet host.
+  when #2025 merges, #2031 steps the stream in the task of the remote reader with the
+  poll forms, and `complete wait` is at most 5% over 27 ns on a quiet host.
