@@ -170,7 +170,8 @@ impl Handle {
 
     /// Starts a dial to `remote` that `peer` must answer, and gives its session,
     /// which [`Session::poll_connected`] waits on. Dropping the session closes the
-    /// dial.
+    /// dial. `remote` is in the form of a reply source, as `dial::route` gives it:
+    /// in another form, each reply comes from an unknown peer and the dial times out.
     ///
     /// # Errors
     ///

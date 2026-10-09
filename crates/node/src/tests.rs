@@ -2340,17 +2340,15 @@ mod port {
         host: &sim::node::Node,
         tasks: env::tasks::Tasks,
     ) -> (transport::Client, Rc<block::Pool>) {
-        let (pool, part) = port(host);
+        let pool = pool();
         let config = transport::client::Config {
+            net: host.net(),
             clock: host.clock(),
             entropy: host.entropy(),
             tasks,
             pool: Rc::clone(&pool),
         };
-        (
-            transport::Client::new(config, part).expect("a client"),
-            pool,
-        )
+        (transport::Client::new(config).expect("a client"), pool)
     }
 
     /// Starts a peer on a new host of `sim` that dials the node at `listen` of `host`
@@ -2958,15 +2956,20 @@ mod port {
         /// the node, which keeps the file.
         #[test]
         fn a_key_that_is_not_valid_stops_the_node() {
-            let mut tag = own();
-            tag[15] = b'2';
-            let crc = crc32c::crc32c(&tag[..64]);
-            tag[64..].copy_from_slice(&crc.to_le_bytes());
+            // Each tag byte with one bit changed, and the tag of the next form.
+            let edits = (0..16).map(|i| (i, own()[i] ^ 1)).chain([(15, b'2')]);
+            let tags = edits.map(|(i, byte)| {
+                let mut tag = own();
+                tag[i] = byte;
+                let crc = crc32c::crc32c(&tag[..64]);
+                tag[64..].copy_from_slice(&crc.to_le_bytes());
+                tag
+            });
             let mut changed = own();
             changed[40] ^= 1;
             let short = own()[..LEN - 1].to_vec();
             let long = [own(), vec![0]].concat();
-            for bytes in [short, long, tag, changed] {
+            for bytes in [short, long, changed].into_iter().chain(tags) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 write_key(&mut sim, &host, bytes.clone());
@@ -3879,13 +3882,21 @@ mod port {
         }
 
         /// Breaks the node's UDP socket from a task on shard 0 at `OPEN + after`, with
-        /// each write of the log failing from `OPEN`. Gives whether the task ran, and
-        /// the node's `join`.
-        fn udp_fault_at(after: Span) -> (bool, Result<(), Error>) {
+        /// each write of the log failing from `OPEN`. `idle` more tasks on shard 0 wake
+        /// at that instant, which changes only the order of the sim's picks. Gives
+        /// whether the task ran, and the node's `join`.
+        fn udp_fault_at(idle: usize, after: Span) -> (bool, Result<(), Error>) {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
             let at = sim::node::Config::default().monotonic + OPEN + after;
+            for _ in 0..idle {
+                let own = host.clone();
+                node.spawn(move |_| async move {
+                    own.clock().sleep_until(at).await;
+                    std::future::pending::<()>().await;
+                });
+            }
             let ran = Arc::new(AtomicBool::new(false));
             let (own, done) = (host.clone(), Arc::clone(&ran));
             node.spawn(move |_| async move {
@@ -3901,24 +3912,34 @@ mod port {
         }
 
         /// Of a transport and a group that stop, `join` gives the one that the node
-        /// sees first, which at one instant can be either.
+        /// sees first. At `WRITE`, the order of the picks decides which one that is,
+        /// and whether the fault task runs before the node stops.
         #[test]
         fn join_gives_the_stop_that_the_node_sees_first() {
-            let error = transport::Error::Network {
-                error: env::net::Error::Io { code: 5 },
+            let transport = || {
+                Err(Error::Transport(transport::Error::Network {
+                    error: env::net::Error::Io { code: 5 },
+                }))
             };
-            assert_eq!(
-                udp_fault_at(Span::from_nanos(WRITE - 1)),
-                (true, Err(Error::Transport(error)))
-            );
-            assert_eq!(
-                udp_fault_at(Span::from_nanos(WRITE)),
-                (true, Err(Error::Group(write_failed())))
-            );
-            assert_eq!(
-                udp_fault_at(Span::from_nanos(WRITE + 1)),
-                (false, Err(Error::Group(write_failed())))
-            );
+            let group = || Err(Error::Group(write_failed()));
+            for idle in 0..8 {
+                assert_eq!(
+                    udp_fault_at(idle, Span::from_nanos(WRITE - 1)),
+                    (true, transport()),
+                    "{idle} idle tasks"
+                );
+                let tie = udp_fault_at(idle, Span::from_nanos(WRITE));
+                assert!(
+                    [(true, transport()), (true, group()), (false, group())]
+                        .contains(&tie),
+                    "{idle} idle tasks: {tie:?}"
+                );
+                assert_eq!(
+                    udp_fault_at(idle, Span::from_nanos(WRITE + 1)),
+                    (false, group()),
+                    "{idle} idle tasks"
+                );
+            }
         }
 
         /// A stop of the node from a task on shard 0, in the poll that breaks the

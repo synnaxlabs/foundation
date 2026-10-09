@@ -6,6 +6,9 @@
 #[doc(hidden)]
 pub mod bench;
 mod directory;
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod fuzz;
 mod handoff;
 mod identity;
 mod route;

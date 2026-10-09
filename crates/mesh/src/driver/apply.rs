@@ -12,7 +12,7 @@ use types::name::Name;
 use types::node;
 
 use super::{Mesh, put};
-use crate::change::{CHUNKS_MAX, Change, HOMES_MAX};
+use crate::change::{self, CHUNKS_MAX, Change, HOMES_MAX};
 use crate::error::Error;
 use crate::region::{self, Refused};
 
@@ -24,15 +24,18 @@ impl Mesh {
     /// put of each chunk of the new tree in [`Config::store`](super::Config::store) has
     /// returned. The change lists each chunk of the new tree that the tree of `base`
     /// lacks, or each chunk of the new tree when the store cannot give the tree of
-    /// `base`. A follower forwards the change to the leader. Returns the new pointer
-    /// once its entry has committed and this node applied it. It tries again when a new
-    /// leader replaces the entry, and after each tick while no leader takes it, as
-    /// [`Mesh::set_home`] does. On `Ok`, the pointer is the one this call makes, and
-    /// each index of `homes` has a home in this node's state when the call settles, the
-    /// listed one or another. A call whose entry finds that pointer, after a lost
-    /// answer or an equal change of another call, returns it when each index of `homes`
-    /// has a home then, and else gives `Stale`. A retry that finds a later pointer
-    /// gives `Stale`, even when an entry of this call applied before it.
+    /// `base`. A follower forwards the change to the leader. Returns the pointer once
+    /// its entry has committed and this node applied it: `base` when the tree of
+    /// `definitions` is the tree of `base` and each index of `homes` has a home in this
+    /// node's state, as such a change leaves the pointer, and else a new pointer. It
+    /// tries again when a new leader replaces the entry, and after each tick while no
+    /// leader takes it, as [`Mesh::set_home`] does. On `Ok`, the pointer is the one
+    /// this call makes, and each index of `homes` has a home in this node's state when
+    /// the call settles, the listed one or another. A call whose entry finds that
+    /// pointer, after a lost answer or an equal change of another call, returns it when
+    /// each index of `homes` has a home then, and else gives `Stale`. A retry that
+    /// finds a later pointer gives `Stale`, even when an entry of this call applied
+    /// before it.
     ///
     /// # Errors
     ///
@@ -148,10 +151,11 @@ impl Mesh {
         };
         loop {
             match self.attempt()?.settle(change.clone()).await? {
-                Some(Ok(())) => return Ok(base.next(root)),
+                Some(Ok(())) => return Ok(change::pointer(base, root, &homes)),
+                // `change::pointer` panics on a base at the last version.
                 Some(Err(Refused::Stale { pointer, .. }))
-                    if pointer.root == root
-                        && pointer.version.checked_sub(1) == Some(base.version)
+                    if base.version < u64::MAX
+                        && pointer == change::pointer(base, root, &homes)
                         && self.homed(&homes) =>
                 {
                     return Ok(pointer);

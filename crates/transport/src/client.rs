@@ -1,5 +1,6 @@
 //! The transport of a program that dials nodes with no node key.
 
+use std::net::{Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -21,32 +22,39 @@ const IDLE: Span = Span::from_nanos(30 * Span::SECOND.nanos());
 /// stays on the thread that made it.
 ///
 /// Dropping it closes nothing that it gave. Each session stays open until its last
-/// clone drops. Once each connection drained, it frees its [`port::Part`].
+/// clone drops. Once each connection drained, it frees its socket.
 pub struct Client {
     carrier: quic::Carrier,
 }
 
 impl Client {
-    /// Starts a program's transport on `part`. Bind a [`Port`](crate::Port) at port 0
-    /// and give it one part. The limits are fixed: messages up to `pool.largest()`, a
-    /// window of that or 1 MiB, whichever is larger, and a 30 s idle timeout. A node
-    /// may open 1 two-way and 1 one-way stream to it at a time, though it opens none.
+    /// Starts a program's transport on a UDP socket that it binds at `[::]` port 0,
+    /// which takes IPv4 and IPv6. The limits are fixed: messages up to
+    /// `pool.largest()`, a window of that or 1 MiB, whichever is larger, and a 30 s
+    /// idle timeout. A node may open 1 two-way and 1 one-way stream to it at a time,
+    /// though it opens none.
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when `config.pool.largest()` is below 1472, the largest UDP
-    /// payload a node takes.
+    /// - [`Error::Config`] when `config.pool.largest()` is below 1472, the largest
+    ///   UDP payload a node takes. It binds no socket then.
+    /// - [`Error::Network`] with the error of the bind.
     ///
     /// ```
-    /// use transport::{Client, Error, client, port};
+    /// use transport::{Client, Error, client};
     ///
-    /// fn start(config: client::Config, part: port::Part) -> Result<Client, Error> {
-    ///     Client::new(config, part)
+    /// fn start(config: client::Config) -> Result<Client, Error> {
+    ///     Client::new(config)
     /// }
     /// ```
-    pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
+    pub fn new(config: Config) -> Result<Self, Error> {
+        let net = config.net.clone();
+        let setup = config.setup()?;
+        let any = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let part =
+            port::Part::udp(&net, any).map_err(|error| Error::Network { error })?;
         Ok(Self {
-            carrier: quic::Carrier::new(config.setup()?, part),
+            carrier: quic::Carrier::new(setup, part),
         })
     }
 
@@ -94,16 +102,20 @@ impl std::fmt::Debug for Client {
 /// use transport::client::Config;
 ///
 /// fn config(
+///     net: env::net::Net,
 ///     clock: env::clock::Clock,
 ///     entropy: env::entropy::Entropy,
 ///     tasks: env::tasks::Tasks,
 ///     pool: Rc<block::Pool>,
 /// ) -> Config {
-///     Config { clock, entropy, tasks, pool }
+///     Config { net, clock, entropy, tasks, pool }
 /// }
 /// ```
 #[derive(Debug)]
 pub struct Config {
+    /// The network where [`Client::new`](crate::Client::new) binds the program's UDP
+    /// socket.
+    pub net: env::net::Net,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,
     /// Every random value the carrier uses outside TLS.
@@ -141,7 +153,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use std::mem::ManuallyDrop;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddrV6};
     use std::num::NonZeroUsize;
     use std::pin::pin;
 
@@ -150,20 +162,21 @@ mod tests {
     use types::ed25519::PrivateKey;
 
     use super::*;
-    use crate::testing::{self, IDLE, Shard, address, nodes, spans};
-    use crate::{Class, Code, Peer};
+    use crate::testing::{self, FREE, IDLE, PORT, Shard, address, any, nodes, spans};
+    use crate::{Class, Code, Peer, Port};
 
     const SERVER: PrivateKey = PrivateKey([2; 32]);
     const OTHER: PrivateKey = PrivateKey([3; 32]);
 
-    /// Starts a transport for `SERVER` on `node` that accepts `sessions` sessions in
-    /// turn. On each, it checks that the peer is a program, echoes the first message
-    /// of the first stream, and waits until the program drops the session.
+    /// Starts a transport for `SERVER` at `[::]` on `node` that accepts `sessions`
+    /// sessions in turn. On each, it checks that the peer is a program, echoes the
+    /// first message of the first stream, and waits until the program drops the
+    /// session.
     fn serve(node: &Node, sessions: usize) {
         testing::shard(node, SERVER, move |config, node| async move {
             // A program's pool has the budget of this one.
             let largest = config.pool.largest();
-            let part = testing::part(&node.net(), testing::address(&node));
+            let part = testing::part(&node.net(), any(PORT));
             let transport = crate::Transport::new(config, part).expect("a transport");
             for _ in 0..sessions {
                 let session = transport.accept().await.expect("a session");
@@ -188,10 +201,9 @@ mod tests {
         });
     }
 
-    /// A client on `shard` bound at `at`.
-    fn bind(shard: &Shard, at: SocketAddr) -> Client {
-        let part = testing::part(shard.net(), at);
-        Client::new(shard.client(), part).expect("a client")
+    /// A client on `shard`.
+    fn client(shard: &Shard) -> Client {
+        Client::new(shard.client()).expect("a client")
     }
 
     /// Sends a message to the node of `session` on a two-way stream and checks the
@@ -218,7 +230,7 @@ mod tests {
         serve(&node, 1);
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
-            let client = bind(&shard, address(&node));
+            let client = client(&shard);
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             assert_eq!(format!("{client:?}"), "Client { .. }");
@@ -236,7 +248,7 @@ mod tests {
         impostor(&other);
         let at = [Address::Udp(address(&other)), Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
-            let client = bind(&shard, address(&node));
+            let client = client(&shard);
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             echo(&shard, &session).await;
@@ -251,8 +263,8 @@ mod tests {
         let others = [(); 2].map(|()| sim.node(sim::node::Config::default()));
         others.iter().for_each(impostor);
         let at = others.each_ref().map(|other| Address::Udp(address(other)));
-        testing::start(&program, move |shard, node| async move {
-            let client = bind(&shard, address(&node));
+        testing::start(&program, move |shard, _| async move {
+            let client = client(&shard);
             let peer = SERVER.public();
             let dialed = client.dial(peer, &at).await;
             let cause = || Error::Authentication { expected: peer };
@@ -267,7 +279,7 @@ mod tests {
         let (mut sim, program, node) = nodes(0);
         let at = Address::Udp(address(&program));
         testing::start(&program, |shard, node| async move {
-            let client = bind(&shard, address(&node));
+            let client = client(&shard);
             node.clock().sleep(spans(IDLE, 3)).await;
             drop(client);
         });
@@ -283,22 +295,77 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_client_keeps_its_sessions_and_frees_its_part_after_them() {
+    fn a_dropped_client_keeps_its_sessions_and_frees_its_socket_after_them() {
         let (mut sim, program, node) = nodes(0);
-        serve(&node, 2);
+        serve(&node, 1);
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
-            let client = bind(&shard, address(&node));
+            let client = client(&shard);
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             drop(client);
             node.clock().sleep(spans(IDLE, 3)).await;
+            let held = env::net::Error::AddressInUse { local: any(FREE) };
+            assert_eq!(Port::bind(shard.net(), any(FREE)).err(), Some(held));
             echo(&shard, &session).await;
             end(&node, session).await;
             node.clock().sleep(spans(IDLE, 3)).await;
-            let client = bind(&shard, address(&node));
+            assert_eq!(Port::bind(shard.net(), any(FREE)).err(), None);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_client_dials_a_node_at_an_ipv4_mapped_address() {
+        let (mut sim, program, node) = nodes(0);
+        serve(&node, 1);
+        let IpAddr::V4(ip) = node.addresses()[0] else {
+            panic!("{:?} is not IPv4", node.addresses()[0]);
+        };
+        let at = [Address::Udp(SocketAddr::new(
+            ip.to_ipv6_mapped().into(),
+            PORT,
+        ))];
+        testing::start(&program, move |shard, node| async move {
+            let client = client(&shard);
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             echo(&shard, &session).await;
             end(&node, session).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_client_dials_a_node_at_a_global_ipv6_address_with_a_scope_and_a_flow_label() {
+        let (mut sim, program, node) = nodes(0);
+        serve(&node, 1);
+        let IpAddr::V6(ip) = node.addresses()[1] else {
+            panic!("{:?} is not IPv6", node.addresses()[1]);
+        };
+        let at = [Address::Udp(SocketAddrV6::new(ip, PORT, 7, 2).into())];
+        testing::start(&program, move |shard, node| async move {
+            let client = client(&shard);
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
+            echo(&shard, &session).await;
+            end(&node, session).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_client_dials_a_node_at_ipv4_and_at_ipv6() {
+        let (mut sim, program, node) = nodes(0);
+        serve(&node, 2);
+        let ips = node.addresses();
+        let at = [0, 1].map(|i| Address::Udp(SocketAddr::new(ips[i], PORT)));
+        assert!(ips[0].is_ipv4() && ips[1].is_ipv6(), "{ips:?}");
+        testing::start(&program, move |shard, node| async move {
+            let client = client(&shard);
+            for at in at {
+                let session = client.dial(SERVER.public(), &[at]).await;
+                let session = session.expect("a session");
+                echo(&shard, &session).await;
+                end(&node, session).await;
+            }
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -347,15 +414,14 @@ mod tests {
             node.clock().sleep(IDLE).await;
         });
         let at = [Address::Udp(address(&node))];
-        testing::start(&program, move |shard, node| async move {
+        testing::start(&program, move |shard, _| async move {
             let budget = block::Config { budget };
             let memory = Heap::new(budget.reservation());
             let config = Config {
                 pool: Rc::new(Pool::new(budget, memory)),
                 ..shard.client()
             };
-            let part = testing::part(shard.net(), address(&node));
-            let client = Client::new(config, part).expect("a client");
+            let client = Client::new(config).expect("a client");
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
@@ -377,7 +443,7 @@ mod tests {
         });
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
-            let client = bind(&shard, address(&node));
+            let client = client(&shard);
             let session = client.dial(SERVER.public(), &at).await.expect("a session");
             let start = node.clock().now();
             assert_eq!(session.closed().await, Error::TimedOut);
@@ -402,7 +468,7 @@ mod tests {
                 field: "pool",
                 rule: "must hold a message of at least 1472 bytes",
             };
-            assert_eq!(Client::new(config, shard.part()).err(), Some(error));
+            assert_eq!(Client::new(config).err(), Some(error));
         });
     }
 }

@@ -1,6 +1,13 @@
+use std::collections::BTreeMap;
+
 use document::diagnostic::{Code, Diagnostic};
 use document::value::{Kind, Value};
 use document::{Document, Map, Span};
+use spec::channel;
+use spec::definition::Definition;
+use spec::time::Peers;
+use spec::unit::Unit;
+use types::name::{Name, Selector, Written};
 
 const PRIVATE_KEY: Code = Code::new("config.private-key");
 /// Text that only a private key holds: the OpenSSH, PEM, and RFC 4716 forms, a `.ppk`
@@ -28,6 +35,59 @@ pub(crate) fn alarms(documents: &[Document]) -> Vec<Diagnostic> {
         in_document(document, &mut alarms);
     }
     crate::sort(&mut alarms);
+    alarms
+}
+
+/// `config.private-key` for each string of `definitions` that holds a private key: a
+/// tree key, a pattern, a name, a unit, or a string of a connector config. The alarms
+/// are in name order. Only an alarm in a connector config has a span: the span that
+/// the config holds.
+pub(crate) fn in_definitions(
+    definitions: &BTreeMap<Name, Definition>,
+) -> Vec<Diagnostic> {
+    let mut alarms = Vec::new();
+    for (key, definition) in definitions {
+        let mut names = vec![key];
+        let mut selectors = Vec::new();
+        let mut unit = None;
+        match definition {
+            Definition::Access(policy) => {
+                selectors.extend([policy.subjects(), policy.select()]);
+            }
+            Definition::Connector(connector) => {
+                names.extend([connector.kind(), connector.node()]);
+                in_document(connector.config().document(), &mut alarms);
+            }
+            Definition::Region(delegation) => names.extend(delegation.initial_voters()),
+            Definition::NodeSettings(policy) => selectors.push(policy.select()),
+            Definition::Compression(policy) => selectors.push(&policy.select),
+            Definition::Placement(policy) => {
+                selectors.push(policy.select());
+                names.extend(crate::placement::nodes(policy));
+            }
+            Definition::Time(policy) => {
+                selectors.push(policy.select());
+                if let Peers::Listed(peers) = policy.peers() {
+                    names.extend(peers);
+                }
+            }
+            Definition::Channel(channel) => {
+                if let channel::Kind::Data(data) = &channel.kind {
+                    unit = data.unit();
+                }
+            }
+            Definition::Retention(policy) => selectors.push(policy.select()),
+            Definition::Subject(_) => {}
+        }
+        let patterns = selectors.into_iter().flat_map(Selector::written);
+        let patterns = patterns.map(|pattern| match pattern {
+            Written::Include(text) | Written::Exclude(text) => text,
+        });
+        let texts = names.into_iter().map(Name::as_str).chain(patterns);
+        for text in texts.chain(unit.map(Unit::as_str)) {
+            in_text(text, None, &mut alarms);
+        }
+    }
     alarms
 }
 
