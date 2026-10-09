@@ -53,8 +53,9 @@
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
   readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
-  sender registers for writable at its first poll and after each `EAGAIN`, and the next
-  send that succeeds drops the registration: Linux wakes each `EPOLLOUT` registration of
+  sender registers for writable at its first poll and at the next `EAGAIN` after a send
+  ends, and drops the registration at each send that ends, with or without an error,
+  also when its wait for writable fails: Linux wakes each `EPOLLOUT` registration of
   a socket for each datagram that the socket sends (1,000 wakes for 1,000 sends on
   box2), so a sender that stays registered on each shard would wake each parked shard.
   Decided by `laptop.architect-2` (2026-10-08 18:27 UTC, #119,

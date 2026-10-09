@@ -150,8 +150,8 @@ fn os_one_by_one(bencher: Bencher<'_, '_>) {
     bench_os(bencher, &[7; SEGMENT], 0, DATAGRAMS, None);
 }
 
-/// The registration that a sender makes at each `EAGAIN`: a write interest on its
-/// raw descriptor, and the drop at the next send that succeeds.
+/// The registration that a sender makes at the first `EAGAIN` of a send: a write
+/// interest on its raw descriptor, and the drop when the send ends.
 #[divan::bench(sample_count = SAMPLES)]
 #[expect(
     clippy::disallowed_methods,
