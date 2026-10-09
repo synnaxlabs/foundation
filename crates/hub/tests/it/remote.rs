@@ -2738,6 +2738,67 @@ fn a_second_removal_keeps_the_end_of_a_remote_reader() {
 }
 
 #[test]
+fn a_reader_that_drops_after_no_room_for_its_credit_stops_the_stream_with_busy() {
+    remote(
+        8,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            for n in 0..32 {
+                send_credit_frame(&mut sender, n).await;
+            }
+            let error = receiver.recv().await.expect_err("the reader stopped");
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(error, transport::Error::Reset { code: busy });
+            let stopped = loop {
+                let block = own_pool().alloc(1).expect("the pool has room");
+                if let Err(error) = sender.send(block.freeze()).await {
+                    break error;
+                }
+            };
+            steps.stopped.store(true, Ordering::Relaxed);
+            assert_eq!(stopped, transport::Error::Stopped { code: busy });
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..32 {
+                reader.next().await.expect("a frame");
+            }
+            let blocks = {
+                // The call gives the last frame back, and its first poll asks the task
+                // for the credit.
+                let mut next = pin!(reader.next());
+                let blocks = fill(&test.pool);
+                let polled = poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
+                assert!(polled.is_pending(), "no frame waits");
+                blocks
+            };
+            // The next poll of the task finds no block for the credit.
+            let polls = test.polls.get();
+            while test.polls.get() == polls {
+                let mut yielded = false;
+                poll_fn(|cx| {
+                    if yielded {
+                        Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
+            // The caller runs after one poll of the task, before the next.
+            assert_eq!(test.polls.get(), polls + 1);
+            drop(reader);
+            drop(blocks);
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
 fn a_session_that_ends_with_a_refusal_while_a_credit_is_due_sends_no_credit() {
     let body = |n: usize| if n == 31 { 14_272 } else { 16_320 };
     remote(
