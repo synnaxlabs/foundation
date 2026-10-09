@@ -63,8 +63,8 @@ pub(crate) const PROBE: &str = "build/asan.c";
 /// # Errors
 ///
 /// When `tool` cannot preprocess `PROBE`: the message names the program that ran,
-/// which is the wrapper of `CC` when it has one, and gives the reason or the standard
-/// error of `tool`.
+/// which is the C compiler wrapper (from `CC` or `RUSTC_WRAPPER`) when `cc` uses one,
+/// and gives the reason or the standard error of `tool`.
 pub(crate) fn asan(tool: &Tool) -> Result<bool, String> {
     let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(PROBE);
     let mut command = tool.to_command();

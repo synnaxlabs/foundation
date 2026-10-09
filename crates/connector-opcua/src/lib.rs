@@ -210,8 +210,11 @@ mod tests {
         build.flag("--connector-opcua-no-such-flag");
         let tool = child::tool(&mut build, env!("CONNECTOR_OPCUA_TARGET"));
         let message = compiler::asan(&tool).unwrap_err();
+        // A wrapper in `CC` or `RUSTC_WRAPPER` of this process runs in place of the
+        // compiler.
+        let program = Path::new(tool.to_command().get_program()).to_owned();
         let stderr = message
-            .strip_prefix(&cannot_preprocess(tool.path(), ""))
+            .strip_prefix(&cannot_preprocess(&program, ""))
             .unwrap_or_else(|| panic!("{message}"));
         assert!(
             stderr.contains("--connector-opcua-no-such-flag"),
