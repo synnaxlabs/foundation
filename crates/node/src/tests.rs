@@ -3904,16 +3904,24 @@ mod port {
         /// sees first, which at one instant can be either.
         #[test]
         fn join_gives_the_stop_that_the_node_sees_first() {
-            let error = transport::Error::Network {
-                error: env::net::Error::Io { code: 5 },
+            let transport = || {
+                Error::Transport(transport::Error::Network {
+                    error: env::net::Error::Io { code: 5 },
+                })
             };
             assert_eq!(
                 udp_fault_at(Span::from_nanos(WRITE - 1)),
-                (true, Err(Error::Transport(error)))
+                (true, Err(transport()))
             );
-            assert_eq!(
-                udp_fault_at(Span::from_nanos(WRITE)),
-                (true, Err(Error::Group(write_failed())))
+            // The task that the sim picks first decides the stop at `WRITE`.
+            let tie = udp_fault_at(Span::from_nanos(WRITE));
+            assert!(
+                [
+                    (true, Err(transport())),
+                    (true, Err(Error::Group(write_failed())))
+                ]
+                .contains(&tie),
+                "{tie:?}"
             );
             assert_eq!(
                 udp_fault_at(Span::from_nanos(WRITE + 1)),
