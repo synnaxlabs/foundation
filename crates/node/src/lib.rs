@@ -810,19 +810,7 @@ impl Serve {
             let group = stopped(mesh.as_ref());
             let port =
                 route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
-            let mut port = pin!(port);
-            let mut group = pin!(group);
-            let mut guard = pin!(guard);
-            let stop = poll_fn(|cx| {
-                let ended = end(
-                    guard.as_mut().poll(cx),
-                    port.as_mut().poll(cx),
-                    group.as_mut().poll(cx),
-                );
-                // Set before the tasks drop, so that `join` ranks it above a panic in
-                // a task's drop.
-                ended.map(|error| error.map_or((), fail))
-            });
+            let stop = until(guard, port, group, fail);
             inbox.serve(task::Handles { hub, ops }, tasks, stop).await;
             ended
         };
@@ -885,6 +873,29 @@ fn stopped(mesh: Option<&mesh::Mesh>) -> impl Future<Output = mesh::Stopped> + u
             }
         }
     }
+}
+
+/// Ready when the node stops (`guard`), the transport stops (`port`), or the mesh's
+/// group stops, by the rank of [`end`]. A transport or a group that ends it goes into
+/// `fail` first.
+async fn until(
+    guard: Guard,
+    port: impl Future<Output = transport::Error>,
+    group: impl Future<Output = mesh::Stopped>,
+    fail: impl Fn(Error),
+) {
+    let (mut guard, mut port, mut group) = (pin!(guard), pin!(port), pin!(group));
+    poll_fn(|cx| {
+        let ended = end(
+            guard.as_mut().poll(cx),
+            port.as_mut().poll(cx),
+            group.as_mut().poll(cx),
+        );
+        // Set before the tasks drop, so that `join` ranks it above a panic in a
+        // task's drop.
+        ended.map(|error| error.map_or((), &fail))
+    })
+    .await;
 }
 
 /// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of
