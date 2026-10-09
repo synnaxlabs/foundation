@@ -73,22 +73,32 @@
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717, on
   https://github.com/synnaxlabs/foundation/issues/2017): shard 0 drops `lock` only once
   the transport has freed the port (`transport::Transport::ended`), also when the mesh
-  does not open, so a restart at once binds the port under `os` too. Each close leaves
-  before `lock` is free. Once its handshake is confirmed, a peer whose one-way delay is
-  under 3 s sees its close first, unless the link loses it, and a peer with a delay of
-  4 s sees it after, which a test pins for each (`laptop.architect`, 04:36 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6074355159). A close
-  before then is paced, so it can come later (the `noq-proto` patch in
-  `docs/dependencies.md`). Each clone of the transport and each session lives in a
-  future that shard 0 drops, or in a task of the mesh that it waits for, before it waits
-  for the port, so a leak holds the stop. The drop of each session closes it. The drop
-  of the transport closes each session that no caller accepted and each handshake in
-  flight, its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
+  does not open, so a restart at once binds the port under `os` too. Once the node
+  has confirmed the handshake of a session, the close of that session leaves at the
+  drop: a peer whose one-way delay is under 3 s gets it before `lock` is free, unless
+  the link loses it, and a peer with a delay of 4 s gets it after, which a test pins
+  for each (`laptop.architect`, 04:36 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6074355159; the
+  condition, 06:16 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6075490388; this
+  text, 06:41 and 06:42 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6075817836 and
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6075828783). The node
+  confirms a session that a peer dialed when the transport gives it, and one that the
+  node dialed one round trip or more later. A close before then can be paced (the
+  `noq-proto` patch in `docs/dependencies.md`), so it can leave after `lock` is free,
+  or not at all when the pacer holds it until the transport frees the port. The peer
+  then waits for its idle time, as when the link loses the close. Each clone of the
+  transport and each session lives in a future that shard 0 drops, or in a task of the
+  mesh that it waits for, before it waits for the port, so a leak holds the stop. The
+  drop of each session closes it. The drop of the transport closes each session that no
+  caller accepted and each handshake in flight, its own dials too (#2084, by
+  `laptop.architect-2`, 02:57 UTC:
   https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
   drain, in about 3 PTO, and at most 3 s after the last one ended, because a peer's
   round trip sets the PTO with no bound (`laptop.architect`, 03:46 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6073847772).
-  The `transport` surface, by `laptop.architect` (02:19 UTC):
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6073847772). The
+  `transport` surface, by `laptop.architect` (02:19 UTC):
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
   Supersedes the `os` sentences of that port rule, and the sentence of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312 that no
