@@ -1903,6 +1903,32 @@ fn a_remove_ends_after_a_dropped_write_ends() {
     assert!(waited, "no remove ended with the write");
 }
 
+/// The time after a `File::remove` of a file with a write in flight whose future
+/// dropped, once a `Files::remove` of its path ended, and what the remove gives.
+fn remove_of_removed_path(value: u64) -> (Monotonic, Result<(), Error>) {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let file = create(&node, "a", KIB).await;
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        files.remove(Path::new("a")).await.unwrap();
+        drop(write);
+        let removed = file.remove().await;
+        (node.clock().now(), removed)
+    })
+}
+
+#[test]
+fn a_remove_through_the_handle_ends_after_a_dropped_write_of_a_removed_path() {
+    for value in 0..32 {
+        let (end, removed) = remove_of_removed_path(value);
+        let (_, written) = write_span(value, false);
+        assert_eq!(removed, Err(Error::NotFound { path: "a".into() }));
+        assert!(written <= end, "value {value}");
+    }
+}
+
 #[test]
 fn a_fault_on_a_remove_fails_it_and_the_file_stays() {
     run(0, MIB, |node, _| async move {
