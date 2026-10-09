@@ -87,7 +87,12 @@
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089614613). A
   status frame larger than the largest block of the pool (`block::Error::TooLarge`) is
   a defect, and panics (`laptop.architect-2`, 2026-10-09T21:40:46Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089720287). After
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089720287). A
+  change of state waits until the home applied the state before it, or until `cancel`
+  is cancelled, so no state replaces a state that the home did not apply. After
+  `Failure::Removed` or `home::Error::Disk`, no change of state waits
+  (`laptop.architect-2`, 2026-10-09T21:46:07Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089790301). After
   `Failure::Removed` or `home::Error::Disk` the call writes no more status. Each other
   refusal is a defect of `connector`, and panics (`laptop.architect-2`,
   2026-10-09T19:41:05Z:
