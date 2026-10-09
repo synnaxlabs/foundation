@@ -857,6 +857,32 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
 }
 
 #[test]
+fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_removed_file() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&files, "a", big as u64).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut open = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            drop(file);
+            drop(parts);
+            pool.alloc(big).unwrap_err();
+            let mut open =
+                Box::pin(files.open(Path::new("a"), Mode::Create { len: KIB }));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        drop(open.as_mut().await.unwrap());
+        drop(pool.alloc(big).unwrap());
+    });
+}
+
+#[test]
 fn a_write_open_waits_for_the_calls_of_a_dropped_close() {
     run(|files, data| async move {
         let (file, pool) = (create(&files, "a", KIB).await, pool());

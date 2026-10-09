@@ -236,11 +236,7 @@ impl Files {
         }
         let mut at = Monotonic(now.0.saturating_add(delay));
         if let Some(path) = call.changes(&path) {
-            let file = match &call {
-                Call::Unlink { handle } => Some(handle.inode),
-                _ => None,
-            };
-            at = at.max(self.wait_end(node, path, file));
+            at = at.max(self.wait_end(node, path));
         }
         self.queue.insert((at, key));
         let flight = Flight {
@@ -260,10 +256,9 @@ impl Files {
     /// The time that a call of `node` that changes what `path` names ends no earlier
     /// than: the end of the last call on `path` that a dropped future or handle left
     /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
-    /// uses it, or the file that it names, or a file that a rename to it moves there,
-    /// or `file`, the file of a remove through a handle. A remove through a handle is
-    /// on the path that it was sent on and on its file.
-    fn wait_end(&self, node: usize, path: &Path, file: Option<u64>) -> Monotonic {
+    /// uses it, or the file that it names, or a file that a rename to it moves there.
+    /// A call through a handle is also on the path that it was sent on.
+    fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
             .map(|(at, key)| (*at, &self.flights[key]))
@@ -281,18 +276,13 @@ impl Files {
         let inodes: BTreeSet<_> = self.disks[node]
             .inode(&path)
             .into_iter()
-            .chain(file)
             .chain(moved)
             .collect();
         (pending.iter())
             .find(|(_, flight)| {
-                let named = disk::normal(&flight.path) == path;
-                match &flight.call {
-                    Call::Unlink { handle } => named || inodes.contains(&handle.inode),
-                    call => call
-                        .handle()
-                        .map_or(named, |handle| inodes.contains(&handle.inode)),
-                }
+                disk::normal(&flight.path) == path
+                    || (flight.call.handle())
+                        .is_some_and(|handle| inodes.contains(&handle.inode))
             })
             .map_or(Monotonic::default(), |(at, _)| *at)
     }
