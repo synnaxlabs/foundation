@@ -76,8 +76,8 @@ impl Node {
             &self.kinds,
         )
         .map_err(|e| e.json())?;
-        let output =
-            serde_json::to_value(output).expect("invariant: an output is JSON");
+        let output = serde_json::to_value(output)
+            .unwrap_or_else(|_| unreachable!("invariant: an output is JSON"));
         Ok((plan.encode(), output))
     }
 
@@ -91,7 +91,8 @@ impl Node {
         let applied = apply::apply(path, bytes, &self.mesh, &self.key)
             .await
             .map_err(|e| e.json())?;
-        Ok(serde_json::to_value(applied).expect("invariant: an apply is JSON"))
+        Ok(serde_json::to_value(applied)
+            .unwrap_or_else(|_| unreachable!("invariant: an apply is JSON")))
     }
 }
 
