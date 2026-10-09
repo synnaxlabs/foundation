@@ -19,7 +19,7 @@
   task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler runs them. No other crate calls Tokio's timers or spawn. This supersedes "A
+  scheduler runs them. No other crate calls Tokio's timers or spawn. This changes "A
   panic in any task ends its shard" (https://github.com/synnaxlabs/foundation/pull/18)
   for the cases below (2026-10-08, #871). As anywhere in Rust, a panic in a drop during
   the unwind of a panic aborts the process. On `os`, a panic in the poll or the drop of
@@ -33,8 +33,10 @@
   setting. It needs `--cfg tokio_unstable` in every build, and a `RUSTFLAGS` or
   `CARGO_ENCODED_RUSTFLAGS` value, as the loom job and the cfg runs of `cargo xtask`
   set, replaces the flags of `.cargo/config.toml`. Decided by `laptop.architect-2`
-  (2026-10-08, #871,
-  https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264).
+  (2026-10-08T23:08:19Z, #871,
+  https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264),
+  approved by `laptop.architect` (2026-10-09T00:26:41Z, #2033,
+  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6071732611).
   `env::files` (#37) gives files under one data directory, with owned blocks and a
   sync that poisons the file on failure (S4). One handle at a time holds a file open
   to write, until it drops and its calls end; another write open fails with `Busy`
