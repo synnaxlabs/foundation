@@ -337,21 +337,20 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Parses `body` as a round comment. `None` when it has no round heading:
-/// [`Shown::number`], or [`Shown::html_number`] when it is not `old`. The fields are
+/// Parses `body` as a round comment. `None` when it has no round heading
+/// ([`Shown::number`]). The fields are
 /// the first block after the heading, so the findings text cannot set them. The last
 /// block is the end lines ([`END`]), unless the comment is `old`, posted before
 /// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = normalized(body);
-    let shown = Shown::read(&body);
+    let shown = Shown::read(&body, old);
     // An old round is taken as written, except where the check cannot read it.
     let hiding = shown
         .hiding
         .iter()
         .find(|(_, cause)| !old || matches!(cause, Cause::Misplaced));
-    let html = shown.html_number.as_deref().filter(|_| !old);
-    let number = shown.number.as_deref().or(html)?;
+    let number = shown.number.as_deref()?;
     let text = &shown.text;
     let lines = shown.fields().iter().map(String::as_str);
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
@@ -491,8 +490,9 @@ fn options() -> Options<'static> {
 /// lines that can hide text or that the check cannot read.
 #[derive(Debug, Default)]
 struct Shown<'a> {
-    /// The round number of the first top-level heading that has one ([`number`]), or
-    /// `None` when the comment has no such heading.
+    /// The round number of the first top-level heading that has one ([`number`]). When
+    /// the comment is not old and has none, that of the comment as [`unblocked`] reads
+    /// it, since GitHub reads some HTML blocks as text and can show a heading in them.
     number: Option<String>,
     /// Each top-level block after the heading: the index in `text` of a paragraph, or
     /// `None` for any other block. The footnotes come last, as GitHub shows them.
@@ -504,15 +504,11 @@ struct Shown<'a> {
     /// Each line of the comment that can hide text on GitHub or that the check cannot
     /// read, with its cause, in order.
     hiding: Vec<(&'a str, Cause)>,
-    /// When `number` is `None`, the round number of the comment read with each HTML
-    /// block as text ([`unblocked`]). GitHub reads some HTML blocks as
-    /// text, and then can show a line as a heading.
-    html_number: Option<String>,
 }
 
 impl<'a> Shown<'a> {
-    /// Reads `body` ([`normalized`]).
-    fn read(body: &'a str) -> Self {
+    /// Reads `body` ([`normalized`]), posted before [`CUTOFF`] when `old`.
+    fn read(body: &'a str, old: bool) -> Self {
         let mut shown = Self::default();
         let starts: Vec<usize> = std::iter::once(0)
             .chain(body.match_indices('\n').map(|(i, _)| i + 1))
@@ -571,8 +567,8 @@ impl<'a> Shown<'a> {
                 _ => {}
             }
         }
-        if shown.number.is_none() {
-            shown.html_number = unblocked(body, &blocks);
+        if shown.number.is_none() && !old {
+            shown.number = unblocked(body, &blocks);
         }
         hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
         hiding.sort_by_key(|(at, _)| *at);
@@ -756,7 +752,7 @@ fn normalized(text: &str) -> String {
 
 /// The round number of the first top-level heading that has one ([`number`]) in `body`
 /// read with each line of the HTML `blocks` that starts with `<` after its indent read
-/// as text.
+/// as a line of a paragraph, as GitHub reads `<search`.
 fn unblocked(body: &str, blocks: &[Range<usize>]) -> Option<String> {
     let mut text = body.to_owned();
     let starts = blocks.iter().flat_map(|b| {
@@ -765,10 +761,14 @@ fn unblocked(body: &str, blocks: &[Range<usize>]) -> Option<String> {
             .map(|(i, _)| b.start + i + 1);
         std::iter::once(b.start).chain(rest)
     });
-    for line in starts.collect::<Vec<_>>().into_iter().rev() {
+    // The tree order of `blocks` is not the source order: footnotes come last.
+    let mut starts: Vec<usize> = starts.collect();
+    starts.sort_unstable();
+    for line in starts.into_iter().rev() {
         let at = body.len() - body[line..].trim_start_matches(' ').len();
         if body[at..].starts_with('<') {
-            text.insert(at, '\\');
+            // Invisible ([`texts`]), and it keeps the tag that the line starts with.
+            text.insert(at, '\u{200B}');
         }
     }
     let arena = Arena::new();

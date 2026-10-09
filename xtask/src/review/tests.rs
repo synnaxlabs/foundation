@@ -1454,11 +1454,27 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         "<search\n## Review [round][d] 3",
         " <search\n <search\n## Review *round* 3",
         "<search\n## Review round 3\n\n<search\n## Review round 4",
+        "<search\n## x\n<b></b>Review round 3\n---",
+        "<search\n***\n<i></i>Review round 3\n---",
     ] {
         let headless = ROUND.replace("## Review round 3", heading) + "\n\n[d]: /x";
         assert_eq!(
             check(&record(vec![bot(&headless)])),
             vec![raw("<search")],
+            "{heading}"
+        );
+    }
+    let found = ROUND.replace("Findings: none", "Findings: 2");
+    let notes = "x[^1]\n\n[^1]: <search\n    <search\n    <search\n\n";
+    for (front, heading, line) in [
+        ("", "<search>Review round 3\n---", "<search>Review round 3"),
+        (notes, "a\n<search\n## Review round 3", "[^1]: <search"),
+        (notes, "é\n<search\n## Review round 3", "[^1]: <search"),
+    ] {
+        let last = front.to_owned() + &found.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            vec![raw(line)],
             "{heading}"
         );
     }
