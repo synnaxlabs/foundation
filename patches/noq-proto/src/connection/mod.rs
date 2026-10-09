@@ -1977,7 +1977,14 @@ impl Connection {
             }
         }
 
-        // Pacing check.
+        // Pacing check. Once the handshake is confirmed, CONNECTION_CLOSE goes in the
+        // Data space alone and ends the pending close, so it is not paced: it is not in
+        // flight, and a paced close can leave after the drain that it starts has ended.
+        // In the handshake, a close that cannot coalesce stays pending, so only pacing
+        // bounds its repeats.
+        if can_send.close && self.is_handshake_confirmed() {
+            return PathBlocked::No;
+        }
         if let Some(delay) = self.path_data_mut(path_id).pacing_delay(bytes_to_send, now) {
             let resume_time = now + delay;
             self.timers.set(
@@ -1985,8 +1992,8 @@ impl Connection {
                 resume_time,
                 self.qlog.with_time(now),
             );
-            // Loss probes and CONNECTION_CLOSE should be subject to pacing, even though
-            // they are not congestion controlled.
+            // Loss probes and CONNECTION_CLOSE in the handshake should be subject to
+            // pacing, even though they are not congestion controlled.
             trace!(?space_id, %path_id, ?delay, "blocked by pacing");
             return PathBlocked::Pacing;
         }

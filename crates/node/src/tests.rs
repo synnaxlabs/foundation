@@ -2810,24 +2810,45 @@ mod port {
     #[test]
     fn a_peer_sees_its_close_before_the_lock_is_free() {
         let closed = transport::Error::PeerClosed { code: Code(0) };
-        let seen = stop_with_a_peer(Span::from_nanos(10 * Span::MILLISECOND.nanos()));
+        let delay = Span::from_nanos(10 * Span::MILLISECOND.nanos());
+        let (seen, _) =
+            stop_with_a_peer(delay, Span::from_nanos(30 * Span::SECOND.nanos()));
         assert_eq!(seen, [Event::Closed(closed), Event::Locked(Ok(()))]);
     }
 
     /// The node waits at most 3 s for the drain, so a probe takes the lock before a
-    /// peer with a one-way delay of 4 s sees its close. The close left before, so it
-    /// still arrives.
+    /// peer with a one-way delay of 4 s sees its close. The close is not paced, so it
+    /// leaves at the drop and arrives one delay later, also when the node stops 20.3 s
+    /// in, just after its handshake confirms, when the pacer would hold a packet for
+    /// about 0.4 s.
     #[test]
     fn a_peer_with_a_delay_over_3_s_sees_its_close_after_the_lock_is_free() {
         let closed = transport::Error::PeerClosed { code: Code(0) };
-        let seen = stop_with_a_peer(Span::from_nanos(4 * Span::SECOND.nanos()));
+        let delay = Span::from_nanos(4 * Span::SECOND.nanos());
+        let run = Span::from_nanos(20_300 * Span::MILLISECOND.nanos());
+        let (seen, after) = stop_with_a_peer(delay, run);
         assert_eq!(seen, [Event::Locked(Ok(())), Event::Closed(closed)]);
+        let late = after.nanos() - delay.nanos();
+        assert!((0..Span::MILLISECOND.nanos()).contains(&late), "{after:?}");
     }
 
-    /// Stops a node while a peer holds a session over links with a one-way `delay`,
-    /// and gives, in order, what the peer and a probe that takes the lock as soon as it
-    /// is free see.
-    fn stop_with_a_peer(delay: Span) -> Vec<Event> {
+    /// A peer whose one-way delay is under 3 s sees its close first, also when the
+    /// node stops 8.8 s in, just after its handshake confirms, when the pacer of the
+    /// connection would hold a packet for about 0.4 s.
+    #[test]
+    fn a_peer_with_a_delay_under_3_s_sees_its_close_first_after_the_handshake() {
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let delay = Span::from_nanos(2_900 * Span::MILLISECOND.nanos());
+        let run = Span::from_nanos(8_800 * Span::MILLISECOND.nanos());
+        let (seen, _) = stop_with_a_peer(delay, run);
+        assert_eq!(seen, [Event::Closed(closed), Event::Locked(Ok(()))]);
+    }
+
+    /// Stops a node `run` after its start, while a peer holds a session over links
+    /// with a one-way `delay`. Gives, in order, what the peer and a probe that takes
+    /// the lock as soon as it is free see, and the time from the stop to the peer's
+    /// close.
+    fn stop_with_a_peer(delay: Span, run: Span) -> (Vec<Event>, Span) {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = keyed(&mut sim, 2);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
@@ -2840,7 +2861,8 @@ mod port {
         sim.link(&host, &peer, link);
         let listen = listen(&host);
         let events = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&events);
+        let at = Arc::new(Mutex::new(None));
+        let (seen, closed_at) = (Arc::clone(&events), Arc::clone(&at));
         let shard = env::shards::Config {
             name: "peer".into(),
             core: None,
@@ -2853,14 +2875,13 @@ mod port {
                 .await
                 .expect("a session");
             let closed = session.closed().await;
+            *closed_at.lock().unwrap() = Some(own.clock().now());
             seen.lock().unwrap().push(Event::Closed(closed));
             drop(transport);
         });
         drop(started.expect("the peer starts"));
-        assert_eq!(
-            sim.run_for(Span::from_nanos(30 * Span::SECOND.nanos())),
-            Ok(())
-        );
+        assert_eq!(sim.run_for(run), Ok(()));
+        let stopped = peer.clock().now();
         node.stop();
         let seen = Arc::clone(&events);
         sim.run_on(&host, move |host, _| async move {
@@ -2872,7 +2893,8 @@ mod port {
         .expect("the probe ends");
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
-        events.lock().unwrap().clone()
+        let closed = at.lock().unwrap().expect("the peer's session closed");
+        (events.lock().unwrap().clone(), closed - stopped)
     }
 
     /// A program with no key starts a handshake that gets no answer, and sends its
