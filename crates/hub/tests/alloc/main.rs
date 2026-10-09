@@ -277,11 +277,13 @@ fn main() {
             .await
             .expect("opens");
         for n in 0..WARM + COUNTED {
+            let stamped = ALLOCATOR.count(|| writer.now()).1;
             let written = write(&mut writer, now + n);
             node.clock().sleep(SETTLE).await;
             let read = read(&mut reader);
             if n >= WARM {
-                assert_eq!((written, read), (0, 0), "frame {n} allocated");
+                let counts = (stamped, written, read);
+                assert_eq!(counts, (0, 0, 0), "frame {n} allocated");
             }
         }
         let now = now + WARM + COUNTED;
