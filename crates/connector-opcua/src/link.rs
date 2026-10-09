@@ -478,14 +478,17 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
 }
 
-/// `build.rs` sets `cfg(asan)` exactly when the address sanitizer instruments the C, so
-/// the tests of the poisoning in `alloc` cannot turn off unseen.
+/// When this test binary links the address sanitizer, the sanitizer instruments the C
+/// and `build.rs` sets `cfg(asan)`, so neither the C checks nor the tests of the
+/// poisoning in `alloc` can turn off unseen.
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
-fn asan_is_set_when_the_c_calls_the_address_sanitizer() {
+fn the_c_and_cfg_asan_follow_the_address_sanitizer_of_the_rust() {
+    let exe = std::env::current_exe().unwrap();
+    let rust = names(&[exe], "--defined-only").contains("__asan_init");
     let undefined = symbols("--undefined-only");
-    let instrumented = undefined.iter().any(|name| name.starts_with("__asan_"));
-    assert_eq!(cfg!(asan), instrumented, "{undefined:?}");
+    let c = undefined.iter().any(|name| name.starts_with("__asan_"));
+    assert_eq!((c, cfg!(asan)), (rust, rust));
 }
 
 /// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
