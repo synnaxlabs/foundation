@@ -457,16 +457,19 @@ impl<'a> Shown<'a> {
         // holds the text of its paragraph with no paragraph event.
         let mut open: Vec<Option<usize>> = Vec::new();
         let (mut fresh, mut code) = (true, false);
+        let (mut html_line, mut notes, mut codes) = (None, Vec::new(), Vec::new());
         for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
             let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
             let paragraph = open.last().copied().flatten().filter(|_| fresh);
-            let hides = || {
-                (!code)
-                    .then(|| hiding(body, &event, range.clone()))
-                    .flatten()
-            };
-            shown.hiding = shown.hiding.or_else(hides);
+            if !code && html_line.is_none() && html(body, &event, start, range.start) {
+                html_line = Some(start);
+            }
+            match event {
+                Event::Start(Tag::FootnoteDefinition(_)) => notes.push(range.start),
+                Event::Start(Tag::CodeBlock(_)) => codes.push(range.clone()),
+                _ => {}
+            }
             // An `Html` event ends at `\n` only, so it can hold more than one line.
             if matches!(event, Event::Html(_)) && open.len() == 1 {
                 let number = || lines(&body[start..range.end]).find_map(heading);
@@ -510,6 +513,7 @@ impl<'a> Shown<'a> {
                 }
             }
         }
+        shown.hiding = hiding(body, html_line, label(body, &notes, &codes));
         shown
     }
 
@@ -590,54 +594,60 @@ fn heading(line: &str) -> Option<&str> {
         .strip_prefix("## Review round ")
 }
 
-/// The line of `event`, at `range` in `body` and outside a code block, that can hide
-/// text on GitHub, and what it holds:
-///
-/// - raw HTML: an HTML block, inline HTML, or a line of text whose source, after the
-///   [`marks`], starts with `<` and a letter, `!`, `/`, or `?`;
-/// - a footnote label in GitHub's form ([`note`]) that `pulldown-cmark` does not read
-///   as a definition: a line whose source starts with one after the marks. GitHub can
-///   read it as a footnote, and hides a footnote with no reference.
-///
-/// GitHub reads the blocks of a comment before its spans, so a line that starts inside
-/// a code span or a link counts too.
-fn hiding<'a>(
-    body: &'a str,
-    event: &Event<'_>,
-    range: Range<usize>,
-) -> Option<(&'a str, &'static str)> {
+/// The first line of `body` that can hide text on GitHub, and what it holds, from the
+/// start of the first line with raw HTML and the start of the first with a label.
+fn hiding(
+    body: &str,
+    html: Option<usize>,
+    label: Option<usize>,
+) -> Option<(&str, &'static str)> {
     const LABEL: &str = "a footnote label in GitHub's form that pulldown-cmark does \
                          not read as a definition";
-    let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
-    let source = body[start..line_end(body, range.start)].trim();
-    let line = &body[range.start..line_end(body, range.start)];
+    // On one line, the label comes first.
+    [label.map(|at| (at, LABEL)), html.map(|at| (at, "raw HTML"))]
+        .into_iter()
+        .flatten()
+        .min_by_key(|&(at, _)| at)
+        .map(|(at, what)| (body[at..line_end(body, at)].trim(), what))
+}
+
+/// Whether `event`, at `at` in `body` on the line that starts at `start`, holds raw
+/// HTML: an HTML block, inline HTML, or text whose source starts the line after the
+/// [`marks`] with `<` and a letter, `!`, `/`, or `?`.
+fn html(body: &str, event: &Event<'_>, start: usize, at: usize) -> bool {
     let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
-    let html = line.strip_prefix('<').is_some_and(|l| l.starts_with(opens));
-    // A footnote definition that `pulldown-cmark` reads starts at its label, and its
-    // text after it, so a block event is not a line of text.
-    let first = match event {
-        Event::Start(tag) => inline(tag.to_end()),
-        Event::End(_) => false,
-        _ => true,
+    let tag = || {
+        body[at..]
+            .strip_prefix('<')
+            .is_some_and(|l| l.starts_with(opens))
     };
-    let first = first && marks(&body[start..range.start]);
     match event {
-        Event::Html(_) | Event::InlineHtml(_) => return Some((source, "raw HTML")),
-        Event::Text(_) if first && html => return Some((source, "raw HTML")),
-        _ if first && note(line).is_some() => return Some((source, LABEL)),
-        Event::Start(tag) if !inline(tag.to_end()) => return None,
-        Event::End(_) => return None,
-        _ => {}
+        Event::Html(_) | Event::InlineHtml(_) => true,
+        Event::Text(_) => tag() && marks(&body[start..at]),
+        _ => false,
     }
-    let span = &body[range.clone()];
-    let starts = span
-        .match_indices(['\n', '\r'])
-        .map(|(i, _)| range.start + i + 1);
-    starts
-        .filter(|&start| start < range.end)
-        .map(|start| &body[start..line_end(body, start)])
-        .find(|line| note(unmarked(line)).is_some())
-        .map(|line| (line.trim(), LABEL))
+}
+
+/// The start of the first line of `body` whose source, after the indent and the marks
+/// of quotes, list items, and footnote definitions that `pulldown-cmark` reads (each
+/// starts at an offset in `notes`), starts with a footnote label in GitHub's form
+/// ([`note`]) at no offset in `notes` or `codes`. GitHub can read that label as a
+/// footnote, and hides a footnote with no reference. GitHub reads the blocks of a
+/// comment before its spans, so a line inside a code span or a link counts too.
+fn label(body: &str, notes: &[usize], codes: &[Range<usize>]) -> Option<usize> {
+    let starts = body.match_indices(['\n', '\r']).map(|(i, _)| i + 1);
+    std::iter::once(0).chain(starts).find(|&start| {
+        let line = &body[start..line_end(body, start)];
+        let mut rest = unmarked(line);
+        while let Some(after) = note(rest) {
+            let at = start + line.len() - rest.len();
+            if !notes.contains(&at) {
+                return !codes.iter().any(|code| code.contains(&at));
+            }
+            rest = unmarked(after);
+        }
+        false
+    })
 }
 
 /// `line` after the indent and the marks of quotes and list items at its start.

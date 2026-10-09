@@ -1309,6 +1309,19 @@ fn fails_a_footnote_label_on_a_line_inside_a_span() {
 }
 
 #[test]
+fn fails_a_footnote_label_on_a_line_inside_a_link_definition_title() {
+    let hidden = ROUND.replace(
+        "## Review round 3\n\n",
+        "## Review round 3\n\n[x]: /u \"t\n[^a\\]: y\"\n",
+    );
+    assert_ne!(hidden, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&hidden)])),
+        vec![label("[^a\\]: y\"")]
+    );
+}
+
+#[test]
 fn passes_a_footnote_label_that_both_parsers_read() {
     for text in [
         "[^1]: x",
@@ -1316,6 +1329,9 @@ fn passes_a_footnote_label_that_both_parsers_read() {
         "[^a]: x\n[^b]: y",
         "[^a\\\\]:x",
         "`[^a\\]: x`",
+        "```\n[^a\\]: x\n```",
+        "> ```\n> [^a\\]: x\n> ```",
+        "    [^a\\]: x",
     ] {
         let comment =
             ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
