@@ -4677,8 +4677,8 @@ mod port {
 
         /// Starts the peer [`OTHER`] of `members` on `host`, which sets a home in the
         /// mesh, one after another, until a set waits [`TEN`].
-        fn set_homes(host: &sim::node::Node, members: Vec<Member>) {
-            peer(host, region(&members), |mesh, host| async move {
+        fn set_homes(host: &sim::node::Node, members: &[Member]) {
+            peer(host, region(members), |mesh, host| async move {
                 let clock = host.clock();
                 for key in 100.. {
                     let key = channel::Key::from_u128(key);
@@ -4714,7 +4714,7 @@ mod port {
                 let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
                 let members = pair(&hosts);
                 let node = start(&hosts[0], region(&members));
-                set_homes(&hosts[1], members);
+                set_homes(&hosts[1], &members);
                 let after = Span::from_nanos(after);
                 assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
                 node.stop();
@@ -4749,7 +4749,7 @@ mod port {
             let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
             let members = pair(&hosts);
             let node = start(&hosts[0], region(&members));
-            set_homes(&hosts[1], members);
+            set_homes(&hosts[1], &members);
             assert_eq!(sim.run_for(Span::from_nanos(1_700_000_000)), Ok(()));
             hosts[0].fail_file(Path::new(LOG), env::files::Operation::WriteAt);
             let (waited, port, _, _) = probe(&mut sim, &hosts[0]);
