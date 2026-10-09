@@ -154,7 +154,8 @@ impl Client {
     /// # Errors
     ///
     /// [`Error::Body`] when `body` is over `BODY_BYTES_MAX`, with nothing sent. The
-    /// error that ended the renewal, once the renewal ended. Else [`Error::Refused`]
+    /// error that ended the renewal, when the renewal ended before or during the
+    /// request. Else [`Error::Refused`]
     /// when the node stopped the request or closed the session with a refusal,
     /// [`Error::Transport`] when the stream or the session failed;
     /// [`Error::Message`] for a response that `wire` refuses or that ends early;
@@ -171,24 +172,38 @@ impl Client {
             begun: false,
             tasks: &shared.tasks,
         };
-        if let Some(error) = shared.ended.borrow().clone() {
-            return Err(error);
-        }
-        let (mut sender, receiver) = shared.session.open(Class::Complete).await?;
-        let receiver = open.receiver.insert(receiver);
         shared
-            .send(&mut sender, &wire::header::encode(Protocol::Hub))
+            .exchange(&mut open, body, length)
+            .await
+            .map_err(|error| shared.ended.borrow().clone().unwrap_or(error))
+    }
+}
+
+impl Shared {
+    /// Sends the request of `body`, whose length is `length`, under `open`, and gives
+    /// the body of the response. Gives each error of [`Client::request`] but
+    /// [`Error::Body`], with the error of the close in place of the error that ended
+    /// the renewal.
+    async fn exchange(
+        &self,
+        open: &mut Open<'_>,
+        body: &[u8],
+        length: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let (mut sender, receiver) = self.session.open(Class::Complete).await?;
+        let receiver = open.receiver.insert(receiver);
+        self.send(&mut sender, &wire::header::encode(Protocol::Hub))
             .await?;
-        let signature = shared
+        let signature = self
             .pair
-            .sign(&access::proof::request(shared.connection, body));
+            .sign(&access::proof::request(self.connection, body));
         // Never `Error::Pool`: `connect` took a larger block for its hello.
-        let mut message = shared.alloc(Request::LEN).await?;
+        let mut message = self.alloc(Request::LEN).await?;
         Request { length, signature }.encode(&mut message);
         sender.send(message.freeze()).await?;
-        let most = sender.bytes_max().min(shared.pool.largest());
+        let most = sender.bytes_max().min(self.pool.largest());
         for chunk in body.chunks(most) {
-            shared.send(&mut sender, chunk).await?;
+            self.send(&mut sender, chunk).await?;
         }
         sender.finish()?;
         let first = receiver.recv().await;
@@ -208,9 +223,7 @@ impl Client {
         rest.end()?;
         Ok(reply)
     }
-}
 
-impl Shared {
     /// A block of `len` bytes. While the pool is full, tries again after [`RETRY`]:
     /// the streams give their blocks back as the node acknowledges them. Gives
     /// [`Error::Pool`] when no block can hold `len` bytes, and the error of the close
