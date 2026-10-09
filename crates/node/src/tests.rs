@@ -2114,8 +2114,25 @@ mod hub {
 
     impl Drop for Dropped {
         fn drop(&mut self) {
-            *self.0.lock().unwrap() = true;
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
         }
+    }
+
+    #[test]
+    fn a_dropped_with_a_poisoned_lock_does_not_abort_a_test_that_panics() {
+        let flag = Arc::new(Mutex::new(false));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = flag.lock().unwrap();
+            panic!("poison the lock");
+        }));
+        poisoned.expect_err("the lock is poisoned");
+        let dropped = Dropped(flag);
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _dropped = dropped;
+                panic!("the test broke");
+            }));
+        unwound.expect_err("the test panics");
     }
 
     /// A stop drops a task that holds a reader and waits for a frame, so the ring
