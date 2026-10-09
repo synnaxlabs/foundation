@@ -41,17 +41,20 @@
   link definition. GitHub reads some of these lines in a different way, and an open
   `<!--` or `<details>` hides the text after it. A footnote label here is `[^`, one or
   more characters other than `]`, space, or tab, then `]:`. It also fails when a span of
-  text, as `comrak` reads it, holds `[^` with no `]` after it in the span: GitHub reads
-  a `]` on a later line as the end of a footnote reference and hides the text between
-  them. It also fails when `comrak` places the text of a paragraph before the last line
-  of the paragraph, as it does after a link or an image with a line break after its text
-  and after a link reference definition in the paragraph, since each line that it then
-  gives is wrong. The message names the first line with one of these causes, or the
-  first line of the paragraph. A round comment that fails by these rules gets an edit
-  that puts the line in a code span, and the cutoff stays. In an old round, a
-  `Hot path:` line, or a `Reviewers:` line of a round that does not parse, counts where
-  GitHub shows it as a line of text of a paragraph, at any depth and any indent. A line
-  of a code block or an HTML block does not count. Changed by
+  text, as `comrak` reads it, holds `[^` on a line before the last line of its
+  paragraph: GitHub can read a `]` on a later line as the end of a footnote reference
+  and hide the text between them. It also fails when `comrak` places the text of a
+  paragraph before the last line of the paragraph, as it does after a link or an image
+  with a line break after its text and after a link reference definition in the
+  paragraph, since each line that it then gives is wrong. The message names the first
+  line with one of these causes, or the first line of the paragraph. A round comment
+  that fails by these rules gets an edit that puts the line in a code span, or that
+  writes each link and image on one line and puts a blank line after each link
+  reference definition, and the cutoff stays. In an old round, a `Hot path:` line, or a
+  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
+  line of text of a paragraph, at any depth and any indent, and in a paragraph that
+  `comrak` places in the wrong lines, at the start of any source line after its marks.
+  A line of a code block or an HTML block does not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
