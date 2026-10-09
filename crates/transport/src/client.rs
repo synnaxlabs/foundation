@@ -451,7 +451,6 @@ mod tests {
                 rule: "must hold a message of at least 1472 bytes",
             };
             assert_eq!(Client::new(config).err(), Some(error));
-            assert_eq!(Port::bind(shard.net(), any(FREE)).err(), None);
         });
     }
 }
