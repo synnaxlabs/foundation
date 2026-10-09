@@ -187,9 +187,10 @@ struct Sender {
 struct Writer {
     /// A registration of `fd`. It drops first, so it never outlives `fd`.
     full: Option<AsyncFd<RawFd>>,
-    /// The index of the next datagram of a transmit that got `Pending`, else 0. After
-    /// a send that its caller drops while it waits, the next transmit starts there, so
-    /// it loses as many datagrams as went out before the `Pending`.
+    /// The index of the next datagram of a transmit that got `Pending`, else 0. A send
+    /// that its caller drops while it waits leaves it set. A different transmit in its
+    /// place can lose its first datagrams, at most as many as went out before the
+    /// `Pending`.
     next: usize,
     fd: UdpSocket,
 }
@@ -793,6 +794,34 @@ mod tests {
                 let attempts: Vec<_> =
                     recorded.sends.iter().map(|s| &s.0[..]).collect();
                 assert_eq!(attempts, [b"ab", b"cd", b"ef", b"EF", b"GH"]);
+            });
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_different_transmit_of_one_datagram_after_pending_goes_out_whole() {
+            runtime().block_on(async {
+                let udp = loopback();
+                turn_gso_off(&udp.bound);
+                let full = Outcome::Fails(Errno::AGAIN);
+                let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
+                let fd = udp.bound.socket.try_clone().unwrap();
+                let mut writer = idle(fd);
+                let mut cx = Context::from_waker(std::task::Waker::noop());
+                let dropped = batch(b"abcdefgh", 2);
+                let pending =
+                    writer.poll_transmit(&mut cx, &udp.bound, &dropped, |_, d| {
+                        recorded.send(d)
+                    });
+                assert_eq!(pending, Poll::Pending);
+                let other = transmit(v4(2), b"XY");
+                let sent = writer.poll_transmit(&mut cx, &udp.bound, &other, |_, d| {
+                    recorded.send(d)
+                });
+                assert_eq!(sent, Poll::Ready(Ok(())));
+                let attempts: Vec<_> =
+                    recorded.sends.iter().map(|s| &s.0[..]).collect();
+                assert_eq!(attempts, [b"ab", b"cd", b"ef", b"XY"]);
             });
         }
 
