@@ -871,6 +871,35 @@ fn an_ipv6_source_to_an_ipv4_destination_gives_einval() {
     });
 }
 
+/// A mapped IPv4 source is not one of the IPv6 sources that `os` refuses.
+#[test]
+fn an_ipv4_source_on_an_any_v6_socket_sends_in_either_form() {
+    on_thread("udp-source-mapped", || async {
+        let net = net();
+        let (_, mut receiver) = loopback(&net);
+        let (mut sender, _) =
+            bind(&net, SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
+        let v4 = receiver.local();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), v4.port());
+        let from = SocketAddr::new(LOCALHOST.into(), sender.local().port());
+        let sources = [IpAddr::from(LOCALHOST), LOCALHOST.to_ipv6_mapped().into()];
+        for (source, destination) in sources
+            .into_iter()
+            .flat_map(|source| [(source, v4), (source, mapped)])
+        {
+            let to = Transmit {
+                source: Some(source),
+                ..transmit(destination, b"from")
+            };
+            let case = format!("source {source}, to {destination}");
+            assert_eq!(send(&mut sender, &to).await, Ok(()), "{case}");
+            let arrived = receive(&mut receiver, 1).await;
+            assert_eq!(arrived[0].source, from, "{case}");
+            assert_eq!(arrived[0].contents, b"from", "{case}");
+        }
+    });
+}
+
 #[test]
 #[should_panic(expected = "A Tokio 1.x context was found, but IO is disabled")]
 fn a_first_receive_in_a_runtime_with_no_io_driver_panics() {
