@@ -185,6 +185,28 @@ impl Side {
         self.calls().iter().map(|(_, state, _)| *state).collect()
     }
 
+    /// Adds a timer of the loop that calls `callback` with `data` once, in
+    /// `interval_ms`.
+    fn add_timer(&self, callback: ffi::Callback, interval_ms: f64, data: *mut c_void) {
+        let events = self.events();
+        let mut key = 0;
+        // SAFETY: the member takes its own loop. The caller keeps `data` live until
+        // the timer runs.
+        let status = Status(unsafe {
+            (events.members().add_timer)(
+                events.raw(),
+                callback,
+                ptr::null_mut(),
+                data,
+                interval_ms,
+                ptr::null_mut(),
+                ffi::ONCE,
+                &raw mut key,
+            )
+        });
+        assert_eq!(status, Status::GOOD);
+    }
+
     fn run(&self) {
         let events = self.events();
         // SAFETY: the member takes its own loop.
@@ -654,28 +676,8 @@ fn after_a_timer(action: Action) -> Outcome {
                 action,
                 remote,
             };
-            let timers: [(ffi::Callback, f64, *mut c_void); 2] = [
-                (act, 10.0, ptr::from_ref(&later).cast_mut().cast()),
-                (nothing, 1000.0, ptr::null_mut()),
-            ];
-            for (callback, interval_ms, data) in timers {
-                let mut key = 0;
-                // SAFETY: the member takes its own loop, and `later` outlives the
-                // run.
-                let status = Status(unsafe {
-                    (side.events().members().add_timer)(
-                        side.events().raw(),
-                        callback,
-                        ptr::null_mut(),
-                        data,
-                        interval_ms,
-                        ptr::null_mut(),
-                        ffi::ONCE,
-                        &raw mut key,
-                    )
-                });
-                assert_eq!(status, Status::GOOD);
-            }
+            side.add_timer(act, 10.0, ptr::from_ref(&later).cast_mut().cast());
+            side.add_timer(nothing, 1000.0, ptr::null_mut());
             side.drive(Span::from_nanos(500_000_000)).await;
             let calls = side.calls();
             if !matches!(action, Action::Close) {
@@ -800,6 +802,48 @@ fn a_close_from_another_task_ends_the_stream_with_no_other_event() {
         .expect("the run ends");
     let reads = reads.lock().expect("no panic under the lock");
     assert_eq!(reads.ended, Some(at + DELAY));
+}
+
+unsafe extern "C" fn send_late(_: *mut c_void, data: *mut c_void) {
+    // SAFETY: the test keeps the side live through the run.
+    let side = unsafe { &*data.cast::<Side>() };
+    assert_eq!(side.send(1, b"late"), Status::GOOD);
+}
+
+/// The drive sleeps on a timer due in 1 s when another task adds one due sooner and
+/// wakes it with a send.
+#[test]
+fn a_timer_added_while_the_drive_sleeps_runs_when_it_is_due() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let (at, due) = network
+        .sim
+        .run_on(&network.local.clone(), move |node, tasks| async move {
+            let side = Rc::new(Side::new(&node));
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            side.add_timer(nothing, 1000.0, ptr::null_mut());
+            let at = side.clock.now() + Span::from_nanos(50_000_000);
+            let other = Rc::clone(&side);
+            tasks.spawn(async move {
+                other.clock.sleep_until(at).await;
+                let data = Rc::as_ptr(&other).cast_mut().cast();
+                other.add_timer(send_late, 10.0, data);
+                assert_eq!(other.send(1, b"wake"), Status::GOOD);
+            });
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            (at, at + Span::from_nanos(10_000_000))
+        })
+        .expect("the run ends");
+    let reads = reads.lock().expect("no panic under the lock");
+    let parts: Vec<_> = reads.parts.iter().map(|(at, b)| (*at, &b[..])).collect();
+    assert_eq!(
+        parts,
+        [(at + DELAY, &b"wake"[..]), (due + DELAY, &b"late"[..])]
+    );
 }
 
 #[test]
