@@ -57,9 +57,9 @@ pub(crate) struct Disk {
     /// ended.
     log: Vec<Change>,
     /// The path of each open descriptor, by the key of its handle.
-    pub(crate) open: BTreeMap<u64, PathBuf>,
+    descriptors: BTreeMap<u64, PathBuf>,
     /// The path of each descriptor closed, in order.
-    pub(crate) closed: Vec<PathBuf>,
+    closes: Vec<PathBuf>,
 }
 
 /// A change of the entries of directory `dir`: each name, and the inode that it then
@@ -139,8 +139,8 @@ impl Disk {
             used: 0,
             inodes: BTreeMap::from([(ROOT, Inode::Dir(Dir::default()))]),
             log: Vec::new(),
-            open: BTreeMap::new(),
-            closed: Vec::new(),
+            descriptors: BTreeMap::new(),
+            closes: Vec::new(),
         }
     }
 
@@ -300,14 +300,16 @@ impl Disk {
         Ok(())
     }
 
-    /// Moves the entry of file `inode` from `from` to `to`, both in one directory.
-    /// `NotFound` when `from` no longer names it; `Exists` when `to` is taken.
+    /// Moves the entry of the file of `handle` from `from` to `to`, both in one
+    /// directory, and gives its descriptor, if open, the path `to`. `NotFound` when
+    /// `from` no longer names it; `Exists` when `to` is taken.
     pub(crate) fn rename(
         &mut self,
-        inode: u64,
+        handle: Handle,
         from: &Path,
         to: &Path,
     ) -> Result<(), Cause> {
+        let inode = handle.inode;
         let (dir, old) = self.entry(inode, from)?;
         let new = segments(to)
             .pop()
@@ -316,6 +318,9 @@ impl Disk {
             return Err(Cause::Exists(to.to_path_buf()));
         }
         self.edit(dir, vec![(old.into(), None), (new.to_owned(), Some(inode))]);
+        if let Some(path) = self.descriptors.get_mut(&handle.key) {
+            *path = normal(to);
+        }
         Ok(())
     }
 
@@ -335,6 +340,25 @@ impl Disk {
         }
     }
 
+    /// Makes `handle`, which an open of `path` gave, a descriptor.
+    pub(crate) fn opened(&mut self, handle: Handle, path: &Path) {
+        self.descriptors.insert(handle.key, normal(path));
+    }
+
+    /// Closes descriptor `handle`: drops its hold and logs its path.
+    pub(crate) fn close(&mut self, handle: Handle) {
+        self.release(handle);
+        let Some(path) = self.descriptors.remove(&handle.key) else {
+            unreachable!("invariant: a descriptor has a path")
+        };
+        self.closes.push(path);
+    }
+
+    /// The path of each descriptor closed, in order.
+    pub(crate) fn closes(&self) -> &[PathBuf] {
+        &self.closes
+    }
+
     /// Adds one hold of the file of `handle`.
     pub(crate) fn hold(&mut self, handle: Handle) {
         let file = self.file(handle.inode);
@@ -350,14 +374,17 @@ impl Disk {
         self.collect(handle.inode);
     }
 
-    /// Crashes the disk by `crash`. Each hold drops, as at the death of the process
-    /// that held the files, and each file that only a hold kept is freed. After a
+    /// Crashes the disk by `crash`. Each hold drops and each descriptor closes, as at
+    /// the death of the process that held the files, and each file that only a hold
+    /// kept is freed. After a
     /// `Power` crash, each directory goes back to its durable entries with the changes
     /// of a prefix of the log, what they no longer reach is freed, and each sector
     /// keeps its durable bytes or its bytes after one write that no sync covered, by
     /// `rng`. The prefix draws from `rng` only when the log is not empty. Returns the
     /// number of changes that a `Power` crash kept, or 0 after a `Process` crash.
     pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) -> u64 {
+        self.closes
+            .extend(mem::take(&mut self.descriptors).into_values());
         let inodes: Vec<u64> = self.inodes.keys().copied().collect();
         for inode in inodes {
             if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
