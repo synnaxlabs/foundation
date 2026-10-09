@@ -8,11 +8,13 @@ mod chunks;
 #[path = "../common/mod.rs"]
 mod common;
 mod parts;
+mod polls;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 fn main() {
+    polls::main();
     chunks::main();
     parts::main();
 }
