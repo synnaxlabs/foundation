@@ -125,7 +125,7 @@ struct Malformed {
     problem: String,
 }
 
-/// A comment with a `## Review round <n>` line.
+/// A comment with a round heading ([`Shown::number`]).
 #[derive(Debug)]
 struct Parsed {
     round: Result<Round, Malformed>,
