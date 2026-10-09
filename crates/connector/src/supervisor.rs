@@ -87,8 +87,9 @@ impl Supervisor {
     /// When the status channels of `name` do not open for a reason other than a
     /// stopped mesh: `node` did not define them, or homed them on another node. When
     /// a status name of `name` is longer than [`Name::MAX_BYTES`], which the plan
-    /// refuses. Or when the home refuses a status frame for a cause that only a defect
-    /// of `connector` gives.
+    /// refuses. When the home refuses a status frame for a cause that only a defect of
+    /// `connector` gives. Or when a status frame is larger than the largest block of
+    /// the shard's pool.
     pub async fn run(
         &self,
         kind: &str,
