@@ -501,7 +501,10 @@ impl State {
                 if key == index {
                     return slot;
                 }
-                assigned.data(key, self.defined[&key].sample())
+                let defined = self.defined.get(&key);
+                let channel =
+                    defined.expect("invariant: each key of a session is defined");
+                assigned.data(key, channel.sample())
             })
             .collect()
     }
