@@ -20,6 +20,9 @@ pub(crate) fn seconds(text: &str) -> Result<NonZeroU16, String> {
         .map_err(|e| format!("`{text}` is not a count of seconds from 1 to 65535: {e}"))
 }
 
+/// The kinds of a lib target in `cargo metadata`.
+const LIBS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+
 /// The source of each requirement on crates.io in `cargo metadata`.
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
@@ -227,11 +230,10 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 }
 
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/` and
-/// that the `root` graph does not build, and for each requirement on crates.io in the
-/// `fuzz` graph that a copy that the `root` graph builds meets, and that resolves to
-/// another package. An edge pairs with each requirement that names it and that its
-/// release meets. Cargo applies a patch to each such requirement. It fails on an edge
-/// of the `fuzz` graph that no requirement names.
+/// that the `root` graph does not build, and for each edge of the `fuzz` graph that
+/// resolves a requirement on crates.io, which a copy that the `root` graph builds
+/// meets, to another package. Cargo applies a patch to each such requirement. It fails
+/// on an edge that no requirement resolves.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
@@ -264,12 +266,11 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         let dependent = find(field::text(node, "id")?)?;
         for edge in field::list(node, "deps")? {
             let dependency = find(field::text(edge, "pkg")?)?;
-            let named = dependent.requirements(field::text(edge, "name")?)?;
+            let resolved = dependent.requirements(dependency, edge)?;
             if dependency.copied {
                 continue;
             }
-            let release = dependency.release()?;
-            for requirement in named {
+            for requirement in resolved {
                 if requirement["source"].as_str() != Some(CRATES_IO) {
                     continue;
                 }
@@ -280,9 +281,6 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                         dependent.id, dependency.name
                     )
                 })?;
-                if !parsed.matches(&release) {
-                    continue;
-                }
                 let Some((copy, _)) = built.iter().find(|(copy, version)| {
                     copy.name == dependency.name && parsed.matches(version)
                 }) else {
@@ -334,21 +332,52 @@ impl<'a> Package<'a> {
         })
     }
 
-    /// The requirements of the package that it names `name` in its code. It fails when
-    /// none does.
-    fn requirements(&self, name: &str) -> Result<Vec<&'a Value>, String> {
-        let mut named = Vec::new();
+    /// The requirements of the package that `edge` of its node in the resolve, to
+    /// `dependency`, resolves: those on `dependency` under the name of the edge, of a
+    /// kind and target of the edge. It fails when none is.
+    fn requirements(
+        &self,
+        dependency: &Package<'_>,
+        edge: &Value,
+    ) -> Result<Vec<&'a Value>, String> {
+        let name = field::text(edge, "name")?;
+        let kinds = field::list(edge, "dep_kinds")?;
+        let mut resolved = Vec::new();
         for requirement in field::list(self.value, "dependencies")? {
-            let package = field::text(requirement, "name")?;
-            let local = requirement["rename"].as_str().unwrap_or(package);
-            if local.replace('-', "_") == name {
-                named.push(requirement);
+            if field::text(requirement, "name")? != dependency.name {
+                continue;
+            }
+            let named = match requirement["rename"].as_str() {
+                Some(rename) => rename.replace('-', "_") == name,
+                None => dependency.lib()? == name,
+            };
+            let kind = kinds.iter().any(|kind| {
+                kind["kind"] == requirement["kind"]
+                    && kind["target"] == requirement["target"]
+            });
+            if named && kind {
+                resolved.push(requirement);
             }
         }
-        if named.is_empty() {
+        if resolved.is_empty() {
             return Err(format!("`{}` has no dependency named `{name}`", self.id));
         }
-        Ok(named)
+        Ok(resolved)
+    }
+
+    /// The name of the lib target of the package, by which a requirement with no rename
+    /// names it.
+    fn lib(&self) -> Result<&'a str, String> {
+        for target in field::list(self.value, "targets")? {
+            let kinds = field::list(target, "kind")?;
+            if kinds
+                .iter()
+                .any(|kind| kind.as_str().is_some_and(|kind| LIBS.contains(&kind)))
+            {
+                return field::text(target, "name");
+            }
+        }
+        Err(format!("`{}` has no lib target", self.id))
     }
 
     /// The version of the package.
@@ -380,6 +409,7 @@ mod tests {
             "version": version,
             "manifest_path": manifest,
             "dependencies": [],
+            "targets": [{ "name": name.replace('-', "_"), "kind": ["lib"] }],
         })
     }
 
@@ -412,10 +442,13 @@ mod tests {
 
     /// `package` with one more requirement on `name`.
     fn needs(mut package: Value, name: &str, req: &str) -> Value {
-        package["dependencies"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({ "name": name, "req": req, "source": CRATES_IO }));
+        package["dependencies"].as_array_mut().unwrap().push(json!({
+            "name": name,
+            "req": req,
+            "source": CRATES_IO,
+            "kind": null,
+            "target": null,
+        }));
         package
     }
 
@@ -443,7 +476,8 @@ mod tests {
                             .map_or("gone".to_string(), |package| {
                                 package["name"].as_str().unwrap().replace('-', "_")
                             });
-                        json!({ "pkg": to, "name": name })
+                        let kinds = [json!({ "kind": null, "target": null })];
+                        json!({ "pkg": to, "name": name, "dep_kinds": kinds })
                     })
                     .collect();
                 json!({ "id": id, "deps": deps })
@@ -625,6 +659,16 @@ mod tests {
     }
 
     #[test]
+    fn passes_a_dependency_whose_lib_name_is_not_its_package_name() {
+        assert_eq!(patched("libname"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn passes_a_dev_requirement_that_the_copy_meets_of_a_registry_package() {
+        assert_eq!(patched("dev"), Ok(Vec::new()));
+    }
+
+    #[test]
     fn refuses_a_release_of_the_series_of_the_copy_under_a_second_name() {
         let dependent = format!(
             "path+file://{}#0.0.0",
@@ -750,12 +794,116 @@ mod tests {
     }
 
     #[test]
+    fn names_a_missing_field_of_a_target_or_an_edge() {
+        for (key, kind) in [("targets", "array"), ("kind", "array"), ("name", "string")]
+        {
+            let needing = needs(types(), "noq-proto", "^1.3");
+            let mut lacking =
+                fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+            lacking["packages"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("targets");
+            if key != "targets" {
+                lacking["packages"][1]["targets"] =
+                    json!([{ "name": "noq_proto", "kind": ["lib"] }]);
+                lacking["packages"][1]["targets"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(key);
+            }
+            assert_eq!(
+                unpatched(&root(), &lacking),
+                Err(format!("JSON has no {kind} field `{key}`"))
+            );
+        }
+        for (key, kind) in [("name", "string"), ("dep_kinds", "array")] {
+            let needing = needs(types(), "noq-proto", "^1.3");
+            let mut lacking =
+                fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+            lacking["resolve"]["nodes"][0]["deps"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert_eq!(
+                unpatched(&root(), &lacking),
+                Err(format!("JSON has no {kind} field `{key}`"))
+            );
+        }
+    }
+
+    #[test]
     fn names_an_edge_that_no_requirement_names() {
         let fuzz = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
         assert_eq!(
             unpatched(&root(), &fuzz),
             Err(format!("`{TYPES}` has no dependency named `noq_proto`"))
         );
+    }
+
+    /// The `fuzz` graph in which `types` needs `noq-proto` `^1.3` as `change` makes it,
+    /// and resolves it to the release 1.3.0 under the edge name `name`.
+    fn paired(
+        name: &str,
+        change: impl FnOnce(&mut Value),
+    ) -> Result<Vec<String>, String> {
+        let mut needing = needs(types(), "noq-proto", "^1.3");
+        change(&mut needing["dependencies"][0]);
+        let mut fuzz = fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        fuzz["resolve"]["nodes"][0]["deps"][0]["name"] = json!(name);
+        unpatched(&root(), &fuzz)
+    }
+
+    #[test]
+    fn pairs_an_edge_with_a_requirement_by_rename_package_kind_and_target() {
+        let unnamed = Err(format!("`{TYPES}` has no dependency named `noq_proto`"));
+        let refused = Ok(vec![format!(
+            "fuzz/Cargo.toml builds `noq-proto` `^1.3` of `{TYPES}` from \
+             `/r/noq-proto-1.3.0/Cargo.toml`, not from the copy \
+             `/w/patches/noq-proto/Cargo.toml` that meets it. Give fuzz/Cargo.toml the \
+             [patch.crates-io] table of the root Cargo.toml."
+        )]);
+        let renamed =
+            |requirement: &mut Value| requirement["rename"] = json!("the-proto");
+        assert_eq!(paired("the_proto", renamed), refused);
+        assert_eq!(paired("noq_proto", renamed), unnamed);
+        let other = |requirement: &mut Value| {
+            requirement["name"] = json!("other");
+            requirement["rename"] = json!("noq-proto");
+        };
+        assert_eq!(paired("noq_proto", other), unnamed);
+        let dev = |requirement: &mut Value| requirement["kind"] = json!("dev");
+        assert_eq!(paired("noq_proto", dev), unnamed);
+        let unix = |requirement: &mut Value| requirement["target"] = json!("cfg(unix)");
+        assert_eq!(paired("noq_proto", unix), unnamed);
+        assert_eq!(paired("noq_proto", |_| ()), refused);
+    }
+
+    #[test]
+    fn names_a_dependency_with_no_lib_target() {
+        let mut bin = release("1.3.0");
+        bin["targets"] = json!([{ "name": "noq_proto", "kind": ["bin"] }]);
+        let needing = needs(types(), "noq-proto", "^1.3");
+        let fuzz = fuzz(&[needing, bin], &[(TYPES, &id("1.3.0"))]);
+        assert_eq!(
+            unpatched(&root(), &fuzz),
+            Err(format!("`{}` has no lib target", id("1.3.0")))
+        );
+    }
+
+    #[test]
+    fn reads_the_lib_target_of_each_kind() {
+        for kind in LIBS {
+            let mut lib = release("1.3.0");
+            lib["targets"] = json!([
+                { "name": "noq_proto", "kind": ["bin"] },
+                { "name": "noq_proto", "kind": [kind] },
+            ]);
+            assert_eq!(
+                Package::read(&lib, Path::new("/w/patches")).unwrap().lib(),
+                Ok("noq_proto")
+            );
+        }
     }
 
     #[test]
@@ -767,17 +915,6 @@ mod tests {
                 "the resolve of fuzz/Cargo.lock has no package `registry+x#gone@1.0.0`"
                     .to_string()
             )
-        );
-        let needing = needs(types(), "noq-proto", "1");
-        let mut bad = fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
-        bad["packages"][1]["version"] = json!("one");
-        assert_eq!(
-            unpatched(&self::root(), &bad),
-            Err(format!(
-                "`{}` has the version `one`: unexpected character 'o' while parsing \
-                 major version number",
-                id("1.3.0")
-            ))
         );
         let mut root = root();
         root["packages"][0]["version"] = json!("one");
