@@ -119,21 +119,24 @@
   so its cost stays the same while other sessions end. The hub finds a session by its
   home key, as the shard never gives a key twice. The home stops carrying an index only
   when its key is not an index of the new definitions (`Shard::shed`, HOME SURFACE), and
-  carries it again when it returns. The hub retires the slot of each removed data
-  channel (`channel::Slots::retire`), so a channel defined later at its key gets a new
-  slot, and a reader takes no series written under the old definition. An index keeps
-  its slot, as the buffer keys its tails by slot (X42). So a slot names one definition
-  of a data channel, and the newest frame of an index stays the current value of each
-  other channel on it (B4). Lost: a drop of the newest frame of each index that a
-  removed channel was on, as each other channel of the index then has no current value
-  until the next live frame; a copy of the newest frame without the removed series, a
-  new key set and a copy for the same result; and a check of each frame in each session,
-  a cost per frame for a change that comes at an apply (`laptop.architect`,
-  2026-10-09T00:41:53Z:
+  carries it again when it returns. A key holds at most two slots (`channel::Slots`):
+  its slot as an index, which never changes, as the buffer keys its tails by slot (X42),
+  and its slot as a data channel, which the hub retires at each removal. So a channel
+  defined later at a key gets a new slot, and a reader takes no series written under the
+  old definition. An index continues its seq after its key was a data channel, also
+  after a restart (`laptop.architect`, 2026-10-09T01:25:59Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot
+  names one definition of a data channel, and the newest frame of an index stays the
+  current value of each other channel on it (B4). Lost: a drop of the newest frame of
+  each index that a removed channel was on, as each other channel of the index then has
+  no current value until the next live frame; a copy of the newest frame without the
+  removed series, a new key set and a copy for the same result; and a check of each
+  frame in each session, a cost per frame for a change that comes at an apply
+  (`laptop.architect`, 2026-10-09T00:41:53Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071897947). A served
   open checks each key as its message arrives, and checks all of them again after it
-  waits for the home of its index, since a call between two messages of its keys run or
-  during the wait can remove one. Each open checks its names or keys again after it
+  waits for the home of its index, as a call between two messages of its keys run, or
+  during the wait, can remove one. Each open checks its names or keys again after it
   waits for the home, and then carries each index and opens with no `await` between.
   When the check gives another result, the open waits again (`laptop.architect`,
   2026-10-09T00:55:16Z:
