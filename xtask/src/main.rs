@@ -8,6 +8,7 @@ mod field;
 mod files;
 mod fuzz;
 mod globals;
+mod libtest;
 mod map;
 mod miri;
 mod nightly;
@@ -46,8 +47,8 @@ fn main() -> ExitCode {
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
-                "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
-                 cargo xtask sanitizers\n       \
+                "usage: cargo xtask <layers|globals|oracles|loom>\n       \
+                 cargo xtask <shuttle|miri|sanitizers>\n       \
                  cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>"

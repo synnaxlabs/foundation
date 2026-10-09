@@ -1,10 +1,11 @@
 //! Runs Miri on the pinned nightly.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde_json::Value;
 
+use crate::libtest::{self, Run};
 use crate::select;
 
 /// The `MIRIFLAGS` of each Miri pass.
@@ -41,21 +42,17 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for flags in PASSES {
         for package in &packages {
-            let output = command(&nightly, package, flags)
-                .stderr(Stdio::inherit())
-                .output()
-                .map_err(|e| vec![format!("rustup: {e}")])?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            eprint!("{stdout}");
-            if !output.status.success() {
-                problems
-                    .push(format!("Miri with `{flags}` failed in `{}`", package.name));
-            } else if tests_ran(&stdout) == 0 {
-                problems.push(format!(
+            match libtest::run(&mut command(&nightly, package, flags))
+                .map_err(|e| vec![e])?
+            {
+                Run::Failed => problems
+                    .push(format!("Miri with `{flags}` failed in `{}`", package.name)),
+                Run::Empty => problems.push(format!(
                     "`{}` names `unsafe_code` but runs no tests under Miri. Add tests \
                      that reach its unsafe code.",
                     package.name
-                ));
+                )),
+                Run::Passed => {}
             }
         }
     }
@@ -79,25 +76,9 @@ fn command(
     command
 }
 
-/// The sum of N over the `running N tests` lines of libtest output.
-pub(crate) fn tests_ran(output: &str) -> usize {
-    output
-        .lines()
-        .filter_map(|line| line.strip_prefix("running ")?.split(' ').next())
-        .filter_map(|count| count.parse::<usize>().ok())
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tests_ran_sums_each_test_binary() {
-        let output = "\nrunning 2 tests\ntest a ... ok\n\nrunning 0 tests\n\n\
-                      running 1 test\ntest b ... ok\n";
-        assert_eq!(tests_ran(output), 3);
-    }
 
     #[test]
     fn packages_are_the_crates_that_name_unsafe_code() {
@@ -128,10 +109,5 @@ mod tests {
                 &package.id
             ]
         );
-    }
-
-    #[test]
-    fn tests_ran_is_zero_with_no_tests() {
-        assert_eq!(tests_ran("\nrunning 0 tests\n\ntest result: ok.\n"), 0);
     }
 }

@@ -2,8 +2,9 @@
 //! check it in place of Miri.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
+use crate::libtest::{self, Run};
 use crate::nightly::Toolchain;
 
 /// The crate that this task checks, which `cargo xtask miri` skips.
@@ -12,25 +13,19 @@ pub(crate) const CRATE: &str = "connector-opcua";
 /// Runs `cargo test` of [`CRATE`] with the feature `sim` and the address sanitizer, on
 /// the nightly in `rust-toolchain-nightly`, for its host triple. `build.rs` of the
 /// crate then builds its C with the address and undefined behavior sanitizers. It
-/// fails when the nightly gives no host triple, a test fails, or no test runs.
+/// does not use a `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` of the caller, which would
+/// drop the sanitizer. It fails when the nightly gives no host triple, a test fails,
+/// or no test runs.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let nightly = Toolchain::read(root).map_err(|e| vec![e])?;
     let host = nightly.host().map_err(|e| vec![e])?;
-    let output = command(&nightly, &host)
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| vec![format!("rustup: {e}")])?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    eprint!("{stdout}");
-    if !output.status.success() {
-        return Err(vec![format!("the sanitizer tests of `{CRATE}` failed")]);
-    }
-    if crate::miri::tests_ran(&stdout) == 0 {
-        return Err(vec![format!(
+    match libtest::run(&mut command(&nightly, &host)).map_err(|e| vec![e])? {
+        Run::Failed => Err(vec![format!("the sanitizer tests of `{CRATE}` failed")]),
+        Run::Empty => Err(vec![format!(
             "`{CRATE}` runs no tests under the sanitizers"
-        )]);
+        )]),
+        Run::Passed => Ok(()),
     }
-    Ok(())
 }
 
 /// The `cargo test` of [`run`] on `nightly` for `host`.
