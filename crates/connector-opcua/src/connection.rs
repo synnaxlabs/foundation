@@ -111,10 +111,10 @@ impl Manager {
     /// it. `run` runs the loop with a timeout of 0, alone or through its client or
     /// server, and may poll its own sources with the context it gets. Between calls,
     /// the drive sleeps until the next timer of the loop or a wake, also from a send or
-    /// a close that `run` or another task asks for. Before it gives the value, it
-    /// moves on each connection again after each connect, send, or close on it that
-    /// the last call or such a step asks for, so it can also read and call open62541
-    /// back after that call.
+    /// a close that `run` or another task asks for. After each call, also the one that
+    /// gives the value, it moves on each connection again after each connect, send, or
+    /// close on it that the call or such a step asks for, so it can also read and call
+    /// open62541 back after that call.
     ///
     /// # Panics
     ///
