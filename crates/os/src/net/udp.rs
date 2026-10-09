@@ -1024,10 +1024,12 @@ mod tests {
             });
         }
 
-        /// No public call sees where a send starts, or makes a registration fail. Linux
-        /// only, since kqueue takes a second registration of a descriptor.
+        /// No public call sees where a send starts, or makes a registration fail.
         #[test]
-        #[cfg(target_os = "linux")]
+        #[cfg_attr(
+            not(target_os = "linux"),
+            ignore = "needs epoll, which refuses a second registration"
+        )]
         fn a_failed_registration_restarts_the_next_transmit_at_its_first_datagram() {
             runtime().block_on(async {
                 let udp = loopback();
