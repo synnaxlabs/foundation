@@ -1698,7 +1698,7 @@ fn a_failed_rename_keeps_the_path_of_its_open() {
 }
 
 #[test]
-fn each_descriptor_of_a_renamed_file_gives_the_path_of_the_rename() {
+fn a_rename_gives_its_path_only_to_its_own_descriptor() {
     let mut sim = sim(0);
     let node = sim.node(node::Config {
         disk_bytes: MIB,
@@ -1712,7 +1712,7 @@ fn each_descriptor_of_a_renamed_file_gives_the_path_of_the_rename() {
         drop(reader);
     })
     .unwrap();
-    assert_eq!(node.file_closes(), ["b", "b"].map(PathBuf::from));
+    assert_eq!(node.file_closes(), ["b", "a"].map(PathBuf::from));
 }
 
 #[test]
@@ -1731,4 +1731,30 @@ fn a_rename_onto_a_taken_name_keeps_the_path_of_its_open() {
     })
     .unwrap();
     assert_eq!(node.file_closes(), ["b", "a"].map(PathBuf::from));
+}
+
+#[test]
+fn a_fault_on_the_path_of_a_reader_fails_it_after_another_descriptor_renames() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let mut writer = create(&node, "a", KIB).await;
+        let reader = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        node.fail_file(Path::new("a"), Operation::ReadAt);
+        let found = reader.read_at(0, pool.alloc(512).unwrap()).await;
+        assert_eq!(found.map(|_| ()), Err(io("a", Operation::ReadAt, 5)));
+    });
+}
+
+#[test]
+fn a_fault_on_the_new_path_misses_a_reader_after_another_descriptor_renames() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let mut writer = create(&node, "a", KIB).await;
+        let reader = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        node.fail_file(Path::new("b"), Operation::ReadAt);
+        let found = reader.read_at(0, pool.alloc(512).unwrap()).await;
+        assert_eq!(found.map(|_| ()), Ok(()));
+    });
 }
