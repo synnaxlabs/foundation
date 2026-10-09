@@ -412,7 +412,9 @@ fn reaped(reaped: &str) -> Command {
         .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
         .arg(binary)
         .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
-        .env(REAPED, reaped);
+        .env(REAPED, reaped)
+        // With it, the harness of the child writes the panic to stderr, not stdout.
+        .env_remove("RUST_TEST_NOCAPTURE");
     command
 }
 
