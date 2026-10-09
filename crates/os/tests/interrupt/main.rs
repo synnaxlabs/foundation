@@ -10,6 +10,10 @@ use std::pin::pin;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[path = "../common/mask.rs"]
+#[expect(dead_code, reason = "this binary only sets the mask")]
+mod mask;
+
 use rustix::process::{Pid, Signal, getpid, kill_process};
 use tokio::time::{sleep, timeout};
 
@@ -20,18 +24,20 @@ const QUIET: Duration = Duration::from_millis(200);
 const BOUND: Duration = Duration::from_secs(10);
 
 fn main() {
+    // A child inherits the mask of the test, which holds the signals once a test has
+    // called `interrupt`.
     match std::env::args_os().nth(1) {
         Some(arg) if arg == "child" => {
-            block(&[]);
+            mask::block(libc::SIG_SETMASK, &[]);
             child();
         }
         Some(arg) if arg == "blocked" => {
-            block(&[libc::SIGTERM]);
+            mask::block(libc::SIG_SETMASK, &[libc::SIGTERM]);
             child();
         }
         #[cfg(target_os = "linux")]
         Some(arg) if arg == "early" => {
-            block(&[]);
+            mask::block(libc::SIG_SETMASK, &[]);
             early();
         }
         _ => {
@@ -56,26 +62,6 @@ fn child() {
         writeln!(output, "fired").expect("a write to the test");
         sleep(BOUND).await;
     });
-}
-
-/// Sets the mask of the calling thread to `signals`. A child inherits the mask of the
-/// test, which holds the signals once a test has called `interrupt`.
-#[expect(unsafe_code, reason = "a signal mask is an OS call")]
-fn block(signals: &[libc::c_int]) {
-    let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-    // SAFETY: `set` is one sigset, which the call initializes.
-    let rc = unsafe { libc::sigemptyset(set.as_mut_ptr()) };
-    assert_eq!(rc, 0, "sigemptyset");
-    for &signal in signals {
-        // SAFETY: `set` is an initialized sigset, and `signal` a valid signal.
-        let rc = unsafe { libc::sigaddset(set.as_mut_ptr(), signal) };
-        assert_eq!(rc, 0, "sigaddset");
-    }
-    // SAFETY: `set` is an initialized sigset, and the old mask is not asked for.
-    let rc = unsafe {
-        libc::pthread_sigmask(libc::SIG_SETMASK, set.as_ptr(), std::ptr::null_mut())
-    };
-    assert_eq!(rc, 0, "pthread_sigmask");
 }
 
 /// With no hold, a SIGTERM that the caller blocks does not end the process. After
