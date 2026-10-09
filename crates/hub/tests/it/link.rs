@@ -514,8 +514,8 @@ struct Agent {
 }
 
 impl Agent {
-    /// Dials the home at `at` from `node` as a program of `subject`, and opens the hello
-    /// stream.
+    /// Dials the home at `at` from `node` as a program of `subject`, and opens the
+    /// hello stream.
     async fn dial(
         node: &sim::node::Node,
         tasks: env::tasks::Tasks,
