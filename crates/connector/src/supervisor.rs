@@ -836,15 +836,15 @@ mod tests {
         assert_eq!(live, (1, 0), "the second run's task outlives the drop");
     }
 
-    /// Polls a `run` of [`Spawner`] for `name` until `span` passed, then drops it.
+    /// Polls a `run` of `kind` for `name` until `span` passed, then drops it.
     async fn drop_after(
         supervisor: &Supervisor,
-        name: &Name,
+        (kind, name): (&str, &Name),
         clock: &Clock,
         span: Span,
     ) {
         let (config, token) = (config(), Token::new());
-        let mut run = pin!(supervisor.run("spawner", name.clone(), &config, &token));
+        let mut run = pin!(supervisor.run(kind, name.clone(), &config, &token));
         let mut later = pin!(clock.sleep(span));
         poll_fn(|cx| {
             assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
@@ -865,9 +865,34 @@ mod tests {
             let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
             let clock = node.clock();
             let name: Name = "plant.spawner".parse().expect("a valid name");
-            drop_after(&supervisor, &name, &clock, ms(5_000)).await;
-            drop_after(&supervisor, &name, &clock, ms(1_000)).await;
-            drop_after(&supervisor, &name, &clock, ms(5_000)).await;
+            drop_after(&supervisor, ("spawner", &name), &clock, ms(5_000)).await;
+            drop_after(&supervisor, ("spawner", &name), &clock, ms(1_000)).await;
+            drop_after(&supervisor, ("spawner", &name), &clock, ms(5_000)).await;
+            seen.lock().expect("no panic").clone()
+        });
+        assert_eq!(seen, [0, 0, 0], "the first dropped run's task still runs");
+    }
+
+    #[test]
+    fn keeps_the_dropped_run_of_a_connector_at_a_drop_of_another() {
+        let seen = run_on(|node, tasks| async move {
+            let kind = Spawner {
+                linger: ms(2_000),
+                ..Spawner::default()
+            };
+            let seen = Arc::clone(&kind.seen);
+            let other = Spawner {
+                linger: ms(2_000),
+                ..Spawner::default()
+            };
+            let kinds = Table::new().with("spawner", kind).with("other", other);
+            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let clock = node.clock();
+            let name: Name = "plant.spawner".parse().expect("a valid name");
+            let another: Name = "plant.other".parse().expect("a valid name");
+            drop_after(&supervisor, ("spawner", &name), &clock, ms(5_000)).await;
+            drop_after(&supervisor, ("other", &another), &clock, ms(1_000)).await;
+            drop_after(&supervisor, ("spawner", &name), &clock, ms(5_000)).await;
             seen.lock().expect("no panic").clone()
         });
         assert_eq!(seen, [0, 0, 0], "the first dropped run's task still runs");
@@ -887,7 +912,7 @@ mod tests {
             let clock = node.clock();
             for i in 0..100 {
                 let name: Name = format!("plant.spawner{i}").parse().expect("a name");
-                drop_after(&supervisor, &name, &clock, ms(5_000)).await;
+                drop_after(&supervisor, ("spawner", &name), &clock, ms(5_000)).await;
             }
             let kept = supervisor.left.borrow().len();
             (kept, *live.lock().expect("no panic"))
@@ -913,7 +938,7 @@ mod tests {
             let config = config();
             let clock = node.clock();
             let name: Name = "plant.spawner".parse().expect("a valid name");
-            drop_after(&supervisor, &name, &clock, ms(5_000)).await;
+            drop_after(&supervisor, ("spawner", &name), &clock, ms(5_000)).await;
             let again = Token::new();
             let (canceller, sleeper) = (again.clone(), clock.clone());
             tasks.spawn(async move {
