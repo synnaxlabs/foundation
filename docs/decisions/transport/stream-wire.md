@@ -29,12 +29,15 @@
   classes wait, a class is owed at most one peer window of `Latest` bytes, so the
   credit of a whole message is never lost. A class that does not wait keeps no credit
   past one peer window of its own bytes once the other class sent one peer window alone.
-  So a class that starts again after the other sent alone goes ahead of it by at most
-  about one window. After a pause in which neither class sends, each keeps the credit of
-  the time both waited, at most one peer window of `Latest` bytes, because no byte moves
-  in the pause and the share has no clock. When a simulation of a deployed load shows
-  `Latest` behind `Complete` by more than one window after such a pause, the share gets
-  a signal of the pause. A class that holds less than its share when
+  So a class that starts again after the other sent alone goes ahead of it by its
+  credit, at most about one window. When the other class holds no message as its credit
+  ends, as a `Latest` stream on `try_send` between its calls, it also takes the rest of
+  that step of credit, at most one more window. After a pause in which neither class
+  sends, each keeps the credit of the time both waited, at most one peer window of
+  `Latest` bytes, because no byte moves in the pause and the share has no clock. When a
+  simulation of a deployed load shows `Latest` behind `Complete` by more than these
+  bounds after such a pause, the share gets a signal of the pause. A class that holds
+  less than its share when
   QUIC gives room sends what it holds first, and the core holds no QUIC room for its
   later messages. So one `Latest` stream on `try_send` sends at most one message for
   each step of credit. Room that a stream got and its caller has not taken counts for
@@ -62,7 +65,14 @@
   UTC): https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279.
   Supersedes the sentence on the credit of a class that does not wait of
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6069633568, and
-  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070164489. Who
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070164489. The lead
+  after the credit: architect-2 (#1998, 2026-10-09 01:34 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6072445520. Lost: a
+  ration of the class with credit while the owed class competes only by its memory, and
+  a refused `try_send` that holds room in the budget, because each holds QUIC credit
+  idle until the `Latest` caller calls again, and with no clock that wait has no bound.
+  Lost: a `try_send` that keeps its newest refused message in the core, because it
+  changes the `try_send` contract and holds a pool block for each such stream. Who
   writes the rest: architect-2 (#1311, 2026-10-07 17:18 UTC):
   https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6043036616. The
   admission of new messages: architect-2 (#1311, 2026-10-08 05:49 UTC, and #1998,
