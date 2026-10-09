@@ -122,13 +122,15 @@
   round 1 of #1991), by `laptop.architect-2` (20:23 UTC):
   https://github.com/synnaxlabs/foundation/pull/1991#issuecomment-6068373063. This
   supersedes `Config::private_key`, the patch of
-  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047. While a
-  Rust caller gives `Config::region`, a founding with a dangling index or two channels
-  of one key makes shard 0 panic. The first PR that gives `node` a `spec::region::check`
-  before each define (#1744 or #1957 PR 2) runs it on `Config::region` too, and then a
-  founding with problems defines no channel (#1741), by `laptop.architect-2` (20:08
-  UTC): https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
-  the ruling of `laptop.architect` (20:08 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047. `node`
+  runs no check of the spec: `mesh` uses only a spec with no problems (SPEC IN USE), so
+  a founding with problems gives no spec in use and the hub knows no channel, by
+  `laptop.architect-2` (2026-10-09, #1957 PR 2):
+  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6088900310. This supersedes the panic of a founding with a dangling index or two
+  channels of one key, and the check in `node` that was to end it, by
+  `laptop.architect-2` (2026-10-08 20:08 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on the
+  ruling of `laptop.architect` (20:08 UTC):
   https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791.
   Amended (2026-10-09, #1628, by `laptop.architect-2`, 13:35 UTC):
   https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858, on the
