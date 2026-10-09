@@ -7984,8 +7984,7 @@ mod tests {
         /// message. Each rest holds room in the send budget, so together they are at
         /// most one window.
         #[test]
-        fn complete_streams_go_ahead_of_a_held_latest_by_their_credit_and_a_message_each()
-         {
+        fn complete_streams_go_ahead_of_a_held_latest_by_their_credit_and_a_window() {
             let loads = [(1, MESSAGE_MAX), (4, MESSAGE_MAX / 2), (4, MESSAGE_MAX)];
             for (alone, lag) in
                 [(NARROW, 1), (2 * NARROW, 1), (NARROW, 50), (2 * NARROW, 50)]
