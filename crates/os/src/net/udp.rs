@@ -740,6 +740,8 @@ mod tests {
             assert_eq!(recorded.sends.len(), 2);
         }
 
+        /// No public call sees where a send starts: the public `Sender` cannot turn
+        /// GSO off on loopback, and with GSO on every send starts at 0.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_retry_after_pending_sends_only_the_datagrams_that_did_not_go_out() {
@@ -902,6 +904,8 @@ mod tests {
             });
         }
 
+        /// No public call sees where a send starts: the public `Sender` cannot turn
+        /// GSO off on loopback, and with GSO on every send starts at 0.
         #[test]
         fn retries_a_pending_send_when_the_socket_is_writable() {
             runtime().block_on(async {
@@ -932,6 +936,8 @@ mod tests {
             });
         }
 
+        /// No public call sees where a send starts: the public `Sender` cannot turn
+        /// GSO off on loopback, and with GSO on every send starts at 0.
         #[test]
         fn a_failed_wait_drops_the_registration() {
             let udp = loopback();
@@ -959,7 +965,10 @@ mod tests {
             });
         }
 
+        /// No public call sees where a send starts, or makes a registration fail. Linux
+        /// only, since kqueue takes a second registration of a descriptor.
         #[test]
+        #[cfg(target_os = "linux")]
         fn a_failed_registration_restarts_the_next_transmit_at_its_first_datagram() {
             runtime().block_on(async {
                 let udp = loopback();
