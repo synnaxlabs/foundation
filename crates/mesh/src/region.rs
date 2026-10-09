@@ -260,7 +260,7 @@ impl State {
                 homes,
                 ..
             } => {
-                self.move_pointer(base, root, &holders, &homes)?;
+                self.swap_pointer(base, root, &holders, &homes)?;
                 let mut moved = false;
                 for (index, home) in homes {
                     if let Entry::Vacant(vacant) = self.homes.entry(index) {
@@ -279,9 +279,10 @@ impl State {
         self.voters = voters;
     }
 
-    // Moves the pointer by compare-and-swap on `base`, when the holders of its chunks
-    // are a quorum. The chunks are never read here.
-    fn move_pointer(
+    // Compares `base` with the pointer and, when the holders of its chunks are a
+    // quorum, sets the pointer that the change makes. The chunks are never read
+    // here.
+    fn swap_pointer(
         &mut self,
         base: Pointer,
         root: Digest,
