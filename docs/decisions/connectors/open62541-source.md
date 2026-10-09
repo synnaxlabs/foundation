@@ -239,4 +239,6 @@
   error gives a warning through the logger of the loop, then `CLOSING`. The wake of a
   send on the thread of the drive: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
-  2026-10-09 04:43 UTC). The rest: approval owed.
+  2026-10-09 04:43 UTC). The rest: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6085824086,
+  2026-10-09 17:22 UTC).
