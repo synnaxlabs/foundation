@@ -428,6 +428,6 @@ in the directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
 connector's protocol parser, the file `name` of the data directory
 (`node::name::decode`, #2174), the file `budget` of the data directory
 (`node::budget::decode`, #2174), the chunk processing of open62541
-(`ua_securechannel.c`, #1990), and `connector::reader::read`, `connector::http::uri`, and
-`connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
-`connector` block of kind `influx`, and no input holds one yet (#1817).
+(`ua_securechannel.c`, #1990), and `connector::reader::read`, `connector::http::uri`,
+and `connector_influx::Kind::parse`, which `config_check` reaches only from an input
+with a `connector` block of kind `influx`, and no input holds one yet (#1817).
