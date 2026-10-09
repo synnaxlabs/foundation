@@ -51,8 +51,7 @@ fn node(start: &Start) -> Result<(), Failure> {
     let threads = os::threads().map_err(failed)?;
     let name = name(start, &threads)?;
     let (called, call) = mpsc::channel();
-    let mut line = Vec::new();
-    start.running(&name, &mut line);
+    let line = start.line(&name);
     // Its own thread, so a standard output that nobody reads blocks neither shard 0
     // nor the stop.
     let show = threads.start("show", move || async move {
@@ -62,7 +61,10 @@ fn node(start: &Start) -> Result<(), Failure> {
         )]
         let called = call.recv();
         if called.is_ok() {
-            io::stdout().lock().write_all(&line).unwrap_or(());
+            // A write that fails changes nothing: the node runs either way.
+            let mut stdout = io::stdout().lock();
+            let written = stdout.write_all(line.as_bytes());
+            written.and_then(|()| stdout.flush()).unwrap_or(());
         }
     });
     let show = show.map_err(failed)?;

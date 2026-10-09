@@ -32,12 +32,12 @@ pub struct Failure {
 }
 
 impl Start {
-    /// Writes that the node `name` runs in [`Start::data`] to `output`, as one line of
-    /// text or JSON, and flushes it. A write that fails changes nothing: the node runs
-    /// either way. JSON gives the data directory with each byte that is not UTF-8 as
-    /// U+FFFD.
-    pub fn running(&self, name: &Name, mut output: impl Write) {
-        let text = if self.json {
+    /// The line that tells that the node `name` runs in [`Start::data`], as text or JSON,
+    /// with its newline. JSON gives the data directory with each byte that is not UTF-8
+    /// as U+FFFD.
+    #[must_use]
+    pub fn line(&self, name: &Name) -> String {
+        if self.json {
             // By hand, as a `json!` object sorts its keys.
             let name = Value::from(name.as_str());
             let data = Value::from(self.data.to_string_lossy());
@@ -45,12 +45,7 @@ impl Start {
         } else {
             let data = self.data.display();
             format!("node {name} runs in {data}. Stop it with Ctrl-C.\n")
-        };
-        drop(
-            output
-                .write_all(text.as_bytes())
-                .and_then(|()| output.flush()),
-        );
+        }
     }
 
     /// Writes `failure` to `errors` as [`crate::cli`] writes its own errors, and gives

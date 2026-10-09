@@ -617,45 +617,26 @@ mod start {
     }
 
     #[test]
-    fn running_writes_the_name_and_the_data_directory() {
+    fn line_gives_the_name_and_the_data_directory() {
         let mut start = Start {
             data: PathBuf::from("foundation-data"),
             json: false,
             name: None,
         };
-        let mut text = Vec::new();
-        start.running(&edge(), &mut text);
         assert_eq!(
-            String::from_utf8(text).unwrap(),
+            start.line(&edge()),
             "node edge runs in foundation-data. Stop it with Ctrl-C.\n"
         );
         start.json = true;
-        let mut json = Vec::new();
-        start.running(&edge(), &mut json);
         assert_eq!(
-            String::from_utf8(json).unwrap(),
+            start.line(&edge()),
             "{\"name\":\"edge\",\"data\":\"foundation-data\"}\n"
-        );
-    }
-
-    #[test]
-    fn running_flushes_the_line() {
-        let start = Start {
-            data: PathBuf::from("foundation-data"),
-            json: false,
-            name: None,
-        };
-        let mut text = io::BufWriter::new(Vec::new());
-        start.running(&edge(), &mut text);
-        assert_eq!(
-            String::from_utf8_lossy(text.get_ref()),
-            "node edge runs in foundation-data. Stop it with Ctrl-C.\n"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn running_gives_a_data_directory_that_is_not_utf8_lossily() {
+    fn line_gives_a_data_directory_that_is_not_utf8_lossily() {
         use std::os::unix::ffi::OsStrExt;
 
         let start = Start {
@@ -663,10 +644,8 @@ mod start {
             json: true,
             name: None,
         };
-        let mut json = Vec::new();
-        start.running(&edge(), &mut json);
         assert_eq!(
-            String::from_utf8(json).unwrap(),
+            start.line(&edge()),
             "{\"name\":\"edge\",\"data\":\"a\u{fffd}b\"}\n"
         );
     }
@@ -682,14 +661,6 @@ mod start {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::ErrorKind::BrokenPipe.into())
         }
-    }
-
-    #[test]
-    fn running_to_a_closed_output_does_not_panic() {
-        let Run::Start(start) = start(&[]) else {
-            panic!("start runs");
-        };
-        start.running(&edge(), Closed);
     }
 
     #[test]
