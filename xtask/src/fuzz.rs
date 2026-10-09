@@ -29,14 +29,14 @@ const MAX_LEN: u64 = 16 * 1024;
 /// Runs each target of `fuzz/` at `root` for `seconds`, as many at once as the host has
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
 /// `oracles/fuzz/<target>`. It fails before the build on each problem that [`check`]
-/// finds, and then when the build fails or a target fails. cargo-fuzz keeps the input
-/// of a crash in `fuzz/artifacts/<target>/`.
+/// finds and when the pinned nightly gives no host triple, and then when the build
+/// fails or a target fails. cargo-fuzz keeps the input of a crash in
+/// `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     let targets = check(root)?;
-    let nightly = crate::nightly(root).map_err(|e| vec![e])?;
-    let built = nightly
-        .cargo()
-        .args(["fuzz", "build"])
+    let cargo = Cargo::new(root).map_err(|e| vec![e])?;
+    let built = cargo
+        .build()
         .status()
         .map_err(|e| vec![format!("rustup: {e}")])?;
     if !built.success() {
@@ -46,7 +46,7 @@ pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     let worker = || {
         let mut problems = Vec::new();
         while let Some(target) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
-            if let Err(problem) = run_one(root, &nightly, target, seconds) {
+            if let Err(problem) = run_one(root, &cargo, target, seconds) {
                 problems.push(problem);
             }
         }
@@ -74,7 +74,7 @@ pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
 /// Runs `target` for `seconds` and prints its result.
 fn run_one(
     root: &Path,
-    nightly: &crate::Nightly,
+    cargo: &Cargo,
     target: &str,
     seconds: NonZeroU16,
 ) -> Result<(), String> {
@@ -89,7 +89,9 @@ fn run_one(
         .map_err(|e| format!("{}: {e}", oracles.display()))?;
     std::fs::create_dir_all(&corpus)
         .map_err(|e| format!("{}: {e}", corpus.display()))?;
-    let output = command(nightly, target, &corpus, &oracles, seconds, max_len(sizes))
+    let max_len = max_len(sizes);
+    let output = cargo
+        .run(target, &corpus, &oracles, seconds, max_len)
         .output()
         .map_err(|e| format!("rustup: {e}"))?;
     let (report, result) = report(target, &output);
@@ -131,29 +133,54 @@ fn unmatched(targets: &[&str], folders: &[String]) -> Vec<String> {
     inputless.chain(targetless).collect()
 }
 
-/// The command that runs `target` on the toolchain `nightly` for `seconds`, on the
-/// inputs in `corpus` and `oracles`, with no input longer than `max_len` bytes.
-fn command(
-    nightly: &crate::Nightly,
-    target: &str,
-    corpus: &Path,
-    oracles: &Path,
-    seconds: NonZeroU16,
-    max_len: u64,
-) -> Command {
-    let mut command = nightly.cargo();
-    command
-        .args(["fuzz", "run", target])
-        .arg(corpus)
-        .arg(oracles)
-        .args([
+/// cargo-fuzz on the pinned nightly, for the host triple of that nightly.
+struct Cargo {
+    nightly: crate::nightly::Toolchain,
+    host: String,
+}
+
+impl Cargo {
+    /// cargo-fuzz on the pinned nightly of the workspace at `root`. cargo-fuzz builds
+    /// for the triple that it was itself built for unless it gets `--target`, and a
+    /// musl build of it cannot build a sanitized target.
+    fn new(root: &Path) -> Result<Self, String> {
+        let nightly = crate::nightly::Toolchain::read(root)?;
+        let host = nightly.host()?;
+        Ok(Self { nightly, host })
+    }
+
+    /// The command that builds each target.
+    fn build(&self) -> Command {
+        self.fuzz("build")
+    }
+
+    /// The command that runs `target` for `seconds`, on the inputs in `corpus` and
+    /// `oracles`, with no input longer than `max_len` bytes.
+    fn run(
+        &self,
+        target: &str,
+        corpus: &Path,
+        oracles: &Path,
+        seconds: NonZeroU16,
+        max_len: u64,
+    ) -> Command {
+        let mut command = self.fuzz("run");
+        command.arg(target).arg(corpus).arg(oracles).args([
             "--".to_string(),
             format!("-max_total_time={seconds}"),
             "-timeout=10".to_string(),
             "-rss_limit_mb=2048".to_string(),
             format!("-max_len={max_len}"),
         ]);
-    command
+        command
+    }
+
+    /// A command that runs `cargo fuzz <sub>` for the host, at the workspace root.
+    fn fuzz(&self, sub: &str) -> Command {
+        let mut command = self.nightly.cargo();
+        command.args(["fuzz", sub, "--target", &self.host]);
+        command
+    }
 }
 
 /// The `-max_len` for oracle inputs of `sizes` bytes: [`MAX_LEN`], or the largest
@@ -415,12 +442,10 @@ impl<'a> Package<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::ExitStatus;
-
     use serde_json::json;
 
     use super::*;
+    use crate::common::output;
 
     const PATCHED: &str = "path+file:///w/patches/noq-proto#noq-proto@1.3.0";
     const TYPES: &str = "path+file:///w/crates/types#0.0.0";
@@ -1240,12 +1265,7 @@ mod tests {
     #[test]
     fn runs_the_target_on_both_corpus_directories_with_the_limits() {
         let seconds = NonZeroU16::new(5).unwrap();
-        let nightly = crate::Nightly {
-            root: "/w".into(),
-            pin: "nightly-x".to_string(),
-        };
-        let command = command(
-            &nightly,
+        let command = arm().run(
             "spec_tree",
             Path::new("/c"),
             Path::new("/o"),
@@ -1261,6 +1281,8 @@ mod tests {
                 "cargo",
                 "fuzz",
                 "run",
+                "--target",
+                "aarch64-unknown-linux-gnu",
                 "spec_tree",
                 "/c",
                 "/o",
@@ -1269,6 +1291,54 @@ mod tests {
                 "-timeout=10",
                 "-rss_limit_mb=2048",
                 "-max_len=20000",
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/w")));
+    }
+
+    fn arm() -> Cargo {
+        Cargo {
+            nightly: crate::nightly::Toolchain::new("/w", "nightly-x"),
+            host: "aarch64-unknown-linux-gnu".to_string(),
+        }
+    }
+
+    #[test]
+    fn new_builds_for_the_host_of_the_pin() {
+        let root = crate::common::create_stable_root("xtask-fuzz-host");
+        let cargo = Cargo::new(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        let build = cargo.unwrap().build();
+        let args: Vec<_> = build.get_args().filter_map(|a| a.to_str()).collect();
+        let [.., "--target", host] = args[..] else {
+            panic!("{args:?}");
+        };
+        assert!(host.starts_with(std::env::consts::ARCH), "{host}");
+    }
+
+    #[test]
+    fn new_names_rustup_and_the_pin_when_the_pin_is_not_installed() {
+        let Err(error) = Cargo::new(&crate::fixture()) else {
+            panic!("the pin of the fixture is not installed");
+        };
+        let command = "`rustup run nightly-2000-01-01 rustc -vV`: exit status: 1: ";
+        assert!(error.starts_with(command), "{error}");
+    }
+
+    #[test]
+    fn builds_for_the_host_of_the_nightly() {
+        let command = arm().build();
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "run",
+                "nightly-x",
+                "cargo",
+                "fuzz",
+                "build",
+                "--target",
+                "aarch64-unknown-linux-gnu",
             ]
         );
         assert_eq!(command.get_current_dir(), Some(Path::new("/w")));
@@ -1305,14 +1375,6 @@ mod tests {
         assert_eq!(max_len([]), 16384);
         assert_eq!(max_len([3, 16384, 70]), 16384);
         assert_eq!(max_len([3, 32875, 16385]), 32875);
-    }
-
-    fn output(code: i32, stdout: &str, stderr: &str) -> Output {
-        Output {
-            status: ExitStatus::from_raw(code << 8),
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-        }
     }
 
     #[test]
