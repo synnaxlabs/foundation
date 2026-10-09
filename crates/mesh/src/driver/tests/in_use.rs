@@ -540,6 +540,18 @@ fn a_first_read_ends_when_the_group_stops() {
     });
 }
 
+// The spec of v0 is in use, so only the check of the stop fails this call.
+#[test]
+fn a_call_after_the_group_stops_gives_the_stop() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
+        assert_eq!(mesh.spec().await, Ok(in_use(base(), &BTreeMap::new())));
+        let stopped = super::send::stop(&node, &mesh);
+        node.clock().sleep(Span::MILLISECOND).await;
+        assert_eq!(mesh.spec().await, Err(stopped));
+    });
+}
+
 // As in `a_call_at_a_later_pointer_waits_for_no_retry_of_an_older_one`, but the retry
 // get finds the missed chunk, and the retry read that follows waits on a put of the
 // other.
