@@ -2342,3 +2342,33 @@ channel \"a.other\" {
     ];
     assert_eq!(codes, expected);
 }
+
+#[test]
+fn check_gives_the_codes_of_plan_when_the_first_writer_in_the_files_differs() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+channel \"a.value\" {
+  data_type = \"f64\"
+  index = \"a.time\"
+}
+placement \"a\" {
+  select = \"a.*\"
+  standby = \"n2\"
+}
+connector \"w2\" {
+  kind = \"writer\"
+  node = \"n2\"
+  writes = [\"a.time\"]
+}
+connector \"w1\" {
+  kind = \"writer\"
+  node = \"n1\"
+  writes = [\"a.value\"]
+}
+";
+    let planned = problems(Spec::create_empty().plan(&[text], &["n1", "n2"]));
+    let codes: Vec<_> = planned.iter().map(|problem| problem.0).collect();
+    assert_eq!(codes, ["config.writer-nodes"]);
+}
