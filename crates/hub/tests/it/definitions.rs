@@ -15,7 +15,7 @@ use types::sample::{Scalar, Type};
 
 use super::{
     I64, LIVE, RING, SETTLE, applied, channels, config, definition, entry, name,
-    poll_flagged, poll_once, run, samples, without, write, write_series, written,
+    poll_flagged, run, samples, without, write, write_series, written,
 };
 
 const I32: Type = Type::Scalar(Scalar::I32);

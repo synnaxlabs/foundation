@@ -345,10 +345,16 @@ impl State {
             let slot = self.interner.slots().assign(key);
             self.home.shed(slot);
         }
-        for known in self.channels.values() {
-            if removed.contains(&known.key()) && known.key() != known.index() {
-                self.interner.slots().retire(known.key());
-            }
+        let retired: Vec<Key> = self
+            .channels
+            .values()
+            .filter(|known| {
+                removed.contains(&known.key()) && known.key() != known.index()
+            })
+            .map(Channel::key)
+            .collect();
+        for key in retired {
+            self.interner.slots().retire(key);
         }
         self.channels
             .retain(|_, known| !removed.contains(&known.key()));
