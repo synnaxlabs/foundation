@@ -746,6 +746,43 @@ fn files_under_a_parent_it_cannot_read_gives_dir_at_each_call() {
 }
 
 #[test]
+fn files_of_a_missing_dir_under_a_parent_it_cannot_write_gives_the_cause() {
+    let scratch = Scratch::new();
+    std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o500))
+        .unwrap();
+    let found = dir_error(&scratch.0.join("a"));
+    std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
+        .unwrap();
+    assert_eq!(
+        found.to_string(),
+        "cannot open, make, or sync the data directory or its parent: Permission \
+         denied (os error 13)"
+    );
+    assert!(matches!(found, os::Error::Dir(_)));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn files_whose_holder_sync_fails_gives_dir() {
+    let scratch = Scratch::new();
+    let dir = scratch.0.join("a");
+    let threads = os::threads().unwrap();
+    let handle = threads.start("synced", move || async move {
+        crate::seccomp::answer_calls(&[libc::SYS_fsync], |_, k| {
+            (k == 0).then_some(libc::EIO)
+        });
+        let found = dir_error(&dir);
+        assert_eq!(
+            found.to_string(),
+            "cannot open, make, or sync the data directory or its parent: \
+             Input/output error (os error 5)"
+        );
+        assert!(matches!(found, os::Error::Dir(_)));
+    });
+    crate::common::assert_joins(handle.unwrap(), Ok(()));
+}
+
+#[test]
 fn files_in_a_directory_under_a_file_gives_dir() {
     let scratch = Scratch::new();
     std::fs::write(scratch.0.join("a"), b"").unwrap();
