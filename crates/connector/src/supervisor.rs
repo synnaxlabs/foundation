@@ -802,4 +802,41 @@ mod tests {
         });
         assert_eq!(live, (1, 0), "the second run's task outlives the drop");
     }
+
+    #[test]
+    fn starts_a_new_call_with_no_wait_for_the_tasks_of_a_dropped_call() {
+        let seen = run_on(|node, tasks| async move {
+            let kind = Spawner {
+                linger: ms(2_000),
+                ..Spawner::default()
+            };
+            let seen = Arc::clone(&kind.seen);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let (token, config) = (Token::new(), config());
+            let name: Name = "plant.spawner".parse().expect("a valid name");
+            let clock = node.clock();
+            let mut run =
+                Box::pin(supervisor.run("spawner", name.clone(), &config, &token));
+            let mut later = pin!(clock.sleep(ms(5_000)));
+            poll_fn(|cx| {
+                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
+                later.as_mut().poll(cx)
+            })
+            .await;
+            drop(run);
+            let again = Token::new();
+            let (canceller, sleeper) = (again.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(1)).await;
+                canceller.cancel();
+            });
+            supervisor
+                .run("spawner", name, &config, &again)
+                .await
+                .expect("ok after the cancel");
+            seen.lock().expect("no panic").clone()
+        });
+        assert_eq!(seen, [0, 0, 1], "the dropped run's task still runs");
+    }
 }
