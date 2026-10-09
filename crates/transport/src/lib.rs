@@ -106,10 +106,12 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 ///
 /// A session that a dial made stays open until `accept` takes it, also when each caller
 /// of `dial` dropped it. Dropping the transport closes with `Code(0)` each session that
-/// no caller accepted and each handshake that a peer started, and the sessions it gave
-/// stay open. It refuses each dial from a peer until each of its connections drained:
-/// each session ended, and each close finished, in about 3 PTO. Then it frees its
-/// [`port::Part`], so a later dial gets no answer, and [`Transport::ended`] resolves.
+/// no caller accepted, and the sessions it gave stay open. It also closes each
+/// handshake that a peer started, and that peer gets [`Error::Broken`], as for a
+/// refused dial, because QUIC sends no code before the handshake is confirmed. It
+/// refuses each dial from a peer until each of its connections drained: each session
+/// ended, and each close finished, in about 3 PTO. Then it frees its [`port::Part`], so
+/// a later dial gets no answer, and [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
