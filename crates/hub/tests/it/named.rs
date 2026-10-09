@@ -180,21 +180,30 @@ fn resumes_each_later_open_of_a_named_complete_reader_at_the_same_position() {
 }
 
 #[test]
-fn opens_a_named_complete_reader_at_the_live_frames_once_its_hold_ends() {
-    run(15, |test| async move {
-        let open = named("a", "r", Mode::Complete, Span::SECOND);
-        let mut first = test.hub.reader(open).await.expect("opens");
-        let mut writer = test.writer("w", &["value"]).await;
-        write(&mut writer, &[test.now()], &[7]);
-        first.next().await.expect("a frame");
-        drop(first);
-        test.clock.sleep(Span::SECOND).await;
-        let open = named("a", "r", Mode::Complete, Span::SECOND);
-        let mut reader = test.hub.reader(open).await.expect("opens");
-        write(&mut writer, &[test.now()], &[8]);
-        let received = reader.next().await.expect("a frame after the hold");
-        assert_eq!(samples(&received, 2), [8]);
-    });
+fn holds_a_named_complete_reader_for_its_hold_and_no_longer() {
+    for (seed, slept, held) in [
+        (15, Span::from_nanos(999_999_999), true),
+        (18, Span::SECOND, false),
+    ] {
+        run(seed, move |test| async move {
+            let open = named("a", "r", Mode::Complete, Span::SECOND);
+            let mut first = test.hub.reader(open).await.expect("opens");
+            let mut writer = test.writer("w", &["value"]).await;
+            write(&mut writer, &[test.now()], &[7]);
+            first.next().await.expect("a frame");
+            drop(first);
+            test.clock.sleep(slept).await;
+            let open = named("a", "r", Mode::Complete, Span::SECOND);
+            let mut reader = test.hub.reader(open).await.expect("opens");
+            write(&mut writer, &[test.now()], &[8]);
+            let next = reader.next().await;
+            if held {
+                assert_eq!(next.expect_err("behind"), Ended::Behind);
+            } else {
+                assert_eq!(samples(&next.expect("a frame"), 2), [8]);
+            }
+        });
+    }
 }
 
 #[test]
