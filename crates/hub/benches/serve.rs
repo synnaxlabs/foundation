@@ -34,21 +34,23 @@
 mod common;
 #[path = "../tests/common/net.rs"]
 mod net;
-#[path = "../tests/common/shard.rs"]
-mod shard;
+#[path = "../tests/common/node.rs"]
+mod node;
 mod table;
 
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 use std::pin::{Pin, pin};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use block::Pool;
+use block::{Heap, Pool};
+use common::name;
 use env::tasks::Tasks;
 use hub::writer::{self, Writer};
 use hub::{Hub, Served, serve};
-use shard::name;
 use spec::channel::{Channel, Data, Kind};
 use spec::data_type::DataType;
 use spec::definition::Definition;
@@ -57,9 +59,10 @@ use transport::stream::{Receiver, Sender};
 use transport::{Address, Class, Transport};
 use types::authority::Authority;
 use types::channel;
+use types::frame::key_set::Interner;
 use types::frame::{Draft, Form};
 use types::sample::{Scalar, Type};
-use types::time::Span;
+use types::time::{Span, Stamp};
 use wire::Protocol;
 use wire::hub::{FromHome, Mode, Open, Reader, keys};
 
@@ -74,8 +77,9 @@ const ROUNDS: usize = 50;
 const RUN: usize = (WARMUP + ROUNDS) * FRAMES;
 /// Samples per series of a `wide` frame.
 const SAMPLES: usize = 256;
-/// A ring that holds each frame of the run, as nothing frees a ring until #160.
-const AREA: u64 = 64 * shard::AREA;
+/// A ring that holds each frame of the run, as nothing frees a ring until #160: 64 times
+/// the ring of `home::testing::shard`.
+const AREA: u64 = 1 << 28;
 /// How long the bench waits between two checks of what the peer read.
 const STEP: Span = Span::MILLISECOND;
 
@@ -470,7 +474,16 @@ fn poll(serving: Pin<&mut impl Future<Output = Result<Served, serve::Error>>>) {
 /// A hub on a new shard whose ring holds the run, with the channels of each shape
 /// defined, and the node's mesh time now.
 async fn create_hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (hub, now) = common::empty(node, tasks, AREA).await;
+    let (home, interner, now, time) = create_shard(node, tasks.clone()).await;
+    let hub = Hub::new(hub::Config {
+        home,
+        interner,
+        tasks,
+        node: types::node::Key::from_u128(1),
+        time,
+        entropy: node.entropy(),
+        mesh: None,
+    });
     let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
     let mut definitions = Vec::new();
     let groups = PEERS.iter().enumerate().flat_map(|(turn, (_, cases))| {
@@ -561,4 +574,51 @@ fn draft(writer: &Writer, samples: usize, stamp: &mut i64) -> Draft {
     }
     draft.set_count(entries[0].group, u32::try_from(samples).expect("few"));
     draft
+}
+
+/// `home::testing::shard` on a ring of `AREA`, its interner, the mesh time once the
+/// clock has one, and the reader of that time. #160 removes it.
+async fn create_shard(
+    node: &sim::node::Node,
+    tasks: Tasks,
+) -> (home::Shard, Interner, i64, clock::Reader) {
+    let config = block::Config { budget: 1 << 23 };
+    let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+    let (clock, mesh) = clock::Clock::new(node.clock());
+    let wall = node.wall();
+    tasks.spawn(async move { clock.run(wall).await });
+    let mut interner = Interner::new();
+    let config = buffer::Config {
+        files: node.files(),
+        dir: PathBuf::from("shard-0"),
+        pool,
+        clock: node.clock(),
+        tasks,
+        entropy: node.entropy(),
+        layout: buffer::Layout::new(AREA, 1 << 16).expect("a ring"),
+        commit: Span::from_nanos(10_000_000),
+    };
+    let buffer = buffer::Buffer::open(config, interner.slots())
+        .await
+        .expect("opens");
+    let shard = home::Shard::new(home::Config {
+        shard: 0,
+        buffer,
+        clock: mesh.clone(),
+        limits: home::order::Limits {
+            earliest: Stamp::from_nanos(1),
+            ahead: Span::from_nanos(1_000_000_000),
+        },
+    });
+    loop {
+        if let Some(now) = mesh.now().mesh {
+            return (
+                shard,
+                interner,
+                now.earliest.nanos().midpoint(now.latest.nanos()),
+                mesh,
+            );
+        }
+        node.clock().sleep(Span::from_nanos(1)).await;
+    }
 }

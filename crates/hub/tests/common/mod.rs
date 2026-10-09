@@ -10,17 +10,18 @@ use spec::data_type::DataType;
 use spec::definition::Definition;
 use types::channel;
 use types::frame::{Draft, Form, Label, Path};
+use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::Span;
 
-use crate::shard::{AREA, name, shard};
+use crate::node::env;
 
 /// Past the commit of a write.
 pub(crate) const SETTLE: Span = Span::from_nanos(20_000_000);
 
 /// A hub on a new shard, with `time` and `value` defined, and the node's mesh time now.
 pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (hub, now) = empty(node, tasks, AREA).await;
+    let (hub, now) = hub::testing::open(env(node, tasks)).await;
     let time = Channel {
         key: channel::Key::from_u128(1),
         kind: Kind::Index {
@@ -36,27 +37,11 @@ pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
     };
     let (time, value) = (Definition::Channel(time), Definition::Channel(value));
     hub.set_definitions([(&name("time"), &time), (&name("value"), &value)]);
-    (hub, now)
+    (hub, now.nanos())
 }
 
-/// A hub with no definitions on a new shard whose ring has `area` bytes, and the node's
-/// mesh time now.
-pub(crate) async fn empty(
-    node: &sim::node::Node,
-    tasks: Tasks,
-    area: u64,
-) -> (Hub, i64) {
-    let (home, interner, now, time) = shard(node, tasks.clone(), area).await;
-    let hub = Hub::new(hub::Config {
-        home,
-        interner,
-        tasks,
-        node: types::node::Key::from_u128(1),
-        time,
-        entropy: node.entropy(),
-        mesh: None,
-    });
-    (hub, now)
+pub(crate) fn name(name: &str) -> Name {
+    name.parse().expect("a valid name")
 }
 
 /// A frame of one sample at `stamp` on `time` and `value`.

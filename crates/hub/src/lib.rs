@@ -7,6 +7,8 @@ mod commit;
 mod link;
 pub mod reader;
 pub mod serve;
+#[cfg(feature = "sim")]
+pub mod testing;
 pub mod writer;
 
 use std::cell::{Cell, RefCell};

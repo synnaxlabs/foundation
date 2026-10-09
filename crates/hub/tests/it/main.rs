@@ -38,6 +38,8 @@ mod net;
 mod client;
 mod definitions;
 mod link;
+#[path = "../common/node.rs"]
+mod node;
 mod region;
 mod serve;
 

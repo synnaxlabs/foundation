@@ -39,8 +39,8 @@
 
 #[path = "../tests/common/mod.rs"]
 mod common;
-#[path = "../tests/common/shard.rs"]
-mod shard;
+#[path = "../tests/common/node.rs"]
+mod node;
 mod table;
 
 use std::pin::pin;
@@ -48,11 +48,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
-use common::SETTLE;
+use common::{SETTLE, name};
 use hub::home::Outcome;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
-use shard::name;
 use table::Line;
 use types::authority::Authority;
 use types::frame::{Label, Path};
@@ -62,8 +61,8 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 /// Frames per round. A round fits the window of a complete reader.
 const FRAMES: usize = 64;
-/// `WARMUP + ROUNDS` commits, under the 341 of `FRAMES` frames that a ring of
-/// `shard::AREA` holds.
+/// `WARMUP + ROUNDS` commits, under the 341 of `FRAMES` frames that the ring of
+/// `home::testing::shard` holds.
 const WARMUP: usize = 20;
 const ROUNDS: usize = 200;
 /// More rounds than fill the ring.

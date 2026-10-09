@@ -6,6 +6,7 @@
 //! kind table has the influx kind.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use std::collections::{BTreeMap, BTreeSet};
 
