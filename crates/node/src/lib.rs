@@ -629,7 +629,12 @@ impl Open {
         if self.stop.raised() {
             return None;
         }
-        match directory::claim(files, cores, name).await {
+        let claimed = async {
+            let lock = directory::claim(files, cores).await?;
+            name::keep(files, name).await?;
+            Ok::<_, Error>(lock)
+        };
+        match claimed.await {
             Ok(lock) => {
                 give.give(Interner::new());
                 Some(lock)
