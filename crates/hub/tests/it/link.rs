@@ -1034,8 +1034,8 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
     );
     assert_eq!(
         over.to_string(),
-        "a request body of 16777216 bytes does not fit under the cap of 33554432 bytes, \
-         since the hub's open requests hold 16777217"
+        "a request body of 16777216 bytes does not fit under the cap of 33554432 bytes: \
+         the open requests of the hub hold 16777217 bytes"
     );
 }
 

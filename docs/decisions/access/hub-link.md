@@ -78,9 +78,12 @@
   `BODY_BYTES_MAX` (32 MiB). A link reserves a body's declared length when it decodes
   the `Request`, before it allocates or reads a byte of the body, and the reservation
   ends when the link frees the request. A body that does not fit stops with `BUSY`
-  (`serve::Error::Bodies`), and the link takes its next request. A node holds at most
-  the cap times the count of its hubs that serve links. A stalled request holds its
-  reservation until its stream or session ends; only an admitted subject can do this.
+  (`serve::Error::Bodies`), and the link takes its next request. The hub holds a body
+  only until the caller sends or drops its `Reply`; after that, the caller holds it.
+  The doc of the const and the names are by `laptop.architect` (2026-10-09,
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6073876384). A
+  stalled request holds its reservation until its stream or session ends; only an
+  admitted subject can do this.
   Lost: pool blocks for a body, which take the blocks that live writes need; a cap on
   links as the bound, 16 MiB times the links. Decided by `laptop.architect`
   (2026-10-08,

@@ -25,10 +25,10 @@ use crate::{Away, State};
 
 pub use client::{Reply, Request};
 
-/// The most bytes of request bodies that one hub holds at once, over each link of its
-/// clients. A request whose body does not fit stops with `BUSY` before the hub reads
-/// a byte of it. A node holds at most this times the count of its hubs that serve
-/// links.
+/// The most bytes of client request bodies that one hub holds at once, over each of
+/// its links: each from the decode of its request until the caller sends or drops
+/// its [`Reply`]. A request whose body does not fit stops with `BUSY` before the
+/// hub reads a byte of it.
 pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
@@ -74,9 +74,9 @@ pub enum Error {
     /// [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed once an open
     /// request replies.
     Bodies {
-        /// The length of the refused request's body.
+        /// The body length of the refused request.
         length: u64,
-        /// The bytes that the bodies of the open requests hold.
+        /// The body bytes that the open requests of the hub held.
         held: u64,
     },
 }
@@ -149,7 +149,8 @@ impl fmt::Display for Error {
             Self::Bodies { length, held } => write!(
                 f,
                 "a request body of {length} bytes does not fit under the cap of \
-                 {BODIES_BYTES_MAX} bytes, since the hub's open requests hold {held}"
+                 {BODIES_BYTES_MAX} bytes: the open requests of the hub hold {held} \
+                 bytes"
             ),
         }
     }
