@@ -4,6 +4,8 @@
   a benchmark may keep each task for its caller to poll (`laptop.architect-2`,
   2026-10-09T03:42:09Z:
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6073808019).
+  Supersedes the ENV SEAMS and `Driver` texts of item 4 of
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016.
   `clock::Clock`: monotonic time as `types::time::Monotonic`, and a `Sleep` future that
   resets without an allocation.
   `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
