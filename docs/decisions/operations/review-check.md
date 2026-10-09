@@ -11,7 +11,9 @@
   line in a code block is not one, and a line that continues the paragraph with an
   indent is. Each end line may wrap onto the lines after it, and a paragraph after
   them fails. The first word of a value, with its backticks and one final comma,
-  period, or semicolon removed, is the word that is checked. Decided by the director at
+  period, or semicolon removed, is the word that is checked. A field name or an end
+  line name is read in the source of its line, so a name with an escape or an entity
+  in it does not count. Decided by the director at
   2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
   check reads the comment as GitHub does, by `comrak` (chosen by the person, as
@@ -78,16 +80,16 @@
   comment posted before the cutoff `CUTOFF` in
   `xtask/src/review.rs` (2026-10-08T03:00:00Z) is checked as before, except that a
   paragraph that `comrak` places in the wrong lines fails. Otherwise an earlier
-  free-form round passes, and it needs no end lines. A `Hot path:` line anywhere in its
-  text that names a function still needs `performance`. Decided by the director at
-  2026-10-08T02:44:00Z
+  free-form round passes, and it needs no end lines. A `Hot path:` line that counts,
+  as stated above, and names a function still needs `performance`. Decided by the
+  director at 2026-10-08T02:44:00Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051099968).
   Supersedes the reviewers of a later round in ruling 2 of
   https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6040439732
   (2026-10-07T06:32:32Z). For this rule, an old round that parses names
   `performance` in its `Reviewers:` field, read as before. One that does not parse
-  names it in any `Reviewers:` line of its text. A `Hot path:` line counts anywhere in
-  its text. Decided by the director at
+  names it in any `Reviewers:` line of its text that counts, as stated above. A
+  `Hot path:` line counts as stated above. Decided by the director at
   2026-10-08T04:42:33Z
   (https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062).
   The last round finds none and ends at the head, or at a commit that reaches the head
