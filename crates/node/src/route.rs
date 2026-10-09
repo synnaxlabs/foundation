@@ -26,8 +26,8 @@ const PLACES: usize = 256;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
 /// transport stops, and gives the error that stopped it. Admits each session of a
-/// member of `mesh`'s region, and of another peer while it gets one of
-/// the [`PLACES`]; closes each other session with `wire::session::REFUSED`. `route`
+/// member of `mesh`'s region, and of another peer while it gets a place, of at most
+/// [`PLACES`]; closes each other session with `wire::session::REFUSED`. `route`
 /// decides each stream.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
@@ -78,8 +78,8 @@ impl Places {
     fn take(&mut self, peer: Peer) -> Option<Rc<()>> {
         self.nodes.retain(|_, place| place.strong_count() > 0);
         // `Places` holds one clone of `programs`.
-        let held = Rc::strong_count(&self.programs) - 1 + self.nodes.len();
-        let full = held >= PLACES;
+        let taken = Rc::strong_count(&self.programs) - 1 + self.nodes.len();
+        let full = taken >= PLACES;
         match peer {
             Peer::Client if full => None,
             Peer::Client => Some(Rc::clone(&self.programs)),
