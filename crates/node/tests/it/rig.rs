@@ -233,17 +233,19 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        // While the thread panics, a wait can block and a second panic aborts the
-        // test binary, so the command only gets the signal.
-        if std::thread::panicking() {
-            if let Err(error) = self.0.kill() {
-                #[expect(clippy::print_stderr, reason = "a panic is under way")]
+        // `kill` gives `Ok` for a command that exited. No wait: while the thread
+        // panics, a wait can block, and `run` waits for its command itself.
+        match self.0.kill() {
+            Err(error) if std::thread::panicking() => {
+                #[expect(
+                    clippy::print_stderr,
+                    reason = "a second panic aborts the test binary"
+                )]
                 {
                     eprintln!("kill the command: {error}");
                 }
             }
-        } else {
-            self.end();
+            killed => killed.expect("kill the command"),
         }
     }
 }
@@ -329,6 +331,37 @@ fn a_rig_removes_its_directory_with_its_files() {
     let dir = rig.dir.clone();
     drop(rig);
     assert!(!dir.exists(), "{} is still there", dir.display());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_test_that_panics_kills_its_command() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 60"]);
+    let running = Running::new(command, &[]);
+    let pid = running.process.0.id();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _running = running;
+        panic!("the test fails");
+    }))
+    .expect_err("the test panics");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
+    // Killed and not waited for, the command stays a zombie.
+    wait(
+        &os::clock(),
+        Span::from_nanos(10_000_000_000),
+        "the command ends",
+        || {
+            let stat =
+                std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+            let state = stat.rsplit(") ").next().expect("a state").chars().next();
+            if state == Some('Z') {
+                Ok(())
+            } else {
+                Err(stat)
+            }
+        },
+    );
 }
 
 #[test]
