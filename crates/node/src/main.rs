@@ -111,15 +111,8 @@ fn node(start: &Start) -> Result<(), Failure> {
     }
     let joined = node.join().map_err(|error| failure(start, &error));
     let closed = handles.into_iter().try_for_each(env::thread::Handle::join);
-    let ended = match stop {
-        // Only the thread stops a node that ends with no failure.
-        Ok(stop) if joined.is_ok() => stop.join().map_err(failed),
-        // The thread lives until the process ends: a node that fails gets no signal.
-        Ok(_) => Ok(()),
-        Err(error) => Err(failed(error)),
-    };
-    // The thread lives until the process ends: a standard output that nobody reads
-    // takes no line.
+    // Each waits only on the process: for a signal, or for a reader of standard output.
+    let ended = stop.map(drop).map_err(failed);
     drop(show);
     joined.and(closed.map_err(failed)).and(ended)
 }
