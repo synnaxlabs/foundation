@@ -7807,20 +7807,19 @@ mod tests {
 
         /// What [`lead`] measured after the pause.
         struct Lead {
-            /// The bytes that `Complete` was owed as the pause ended. STREAM WIRE
-            /// states the lead from this credit, which no read count shows.
+            /// The bytes that `Complete` was owed as the pause ended, from the share.
+            /// STREAM WIRE states the lead from this credit.
             credit: usize,
             /// The bytes of `Complete` that noq-proto took before the first byte of
-            /// the `Latest` sample. The share counts what noq-proto took, and a
-            /// server read counts only whole messages, so this reads the streams.
+            /// the `Latest` sample: the lead that STREAM WIRE states.
             ahead: usize,
             /// The most bytes of `Complete` that noq-proto took in one [`STEP`].
             took: usize,
             /// The most bytes the server read at once: the largest step of credit
             /// that its reads give.
             step: usize,
-            /// The bytes of `Complete` that the server read from the pause until
-            /// then.
+            /// The bytes of `Complete` that the server read from the pause until it
+            /// read the `Latest` sample.
             read: usize,
         }
 
@@ -7835,7 +7834,8 @@ mod tests {
         /// of `size` bytes. Then it backlogs each `Complete` stream with messages of
         /// `size` bytes, and gives `Latest` one sample, with `write` when `blocking`
         /// and with `try_write` at each [`STEP`] if not, while the server reads each
-        /// `lag` steps. It measures until noq-proto takes the sample.
+        /// `lag` steps until noq-proto takes the sample, then each step until the
+        /// server reads it.
         fn lead(
             shard: &Shard,
             alone: usize,
@@ -7874,23 +7874,13 @@ mod tests {
             send_alone(&mut pair, reader, &mut latest, &message, alone);
             let credit = usize::try_from(owed(&mut pair)).expect("`Complete` is owed");
             let start = read[Class::Complete.rank()];
+            let latest_read = read[Class::Latest.rank()];
             let sample = shard.block(&[2; 1000]);
             let mut pending = Some(sample.clone());
             let mut ahead = refill_each(&mut pair, &mut completes, &message);
             let (mut took, mut step) = (0, 0);
             for steps in 1.. {
-                if blocking {
-                    let now = pair.now();
-                    let written = pair::write(
-                        &mut pair.client.endpoint,
-                        now,
-                        &latest,
-                        &mut pending,
-                    );
-                    assert!(written.is_ok(), "{written:?}");
-                } else {
-                    send(&mut pair, &mut latest, &mut pending);
-                }
+                give(&mut pair, &mut latest, &mut pending, blocking);
                 pair.run(STEP);
                 if steps % lag == 0 {
                     let before: usize = read.iter().sum();
@@ -7904,12 +7894,36 @@ mod tests {
                 took = took.max(stepped);
                 ahead += stepped;
             }
+            while read[Class::Latest.rank()] - latest_read < sample.len() {
+                give(&mut pair, &mut latest, &mut pending, blocking);
+                pair.run(STEP);
+                take(&mut pair, &mut receivers, &mut read);
+                refill_each(&mut pair, &mut completes, &message);
+            }
             Lead {
                 credit,
                 ahead,
                 took,
                 step,
                 read: read[Class::Complete.rank()] - start,
+            }
+        }
+
+        /// Writes `pending` to `latest`, or the rest of its message: with `write`
+        /// when `blocking`, and with `try_write` if not.
+        fn give(
+            pair: &mut Pair,
+            latest: &mut Sender,
+            pending: &mut Option<Block>,
+            blocking: bool,
+        ) {
+            if blocking {
+                let now = pair.now();
+                let written =
+                    pair::write(&mut pair.client.endpoint, now, latest, pending);
+                assert!(written.is_ok(), "{written:?}");
+            } else {
+                send(pair, latest, pending);
             }
         }
 
@@ -7950,11 +7964,14 @@ mod tests {
                         credit,
                         ahead,
                         took,
+                        read,
                         ..
                     } = ahead_after_a_pause(shard, windows * NARROW);
                     assert!(credit <= NARROW, "{credit} of {NARROW}; {windows}");
                     let bound = credit + took + MESSAGE_MAX / 4;
                     assert!(ahead <= bound, "{ahead} of {bound}; {windows}");
+                    let bound = NARROW + took + MESSAGE_MAX / 4;
+                    assert!(read <= bound, "{read} of {bound}; {windows}");
                 }
             });
         }
@@ -7972,14 +7989,19 @@ mod tests {
             {
                 testing::run(1, move |shard| {
                     for (streams, size) in loads {
-                        let Lead { credit, ahead, .. } =
-                            lead(shard, alone, size, lag, streams, true);
+                        let Lead {
+                            credit,
+                            ahead,
+                            read,
+                            ..
+                        } = lead(shard, alone, size, lag, streams, true);
+                        let case =
+                            format!("{streams} of {size} B, alone {alone}, lag {lag}");
+                        assert!(credit <= NARROW, "{credit} of {NARROW}; {case}");
                         let bound = credit + streams * size;
-                        assert!(
-                            ahead <= bound,
-                            "{ahead} of {bound}; {streams} of {size} B, alone {alone}, \
-                             lag {lag}"
-                        );
+                        assert!(ahead <= bound, "{ahead} of {bound}; {case}");
+                        let bound = NARROW + streams * size;
+                        assert!(read <= bound, "{read} of {bound}; {case}");
                     }
                 });
             }
