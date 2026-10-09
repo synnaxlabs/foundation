@@ -1,6 +1,6 @@
-//! Polling a registered wait or race allocates nothing, and so does a tick from the
-//! third call on. This binary has no test harness: the count covers each thread, and a
-//! harness allocates on its own thread at any time.
+//! Polling a registered wait or race allocates nothing, and so do a tick from the third
+//! call on and a set of a status count. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -49,6 +49,8 @@ fn main() {
         "race",
     );
     check_ticks();
+    #[cfg(feature = "sim")]
+    status::check();
 }
 
 /// Checks that 64 ticks after two warm-up ticks allocate nothing in their polls. The
@@ -110,4 +112,112 @@ fn check<F: Future>(mut f: Pin<&mut F>, token: &Token, wakers: &[Waker], name: &
         allocations, 0,
         "{name}: a registered poll allocates nothing"
     );
+}
+
+#[cfg(feature = "sim")]
+mod status {
+    use std::cell::Cell;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    use connector::cancel::Token;
+    use connector::kind::{Channels, Context, Error, Kind, Table};
+    use connector::supervisor::Supervisor;
+    use connector::testing;
+    use document::Document;
+    use document::diagnostic::Diagnostic;
+    use types::channel;
+    use types::name::Name;
+    use types::time::Span;
+
+    use super::ALLOCATOR;
+
+    /// A kind that sets its count `samples` 64 times in each second, and counts the
+    /// allocations of the sets from the third second on.
+    struct Sets(Arc<AtomicU64>);
+
+    impl Kind for Sets {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            let counts = vec![samples()];
+            Ok(Channels {
+                counts,
+                ..Channels::default()
+            })
+        }
+
+        fn discover(
+            &self,
+            _: &Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let count = ctx.status().count("samples");
+            let allocations = Cell::new(0);
+            // The first wakes of the flush grow the simulator's lists.
+            for second in 0..6_u64 {
+                let ((), n) = ALLOCATOR.count(|| {
+                    for i in 0..64 {
+                        count.set(second * 64 + i);
+                    }
+                });
+                if second >= 2 {
+                    allocations.set(allocations.get() + n);
+                }
+                ctx.clock().sleep(Span::from_nanos(1_100_000_000)).await;
+            }
+            self.0.store(allocations.get(), Relaxed);
+            Ok(())
+        }
+    }
+
+    fn samples() -> Name {
+        "samples".parse().expect("a valid name")
+    }
+
+    /// Checks that a set of a status count allocates nothing, also the set that wakes
+    /// the status writer.
+    pub(super) fn check() {
+        let allocations = Arc::new(AtomicU64::new(1));
+        let kind = Sets(Arc::clone(&allocations));
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let result = sim.run_on(&node, |node, tasks| async move {
+            let env = hub::testing::Env {
+                files: node.files(),
+                clock: node.clock(),
+                wall: node.wall(),
+                entropy: node.entropy(),
+                tasks,
+            };
+            let kinds = Table::new().with("sets", kind);
+            let config = testing::create_config(env, node.net(), kinds).await;
+            let connector: Name = "plant.sets".parse().expect("a valid name");
+            let counts = [samples()];
+            let first = channel::Key::from_u128(100);
+            let status = testing::create_status(&connector, &counts, first);
+            config
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            Supervisor::new(config)
+                .run("sets", connector, &Document::default(), &Token::new())
+                .await
+        });
+        result
+            .expect("the run ends")
+            .expect("the connector ends ok");
+        assert_eq!(
+            allocations.load(Relaxed),
+            0,
+            "a set of a status count allocates nothing"
+        );
+    }
 }
