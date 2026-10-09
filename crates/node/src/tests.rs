@@ -4133,6 +4133,7 @@ mod port {
         /// its open.
         #[test]
         fn a_node_stops_while_a_reader_at_a_peer_is_open() {
+            use super::super::hub::{WALL, write, writer};
             for opened in [true, false] {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
@@ -4152,14 +4153,23 @@ mod port {
                     let mut reader = reader.expect("the reader opens");
                     let next = reader.next().await.is_ok();
                     out.lock().unwrap().push(next);
+                    std::future::pending::<()>().await;
                 });
-                peer_hub(&hosts[1], theirs, move |_hub, _, _host| async move {
+                peer_hub(&hosts[1], theirs, move |hub, _, host| async move {
+                    if opened {
+                        let clock = host.clock();
+                        let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                        for at in 0..100 {
+                            write(&mut writer, WALL + at, 7);
+                            clock.sleep(Span::from_nanos(10_000_000)).await;
+                        }
+                    }
                     std::future::pending::<()>().await;
                 });
                 assert_eq!(sim.run_for(TEN), Ok(()), "opened {opened}");
                 assert_eq!(
                     *read.lock().unwrap(),
-                    if opened { vec![true] } else { vec![] },
+                    if opened { vec![true, true] } else { vec![] },
                     "opened {opened}"
                 );
                 node.stop();
@@ -4173,15 +4183,17 @@ mod port {
             }
         }
 
-        /// The readers that the peer holds at the node's home leave the mesh of the
-        /// peer a stream to the node, so a home that the peer sets still commits.
+        /// A home that the peer sets, while it holds readers at the node's home,
+        /// commits while the readers leave its mesh a stream to the node.
         #[test]
-        #[ignore = "waits on #2019"]
         fn readers_at_a_home_leave_the_mesh_a_stream() {
-            // In seed 2 the peer is not the leader, so it sends the change on a new
-            // stream to the node.
-            assert!(set_with_readers(2, 63), "63 readers");
-            assert!(set_with_readers(2, 64), "64 readers");
+            for seed in 0..8 {
+                assert!(set_with_readers(seed, 63), "seed {seed}");
+            }
+            // A known bug: 64 readers take each stream, so a peer that is a follower
+            // cannot forward the change. #2019 asserts that each seed commits.
+            let committed = (0..8).filter(|&seed| set_with_readers(seed, 64)).count();
+            assert!(committed < 8, "64 readers: {committed} of 8 seeds commit");
         }
 
         /// Whether a home that the peer sets, while it holds `count` readers at the
