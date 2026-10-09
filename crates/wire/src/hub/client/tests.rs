@@ -542,7 +542,7 @@ fn gives_the_code_and_the_text_of_each_refusal() {
             "the hello does not echo the nonce of the node's last challenge",
         ),
         (Refusal::Via, 23, "the hello names another node as via"),
-        (Refusal::Expired, 24, "the hello expired"),
+        (Refusal::Expired, 24, "the hello ended"),
         (
             Refusal::Changed,
             26,

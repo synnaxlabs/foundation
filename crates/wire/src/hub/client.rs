@@ -56,7 +56,7 @@ pub const STALE: u32 = 22;
 /// Stop code: the hello names another node as `via` than the node that carried it.
 pub const VIA: u32 = 23;
 
-/// Stop code: the hello expired.
+/// Stop code: the hello ended.
 pub const EXPIRED: u32 = 24;
 
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
@@ -134,7 +134,7 @@ impl fmt::Display for Refusal {
                  challenge"
             }
             Self::Via => "the hello names another node as via",
-            Self::Expired => "the hello expired",
+            Self::Expired => "the hello ended",
             Self::Changed => {
                 "a renewal names another subject, key, via, or connection than \
                  the hello it renews"

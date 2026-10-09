@@ -1093,7 +1093,7 @@ fn gives_the_turn_in_the_order_requests_began() {
 #[test]
 fn names_each_error() {
     let cases = [
-        (Error::Refused(Refusal::Expired), "the hello expired"),
+        (Error::Refused(Refusal::Expired), "the hello ended"),
         (
             Error::Transport(transport::Error::TimedOut),
             "the session failed: the peer stopped answering",
