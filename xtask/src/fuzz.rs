@@ -1,6 +1,6 @@
 //! Runs each fuzz target on the pinned nightly, with its oracle inputs.
 
-use std::num::NonZeroU64;
+use std::num::NonZeroU16;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,7 +10,14 @@ use serde_json::Value;
 use crate::field;
 
 /// The seconds of each target when the task names none.
-pub(crate) const SECONDS: NonZeroU64 = NonZeroU64::new(60).unwrap();
+pub(crate) const SECONDS: NonZeroU16 = NonZeroU16::new(60).unwrap();
+
+/// The seconds of each target that `text` names. libFuzzer wraps a count above
+/// `i32::MAX`, and 0 means no limit, so it refuses each count outside 1 to 65535.
+pub(crate) fn seconds(text: &str) -> Result<NonZeroU16, String> {
+    text.parse()
+        .map_err(|e| format!("`{text}` is not a count of seconds from 1 to 65535: {e}"))
+}
 
 /// The least `-max_len` of a run: libFuzzer makes no input longer.
 const MAX_LEN: u64 = 16 * 1024;
@@ -21,7 +28,7 @@ const MAX_LEN: u64 = 16 * 1024;
 /// does not build each crate that the root `Cargo.toml` patches from its copy, when the
 /// build fails, or when a target fails. cargo-fuzz keeps the input of a crash in
 /// `fuzz/artifacts/<target>/`.
-pub(crate) fn run(root: &Path, seconds: NonZeroU64) -> Result<(), Vec<String>> {
+pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     patched(root)?;
     let nightly = crate::nightly(root).map_err(|e| vec![e])?;
     let built = nightly
@@ -77,7 +84,7 @@ fn run_one(
     root: &Path,
     nightly: &crate::Nightly,
     target: &str,
-    seconds: NonZeroU64,
+    seconds: NonZeroU16,
 ) -> Result<(), String> {
     let oracles = root.join("oracles/fuzz").join(target);
     let corpus = root.join("fuzz/corpus").join(target);
@@ -112,7 +119,7 @@ fn command(
     target: &str,
     corpus: &Path,
     oracles: &Path,
-    seconds: NonZeroU64,
+    seconds: NonZeroU16,
     max_len: u64,
 ) -> Command {
     let mut command = nightly.cargo();
@@ -194,9 +201,10 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         for namesake in root_packages.iter().filter(|p| p["name"] == name) {
             if copy(namesake)? {
                 problems.push(format!(
-                    "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the copy \
-                     in patches/ that the root Cargo.toml builds. Give fuzz/Cargo.toml \
-                     the [patch.crates-io] table of the root Cargo.toml."
+                    "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the \
+                     copy in patches/ that the root Cargo.toml builds. Give \
+                     fuzz/Cargo.toml the [patch.crates-io] table of the root \
+                     Cargo.toml."
                 ));
             }
         }
@@ -224,7 +232,11 @@ mod tests {
             "workspace_root": "/w",
             "packages": [
                 package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml"),
-                package("types", "path+file:///w/crates/types#0.0.0", "/w/crates/types/Cargo.toml"),
+                package(
+                    "types",
+                    "path+file:///w/crates/types#0.0.0",
+                    "/w/crates/types/Cargo.toml",
+                ),
             ],
         })
     }
@@ -286,9 +298,10 @@ mod tests {
         assert_eq!(
             unpatched(&root(), &fuzz),
             Ok(vec![
-                "fuzz/Cargo.toml builds `noq-proto` from `/r/noq-proto-1.3.0/Cargo.toml`, \
-                 not from the copy in patches/ that the root Cargo.toml builds. Give \
-                 fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml."
+                "fuzz/Cargo.toml builds `noq-proto` from \
+                 `/r/noq-proto-1.3.0/Cargo.toml`, not from the copy in patches/ that \
+                 the root Cargo.toml builds. Give fuzz/Cargo.toml the \
+                 [patch.crates-io] table of the root Cargo.toml."
                     .to_string()
             ])
         );
@@ -349,7 +362,7 @@ mod tests {
 
     #[test]
     fn runs_the_target_on_both_corpus_directories_with_the_limits() {
-        let seconds = NonZeroU64::new(5).unwrap();
+        let seconds = NonZeroU16::new(5).unwrap();
         let nightly = crate::Nightly {
             root: "/w".into(),
             pin: "nightly-x".to_string(),
@@ -382,6 +395,25 @@ mod tests {
             ]
         );
         assert_eq!(command.get_current_dir(), Some(Path::new("/w")));
+    }
+
+    #[test]
+    fn seconds_refuses_a_count_outside_1_to_65535() {
+        assert_eq!(seconds("65535"), Ok(NonZeroU16::MAX));
+        assert_eq!(
+            seconds("0").err().as_deref(),
+            Some(
+                "`0` is not a count of seconds from 1 to 65535: number would be zero \
+                 for non-zero type"
+            )
+        );
+        assert_eq!(
+            seconds("4294967297").err().as_deref(),
+            Some(
+                "`4294967297` is not a count of seconds from 1 to 65535: number too \
+                 large to fit in target type"
+            )
+        );
     }
 
     #[test]

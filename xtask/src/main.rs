@@ -35,13 +35,8 @@ fn main() -> ExitCode {
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
         ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
-        ["fuzz", seconds] => seconds
-            .parse()
-            .map_err(|e| {
-                vec![format!(
-                    "`{seconds}` is not a positive count of seconds: {e}"
-                )]
-            })
+        ["fuzz", seconds] => fuzz::seconds(seconds)
+            .map_err(|e| vec![e])
             .and_then(|seconds| fuzz::run(root, seconds)),
         ["open62541"] => open62541::check(root),
         ["open62541", tag] => open62541::run(root, open62541::URL, tag),
