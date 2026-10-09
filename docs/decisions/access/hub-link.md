@@ -84,5 +84,8 @@
   which take the blocks that live writes need; a cap on links as the bound, 16 MiB times
   the links. Decided by `laptop.architect` (2026-10-08T21:34:56Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483); the
-  names, by `laptop.architect` (2026-10-09T03:49:08Z,
+  names, and the end of the hub's hold at the `Reply`, by `laptop.architect`
+  (2026-10-09T03:49:08Z,
   https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6073876384).
+  Supersedes "The bound of a node is the cap times the count of hubs that serve links"
+  (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483).
