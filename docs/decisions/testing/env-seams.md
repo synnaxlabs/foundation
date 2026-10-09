@@ -19,10 +19,28 @@
   task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
-  (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392).
+  scheduler runs them. No other crate calls Tokio's timers or spawn. This changes "A
+  panic in any task ends its shard" (https://github.com/synnaxlabs/foundation/pull/18)
+  for the cases below (2026-10-08, #871). As anywhere in Rust, a panic that unwinds into
+  the unwind of another panic aborts the process. On `os`, a panic in the poll or the
+  drop of a task that code spawns with `tokio::spawn` on a shard or a dedicated thread,
+  or with `tokio::task::spawn_local` on a shard, not through `Tasks`, does not end it:
+  Tokio catches the panic. Tokio drops such a task during the unwind of a panic in its
+  poll, so a panic that unwinds out of that drop aborts the process. A panic in the drop
+  of the payload of a panic can escape Tokio's catches and end the shard or the thread.
+  A release build aborts at any panic. Of the Foundation crates that `node` links, only
+  `os` depends on Tokio, so only vendor code can spawn such a task. Lost: Tokio's
+  `unhandled_panic` setting. It needs `--cfg tokio_unstable` in every build, and a
+  `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` value, as the loom job and the cfg runs of
+  `cargo xtask` set, replaces the flags of `.cargo/config.toml`. Decided by
+  `laptop.architect-2` (2026-10-08T23:08:19Z, #871,
+  https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264),
+  approved by `laptop.architect` (2026-10-09T01:09:48Z, #2033,
+  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6072192755).
+  `env::files` (#37) gives files under one data directory, with owned blocks and a
+  sync that poisons the file on failure (S4). One handle at a time holds a file open
+  to write, until it drops and its calls end; another write open fails with `Busy`
+  (#392).
   `File::close` ends after the calls of its handle end; a drop closes without a wait
   (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
   sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
@@ -52,7 +70,24 @@
   `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
-  readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
+  readable at its first poll, in a field of its driver (`laptop.architect-2`,
+  2026-10-08 19:12 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
+  `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
+  2026-10-08 18:27 UTC,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). Its
+  poll and its drop lock only Tokio's `Mutex`es, in Tokio's `AsyncFd` and I/O driver.
+  `laptop.architect-2` reads item 2 as no `Mutex` of our own, with Tokio's own locks
+  allowed (2026-10-09 03:18 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6073564290). The
+  receiver's `receiver::Driver` is its alone, as a sender clone's is:
+  `net::Driver::udp` gives it at the bind, beside the socket (`laptop.architect-2`,
+  2026-10-09 01:42 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
+  Supersedes the `OnceLock` of item 2 of
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541 and the
+  two `OnceLock`s of item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743. A
   sender registers for writable at its first poll and after `EAGAIN`, and drops the
   registration when the send ends: Linux wakes each `EPOLLOUT` registration of a socket
   for each datagram that the socket sends (1,000 wakes for 1,000 sends on box2), so a
@@ -243,3 +278,31 @@
   https://github.com/synnaxlabs/foundation/issues/1977#issuecomment-6067346540; the
   order, 2026-10-08T19:44:46Z:
   https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).
+  Amended (2026-10-08T17:39:11Z, #1940): `tcp::Options::unsent_bytes_max` is a
+  `NonZeroUsize`. A bound of 0 has no meaning in its doc, and the drivers did not agree
+  on it: Linux read it as the host sysctl `net.ipv4.tcp_notsent_lowat`, by default no
+  bound, the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per call, and
+  `sim` never wrote. No caller gives 0. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1940). The Linux text:
+  `laptop.director`, 2026-10-09T01:51:29Z
+  (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
+  Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on exec.
+  On Linux, the call that opens the socket sets that and non-blocking, so a child that
+  another thread spawns never holds it. macOS has no such flag, and Tokio sets it in a
+  second call on an accepted stream too, so on macOS that child may hold the socket and
+  its port, as the doc of `os::net()` says. A Foundation node spawns no process, so only
+  tests see it, and CI runs on Linux. Lost: `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn
+  side, which std does not set, and which needs a spawn seam and `unsafe` for tests
+  only. Decided by `laptop.architect-2` (2026-10-08T21:01:28Z:
+  https://github.com/synnaxlabs/foundation/issues/2000). On macOS, a child that another
+  thread spawns during a lookup may also hold the sockets that the C library opens for
+  it, and a child spawned after a lookup may hold a socket that the C library keeps
+  open. `os` keeps this gap for the same reason. It cannot set the flags of the sockets
+  of a lookup, because the C library opens them, and it cannot open them another way
+  without its own resolver. Lost: a resolver in `os`, which changes what each lookup
+  gives on macOS. Trigger: the first change that makes a node spawn a process closes
+  each macOS gap of this amendment on the spawn side. Decided by `laptop.architect`
+  (2026-10-09T02:37:32Z:
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
+  that the C library keeps open, 2026-10-09T02:42:31Z:
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413).

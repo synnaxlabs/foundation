@@ -63,12 +63,13 @@ impl Link {
 
     /// Serves `incoming`, a hub stream of the link's session whose header the caller
     /// read, in the role that it takes at the call, not at the first poll. From a node,
-    /// it serves a reader session. From a client, the first stream given to `serve` is
-    /// its hello stream, which lives as long as the session and closes it when it
-    /// ends. Each later stream is a request stream, which gives [`Served::Request`]
-    /// once its body is read and verified. A program sends the header of a request
-    /// stream only after the challenge after its hello, so the hello stream comes
-    /// first in any order of the headers.
+    /// it waits until the mesh names a home for the index of the open, then serves a
+    /// reader session. From a client, the first stream given to `serve` is its hello
+    /// stream, which lives as long as the session and closes it when it ends. Each
+    /// later stream is a request stream, which gives [`Served::Request`] once its body
+    /// is read and verified. A program sends the header of a request stream only after
+    /// the challenge after its hello, so the hello stream comes first in any order of
+    /// the headers.
     ///
     /// # Errors
     ///

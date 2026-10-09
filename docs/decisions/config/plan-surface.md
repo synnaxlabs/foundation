@@ -33,10 +33,12 @@
   https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
-  `config.writer-nodes` is at the `node` of the first connector on a second node that
-  writes one index. The first writer, the first of the names of one key, and the first
-  connector of a name come first by `Source`, then in source order, so the order of
-  `documents` changes no problem (#1886 round 2, 2026-10-08T14:14:16Z,
+  `config.writer-nodes` is at the `node` of the first connector, in name order, on a
+  second node that writes one index (`laptop.architect-2`, 2026-10-09T00:48:39Z,
+  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872). The
+  first of the names of one key and the first connector of a name come first by
+  `Source`, then in source order, so the order of `documents` changes no problem (#1886
+  round 2, 2026-10-08T14:14:16Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143). A tie,
   with no span or with one `Source` in two Documents, has no defined choice (#1886 round
   4, 2026-10-08T14:35:32Z,
@@ -47,8 +49,8 @@
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6062122870. Trigger:
   before a path makes Documents with no spans, such as an SDK that builds a spec in
   code, PLAN SURFACE states the order on a tie (the order of `documents`), with a test
-  for the writer, for the connector of a name, and for the name of a key. The problems
-  come in `Source` order, then in source order, as the problems of `check` do.
+  for the connector of a name and for the name of a key. The problems come in `Source`
+  order, then in source order, as the problems of `check` do.
   `place` also runs for each connector, with the connector's `node` as `writer`, and its
   `Tie` or `Homeless` is `config.unplaced` at the label of the connector. The fix of
   `Homeless::Overlap` is "Move the node to `home` when it is the one node of the
@@ -128,7 +130,7 @@
   home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
   and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
   applied tree as an input, with which `ops` reads the tree a second time and a missing
-  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
+  chunk panics in `config`, though #1741 names that case (`Cause::Read`), and, for
   checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
   `config`, no report for the `Tie` or `Homeless` of a connector, a check against each
   connector above the index, with which two nested connectors on two nodes share one

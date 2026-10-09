@@ -5,11 +5,11 @@ use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::thread::{self, ThreadId};
 
-use env::net::udp::{self, Meta, Transmit, sender};
+use env::net::udp::{self, Meta, Transmit, receiver, sender};
 use env::net::{Ecn, Error};
 use noq_udp::{EcnCodepoint, RecvMeta, UdpSocketState};
 use rustix::io::Errno;
@@ -20,14 +20,9 @@ use tokio::io::unix::AsyncFd;
 use super::socket;
 use super::{bind, canonical, errno, from_io, io_error};
 
-/// A bound UDP socket, and the receive half of it.
+/// A bound UDP socket.
 pub(super) struct Udp {
     bound: Arc<Bound>,
-    /// The thread of the receiver's first poll.
-    thread: OnceLock<ThreadId>,
-    /// The receiver's `dup` of the socket, registered for readable by the first poll
-    /// that succeeds.
-    readable: OnceLock<AsyncFd<UdpSocket>>,
 }
 
 /// What each half of one socket reads.
@@ -41,8 +36,9 @@ struct Bound {
 }
 
 impl Udp {
-    /// Binds a socket to `config.local`, with don't-fragment set. Needs no runtime.
-    pub(super) fn bind(config: &udp::Config) -> Result<Self, Error> {
+    /// Binds a socket to `config.local`, with don't-fragment set, and gives it with
+    /// the driver of its one receiver. Needs no runtime.
+    pub(super) fn bind(config: &udp::Config) -> Result<(Self, Receiver), Error> {
         let local = config.local;
         let fd =
             super::socket(local, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
@@ -62,11 +58,13 @@ impl Udp {
             state,
             local,
         };
-        Ok(Self {
-            bound: Arc::new(bound),
-            thread: OnceLock::new(),
-            readable: OnceLock::new(),
-        })
+        let bound = Arc::new(bound);
+        let receiver = Receiver {
+            bound: Arc::clone(&bound),
+            thread: None,
+            readable: None,
+        };
+        Ok((Self { bound }, receiver))
     }
 }
 
@@ -101,23 +99,36 @@ impl udp::Driver for Udp {
             writer: None,
         })
     }
+}
 
+/// The driver of the `Receiver`.
+pub(super) struct Receiver {
+    bound: Arc<Bound>,
+    /// The thread of the first poll.
+    thread: Option<ThreadId>,
+    /// A `dup` of the socket, registered for readable by the first poll that
+    /// succeeds.
+    readable: Option<AsyncFd<UdpSocket>>,
+}
+
+impl receiver::Driver for Receiver {
     fn poll_recv(
-        &self,
+        &mut self,
         cx: &mut Context<'_>,
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> Poll<Result<usize, Error>> {
-        let bound = &self.bound;
-        let thread = self.thread.get_or_init(|| thread::current().id());
+        let bound = &*self.bound;
+        let thread = self.thread.get_or_insert_with(|| thread::current().id());
         socket::on_thread("UDP receiver", *thread);
-        let socket = if let Some(socket) = self.readable.get() {
-            socket
-        } else {
-            let socket = (bound.socket.try_clone())
-                .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
-                .map_err(|e| from_io(&e))?;
-            self.readable.get_or_init(|| socket)
+        let socket = match &mut self.readable {
+            Some(socket) => socket,
+            none @ None => {
+                let socket = (bound.socket.try_clone())
+                    .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
+                    .map_err(|e| from_io(&e))?;
+                none.insert(socket)
+            }
         };
         loop {
             let mut guard =
@@ -367,7 +378,7 @@ mod tests {
     }
 
     fn loopback() -> Udp {
-        Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap()
+        Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap().0
     }
 
     fn transmit(destination: SocketAddr, contents: &[u8]) -> Transmit<'_> {
@@ -686,18 +697,66 @@ mod tests {
         }
     }
 
-    mod writer {
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    /// The epoll entries of any runtime in this process for the socket of `inode`.
+    fn registrations(inode: u64) -> usize {
+        let entry = format!("ino:{inode:x} ");
+        std::fs::read_dir("/proc/self/fdinfo")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
+            .map(|info| {
+                info.lines()
+                    .filter(|line| line.starts_with("tfd:") && line.contains(&entry))
+                    .count()
+            })
+            .sum()
+    }
+
+    mod receiver {
         use std::task::Waker;
 
         use super::*;
 
-        fn runtime() -> tokio::runtime::Runtime {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_io()
-                .enable_time()
-                .build()
-                .unwrap()
+        /// While the senders live, a dropped receiver drops its readable
+        /// registration.
+        #[test]
+        #[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
+        fn a_dropped_receiver_drops_its_registration() {
+            use std::os::unix::fs::MetadataExt;
+
+            use env::net::udp::receiver::Driver as _;
+
+            runtime().block_on(async {
+                let (udp, mut receiver) =
+                    Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap();
+                let path = format!("/proc/self/fd/{}", udp.bound.socket.as_raw_fd());
+                let inode = std::fs::metadata(path).unwrap().ino();
+                let mut buffer = [0; 64];
+                let mut meta = [Meta::default()];
+                let poll = receiver.poll_recv(
+                    &mut Context::from_waker(Waker::noop()),
+                    &mut [IoSliceMut::new(&mut buffer)],
+                    &mut meta,
+                );
+                assert_eq!(poll, Poll::Pending);
+                assert_ne!(registrations(inode), 0);
+                drop(receiver);
+                assert_eq!(registrations(inode), 0);
+            });
         }
+    }
+
+    mod writer {
+        use std::task::Waker;
+
+        use super::*;
 
         #[test]
         fn waits_while_the_buffer_is_full_and_then_drops_the_registration() {
@@ -720,27 +779,10 @@ mod tests {
             });
         }
 
-        /// The epoll entries of any runtime in this process for the socket of `inode`.
-        #[cfg(target_os = "linux")]
-        fn registrations(inode: u64) -> usize {
-            let entry = format!("ino:{inode:x} ");
-            std::fs::read_dir("/proc/self/fdinfo")
-                .unwrap()
-                .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
-                .map(|info| {
-                    info.lines()
-                        .filter(|line| {
-                            line.starts_with("tfd:") && line.contains(&entry)
-                        })
-                        .count()
-                })
-                .sum()
-        }
-
         /// While the socket stays open in `Bound`, epoll keeps a registration whose
         /// descriptor closed before it.
-        #[cfg(target_os = "linux")]
         #[test]
+        #[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
         fn drop_removes_the_registration_from_epoll() {
             use std::os::unix::fs::MetadataExt;
 

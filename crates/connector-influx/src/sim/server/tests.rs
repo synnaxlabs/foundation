@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -18,7 +19,7 @@ const TIMEOUT: Span = Span::from_nanos(10_000_000_000);
 const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
-    unsent_bytes_max: 1 << 14,
+    unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
     delayed: false,
 };
 

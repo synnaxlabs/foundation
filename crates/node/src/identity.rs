@@ -5,9 +5,9 @@
 //! keeps whole or old, so a write never tears it. 68 zero bytes are a key that a crash
 //! kept from being written.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use env::files::{Files, Mode};
+use env::files::{File, Files, Mode};
 use types::ed25519::PrivateKey;
 use types::time::Stamp;
 
@@ -17,8 +17,10 @@ use crate::Error;
 pub(crate) const FILE: &str = "node.key";
 /// The first bytes of the file; a new form gets a new tag.
 const TAG: &[u8; 16] = b"foundation/key/1";
-/// The length of the file.
-pub(crate) const LEN: usize = 68;
+/// The length of the tag, the node key, and the private key.
+pub(crate) const BODY: usize = 64;
+/// The length of the file: the body and its CRC32C.
+pub(crate) const LEN: usize = BODY + 4;
 /// The pool of the file's two blocks. The load holds them while the shard's buffer
 /// holds blocks of the shard's pool, so that pool can lack room for them.
 const POOL: block::Config = block::Config { budget: 4096 };
@@ -30,33 +32,28 @@ pub(crate) struct Identity {
     pub(crate) private_key: PrivateKey,
 }
 
-/// The identity in `node.key` of `files`. When the file is not there, or holds only
-/// zero bytes, makes a new one at mesh time from `clock`, once it has mesh time, and
-/// from `entropy`. Writes the identity back and makes it durable before it returns,
-/// also one it read: a failed sync of an earlier start can leave a key that a read
-/// sees but a crash loses. Never writes another key over a file that holds one.
+/// The identity in `node.key` of `files`. When the file is not there, has no bytes,
+/// or holds 68 zero bytes, makes a new one at mesh time from `clock`, once it has
+/// mesh time, and from `entropy`. Writes the identity back and makes it durable
+/// before it returns, also one it read: a failed sync of an earlier start can leave
+/// a key that a read sees but a crash loses. Never writes another key over a file
+/// that holds one.
 ///
 /// # Errors
 ///
-/// [`Error::Key`] for a file of another length, tag, or checksum, and
-/// [`Error::Directory`] for a file call that fails.
+/// [`Error::Key`] for a file of another length that is not 0, or of another tag or
+/// checksum, and [`Error::Directory`] for a file call that fails.
 pub(crate) async fn load(
     files: &Files,
     clock: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> Result<Identity, Error> {
-    let file = files
-        .open(Path::new(FILE), Mode::Create { len: LEN as u64 })
-        .await
-        .map_err(|error| match error {
-            env::files::Error::Length { .. } => Error::Key,
-            error => Error::Directory(error),
-        })?;
     let pool = block::Pool::heap(POOL);
-    let into = pool.alloc(LEN).expect("invariant: the pool holds a key");
-    let read = file.read_at(0, into).await.map_err(Error::Directory)?;
-    let bytes: &[u8; LEN] = (&*read).try_into().expect("invariant: a read fills it");
-    let identity = if *bytes == [0; LEN] {
+    let (file, bytes) = read(files, &pool).await.map_err(|error| match error {
+        env::files::Error::Length { .. } => Error::Key,
+        error => Error::Directory(error),
+    })?;
+    let identity = if bytes == [0; LEN] {
         clock.reach(Stamp::from_nanos(i64::MIN)).await;
         let now = match clock.status() {
             clock::Status::Synced(now) | clock::Status::Holdover(now, _) => now.time(),
@@ -64,18 +61,62 @@ pub(crate) async fn load(
         };
         create(now, entropy)
     } else {
-        decode(bytes).ok_or(Error::Key)?
+        decode(&bytes).ok_or(Error::Key)?
     };
-    let block = pool
-        .copy(&encode(&identity))
-        .expect("invariant: the pool holds a key");
-    file.write_at(0, &[block]).await.map_err(Error::Directory)?;
-    file.sync().await.map_err(Error::Directory)?;
-    files
-        .sync_dir(Path::new(""))
+    write(files, &file, &pool, &identity)
         .await
         .map_err(Error::Directory)?;
     Ok(identity)
+}
+
+/// Writes `identity` to `node.key` in `files` when the file is not there, has no
+/// bytes, or holds 68 zero bytes, and makes it durable.
+///
+/// # Errors
+///
+/// [`Error::Directory`] with [`env::files::Error::Exists`] when the file holds 68
+/// bytes that are not all zero, with [`env::files::Error::Length`] when it has another
+/// length that is not 0, and with the error of each other file call that fails.
+pub(crate) async fn store(files: &Files, identity: &Identity) -> Result<(), Error> {
+    let pool = block::Pool::heap(POOL);
+    let (file, bytes) = read(files, &pool).await.map_err(Error::Directory)?;
+    if bytes != [0; LEN] {
+        let path = PathBuf::from(FILE);
+        return Err(Error::Directory(env::files::Error::Exists { path }));
+    }
+    write(files, &file, &pool, identity)
+        .await
+        .map_err(Error::Directory)
+}
+
+/// Opens `node.key` in `files`, made of zero bytes when it is not there, and reads
+/// it.
+async fn read(
+    files: &Files,
+    pool: &block::Pool,
+) -> Result<(File, [u8; LEN]), env::files::Error> {
+    let file = files
+        .open(Path::new(FILE), Mode::Create { len: LEN as u64 })
+        .await?;
+    let into = pool.alloc(LEN).expect("invariant: the pool holds a key");
+    let read = file.read_at(0, into).await?;
+    let bytes = (&*read).try_into().expect("invariant: a read fills it");
+    Ok((file, bytes))
+}
+
+/// Writes `identity` to `file` and makes the file and its name durable.
+async fn write(
+    files: &Files,
+    file: &File,
+    pool: &block::Pool,
+    identity: &Identity,
+) -> Result<(), env::files::Error> {
+    let block = pool
+        .copy(&encode(identity))
+        .expect("invariant: the pool holds a key");
+    file.write_at(0, &[block]).await?;
+    file.sync().await?;
+    files.sync_dir(Path::new("")).await
 }
 
 /// A new identity: a UUIDv7 key at `now`, and a random private key.
@@ -94,27 +135,56 @@ fn create(now: Stamp, entropy: &env::entropy::Entropy) -> Identity {
 
 /// The bytes of the file that holds `identity`.
 pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
-    let mut bytes = [0; LEN];
-    bytes[..16].copy_from_slice(TAG);
-    bytes[16..32].copy_from_slice(&identity.key.as_u128().to_be_bytes());
-    bytes[32..64].copy_from_slice(&identity.private_key.0);
-    let crc = crc32c::crc32c(&bytes[..64]);
-    bytes[64..].copy_from_slice(&crc.to_le_bytes());
-    bytes
+    let mut body = [0; BODY];
+    body[..16].copy_from_slice(TAG);
+    body[16..32].copy_from_slice(&identity.key.as_u128().to_be_bytes());
+    body[32..].copy_from_slice(&identity.private_key.0);
+    with_checksum(&body)
 }
 
 /// The identity in `bytes`, or `None` for another tag or checksum.
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
-    let (body, crc) = bytes.split_first_chunk::<64>()?;
-    let (tag, rest) = body.split_first_chunk::<16>()?;
-    let (key, private_key) = rest.split_first_chunk::<16>()?;
-    if tag != TAG || crc32c::crc32c(body).to_le_bytes() != *crc {
-        return None;
+    let (body, crc) = bytes.split_at(BODY);
+    let valid = body[..16] == *TAG && crc32c::crc32c(body).to_le_bytes() == *crc;
+    valid.then(|| fields(bytes))
+}
+
+/// The key and the private key in `bytes`, whatever its tag and checksum.
+fn fields(bytes: &[u8; LEN]) -> Identity {
+    Identity {
+        key: types::node::Key::from_u128(u128::from_be_bytes(
+            bytes[16..32].try_into().expect("invariant: 16 bytes"),
+        )),
+        private_key: PrivateKey(
+            bytes[32..BODY].try_into().expect("invariant: 32 bytes"),
+        ),
     }
-    Some(Identity {
-        key: types::node::Key::from_u128(u128::from_be_bytes(*key)),
-        private_key: PrivateKey(private_key.try_into().ok()?),
-    })
+}
+
+/// `body` with its CRC32C after it.
+pub(crate) fn with_checksum(body: &[u8; BODY]) -> [u8; LEN] {
+    let mut bytes = [0; LEN];
+    bytes[..BODY].copy_from_slice(body);
+    bytes[BODY..].copy_from_slice(&crc32c::crc32c(body).to_le_bytes());
+    bytes
+}
+
+/// Checks that `decode` gives an identity exactly for the bytes that `encode` writes,
+/// and that the identity encodes to `bytes`.
+///
+/// # Panics
+///
+/// When a check fails.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn check(bytes: &[u8; LEN]) {
+    let valid = encode(&fields(bytes)) == *bytes;
+    match decode(bytes) {
+        Some(identity) => {
+            assert!(valid, "decodes {bytes:02x?}");
+            assert_eq!(encode(&identity), *bytes, "encodes {bytes:02x?}");
+        }
+        None => assert!(!valid, "refuses {bytes:02x?}"),
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +242,29 @@ mod tests {
             let mut bytes = encode(&identity(key, private_key));
             bytes[bit / 8] ^= 1 << (bit % 8);
             prop_assert!(decode(&bytes).is_none());
+        }
+
+        #[test]
+        fn refuses_each_one_bit_change_of_the_tag_with_its_checksum(
+            key in any::<u128>(),
+            private_key in any::<[u8; 32]>(),
+            bit in 0..TAG.len() * 8,
+        ) {
+            let bytes = encode(&identity(key, private_key));
+            let mut body = *bytes.first_chunk::<BODY>().expect("68 bytes");
+            check(&bytes);
+            body[bit / 8] ^= 1 << (bit % 8);
+            prop_assert!(decode(&with_checksum(&body)).is_none());
+        }
+
+        #[test]
+        fn checks_any_bytes(bytes in any::<[u8; LEN]>()) {
+            check(&bytes);
+        }
+
+        #[test]
+        fn checks_any_body_with_its_checksum(body in any::<[u8; BODY]>()) {
+            check(&with_checksum(&body));
         }
     }
 }

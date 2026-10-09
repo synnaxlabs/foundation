@@ -3,6 +3,7 @@
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use env::clock::Clock;
@@ -35,7 +36,7 @@ fn options(buffer: usize) -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: buffer,
         recv_buffer_bytes: buffer,
-        unsent_bytes_max: buffer,
+        unsent_bytes_max: NonZeroUsize::new(buffer).unwrap(),
         delayed: false,
     }
 }
