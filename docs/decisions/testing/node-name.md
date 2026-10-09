@@ -11,9 +11,10 @@
   stored, given }` (the CLI code is `node.renamed`, #1732). The node never writes
   another name over a name.
   The file is the only copy of the name on the node, and the source of the name that
-  the node puts in its card when it founds or joins a region (#1744). In the region,
-  `card.name` is the one copy (MEMBER RECORD). Trigger: the first operation that
-  renames a node in the region also writes this file, or refuses the rename.
+  the node puts in its card when it founds a region (#1744) or joins one by ticket
+  (#1157). In the region, `card.name` is the one copy (MEMBER RECORD). Trigger: the
+  first operation that renames a node in the region also writes this file, or
+  refuses the rename.
   The file is one sector: the tag `foundation/name/1`, the length of the name in one
   byte, the name with zeros after it up to 255 bytes, and the CRC32C of those 273 bytes
   (little-endian).
