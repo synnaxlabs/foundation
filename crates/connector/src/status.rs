@@ -389,8 +389,8 @@ impl Session {
     fn write(&mut self, values: &Values, now: Monotonic) {
         values.staged.set(false);
         self.wrote = now;
-        let now = self.hub.now();
-        let stamp = self.last.map_or(now, |last| now.max(after(last)));
+        let mesh = self.hub.now();
+        let stamp = self.last.map_or(mesh, |last| mesh.max(after(last)));
         if let Err(before) = self.send(values, stamp)
             && let Err(again) = self.send(values, after(before))
         {
@@ -409,7 +409,7 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// As [`Session::write`].
+    /// When the home refuses the frame for a cause that only a defect gives.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
         self.last = Some(stamp);
         let draft = self.frame(values, stamp);
