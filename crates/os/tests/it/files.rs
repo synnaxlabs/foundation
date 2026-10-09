@@ -857,6 +857,27 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
 }
 
 #[test]
+fn a_write_open_waits_for_the_calls_of_a_dropped_close() {
+    run(|files, data| async move {
+        let (file, pool) = (create(&files, "a", KIB).await, pool());
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut open = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            let mut close = Box::pin(file.close());
+            pend(&mut close, context);
+            drop(close);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        assert_eq!(open.as_mut().await.map(drop), Ok(()));
+    });
+}
+
+#[test]
 fn a_write_open_waits_for_a_dropped_call_on_the_file_that_its_path_names() {
     run(|files, data| async move {
         let (mut file, pool) = (create(&files, "a", KIB).await, pool());

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Pool};
@@ -1614,6 +1614,67 @@ fn a_create_does_not_wait_for_a_dropped_call_on_another_path() {
     }
 }
 
+/// Whether a create of `a` on node 1, one nanosecond after node 0 drops a remove of
+/// its own `a`, ends before a read open on node 0 that still finds that file.
+fn create_beside_remove_of_another_node(value: u64) -> bool {
+    let mut sim = sim(value);
+    let config = || node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    };
+    let (a, b) = (sim.node(config()), sim.node(config()));
+    let at = a.clock().now() + Span::MILLISECOND;
+    let made = Arc::new(AtomicU64::new(0));
+    let end = Arc::clone(&made);
+    let create_b = b.shards().start(shard("b"), move |_| async move {
+        b.clock().sleep_until(at + Span::from_nanos(1)).await;
+        drop(create(&b, "a", KIB).await);
+        end.store(b.clock().now().0, Ordering::Relaxed);
+    });
+    let (found, read) = sim
+        .run_on(&a, move |a, _| async move {
+            let files = a.files();
+            drop(create(&a, "a", KIB).await);
+            a.clock().sleep_until(at).await;
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(remove.as_mut()).await;
+            drop(remove);
+            let found = files.open(Path::new("a"), Mode::Read).await.is_ok();
+            (found, a.clock().now().0)
+        })
+        .unwrap();
+    create_b.unwrap().join().unwrap();
+    found && made.load(Ordering::Relaxed) < read
+}
+
+#[test]
+fn a_call_does_not_wait_for_a_dropped_call_of_another_node() {
+    assert!((0..32).any(create_beside_remove_of_another_node));
+}
+
+/// What a create of `b` gives while a rename of `a` to `b` through a live handle is
+/// in flight, after the sync that the rename makes first.
+fn create_beside_live_rename(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        let mut file = create(&node, "a", KIB).await;
+        let mut rename = Box::pin(file.rename(Path::new("b")));
+        pend(rename.as_mut()).await;
+        node.clock().sleep(Span::from_nanos(200_000)).await;
+        pend(rename.as_mut()).await;
+        let found = files.open(Path::new("b"), Mode::Create { len: KIB }).await;
+        let found = found.map(drop).err();
+        drop(rename.await);
+        found
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_live_rename_to_its_path() {
+    let found: Vec<_> = (0..32).map(create_beside_live_rename).collect();
+    assert!(found.contains(&None), "{found:?}");
+}
+
 /// Whether `a` is still there when a create of `b` ends, which starts once a remove
 /// of `a` is polled once and its future drops.
 fn create_beside_dropped_remove(value: u64) -> bool {
@@ -1675,8 +1736,6 @@ fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
     });
 }
 
-/// What a write open of `a` gives after a `File::remove` of it is polled once and
-/// dropped, then what a create gives, and the names in the data directory a
 /// What a write open of `a` gives while a `File::remove` of it, whose future lives
 /// and which a fault fails, is in flight.
 fn open_beside_failed_handle_remove(value: u64) -> Option<Error> {
@@ -1703,6 +1762,8 @@ fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle() {
     }
 }
 
+/// What a write open of `a` gives after a `File::remove` of it is polled once and
+/// dropped, then what a create gives, and the names in the data directory a
 /// millisecond after the create.
 fn opens_after_dropped_remove(
     value: u64,
