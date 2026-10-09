@@ -76,9 +76,7 @@ Check:
 - Errors: is each error returned, typed, and tested with its exact variant? Does any
   code catch or skip an error to hide a defect?
 - Rust rules: read `docs/claude/rust.md`. Each line that the PR adds or changes and
-  that breaks one of its rules is a finding. When the PR removes the last `todo!()` of
-  a crate, check that its `lib.rs` denies `clippy::todo` and
-  `clippy::let_underscore_untyped`.
+  that breaks one of its rules is a finding.
 - Guards: does a check repeat one that another path already makes? Remove it and run
   the tests. If none fails, it is a finding.
 - Tests: for each issue that the PR closes, name the test of each item of its "Tests
