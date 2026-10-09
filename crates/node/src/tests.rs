@@ -2431,11 +2431,7 @@ mod port {
             };
             let (mut sender, mut receiver) =
                 session.open(Class::Complete).await.expect("a stream");
-            let message = |bytes: &[u8]| {
-                let mut block = pool.alloc(bytes.len()).unwrap();
-                block.copy_from_slice(bytes);
-                block.freeze()
-            };
+            let message = |bytes: &[u8]| pool.copy(bytes).unwrap();
             let bytes_max = sender.bytes_max();
             let mut sent = Ok(());
             for bytes in &first {
@@ -2787,11 +2783,7 @@ mod port {
                 .dial(KEY.public(), &[Address::Udp(listen)])
                 .await
                 .expect("a session");
-            let message = |bytes: &[u8]| {
-                let mut block = pool.alloc(bytes.len()).unwrap();
-                block.copy_from_slice(bytes);
-                block.freeze()
-            };
+            let message = |bytes: &[u8]| pool.copy(bytes).unwrap();
             let header = wire::header::encode(wire::Protocol::Mesh);
             let mut late = header.to_vec();
             late.resize(60 << 10, 0);
@@ -3719,11 +3711,7 @@ mod port {
                 let session = dialed.expect("the dial reaches the node");
                 let sender = session.open_sender(Class::Complete).await;
                 let mut sender = sender.expect("a stream");
-                let block = |bytes: &[u8]| {
-                    let mut block = pool.alloc(bytes.len()).unwrap();
-                    block.copy_from_slice(bytes);
-                    block.freeze()
-                };
+                let block = |bytes: &[u8]| pool.copy(bytes).unwrap();
                 let header = wire::header::encode(wire::Protocol::Mesh);
                 let mut sent = sender.send(block(&header)).await;
                 for _ in 0..100 {
