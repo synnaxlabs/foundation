@@ -1,6 +1,6 @@
-//! Entry points for the fuzz targets only. Not a stable surface.
+//! Fuzz entry points, for the fuzz targets only. Not a stable surface.
 
-use crate::identity::{self, LEN};
+use crate::identity::{self, BODY, LEN};
 
 /// Decodes `data` as the bytes of `node.key`: 68 bytes as they are, or 64 bytes with
 /// their CRC32C appended. Ignores any other length.
@@ -12,7 +12,7 @@ use crate::identity::{self, LEN};
 pub fn identity(data: &[u8]) {
     if let Ok(bytes) = <&[u8; LEN]>::try_from(data) {
         identity::check(bytes);
-    } else if let Ok(body) = <&[u8; 64]>::try_from(data) {
+    } else if let Ok(body) = <&[u8; BODY]>::try_from(data) {
         identity::check(&identity::with_checksum(body));
     }
 }
