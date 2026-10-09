@@ -976,6 +976,54 @@ mod tests {
     }
 
     #[test]
+    fn waits_for_a_full_pool_after_its_disk_failed() {
+        let returned = run_on(|node, tasks| async move {
+            let kind = Counted(|ctx: Context<()>| async move {
+                ctx.count("samples").set(1);
+                ctx.clock().sleep(ms(1_500)).await;
+                Ok(())
+            });
+            let kinds = Table::new().with("tally", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let (hub, clock, failer) = (inputs.hub.clone(), node.clock(), node.clone());
+            tasks.spawn(async move {
+                clock.sleep(ms(100)).await;
+                let mut hog = rival(&hub, &["state"]).await;
+                clock.sleep(ms(400)).await;
+                failer.fail_file(RING.as_ref(), env::files::Operation::Sync);
+                clock.sleep(ms(700)).await;
+                let mut held = fill(&hog);
+                clock.sleep(ms(200)).await;
+                let one = held.pop().expect("one draft");
+                let failed = hog.write(Label::Path(Path::Live), one);
+                assert!(
+                    matches!(
+                        failed,
+                        Err(hub::writer::Failure::Home(hub::home::Error::Disk(_)))
+                    ),
+                    "the shard failed on disk at 1.4 s: {failed:?}"
+                );
+                held.extend(fill(&hog));
+                clock.sleep(ms(19_800)).await;
+                drop(held);
+            });
+            let (clock, start) = (node.clock(), node.clock().now());
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            clock.now() - start
+        });
+        assert_eq!(returned, ms(21_500), "state 3 waits until the pool frees");
+    }
+
+    #[test]
     fn writes_no_status_for_a_config_that_does_not_parse() {
         let out = supervise("modbus", vec![Step::Done], config(), None);
         assert!(out.statuses.is_empty(), "{:?}", out.statuses);
