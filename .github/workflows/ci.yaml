@@ -312,8 +312,6 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - name: Mutants in the diff
-        env:
-          TMPDIR: ${{ runner.temp }}
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
           status=0
