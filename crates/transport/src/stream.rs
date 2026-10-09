@@ -565,8 +565,8 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::ops::Range;
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Waker};
 
     use std::future::poll_fn;
@@ -972,6 +972,86 @@ mod tests {
             (sim.run(), sim.digest())
         };
         assert_eq!(trace(2), trace(2));
+    }
+
+    /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT. A cut drops the
+    /// server's first flight, with its hello at 0.5-RTT: its datagrams leave within
+    /// 27 ms of the client's Initial, which takes one delay to arrive. So the server's
+    /// hello reaches the client after `idle`, and on the slower link after twice
+    /// `idle`, but within the idle timeout of 3 PTO. The session stays.
+    #[test]
+    fn keep_a_session_whose_hello_a_short_cut_delays() {
+        for (delay, after) in [(300, 1), (600, 2)] {
+            let link = sim::link::Config {
+                delay: spans(Span::MILLISECOND, delay),
+                ..sim::link::Config::default()
+            };
+            let waited = Arc::new(AtomicI64::new(0));
+            let wait = Arc::clone(&waited);
+            let (mut sim, client, server) = testing::sessions(
+                1,
+                |config| Config {
+                    idle: Span::SECOND,
+                    ..config
+                },
+                move |side| async move {
+                    let connected = side.node.clock().now();
+                    let opened = side.session.open_sender(Class::Command).await;
+                    let mut sender = opened.expect("a stream");
+                    let late = side.node.clock().now() - connected;
+                    wait.store(late.nanos(), Ordering::Relaxed);
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    sender.finish().expect("finished");
+                    side.node.clock().sleep(spans(Span::SECOND, 5)).await;
+                    side.session.close(Code(0));
+                },
+                |side| async move {
+                    let mut incoming = side.session.accept().await.expect("a stream");
+                    let read = bytes(incoming.receiver.recv().await);
+                    assert_eq!(read, Ok(Some(b"a".to_vec())));
+                    let closed = Error::PeerClosed { code: Code(0) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+            );
+            let cut = sim::link::Config { loss: 1.0, ..link };
+            sim.link(&client, &server, link);
+            sim.link(&server, &client, cut);
+            let healed = spans(Span::MILLISECOND, delay + 27);
+            assert_eq!(sim.run_for(healed), Ok(()));
+            sim.link(&server, &client, link);
+            assert_eq!(sim.run(), Ok(()));
+            let late = Span::from_nanos(waited.load(Ordering::Relaxed));
+            assert!(late > spans(Span::SECOND, after), "{delay}: {late:?}");
+        }
+    }
+
+    /// Two honest nodes, on a link that loses 70% of the server's datagrams. The
+    /// server's hello and each resend of it are lost until the bound, while enough
+    /// keep-alives arrive that the idle timeout never ends the session. The client
+    /// ends it as a peer with no hello.
+    #[test]
+    fn end_a_session_whose_hello_a_lossy_link_loses_until_the_bound() {
+        let closed = Arc::new(Mutex::new(None));
+        let close = Arc::clone(&closed);
+        let (mut sim, client, server) = testing::sessions(
+            39,
+            |config| config,
+            move |side| async move {
+                *close.lock().expect("a lock") = Some(side.session.closed().await);
+            },
+            |side| async move {
+                side.session.closed().await;
+            },
+        );
+        let lossy = sim::link::Config {
+            loss: 0.7,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, lossy);
+        assert_eq!(sim.run_for(spans(Span::SECOND, 10)), Ok(()));
+        let reason = "a peer with no hello".to_owned();
+        let closed = closed.lock().expect("a lock").take();
+        assert_eq!(closed, Some(Error::Broken { reason }));
     }
 
     #[test]
