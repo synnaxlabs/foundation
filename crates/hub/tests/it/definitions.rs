@@ -332,6 +332,28 @@ fn gives_a_latest_reader_no_series_of_a_channel_that_moved_away_and_back() {
     });
 }
 
+/// An index that becomes a data channel at its key and then an index again continues
+/// its seq from the buffer, as an index that leaves and returns does.
+#[test]
+fn continues_the_seq_of_an_index_that_was_a_data_channel_between() {
+    run(31, |test| async move {
+        let mut writer = test.writer("a", &["value-b"]).await;
+        let now = test.now();
+        assert_eq!(
+            seq(&write_series(&mut writer, &[(3, &[now]), (4, &[10])])),
+            0
+        );
+        drop(writer);
+        let mut data = without(&["time-b", "value-b"]);
+        data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
+        test.hub.set_definitions(&data);
+        test.hub.set_definitions(&channels());
+        let mut writer = test.writer("b", &["value-b"]).await;
+        let outcomes = write_series(&mut writer, &[(3, &[now + 1]), (4, &[20])]);
+        assert_eq!(seq(&outcomes), 1);
+    });
+}
+
 /// The ring bytes after 8 writers on `value` open and then end: by a removal of
 /// `value` when `removed`, else by drops in open order.
 fn ring_after_writers_end(removed: bool) -> Vec<u8> {

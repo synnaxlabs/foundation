@@ -15,7 +15,7 @@ use std::task::Waker;
 
 use spec::channel::Kind;
 use spec::definition::Definition;
-use types::channel::Key;
+use types::channel::{Key, Slot};
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
@@ -82,6 +82,10 @@ struct State {
     channels: hash::Map<Name, Channel>,
     /// The index of each channel in `channels`, by key.
     indexes: hash::Map<Key, Key>,
+    /// The slot of each index that the hub shed and that is not an index now. The slot
+    /// returns to the key when it is an index again, as the buffer keys the tails of
+    /// an index by slot.
+    shed: hash::Map<Key, Slot>,
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
@@ -123,6 +127,7 @@ impl Hub {
             interner,
             channels: hash::Map::default(),
             indexes: hash::Map::default(),
+            shed: hash::Map::default(),
             writers: Sessions::default(),
             readers: Sessions::default(),
             wakers: hash::Map::default(),
@@ -344,6 +349,8 @@ impl State {
         for key in shed {
             let slot = self.interner.slots().assign(key);
             self.home.shed(slot);
+            self.interner.slots().retire(key);
+            self.shed.insert(key, slot);
         }
         let retired: Vec<Key> = self
             .channels
@@ -356,6 +363,14 @@ impl State {
         for key in retired {
             self.interner.slots().retire(key);
         }
+        let slots = self.interner.slots();
+        self.shed.retain(|&key, &mut slot| {
+            let back = after.contains(&key);
+            if back {
+                slots.restore(key, slot);
+            }
+            !back
+        });
         self.channels
             .retain(|_, known| !removed.contains(&known.key()));
         self.indexes.retain(|key, _| !removed.contains(key));

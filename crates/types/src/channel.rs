@@ -93,9 +93,10 @@ impl Slots {
     }
 
     /// The slot of `key`. The first call for a key, and the first call after each
-    /// [`retire`](Self::retire) of it, assigns the next slot, from 0. A slot is never
-    /// reused. Give it only keys from the spec or the node's disk, which limit the keys
-    /// that the table holds: it hashes with no key.
+    /// [`retire`](Self::retire) of it, assigns the next slot, from 0, unless a
+    /// [`restore`](Self::restore) gave the key a slot. No two keys get one slot. Give
+    /// it only keys from the spec or the node's disk, which limit the keys that the
+    /// table holds: it hashes with no key.
     ///
     /// # Panics
     ///
@@ -113,6 +114,17 @@ impl Slots {
     /// slot that no key had.
     pub fn retire(&mut self, key: Key) {
         self.assigned.remove(&key);
+    }
+
+    /// Gives `key` its retired `slot` again, so the next [`assign`](Self::assign) of
+    /// `key` gives `slot`.
+    ///
+    /// # Panics
+    ///
+    /// If `key` has a slot.
+    pub fn restore(&mut self, key: Key, slot: Slot) {
+        let old = self.assigned.insert(key, slot);
+        assert!(old.is_none(), "{key} has slot {old:?}");
     }
 }
 
@@ -264,5 +276,27 @@ mod tests {
         let unassigned = Key::from_u128(5);
         slots.retire(unassigned);
         assert_eq!(slots.assign(unassigned), Slot::new(4));
+    }
+
+    #[test]
+    fn gives_a_restored_slot_to_its_key() {
+        let mut slots = Slots::new();
+        let a = Key::from_u128(7);
+        let old = slots.assign(a);
+        slots.retire(a);
+        assert_eq!(slots.assign(a), Slot::new(1));
+        slots.retire(a);
+        slots.restore(a, old);
+        assert_eq!(slots.assign(a), old);
+        assert_eq!(slots.assign(Key::from_u128(3)), Slot::new(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "has slot Some(Slot(0))")]
+    fn panics_at_the_restore_of_a_key_with_a_slot() {
+        let mut slots = Slots::new();
+        let a = Key::from_u128(7);
+        let old = slots.assign(a);
+        slots.restore(a, old);
     }
 }
