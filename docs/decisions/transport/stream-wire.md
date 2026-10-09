@@ -86,11 +86,12 @@
   Until the peer's hello arrives, a node opens and accepts no stream; a peer whose hello
   has not arrived twice the idle timeout after the handshake breaks the protocol, with
   the reason `a peer with no hello`. A check that comes after the idle timeout was also
-  due ends the session as timed out. QUIC counts the idle timeout again from this side's
-  first send after the peer's last packet that asks for an ack (`laptop.architect-2`,
-  #2149, 2026-10-09 16:42 UTC:
+  due ends the session as timed out. QUIC counts the idle timeout again from each packet
+  from the peer, and from this side's first send after it that asks for an ack
+  (`laptop.architect-2`, #2149, 2026-10-09 16:42 UTC:
   https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085189583; 17:07 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085581998). A link
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085581998; 18:14 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6086657957). A link
   that loses most datagrams can also end an honest session with this error, when the
   peer's hello and each resend of it are lost until the bound (`laptop.architect-2`,
   #2149, 2026-10-09 17:21 UTC:
