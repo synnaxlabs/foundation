@@ -59,19 +59,19 @@
   (https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498), which
   changes "runs no check of `Config::founding`" in
   https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151.
-  `Hub::define` into a new hub, and `Hub::set_definitions` of #2020, panic only when
-  two channels have one key or one name, or the index of a data channel is not an
-  index of the input. No spec holds two channels of one name, and
-  `spec::region::check` refuses the other two cases. Each panic is a defect of the
-  caller. `node` runs `spec::region::check` on each spec before it gives it to the
-  hub: the founding once it is region state (#1744, #336), and each committed change,
-  with `set_definitions` (#1957 PR 2). A spec with problems follows #1741: the node
-  gives the hub none of it and keeps the spec it uses, which is empty for a founding
-  with problems. So no spec from disk or a peer makes an open panic. `Config::region`
-  keeps its panic (NODE PORT) until the first PR that adds the check (#1744 or #1957
-  PR 2). That PR runs the check on `Config::region` too, and its doc then says that a
-  founding with problems defines no channel. Decided by `laptop.architect`: chunks
-  through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
+  `Hub::set_definitions` (#2020), and `Hub::define` into a new hub before it, panic only
+  when two channels have one key or one name, or the index of a data channel is not an
+  index of the input. No spec holds two channels of one name, and `spec::region::check`
+  refuses the other two cases. Each panic is a defect of the caller. `node` runs
+  `spec::region::check` on each spec before it gives it to the hub: the founding once it
+  is region state (#1744, #336), and each committed change, with `set_definitions`
+  (#1957 PR 2). A spec with problems follows #1741: the node gives the hub none of it
+  and keeps the spec it uses, which is empty for a founding with problems. So no spec
+  from disk or a peer makes an open panic. `Config::region` keeps its panic (NODE PORT)
+  until the first PR that adds the check (#1744 or #1957 PR 2). That PR runs the check
+  on `Config::region` too, and its doc then says that a founding with problems defines
+  no channel. Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
+  2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
@@ -92,13 +92,13 @@
   2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
-  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
-  The panic of `Hub::define` and the check before it, agreed with
-  `laptop.architect-2`, 2026-10-08T20:08:50Z
-  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791), with
-  the check of `Config::region` by `laptop.architect-2`, 2026-10-08T20:08:26Z
-  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507). This
-  changes item 1 of 6068129791, which left out the panic of `define` on a known key or
-  name (HUB SESSIONS). `set_definitions` has no such panic (`laptop.architect`,
+  (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643). The
+  panics of the hub and the check before them, agreed with `laptop.architect-2`,
+  2026-10-08T20:08:50Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791), with the
+  check of `Config::region` by `laptop.architect-2`, 2026-10-08T20:08:26Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507). Item 1
+  of 6068129791 left out the panic of `define` on a known key or name, which HUB
+  SESSIONS states (#1917). `set_definitions` has no such panic (`laptop.architect`,
   2026-10-08T22:09:38Z,
   https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).
