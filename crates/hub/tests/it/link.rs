@@ -293,7 +293,6 @@ async fn recorded(node: &sim::node::Node, kept: &Kept, accepted: usize) {
     }
 }
 
-/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
 /// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
 /// session of the first program that dials it, with its link.
 pub(super) async fn accept(
