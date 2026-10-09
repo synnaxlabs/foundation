@@ -72,7 +72,7 @@ pub enum Error {
     Pending,
     /// The open requests of the hub hold so many body bytes that a body of `length`
     /// more is over [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed
-    /// once an open request replies.
+    /// once enough open requests reply.
     Bodies {
         /// The body length of the refused request.
         length: u64,
