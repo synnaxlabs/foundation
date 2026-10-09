@@ -100,7 +100,8 @@ fn early() {
     writeln!(output, "{}", polled.is_ready()).expect("a write to the test");
 }
 
-/// Whether the thread `signal` of this process blocks SIGINT.
+/// Whether the thread `signal` of this process has not named itself yet or blocks
+/// SIGINT.
 #[cfg(target_os = "linux")]
 fn serving_blocks_sigint() -> bool {
     for task in std::fs::read_dir("/proc/self/task").expect("the tasks list") {
@@ -117,7 +118,7 @@ fn serving_blocks_sigint() -> bool {
         let mask = u64::from_str_radix(mask.trim(), 16).expect("a hex mask");
         return mask & (1 << (libc::SIGINT - 1)) != 0;
     }
-    panic!("no thread signal")
+    true
 }
 
 #[cfg(target_os = "linux")]

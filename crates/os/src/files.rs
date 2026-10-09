@@ -319,7 +319,8 @@ fn data(dir: &Path) -> io::Result<OwnedFd> {
     make(&dir, Path::new("data"))
 }
 
-/// Opens directory `path` of `at`, and first makes it when it is not there.
+/// Opens directory `path` of `at`, first makes it when it is not there, and syncs the
+/// directory that holds it.
 fn make(at: impl AsFd, path: &Path) -> io::Result<OwnedFd> {
     match fs::mkdirat(&at, path, DIR) {
         Ok(()) | Err(Errno::EXIST) => {}

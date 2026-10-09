@@ -165,7 +165,8 @@ pub fn net() -> env::net::Net {
 ///
 /// # Errors
 ///
-/// - [`Error::Dir`] when the OS cannot open or make `dir` or `dir/data`.
+/// - [`Error::Dir`] when the OS cannot open or make `dir` or `dir/data`, or cannot open
+///   the parent of `dir`, which it syncs.
 /// - [`Error::Thread`] when the I/O thread cannot start.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn files(
@@ -190,22 +191,16 @@ pub fn files(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn interrupt() -> Result<impl Future<Output = ()> + Send + 'static, Error> {
     let set = signal::set();
-    signal::block(&set);
+    let old = signal::block(&set);
     let (fire, fired) = tokio::sync::oneshot::channel();
-    let handle = thread::start(
-        "signal".to_owned(),
-        |_| Ok(()),
-        move |()| {
-            // The future may be gone, as when the process stops on its own.
-            signal::serve(&set, || fire.send(()).unwrap_or(()))
-        },
-    )
-    .map_err(|e| {
-        signal::unblock(&set);
-        Error::Thread(e)
+    // The future may be gone, as when the process stops on its own.
+    signal::start(set, move || fire.send(()).unwrap_or(())).map_err(|e| {
+        signal::restore(&old);
+        Error::Thread(env::thread::Error::Start {
+            name: "signal".to_owned(),
+            reason: e.to_string(),
+        })
     })?;
-    // The thread ends with the process.
-    drop(handle);
     Ok(wait(fired))
 }
 
@@ -222,7 +217,7 @@ async fn wait(fired: tokio::sync::oneshot::Receiver<()>) {
 pub enum Error {
     /// The OS could not give the cores of the calling thread.
     Cores(std::io::Error),
-    /// The OS could not open or make the data directory.
+    /// The OS could not open, make, or sync the data directory or its parent.
     Dir(std::io::Error),
     /// A thread of `os` could not start: the I/O thread of [`files`] or the thread
     /// of [`interrupt`].
@@ -235,7 +230,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cores(e) => write!(f, "cannot read the cores of this thread: {e}"),
-            Self::Dir(e) => write!(f, "cannot open or make the data directory: {e}"),
+            Self::Dir(e) => {
+                write!(
+                    f,
+                    "cannot open, make, or sync the data directory or its parent: {e}"
+                )
+            }
             Self::Thread(e) => write!(f, "{e}"),
             Self::Wall(e) => write!(f, "cannot read the wall clock: {e}"),
         }

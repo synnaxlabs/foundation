@@ -690,7 +690,8 @@ fn files_of_a_dir_with_a_missing_parent_gives_dir_and_makes_nothing() {
     let found = dir_error(&scratch.0.join("a").join("b"));
     assert_eq!(
         found.to_string(),
-        "cannot open or make the data directory: No such file or directory (os error 2)"
+        "cannot open, make, or sync the data directory or its parent: No such file or \
+         directory (os error 2)"
     );
     assert!(matches!(found, os::Error::Dir(_)));
     assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
@@ -739,8 +740,8 @@ fn files_under_a_parent_it_cannot_read_gives_dir_at_each_call() {
     let found = [dir_error(&dir).to_string(), dir_error(&dir).to_string()];
     std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
         .unwrap();
-    let denied = "cannot open or make the data directory: Permission denied (os error \
-                  13)";
+    let denied = "cannot open, make, or sync the data directory or its parent: \
+                  Permission denied (os error 13)";
     assert_eq!(found, [denied, denied]);
 }
 
@@ -751,7 +752,8 @@ fn files_in_a_directory_under_a_file_gives_dir() {
     let found = dir_error(&scratch.0.join("a"));
     assert_eq!(
         found.to_string(),
-        "cannot open or make the data directory: Not a directory (os error 20)"
+        "cannot open, make, or sync the data directory or its parent: Not a directory \
+         (os error 20)"
     );
     assert!(matches!(found, os::Error::Dir(_)));
 }
