@@ -793,6 +793,11 @@ fn reads_the_round_heading_as_github_shows_it() {
         check(&record(vec![bot(ROUND), bot(&level)])),
         Vec::<String>::new()
     );
+    let lines = fields.replace("## Review round 3", "Review round\n3\n---");
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&lines)])),
+        vec!["`## Review round ` has no round number"]
+    );
 }
 
 #[test]
@@ -2100,14 +2105,17 @@ fn reads_a_line_break_in_an_image_text_as_github_shows_it() {
 
 #[test]
 fn an_old_round_reads_a_footnote_reference_as_github_shows_it() {
-    // GitHub shows `Hot path: 1none`: its first word is not `none`.
-    let round = old(
-        "## Review round 1\n\nConfirmed a finding.\n\nHot path: [^1]none\n\n[^1]: x",
-    );
-    assert_eq!(
-        check(&record(vec![round, bot(ROUND)])),
-        vec!["review round 1 names no performance, which this round requires."]
-    );
+    // GitHub shows `Hot path: 1none` and `Hot path: 1`: no first word is `none`.
+    for path in ["[^1]none\n\n[^1]: x", "[^none]\n\n[^none]: x"] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\nHot path: {path}"
+        ));
+        assert_eq!(
+            check(&record(vec![round, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{path}"
+        );
+    }
 }
 
 #[test]
