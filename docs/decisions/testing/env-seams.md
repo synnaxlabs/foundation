@@ -96,6 +96,8 @@
   https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081197695 (12:48
   UTC), and "at most once for each socket" of
   https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463 (07:15
+  UTC) and
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130 (21:15
   UTC). Each half has its own `dup` of the socket. The receiver registers for readable
   at its first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08
   19:12 UTC,
