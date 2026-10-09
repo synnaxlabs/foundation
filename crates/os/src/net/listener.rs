@@ -223,7 +223,10 @@ mod tests {
         let _copy = rustix::io::dup(listener.socket.fd().unwrap()).unwrap();
         drop(listener);
         let error = std::net::TcpStream::connect(local).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(Errno::CONNREFUSED.raw_os_error()));
+        assert_eq!(
+            error.raw_os_error(),
+            Some(Errno::CONNREFUSED.raw_os_error())
+        );
     }
 
     mod socket {
