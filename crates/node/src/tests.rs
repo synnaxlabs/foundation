@@ -2819,8 +2819,7 @@ mod port {
     /// The node waits at most 3 s for the drain, so a probe takes the lock before a
     /// peer with a one-way delay of 4 s sees its close. The close is not paced, so it
     /// leaves at the drop and arrives one delay later, also when the node stops 20.3 s
-    /// in, just after its handshake confirms, when the pacer would hold a packet for
-    /// about 0.4 s.
+    /// in, when a paced close would wait about 0.43 s.
     #[test]
     fn a_peer_with_a_delay_over_3_s_sees_its_close_after_the_lock_is_free() {
         let closed = transport::Error::PeerClosed { code: Code(0) };
@@ -2829,7 +2828,10 @@ mod port {
         let (seen, after) = stop_with_a_peer(delay, run);
         assert_eq!(seen, [Event::Locked(Ok(())), Event::Closed(closed)]);
         let late = after.nanos() - delay.nanos();
-        assert!((0..Span::MILLISECOND.nanos()).contains(&late), "{after:?}");
+        assert!(
+            (0..Span::MILLISECOND.nanos()).contains(&late),
+            "the peer saw its close {after:?} after the stop, not {delay:?}"
+        );
     }
 
     /// A peer whose one-way delay is under 3 s sees its close first, also when the
