@@ -43,12 +43,13 @@ fn write_record(sim: &mut Sim, node: &sim::node::Node) {
 
 /// A first open with the founding of [`create_region`], and a record in the log.
 fn founded(seed: u64) -> (Sim, sim::node::Node, region::Founding) {
-    founded_with(seed, BTreeMap::new())
+    founded_with(seed, BTreeMap::new(), BTreeMap::new())
 }
 
 /// [`founded`], with the founding homes `homes`.
 fn founded_with(
     seed: u64,
+    definitions: BTreeMap<Name, Definition>,
     homes: BTreeMap<channel::Key, node::Key>,
 ) -> (Sim, sim::node::Node, region::Founding) {
     let mut sim = Sim::new(sim::Config {
@@ -59,6 +60,7 @@ fn founded_with(
     let region = sim
         .run_on(&node, |node, tasks| async move {
             region::Founding {
+                definitions,
                 homes,
                 ..create_region(&node, &tasks).await
             }
@@ -192,42 +194,52 @@ fn a_reopen_with_other_definitions_is_refused() {
     assert_eq!(error, mismatch(&region, &more), "a second refused open");
 }
 
+/// Each text names the index by the tree key of its channel definition, or by its key
+/// when no definition has it.
 #[test]
 fn a_reopen_with_other_homes_is_refused() {
-    let homes = |home: Option<u8>| {
-        let homes = home.map(|id| (common::index(1), key(id)));
+    let homes = |index: u128, home: Option<u8>| {
+        let homes = home.map(|id| (common::index(index), key(id)));
         homes.into_iter().collect::<BTreeMap<_, _>>()
     };
-    let (mut sim, node, region) = founded_with(0, homes(Some(2)));
-    let index = common::index(1);
+    let channel = spec::channel::Channel {
+        key: common::index(1),
+        kind: spec::channel::Kind::Index {
+            error: None,
+            control: None,
+        },
+    };
+    let name = spec::definition::Kind::Channel.key("plant.i").unwrap();
+    let definitions: BTreeMap<_, _> = [(name, Definition::Channel(channel))].into();
+    let (mut sim, node, region) =
+        founded_with(0, definitions.clone(), homes(1, Some(2)));
     let cases = [
         (
             Some(3),
-            format!("the mesh was founded with another home of index {index}"),
+            "the mesh was founded with another home of index plant.i",
         ),
         (
             None,
-            format!(
-                "the mesh was founded with a home of index {index}, which the config lacks"
-            ),
+            "the mesh was founded with a home of index plant.i, which the config lacks",
         ),
     ];
     for (home, text) in cases {
         let given = region::Founding {
-            homes: homes(home),
+            homes: homes(1, home),
             ..region.clone()
         };
         let error = refused(&mut sim, &node, given.clone());
         assert_eq!(error, mismatch(&region, &given), "{home:?}");
         assert_eq!(error.to_string(), text);
     }
-    let (mut sim, node, region) = founded(0);
+    let (mut sim, node, region) = founded_with(0, definitions, BTreeMap::new());
     let given = region::Founding {
-        homes: homes(Some(2)),
+        homes: homes(2, Some(2)),
         ..region.clone()
     };
     let error = refused(&mut sim, &node, given.clone());
     assert_eq!(error, mismatch(&region, &given));
+    let index = common::index(2);
     let text = format!("the mesh was founded with no home of index {index}");
     assert_eq!(error.to_string(), text);
     run_with(&mut sim, &node, region);

@@ -6,6 +6,8 @@ use env::files;
 
 use raft::Position;
 use spec::Pointer;
+use spec::definition::Definition;
+use types::channel;
 use types::ed25519::PublicKey;
 use types::name::Name;
 use types::node;
@@ -285,16 +287,19 @@ fn founded(
         }
         Some((name, None, _)) => write!(f, "{founded} no definition {name}"),
         None => match first(&stored.homes, &given.homes) {
-            Some((index, Some(_), Some(_))) => {
-                write!(f, "{founded} another home of index {index}")
+            Some((key, stored_home, given_home)) => {
+                let index = Index(&stored.definitions, key);
+                match (stored_home, given_home) {
+                    (Some(_), Some(_)) => {
+                        write!(f, "{founded} another home of index {index}")
+                    }
+                    (Some(_), None) => write!(
+                        f,
+                        "{founded} a home of index {index}, which the config lacks"
+                    ),
+                    (None, _) => write!(f, "{founded} no home of index {index}"),
+                }
             }
-            Some((index, Some(_), None)) => {
-                write!(
-                    f,
-                    "{founded} a home of index {index}, which the config lacks"
-                )
-            }
-            Some((index, None, _)) => write!(f, "{founded} no home of index {index}"),
             None => write!(f, "{founded} another region"),
         },
     }
@@ -316,6 +321,26 @@ fn first<'a, K: Ord, V: PartialEq>(
     keys.into_iter()
         .map(|key| (key, a.get(key), b.get(key)))
         .find(|(_, a, b)| a != b)
+}
+
+// An index as the tree key of its channel definition, or as its key when no
+// definition has it.
+struct Index<'a>(&'a BTreeMap<Name, Definition>, &'a channel::Key);
+
+impl fmt::Display for Index<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = self
+            .0
+            .iter()
+            .find_map(|(name, definition)| match definition {
+                Definition::Channel(channel) if channel.key == *self.1 => Some(name),
+                _ => None,
+            });
+        match name {
+            Some(name) => write!(f, "{name}"),
+            None => write!(f, "{}", self.1),
+        }
+    }
 }
 
 // A set of node keys as `{a, b}`.
