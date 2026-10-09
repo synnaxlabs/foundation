@@ -118,7 +118,7 @@ fn main() {
             };
             let buffer = Buffer::open(config, &mut slots).await.expect("opens");
             for index in 0..WIDE {
-                slots.assign(channel::Key::from_u128(u128::from(index)));
+                slots.index(channel::Key::from_u128(u128::from(index)));
             }
             let parts = Parts::from(pool.alloc(256).expect("a block").freeze());
             let half = Parts::from(pool.alloc(BODY_MAX / 2).expect("a block").freeze());

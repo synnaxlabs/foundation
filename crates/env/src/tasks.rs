@@ -33,7 +33,7 @@ pub type Task = Pin<Box<dyn Future<Output = ()>>>;
 pub struct Tasks(Rc<dyn Driver>);
 
 impl Tasks {
-    /// Wraps a driver from `os` or `sim`.
+    /// Wraps `driver`.
     ///
     /// ```
     /// fn wrap(driver: impl env::tasks::Driver + 'static) -> env::tasks::Tasks {
@@ -67,7 +67,9 @@ impl fmt::Debug for Tasks {
     }
 }
 
-/// What `os` and `sim` implement to run [`Tasks`]. Only they implement it.
+/// What [`Tasks`] runs its tasks on. `os` and `sim` implement it for a shard. A driver
+/// that counts tasks passes each task to one of theirs. A driver of a test or a
+/// benchmark may keep each task for its caller to poll.
 ///
 /// ```
 /// fn wrap(driver: impl env::tasks::Driver + 'static) -> env::tasks::Tasks {

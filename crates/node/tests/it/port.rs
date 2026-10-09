@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -185,14 +184,12 @@ fn client(tasks: env::tasks::Tasks) -> (transport::Client, Rc<block::Pool>) {
     let config = block::Config { budget: 1 << 20 };
     let memory = block::Heap::new(config.reservation());
     let pool = Rc::new(block::Pool::new(config, memory));
-    let at = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-    let bound = transport::Port::bind(&os::net(), at).unwrap();
-    let part = bound.split(NonZeroUsize::MIN).pop().unwrap();
     let config = transport::client::Config {
+        net: os::net(),
         clock: os::clock(),
         entropy: os::entropy(),
         tasks,
         pool: Rc::clone(&pool),
     };
-    (transport::Client::new(config, part).unwrap(), pool)
+    (transport::Client::new(config).unwrap(), pool)
 }

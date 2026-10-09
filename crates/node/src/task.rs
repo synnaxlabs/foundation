@@ -1,9 +1,11 @@
-//! Tasks given from any thread that shard 0 calls with its hub, in the order given.
+//! Tasks given from any thread that shard 0 calls with its handles, in the order
+//! given.
 
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
 use std::pin::pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 #[cfg(loom)]
@@ -15,8 +17,15 @@ use hub::Hub;
 
 use crate::scope::Scope;
 
-/// A task of [`crate::Node::spawn`], with its future boxed.
-pub(crate) type Task = Box<dyn FnOnce(Hub) -> env::tasks::Task + Send>;
+/// What shard 0 gives each task.
+pub(crate) struct Handles {
+    pub(crate) hub: Hub,
+    /// The operations on the mesh, or `None` for a node with no region.
+    pub(crate) ops: Option<Rc<ops::Node>>,
+}
+
+/// A task of [`crate::Node::spawn`] or [`crate::Node::operate`], with its future boxed.
+pub(crate) type Task = Box<dyn FnOnce(&Handles) -> env::tasks::Task + Send>;
 
 /// The two ends of the queue of tasks for shard 0. A task is pushed once, never on a
 /// frame's path, so a mutex is fine.
@@ -99,12 +108,12 @@ impl<T> Drop for Inbox<T> {
 }
 
 impl Inbox<Task> {
-    /// Calls each task given with a clone of `hub`, in the order given, and runs its
-    /// future on `tasks`, until `stop` completes. Then drops each future, `hub`, and
-    /// the inbox. A future that completes drops at once.
+    /// Calls each task given with `handles`, in the order given, and runs its future
+    /// on `tasks`, until `stop` completes. Then drops each future, `handles`, and the
+    /// inbox. A future that completes drops at once.
     pub(crate) async fn serve(
         self,
-        hub: Hub,
+        handles: Handles,
         tasks: env::tasks::Tasks,
         stop: impl Future<Output = ()>,
     ) {
@@ -120,7 +129,7 @@ impl Inbox<Task> {
                     if stop.as_mut().poll(cx).is_ready() {
                         return Poll::Ready(());
                     }
-                    running.spawn(task(hub.clone()));
+                    running.spawn(task(&handles));
                 }
             }
             Poll::Pending

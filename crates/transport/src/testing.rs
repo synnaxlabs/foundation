@@ -2,7 +2,7 @@
 //! or a session on each.
 
 use std::future::poll_fn;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
@@ -27,6 +27,8 @@ pub(crate) const MESSAGE_BYTES_MAX: usize = 1 << 16;
 
 /// The UDP port of [`address`].
 pub(crate) const PORT: u16 = 4433;
+/// The first port that a bind of port 0 takes under `sim`.
+pub(crate) const FREE: u16 = 49152;
 
 /// The key of the client node of [`sessions`].
 pub(crate) const CLIENT: PrivateKey = PrivateKey([1; 32]);
@@ -96,6 +98,7 @@ impl Shard {
     /// A config for a program on this shard.
     pub(crate) fn client(&self) -> client::Config {
         client::Config {
+            net: self.net.clone(),
             clock: self.clock.clone(),
             entropy: self.entropy.clone(),
             tasks: self.tasks.clone(),
@@ -145,6 +148,11 @@ pub(crate) fn nodes(value: u64) -> (Sim, Node, Node) {
 /// The address at [`PORT`] on the first IP of `node`.
 pub(crate) fn address(node: &Node) -> SocketAddr {
     SocketAddr::new(node.addresses()[0], PORT)
+}
+
+/// Port `port` at `[::]`.
+pub(crate) fn any(port: u16) -> SocketAddr {
+    SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
 }
 
 /// The one part of a port bound at `at`.

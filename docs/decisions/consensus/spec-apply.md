@@ -1,15 +1,15 @@
 - **SPEC APPLY (#1083)** `Mesh::apply(base, definitions, homes)` makes the definitions,
   by tree key, the region's spec through the leader, as `set_home` does, and gives the
-  new pointer. It first runs `spec::region::check` (REGION CHECK) at the region's
-  prefix: a problem gives `Error::Problems`, which holds each problem as `check` gives
-  it, and proposes nothing. `mesh` defines no problem of its own. `homes` maps index
-  names to node names (S12 (placement part) + B7). An index that `definitions` does not
-  hold as an index channel gives `Error::NotIndex`, then more than `HOMES_MAX` homes
-  give `Error::Homes`, both before the read of the base tree. `Homes` counts only the
-  listed indexes with no home in this node's state then. `UnknownNode` looks up only the
-  nodes of the listed indexes with no home when the call checks the node names, which
-  are among those, and the change takes only those indexes (`laptop.architect`,
-  2026-10-08T18:35:16Z:
+  pointer that its change makes (SPEC CHANGE). It first runs `spec::region::check`
+  (REGION CHECK) at the region's prefix: a problem gives `Error::Problems`, which holds
+  each problem as `check` gives it, and proposes nothing. `mesh` defines no problem of
+  its own. `homes` maps index names to node names (S12 (placement part) + B7). An index
+  that `definitions` does not hold as an index channel gives `Error::NotIndex`, then
+  more than `HOMES_MAX` homes give `Error::Homes`, both before the read of the base
+  tree. `Homes` counts only the listed indexes with no home in this node's state then.
+  `UnknownNode` looks up only the nodes of the listed indexes with no home when the call
+  checks the node names, which are among those, and the change takes only those indexes
+  (`laptop.architect`, 2026-10-08T18:35:16Z:
   https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). The two
   reads decided by `laptop.architect`, 2026-10-08T21:37:03Z
   (https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069527551), which
@@ -55,8 +55,13 @@
   (https://github.com/synnaxlabs/foundation/pull/1855#issuecomment-6059166107). A listed
   home is a proposal: the entry gives it only to an index with none. On `Ok`, the
   pointer is the call's and each listed index has a home in this node's state when the
-  call settles, the listed one or another. A call whose entry finds `base.next(root)`
-  returns it when each listed index has a home then, and else gives `Stale`. No entry
+  call settles, the listed one or another. A call whose entry finds the pointer that its
+  change makes returns it when each listed index has a home then, and else gives
+  `Stale`. This changes `base.next(root)` of
+  https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915, as a
+  change at the base root with no home leaves the pointer (SPEC CHANGE;
+  `laptop.architect`, 2026-10-09T00:57:47Z,
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6072065332). No entry
   removes a home, so the path on which the call's entry applies needs no check, and both
   paths give the same result. Trigger: when an entry can remove a home, that path checks
   too, and so does the count of `Homes` at the name check (that count,

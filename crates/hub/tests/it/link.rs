@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use access::proof::{Error as Refusal, Field};
@@ -11,7 +10,7 @@ use hub::{Served, serve};
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Address, Class, Code, Port, Session};
+use transport::{Address, Class, Code, Session};
 use types::connection;
 use types::ed25519::{Pair, PrivateKey};
 use types::hello::Hello;
@@ -143,7 +142,9 @@ where
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
+        let mut accepted = 0;
         while let Ok(mut incoming) = session.accept().await {
+            accepted += 1;
             let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
             tasks.spawn(async move {
                 header(&mut incoming).await;
@@ -152,6 +153,20 @@ where
             });
         }
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
+        // The end of this future drops each serve task that has not yet recorded.
+        let deadline = node.clock().now() + Span::SECOND;
+        loop {
+            let recorded = kept.lock().expect("not poisoned").len();
+            if recorded == accepted {
+                break;
+            }
+            let now = node.clock().now();
+            assert!(
+                now < deadline,
+                "{recorded} of {accepted} serve tasks recorded"
+            );
+            node.clock().sleep(Span::MICROSECOND).await;
+        }
         drop((link, test));
     };
     run_program_on(seed, wire, home, program);
@@ -289,7 +304,7 @@ pub(super) async fn header(incoming: &mut Incoming) {
 }
 
 /// What `serve` gave for one stream, once it replied to a request with its body
-/// reversed after [`HOLD`].
+/// reversed after [`HOLD`], or the error of that reply.
 async fn answer(
     serve: impl Future<Output = Result<Served, serve::Error>>,
     clock: &env::clock::Clock,
@@ -300,7 +315,7 @@ async fn answer(
             let subject = request.admitted.hello.subject.clone();
             let reply: Vec<u8> = request.body.iter().rev().copied().collect();
             clock.sleep(HOLD).await;
-            request.reply.send(&reply).await.expect("sends the reply");
+            request.reply.send(&reply).await?;
             Ok(Got::Request(subject, request.body))
         }
     }
@@ -378,18 +393,14 @@ impl Agent {
         at: Address,
     ) -> Self {
         let pool = own_pool();
-        let own = SocketAddr::new(node.addresses()[0], PORT);
-        let mut parts = Port::bind(&node.net(), own)
-            .expect("binds")
-            .split(NonZeroUsize::MIN);
         let config = transport::client::Config {
+            net: node.net(),
             clock: node.clock(),
             entropy: node.entropy(),
             tasks,
             pool: std::rc::Rc::clone(&pool),
         };
-        let client = transport::Client::new(config, parts.pop().expect("one part"))
-            .expect("a client");
+        let client = transport::Client::new(config).expect("a client");
         let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
         let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
         let mut hello = Stream {
@@ -782,6 +793,24 @@ fn stops_a_second_request_while_one_is_open() {
     assert_eq!(
         serve::Error::Pending.to_string(),
         "the program sent a request while another request waits for its reply"
+    );
+}
+
+/// A serve task that still holds its reply when the session closes ends after the
+/// home's accept loop, and its result still counts.
+#[test]
+fn keeps_the_result_of_a_reply_that_fails_once_the_session_closed() {
+    let home = session(99, true, |mut agent| async move {
+        agent.admit().await;
+        let _held = agent.request(2, b"ab").await;
+        agent.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Stream(closed_with(0))),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
     );
 }
 
