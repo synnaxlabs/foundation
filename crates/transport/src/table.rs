@@ -1493,7 +1493,7 @@ mod tests {
             drop(dialed);
         });
         testing::shard(&client, CLIENT, move |config, node| async move {
-            let (transport, _sessions) = accepting(config, &node);
+            let (transport, sessions) = accepting(config, &node);
             node.clock().sleep(Span::from_nanos(250_000)).await;
             let dialed = transport.dial(SERVER.public(), &at).await;
             let dialed = dialed.expect("a session");
@@ -1503,6 +1503,7 @@ mod tests {
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 100))
                 .await;
+            assert_eq!(sessions.borrow().len(), 1);
             assert!(dialed.quic().live(), "{:?}", dialed.closed().await);
             linger(&node).await;
         });
