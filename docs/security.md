@@ -409,7 +409,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `node_identity` | `node::identity::decode` and `encode`, by `node::fuzz::identity` (feature `sim`), on 68 bytes, or on 64 bytes with their CRC32C | Gives an identity exactly for bytes with the tag and the CRC32C, and that identity encodes to the same bytes |
 
 No target yet, because the decoder is private, not built, not reached from a file, or
-not reached from the corpus: `transport::message` (#55), the QUIC hello
+not reached from the corpus: `transport::message` (#2139), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), the scan of the mesh log files and the
 names of their directory (`mesh::log::scan` and `mesh::log::sequence`, #1746), the names
