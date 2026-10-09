@@ -536,7 +536,7 @@ fn keeps_the_highest_credit_sent_while_the_open_waits_for_a_home() {
         let writing = Rc::clone(&test);
         test.tasks.spawn(async move {
             writing.clock.sleep(SETTLE).await;
-            writing.set_home(region::TIME, super::NODE).await;
+            writing.set_home(super::TIME, super::NODE).await;
             let mut writer = writing.writer("a", &["value"]).await;
             writing.clock.sleep(SETTLE).await;
             write(&mut writer, &[writing.now()], &[10]);

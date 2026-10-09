@@ -22,14 +22,12 @@ use wire::hub::Mode;
 
 use super::serve::{HOME, PEER, Peer, own_pool, public_key, session_in, stopped};
 use super::{
-    AREA, BODY_MAX, NODE, POOL, Test, config, name, poll_once, reader, samples, write,
-    writer,
+    AREA, BODY_MAX, NODE, POOL, TIME, TIME_B, Test, config, name, poll_once, reader,
+    samples, write, writer,
 };
 
 /// The other member of the region, which is not a voter.
 pub(super) const OTHER: types::node::Key = types::node::Key::from_u128(2);
-pub(super) const TIME: channel::Key = channel::Key::from_u128(1);
-const TIME_B: channel::Key = channel::Key::from_u128(3);
 /// The first file of the mesh's log.
 const LOG: &str = "mesh/log/log-0";
 

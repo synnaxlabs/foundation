@@ -22,11 +22,11 @@ use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
-use super::region::{OTHER, TIME};
+use super::region::OTHER;
 use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
 use super::{
-    AREA, BODY_MAX, I64, POOL, Test, VALUE, definition, fill, name, samples, write,
-    write_series, write_wide,
+    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, definition, fill, name, samples,
+    write, write_series, write_wide,
 };
 
 /// The fewest bytes that a transport takes in one message.
