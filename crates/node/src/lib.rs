@@ -694,11 +694,11 @@ impl Serve {
     /// Loads the node's identity ([`identity::load`]) and opens the endpoint, then
     /// runs each task given with a hub over `home` that knows each channel of the
     /// region's founding spec, and serves the node's port, until `guard` completes,
-    /// the transport stops, or the mesh's group stops. A transport or a group that
-    /// stops goes into `failed` before any task drops. Then drops the tasks, the hub,
-    /// `home`, `guard`, each session and stream future, and the mesh, and, with a mesh,
-    /// waits for each task of the mesh to end. The transport drops with the last of the
-    /// port's future and the tasks of the mesh. Runs no task and takes no session when
+    /// the transport stops, or the mesh's group stops, by the rank of [`end`]. A
+    /// transport or a group that ends it goes into `failed` before it drops the tasks
+    /// given that still run. Before it returns, it drops the tasks, the hub, `home`,
+    /// `guard`, each session and stream future, the mesh, and the transport, and
+    /// waits for each task of the mesh to end. Runs no task and takes no session when
     /// a shard did not open, or when the identity did not load or the mesh did not
     /// open, which goes into `failed`.
     async fn run(
@@ -756,7 +756,8 @@ impl Serve {
         let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
-            let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
+            let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
+            let mut port = pin!(port);
             let mut group = pin!(group);
             let mut guard = pin!(guard);
             let stop = poll_fn(|cx| {
@@ -777,7 +778,7 @@ impl Serve {
     }
 }
 
-/// Completes with the stop of `mesh`'s group, or never when the node has no mesh.
+/// Resolves with the stop of the group of `mesh`, or never when the node has no mesh.
 fn stopped(mesh: Option<&mesh::Mesh>) -> impl Future<Output = mesh::Stopped> + use<> {
     // `next` gives the stop of the group on a watch of any index.
     let watch = mesh.map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
