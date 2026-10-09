@@ -7,6 +7,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
@@ -712,6 +713,60 @@ fn serves_the_new_type_of_a_channel_changed_while_the_open_waits_for_a_home() {
             let mut out = [0; 4];
             codec::decode(I32, 1, &got.body[..end], &mut out).expect("decodes");
             assert_eq!(i32::from_le_bytes(out), 20);
+            peer.sender.finish().expect("finishes");
+            assert_eq!(peer.recv().await, Ok(None));
+        },
+    );
+}
+
+/// An open that waits for the home of its index waits again for the home of the new
+/// index of its keys that a call gave them meanwhile, and serves it.
+#[test]
+fn serves_the_new_index_of_keys_changed_while_the_open_waits_for_a_home() {
+    let homed = Arc::new(AtomicBool::new(false));
+    let setting = Arc::clone(&homed);
+    let home = |test: Test, link: Link, incoming| async move {
+        let test = Rc::new(test);
+        let writing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            writing.clock.sleep(SETTLE).await;
+            let mut swapped = channels();
+            let sample = DataType::Sample(I64);
+            swapped.insert(name("value"), definition(2, sample.clone(), 2));
+            swapped.insert(name("time"), definition(1, sample.clone(), 2));
+            swapped.insert(name("value-c"), definition(5, sample, 2));
+            writing.hub.set_definitions(&swapped);
+            writing.set_home(region::TIME, super::NODE).await;
+            writing.clock.sleep(SETTLE).await;
+            setting.store(true, Ordering::Relaxed);
+            writing
+                .set_home(channel::Key::from_u128(2), super::NODE)
+                .await;
+            let mut writer = writing.writer("a", &["time"]).await;
+            writing.clock.sleep(SETTLE).await;
+            let now = writing.now();
+            write_series(&mut writer, &[(2, &[now]), (1, &[20])]);
+            writing.clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session_in(
+        80,
+        Class::Latest,
+        false,
+        true,
+        home,
+        |mut peer| async move {
+            peer.open(Mode::Latest, &[2, 1]).await;
+            let mut reader = Reader::new(&Open {
+                mode: Mode::Latest,
+                channels: 2,
+            });
+            let opened = peer.recv().await.expect("receives").expect("a message");
+            assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));
+            assert!(homed.load(Ordering::Relaxed), "opened before the new home");
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            assert_eq!(places(&got), [0, 1]);
             peer.sender.finish().expect("finishes");
             assert_eq!(peer.recv().await, Ok(None));
         },

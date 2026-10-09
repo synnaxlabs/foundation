@@ -292,6 +292,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a node assigns at most 2^32 slots")]
+    fn panics_at_the_assign_after_2_32_slots() {
+        let mut slots = Slots::new();
+        slots.given = 1 << 32;
+        slots.assign(Key::from_u128(7));
+    }
+
+    #[test]
     #[should_panic(expected = "has slot Some(Slot(0))")]
     fn panics_at_the_restore_of_a_key_with_a_slot() {
         let mut slots = Slots::new();

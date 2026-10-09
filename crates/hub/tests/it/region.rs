@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use env::files::Operation;
 use env::tasks::Tasks;
+use hub::reader::Ended;
+use hub::writer::Failure;
 use hub::{Link, serve};
 use mesh::Member;
 use mesh::card::addresses::Addresses;
@@ -26,7 +28,7 @@ use super::serve::{HOME, PEER, Peer, own_pool, public_key, session_in, stopped};
 use super::{
     AREA, BODY_MAX, I64, NODE, POOL, Test, applied, channels, config, definition,
     entry, keys, name, poll_once, reader, samples, without, write, write_series,
-    writer,
+    writer, written,
 };
 
 /// The other member of the region, which is not a voter.
@@ -196,7 +198,8 @@ fn a_session_opens_on_the_new_index_of_a_channel_moved_while_it_waits_for_a_home
 }
 
 /// A session that waits for the home of its index opens on the sample type that a
-/// call gave its channel meanwhile.
+/// call gave its channel meanwhile, on the slot of the new definition: a session that
+/// opens after the wait sees its frames.
 #[test]
 fn a_session_opens_on_the_new_type_of_a_channel_changed_while_it_waits_for_a_home() {
     run(9, |test| async move {
@@ -211,11 +214,44 @@ fn a_session_opens_on_the_new_type_of_a_channel_changed_while_it_waits_for_a_hom
         test.set_home(TIME, NODE).await;
         let mut writer = opening.await.expect("opens");
         let mut reader = reading.await.expect("opens");
+        let mut after = test.reader(&["value"], reader::Mode::Latest).await;
         assert_eq!(write_i32(&mut writer, test.now(), 20), [applied(0)]);
+        for received in [after.next().await, reader.next().await] {
+            let received = received.expect("a frame");
+            assert_eq!(keys(&received), [1, 2]);
+            let at = entry(received.set, 2);
+            assert_eq!(received.set.entries()[at].data_type, I32);
+        }
+    });
+}
+
+/// A session that waits for the home of its index opens on the key that a call gave
+/// its channel meanwhile, and a later removal of that key ends it.
+#[test]
+fn a_session_opens_on_the_new_key_of_a_channel_changed_while_it_waits_for_a_home() {
+    run(10, |test| async move {
+        let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
+        let names = [name("value")];
+        let mut reading = std::pin::pin!(test.hub.reader(&names, reader::Mode::Latest));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        assert!(poll_once(reading.as_mut()).is_pending());
+        let mut changed = channels();
+        changed.insert(name("value"), definition(7, DataType::Sample(I64), 1));
+        test.hub.set_definitions(&changed);
+        test.set_home(TIME, NODE).await;
+        let mut writer = opening.await.expect("opens");
+        let mut reader = reading.await.expect("opens");
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (7, &[20])]);
         let received = reader.next().await.expect("a frame");
-        assert_eq!(keys(&received), [1, 2]);
-        let at = entry(received.set, 2);
-        assert_eq!(received.set.entries()[at].data_type, I32);
+        assert_eq!(keys(&received), [1, 7]);
+        assert_eq!(samples(&received, 7), [20]);
+        test.hub.set_definitions(&without(&["value"]));
+        let removed = channel::Key::from_u128(7);
+        let failure = written(&mut writer, &[(1, &[now + 1]), (7, &[30])]);
+        assert_eq!(failure, Err(Failure::Removed(removed)));
+        let ended = reader.next().await.expect_err("the reader ended");
+        assert_eq!(ended, Ended::Removed(removed));
     });
 }
 
