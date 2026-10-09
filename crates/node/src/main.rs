@@ -246,7 +246,10 @@ fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Fa
         }
         node::Error::Buffer {
             core,
-            error: error @ buffer::Error::Pool(block::Error::TooLarge { .. }),
+            error:
+                error @ buffer::Error::Pool(
+                    block::Error::TooLarge { .. } | block::Error::Exhausted { .. },
+                ),
         } => {
             let pool = budget.pool;
             let free = (
@@ -472,6 +475,32 @@ mod tests {
                 fix: "Remove it, and the next start computes the budgets again from \
                       the free memory and disk"
                     .to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_full_pool_is_a_pool_budget_that_gives_too_little() {
+        let error = node::Error::Buffer {
+            core: 3,
+            error: buffer::Error::Pool(block::Error::Exhausted {
+                requested: 64,
+                available: 0,
+            }),
+        };
+        let budget = Budget {
+            pool: Size::MEBIBYTE,
+            disk: DISK_MOST,
+        };
+        assert_eq!(
+            failure(&start(), &error, budget, false),
+            Failure {
+                code: MEMORY,
+                message: "the pool budget 1MiB, a quarter of the available memory, \
+                          gives shard-3 too little: the pool has no block: pool is \
+                          full: asked for 64 bytes, 0 bytes free"
+                    .to_owned(),
+                fix: "Free memory on this host".to_owned(),
             }
         );
     }
