@@ -152,6 +152,7 @@ struct Known {
 }
 
 /// Where the pool budget and the disk budget come from.
+#[derive(Debug, PartialEq, Eq)]
 struct Origins {
     pool: Origin,
     disk: Origin,
@@ -202,18 +203,10 @@ fn known(start: &Start, threads: &Threads) -> Result<Known, Failure> {
                 };
                 return Ok(Known { name, budget, from });
             }
-            let memory = os::memory::available().map_err(failed)?.bytes();
-            let (pool, pool_from) = quarter(memory, POOL_MOST);
+            let memory = os::memory::available().map_err(failed)?;
             let free = files.free().await.map_err(failed)?;
-            let (disk, disk_from) = quarter(free, DISK_MOST);
-            Ok(Known {
-                name,
-                budget: Budget { pool, disk },
-                from: Origins {
-                    pool: pool_from,
-                    disk: disk_from,
-                },
-            })
+            let (budget, from) = first(memory, free);
+            Ok(Known { name, budget, from })
         };
         send.send(known.await)
             .expect("invariant: main waits for what the thread reads");
@@ -223,6 +216,18 @@ fn known(start: &Start, threads: &Threads) -> Result<Known, Failure> {
     receive
         .try_recv()
         .expect("invariant: the thread sent what it read")
+}
+
+/// The budgets of a first start on a host with `memory` available and `free` bytes
+/// free on the disk of the data directory, and where each comes from.
+fn first(memory: Size, free: u64) -> (Budget, Origins) {
+    let (pool, pool_from) = quarter(memory.bytes(), POOL_MOST);
+    let (disk, disk_from) = quarter(free, DISK_MOST);
+    let from = Origins {
+        pool: pool_from,
+        disk: disk_from,
+    };
+    (Budget { pool, disk }, from)
 }
 
 /// A quarter of `free` bytes up to `most`, and whether the quarter or the most won.
@@ -272,8 +277,8 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
             let (message, fix) = match pool {
                 block::Error::Refused { .. } => (
                     format!(
-                        "the system refused memory for shard-{core} that its part of the \
-                         pool budget {budget} has room for: {error}"
+                        "the system refused memory for shard-{core} that its part of \
+                         the pool budget {budget} has room for: {error}"
                     ),
                     "Free memory on this host".to_owned(),
                 ),
@@ -473,6 +478,19 @@ mod tests {
         );
         assert_eq!(quarter(64 << 30, DISK_MOST), (DISK_MOST, Origin::Most));
         assert_eq!(DISK_MOST, Size::from_bytes(8_589_934_592));
+    }
+
+    #[test]
+    fn a_first_start_sizes_the_pool_from_memory_and_the_disk_budget_from_disk() {
+        let budget = Budget {
+            pool: Size::from_bytes(512 << 20),
+            disk: Size::from_bytes(4 << 30),
+        };
+        let from = Origins {
+            pool: Origin::Quarter,
+            disk: Origin::Quarter,
+        };
+        assert_eq!(first(Size::from_bytes(2 << 30), 16 << 30), (budget, from));
     }
 
     #[test]
