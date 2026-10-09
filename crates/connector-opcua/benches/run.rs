@@ -42,7 +42,8 @@ fn run(bencher: Bencher<'_, '_>, timers: usize) {
         .bench_local_values(|()| clients.iter_mut().for_each(Client::run));
 }
 
-#[divan::bench]
+/// 1000 samples: with 100, the median moves over 10% against itself.
+#[divan::bench(sample_count = 1000)]
 fn new(bencher: Bencher<'_, '_>) {
     let (_sim, clock) = sim();
     bencher.bench_local(|| drop(Client::new(env::clock::Clock::clone(&clock), 100)));
