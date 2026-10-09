@@ -373,7 +373,7 @@ mod admit {
     #[test]
     fn refuses_a_hello_for_the_first_check_that_fails() {
         let other = node::Key::from_u128(7);
-        let wide = Some(at(EXPIRES));
+        let late = Some(at(EXPIRES));
         let hello = Hello {
             via: other,
             ..create_hello()
@@ -394,18 +394,18 @@ mod admit {
             Error::Unsynced
         );
         assert_eq!(
-            refuse(&rules(&[]), wide, &hello, &unsigned),
+            refuse(&rules(&[]), late, &hello, &unsigned),
             Error::Unknown {
                 subject: subject.clone()
             }
         );
         assert_eq!(
-            refuse(&unlisted, wide, &hello, &unsigned),
+            refuse(&unlisted, late, &hello, &unsigned),
             Error::Unlisted { subject, key }
         );
-        assert_eq!(refuse(&listed(), wide, &hello, &unsigned), Error::Signature);
+        assert_eq!(refuse(&listed(), late, &hello, &unsigned), Error::Signature);
         assert_eq!(
-            refuse(&listed(), wide, &hello, &signature),
+            refuse(&listed(), late, &hello, &signature),
             Error::Via {
                 via: other,
                 peer: PEER
@@ -414,7 +414,7 @@ mod admit {
         let hello = create_hello();
         let signature = sign(&pair(TEST_1), &super::hello(&hello));
         assert_eq!(
-            refuse(&listed(), wide, &hello, &signature),
+            refuse(&listed(), late, &hello, &signature),
             Error::Expired {
                 expires: EXPIRES,
                 now: EXPIRES
