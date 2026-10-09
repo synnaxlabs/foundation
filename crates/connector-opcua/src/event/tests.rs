@@ -346,11 +346,14 @@ fn a_timer_changes_its_interval_and_goes() {
     assert_eq!(f.ran(), []);
 }
 
-/// Intervals whose due time leaves the range of the clock's ticks, or is not a number.
-const OUT_OF_RANGE: [(f64, ffi::Policy); 4] = [
+/// Intervals whose due time or ticks leave the range of the clock's ticks, or that are
+/// not a number. The ticks of the fourth are below `i64::MIN`, though its due time from
+/// a clock past 1 s is not.
+const OUT_OF_RANGE: [(f64, ffi::Policy); 5] = [
     (922_337_203_685_477.0, ffi::CURRENT_TIME),
     (f64::INFINITY, ffi::BASE_TIME),
     (f64::NAN, ffi::ONCE),
+    (-922_337_203_690_000.0, ffi::ONCE),
     (f64::NEG_INFINITY, ffi::ONCE),
 ];
 
