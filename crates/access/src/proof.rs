@@ -222,7 +222,8 @@ pub enum Error {
     /// The hello is no longer live at `expires`: its expiry, or [`Admitted::ends`] of
     /// an admitted hello. `now` is at or after it.
     Expired {
-        /// When the hello stops being live.
+        /// When the hello stops being live at this node: the earlier of its `expires`
+        /// and [`CAP`] past the latest mesh time at its admission ([`Admitted::ends`]).
         expires: Stamp,
         /// The latest the mesh time can be.
         now: Stamp,
@@ -273,7 +274,9 @@ impl Error {
             }
             Self::Signature => "Sign the exact bytes with the key of the hello",
             Self::Via { .. } => "Name the node that the program connects to as `via`",
-            Self::Expired { .. } => "Renew the hello before it ends",
+            Self::Expired { .. } => {
+                "Send a hello with a later expiry, and renew it before it ends"
+            }
             Self::Changed { .. } => {
                 "Renew with the subject, key, `via`, and connection of the hello it \
                  renews"

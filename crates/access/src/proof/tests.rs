@@ -856,7 +856,7 @@ fn names_each_refusal_and_its_fix() {
             },
             "the hello ended at 1970-01-01T00:00:02.000000000Z, at or before the \
              mesh time 1970-01-01T00:00:03.000000000Z",
-            "Renew the hello before it ends",
+            "Send a hello with a later expiry, and renew it before it ends",
         ),
     ];
     for (error, message, fix) in cases {
