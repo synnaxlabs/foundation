@@ -246,6 +246,7 @@ impl Drop for Held {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;

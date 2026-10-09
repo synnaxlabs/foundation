@@ -536,6 +536,7 @@ impl Wake for Woke {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use std::sync::atomic::AtomicUsize;
 

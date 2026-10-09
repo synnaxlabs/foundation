@@ -386,6 +386,7 @@ impl<K: Kind> Erased for K {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use document::value::{self, Value};
     use document::{Attribute, Map, Position, Source};
