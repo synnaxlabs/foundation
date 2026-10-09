@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
 use std::ffi::{CString, c_char, c_void};
 use std::future::poll_fn;
@@ -102,6 +102,8 @@ struct Side {
     clock: Clock,
     manager: Manager,
     calls: Box<RefCell<Vec<Call>>>,
+    /// The connection callback of each open: [`record`] unless a test sets another.
+    callback: ffi::ConnectionCallback,
 }
 
 impl Side {
@@ -117,6 +119,7 @@ impl Side {
             clock,
             manager,
             calls: Box::new(RefCell::new(Vec::new())),
+            callback: record,
         }
     }
 
@@ -138,7 +141,7 @@ impl Side {
         self.calls.borrow().clone()
     }
 
-    /// Opens a connection with `params`, with the callback that records each call.
+    /// Opens a connection with `params` and the callback of the side.
     fn open(&self, params: &[(&str, Value<'_>)]) -> Status {
         let mut params = map(params);
         let application = ptr::from_ref(&*self.calls).cast_mut().cast();
@@ -149,7 +152,7 @@ impl Side {
                 &raw const params,
                 application,
                 ptr::null_mut(),
-                record,
+                self.callback,
             )
         });
         // SAFETY: `map` made it.
@@ -214,10 +217,13 @@ impl Side {
         assert_eq!(status, Status::GOOD);
     }
 
-    /// Drives the manager and runs the loop until `span` passes.
-    async fn drive(&self, span: Span) {
+    /// Drives the manager and runs the loop until `span` passes, and gives the count
+    /// of runs.
+    async fn drive(&self, span: Span) -> usize {
+        let runs = Cell::new(0);
         let mut end = self.clock.sleep(span);
         let mut drive = pin!(self.manager.drive(|| {
+            runs.set(runs.get() + 1);
             self.run();
             None::<Infallible>
         }));
@@ -228,6 +234,7 @@ impl Side {
             Pin::new(&mut end).poll(cx)
         })
         .await;
+        runs.get()
     }
 }
 
@@ -275,6 +282,25 @@ unsafe extern "C" fn record(
         unsafe { std::slice::from_raw_parts(message.data, message.length) }.to_vec()
     };
     calls.borrow_mut().push((id, state, bytes));
+}
+
+/// Records a call as [`record`] does, and answers the `ESTABLISHED` that opens a
+/// connection with a send on it.
+unsafe extern "C" fn answer(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+) {
+    let opened = state == ffi::ESTABLISHED && message.length == 0;
+    // SAFETY: the manager gives the arguments that it gives `record`.
+    unsafe { record(cm, id, application, context, state, params, message) };
+    if opened {
+        assert_eq!(send_on(cm, id, b"hi"), Status::GOOD);
+    }
 }
 
 /// What the peer read: each read with its time, and when and how the stream ended.
@@ -802,6 +828,42 @@ fn a_close_from_another_task_ends_the_stream_with_no_other_event() {
         .expect("the run ends");
     let reads = reads.lock().expect("no panic under the lock");
     assert_eq!(reads.ended, Some(at + DELAY));
+}
+
+/// Opens two connections to the peer with `callback`, drives them for 1 s, and gives
+/// the count of runs of the drive.
+fn runs(callback: ffi::ConnectionCallback) -> usize {
+    let mut network = Network::new();
+    drop(network.serve(None));
+    let remote = network.remote();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side {
+                callback,
+                ..Side::new(&node)
+            };
+            assert_eq!(side.connect(remote), Status::GOOD);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            let runs = side.drive(Span::SECOND).await;
+            let states = [
+                ffi::OPENING,
+                ffi::OPENING,
+                ffi::ESTABLISHED,
+                ffi::ESTABLISHED,
+            ];
+            assert_eq!(side.states(), states);
+            runs
+        })
+        .expect("the run ends")
+}
+
+/// A send from the callback of a connection goes out in the pass that calls it, so
+/// it adds no pass. Connection 2 sends while the pass drives it with connection 1
+/// behind it.
+#[test]
+fn a_send_from_the_callback_of_its_connection_adds_no_pass() {
+    assert_eq!(runs(answer), runs(record));
 }
 
 unsafe extern "C" fn send_late(_: *mut c_void, data: *mut c_void) {
