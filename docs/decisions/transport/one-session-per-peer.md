@@ -40,3 +40,7 @@
   start number in the hello (a wire change, and the ping gives the same result within
   one round trip). Decided by `laptop.architect-2` at 2026-10-07T12:00:38Z:
   https://github.com/synnaxlabs/foundation/issues/1363#issuecomment-6037453233.
+  Rule 1 changed by `laptop.architect-2`, 2026-10-09T00:28:02Z,
+  https://github.com/synnaxlabs/foundation/pull/2042#issuecomment-6071747436. The
+  last sentence of rule 4 changed by `laptop.architect-2`, 2026-10-09T00:38:32Z,
+  https://github.com/synnaxlabs/foundation/pull/2042#issuecomment-6071862349.
