@@ -7579,6 +7579,21 @@ mod tests {
         /// credit after the pause and the bytes `Complete` then sends ahead of one
         /// `Latest` sample.
         fn ahead_after_a_pause(shard: &Shard, alone: usize) -> (isize, usize) {
+            let (paused, ahead, _) =
+                ahead_of_a_reader(shard, alone, MESSAGE_MAX / 4, 1);
+            (paused, ahead)
+        }
+
+        /// As [`ahead_after_a_pause`], with messages of `size` bytes, and a server
+        /// that reads each `lag` [`STEP`]s after the pause. Also returns the most
+        /// bytes the server read at once after the pause: the largest step of credit
+        /// that its reads give.
+        fn ahead_of_a_reader(
+            shard: &Shard,
+            alone: usize,
+            size: usize,
+            lag: usize,
+        ) -> (isize, usize, usize) {
             let mut pair = narrow(shard);
             let (mut receivers, mut read) = (Vec::new(), [0; 4]);
             let big = shard.block(&vec![1; MESSAGE_MAX]);
@@ -7602,7 +7617,7 @@ mod tests {
                 let senders = [&latest, &catch_up, &complete];
                 flush(&mut pair, &mut receivers, &mut read, &senders);
             }
-            let message = shard.block(&vec![1; MESSAGE_MAX / 4]);
+            let message = shard.block(&vec![1; size]);
             let start = read[Class::Latest.rank()];
             for _ in 0..alone.div_ceil(message.len()) {
                 let mut pending = Some(message.clone());
@@ -7623,10 +7638,15 @@ mod tests {
             let mut pending = Some(sample.clone());
             let mut ahead = refill(&mut pair, &mut complete, &message);
             ahead -= held(&mut pair, complete.key());
-            loop {
+            let mut step = 0;
+            for steps in 1.. {
                 send(&mut pair, &mut latest, &mut pending);
                 pair.run(STEP);
-                take(&mut pair, &mut receivers, &mut read);
+                if steps % lag == 0 {
+                    let before: usize = read.iter().sum();
+                    take(&mut pair, &mut receivers, &mut read);
+                    step = step.max(read.iter().sum::<usize>() - before);
+                }
                 if pending.is_none() && held(&mut pair, latest.key()) < sample.len() {
                     break;
                 }
@@ -7634,7 +7654,7 @@ mod tests {
                 let taken = refill(&mut pair, &mut complete, &message);
                 ahead += before + taken - held(&mut pair, complete.key());
             }
-            (paused, ahead)
+            (paused, ahead, step)
         }
 
         #[test]
@@ -7651,10 +7671,26 @@ mod tests {
         }
 
         #[test]
-        fn complete_after_latest_sends_in_a_pause_goes_at_most_one_window_ahead() {
+        fn complete_after_a_pause_goes_ahead_by_its_credit_and_one_step_of_credit() {
             testing::run(1, |shard| {
-                let (paused, ahead) = ahead_after_a_pause(shard, 2 * NARROW);
-                assert!(ahead <= NARROW, "{ahead} of {NARROW}; owed {paused}");
+                for (size, lag) in [(1000, 1), (1000, 50), (MESSAGE_MAX, 50)] {
+                    let (paused, ahead, step) =
+                        ahead_of_a_reader(shard, 2 * NARROW, size, lag);
+                    let credit = usize::try_from(paused).expect("`Complete` is owed");
+                    let bound = credit + step + size;
+                    assert!(ahead <= bound, "{ahead} of {bound}; {size} B, lag {lag}");
+                }
+            });
+        }
+
+        #[test]
+        fn complete_after_latest_sends_in_a_pause_goes_about_one_window_ahead() {
+            testing::run(1, |shard| {
+                let bound = NARROW + 2 * (MESSAGE_MAX / 4);
+                for windows in 1..=4 {
+                    let (paused, ahead) = ahead_after_a_pause(shard, windows * NARROW);
+                    assert!(ahead <= bound, "{ahead} of {bound}; owed {paused}");
+                }
             });
         }
 
