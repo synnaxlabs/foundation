@@ -216,6 +216,41 @@ jobs:
       - name: Miri
         run: cargo xtask miri
 
+  fuzz:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.rust != 'false'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned nightly
+        run: |
+          rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2,cargo-deny@0.20.2
+      # `fuzz/` is a workspace of its own, which the workspace gates do not see.
+      - name: Format
+        run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+      - name: Dependencies
+        run: |
+          cargo deny --manifest-path fuzz/Cargo.toml \
+            check advisories bans licenses sources
+      - name: Fuzz
+        run: cargo xtask fuzz 60
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   mutants:
     needs: changes
     if: >-

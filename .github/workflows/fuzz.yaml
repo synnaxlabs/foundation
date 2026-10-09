@@ -1,0 +1,31 @@
+name: Fuzz
+
+# Each PR runs each target for 60 seconds (`ci.yaml`). This run is longer, on the ARM
+# runner, which is idle at night.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add cargo to the path
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install the pinned nightly
+        run: |
+          rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: Fuzz
+        run: cargo xtask fuzz 600
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
