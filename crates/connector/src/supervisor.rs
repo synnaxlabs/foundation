@@ -1921,9 +1921,10 @@ mod tests {
         assert_eq!(states(&statuses), [(0, 0, 0), (3, 0, 0), (2, 0, 0)]);
     }
 
-    /// Runs a `Script` connector with no step on a node whose mesh time starts `delay`
-    /// after the call, and cancels it at `cancel`. Checks that the call returns `Ok`, and
-    /// gives when it returned and when each run started, and the status frames.
+    /// Runs a `Script` connector with no step on a node whose mesh time starts
+    /// `delay` after the call, and cancels it at `cancel`. Checks that the call returns
+    /// `Ok`, and gives when it returned and when each run started, and the status
+    /// frames.
     fn unsynced(delay: Span, cancel: Span) -> (Span, Vec<Span>, Vec<Written>) {
         run_on(move |node, tasks| async move {
             let hub =

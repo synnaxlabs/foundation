@@ -1,5 +1,5 @@
-//! The cost of one poll of a kind's run under `Supervisor::run`, on a sim node. Run with
-//! `cargo bench -p connector --bench run`.
+//! The cost of one poll of a kind's run under `Supervisor::run`, on a sim node. Run
+//! with `cargo bench -p connector --bench run`.
 //!
 //! The kind's run wakes itself and is pending once between its steps, so each step is
 //! one poll of the supervisor's task. Each round times `STEPS` steps:

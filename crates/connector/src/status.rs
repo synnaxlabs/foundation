@@ -756,8 +756,9 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "invariant: a status frame fits the largest block of the pool: block \
-                    of 8000096 bytes is above the largest block of 7340032 bytes"
+        expected = "invariant: a status frame fits the largest block of the pool: \
+                    block of 8000096 bytes is above the largest block of 7340032 \
+                    bytes"
     )]
     fn panics_at_the_start_of_a_status_larger_than_the_largest_block() {
         // 16 bytes a count.
