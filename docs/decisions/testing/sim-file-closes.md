@@ -15,8 +15,11 @@
   normal form, 05:01 UTC:
   https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6074620722; the leaked
   and renamed cases, 05:12 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6074738970; the path
-  that a rename of a descriptor sets and that a call of it names, 06:16 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6075502445). Also
+  https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6074738970; the order
+  in which the opens of the leaked ones started, and the path that a rename of a
+  descriptor sets and that a call of it names, 06:16 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6075502445; the drops
+  of a crash before the leaked closes, in the order of the drops, 06:24 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6075602074). Also
   lost, in the plan: a held close, since a drop closes at once and cannot wait
   (https://github.com/synnaxlabs/foundation/issues/1835#issuecomment-6074488621).
