@@ -194,15 +194,18 @@ impl Table {
         }
     }
 
-    /// Takes `session`, which a peer dialed, and gives it back when it becomes the
-    /// open session to its node and goes to `accept`. The lower key's dial wins:
-    /// the lower node holds a higher peer's session while its own dial runs, or
-    /// while it pings its own open session. Else the newer session wins. Each loser
-    /// closes with `Code(0)`. A client's session has no node.
+    /// Takes `session`, which a peer dialed, and gives it back when it goes to
+    /// `accept`. The lower key's dial wins: the lower node holds a higher peer's
+    /// session while its own dial runs, or while it pings its own open session. Else
+    /// the newer session wins. Each loser closes with `Code(0)`. A client's session
+    /// has no node, and one that ended changes nothing.
     fn arrive(&mut self, session: Session) -> Option<Session> {
         let Peer::Node(node) = session.peer() else {
             return Some(session);
         };
+        if !session.live() {
+            return Some(session);
+        }
         let lower = self.key < node;
         let entry = self.entry(node);
         let open = entry.session.open();
@@ -965,7 +968,7 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The client closes its session while the server holds it, so the server's failed
+    // The client closes its session after the server holds it, so the server's failed
     // dial has no session to give.
     #[test]
     fn a_failed_dial_of_the_lower_key_gives_its_error_when_the_held_session_ended() {
@@ -981,7 +984,11 @@ mod tests {
         });
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let dialed = transport.dial(SERVER.public(), &at).await;
-            dialed.expect("a session").close(Code(1));
+            let dialed = dialed.expect("a session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            dialed.close(Code(1));
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
@@ -1150,5 +1157,71 @@ mod tests {
     fn a_restarted_peer_of_the_higher_key_wins_once_the_first_session_resets() {
         let reason = "reset by peer".to_owned();
         restart(SERVER, CLIENT, Error::Broken { reason });
+    }
+
+    // The server dials the client and closes that session at once. The client then
+    // dials the server while its accept takes the ended session from the carrier.
+    #[test]
+    fn an_ended_session_from_the_lower_key_does_not_end_a_dial() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let first = transport.dial(CLIENT.public(), &back).await;
+            first.expect("a session").close(Code(7));
+            drop(transport.accept().await.expect("the dialed session"));
+            let theirs = transport.accept().await.expect("the client's session");
+            theirs.close(Code(6));
+            linger(&node).await;
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            let (dialed, _accepted) =
+                testing::join(transport.dial(SERVER.public(), &at), transport.accept())
+                    .await;
+            let dialed = dialed.expect("a session");
+            assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(6) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // As above, but the client's dial completes first, and both nodes keep its
+    // session open. Then the client's accept takes the server's ended session.
+    #[test]
+    fn an_ended_session_from_the_lower_key_does_not_close_the_open_one() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let first = transport.dial(CLIENT.public(), &back).await;
+            first.expect("a session").close(Code(7));
+            drop(transport.accept().await.expect("the dialed session"));
+            let theirs = transport.accept().await.expect("the client's session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 50))
+                .await;
+            let open = transport.dial(CLIENT.public(), &[]).await;
+            assert!(open.expect("the open session").downgrade().is(&theirs));
+            theirs.close(Code(6));
+            linger(&node).await;
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            let dialed = transport.dial(SERVER.public(), &at).await;
+            let dialed = dialed.expect("a session");
+            drop(transport.accept().await.expect("the dialed session"));
+            drop(
+                transport
+                    .accept()
+                    .await
+                    .expect("the server's ended session"),
+            );
+            assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(6) });
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 }
