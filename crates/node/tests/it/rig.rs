@@ -364,7 +364,9 @@ fn a_test_that_panics_kills_its_command() {
     );
 }
 
-/// Gives a failed kill to [`killed`] when it drops.
+/// Gives a failed kill to [`killed`] when it drops, as `Drop for Process` does. No
+/// test can make the kill of a real command fail: that needs a command that another
+/// process reaps or that changes its user.
 struct Failed<'a>(&'a mut Vec<u8>);
 
 impl Drop for Failed<'_> {
