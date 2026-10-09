@@ -121,11 +121,11 @@ impl Interner {
     /// The key set of `groups`: each index, with type `Stamp`, and each data channel.
     /// Each index gets its slot from [`Slots::index`], and each data channel from
     /// [`Slots::data`], in the order of `groups`, each index before its data. Groups
-    /// are numbered in the order of their index slots. Equal groups, in any order, give the same key
-    /// set. A new key set copies the snapshot's list, so it takes time linear in the
-    /// number of key sets. Give it only groups that the node builds from the spec,
-    /// never a subset of channels that a party outside the node picks: the table of key
-    /// sets has no limit.
+    /// are numbered in the order of their index slots. Equal groups, in any order, give
+    /// the same key set. A new key set copies the snapshot's list, so it takes time
+    /// linear in the number of key sets. Give it only groups that the node builds from
+    /// the spec, never a subset of channels that a party outside the node picks: the
+    /// table of key sets has no limit.
     ///
     /// # Panics
     ///
