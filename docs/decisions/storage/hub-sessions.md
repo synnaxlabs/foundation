@@ -162,10 +162,10 @@
   (https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074115276).
   Accepted until #2031 by `laptop.architect` (2026-10-09T04:13:57Z:
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074122773).
-  Trigger: #2031 runs the three cases on the `remote()` rig on a quiet host, and a case
-  more than 5% over its "before" number of 6074115276 (11129 ns when the caller lags,
-  1012 ns with 1 sample per series when the caller lags, 8965 ns when the caller
-  waits) needs a new P1 judgment of `laptop.architect`.
+  Trigger: #2031 runs the three cases on the `remote()` rig for 1f2796b4 and its own
+  head on one quiet host in one run, and a case more than 5% over 1f2796b4 needs a new
+  P1 judgment of `laptop.architect` (2026-10-09T05:15:21Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074769168).
   Amended (2026-10-08T22:24:43Z, #2020): `Hub::set_definitions` replaces `Hub::define`.
   It makes the channels of a spec's definitions the channels that sessions may name. A
   known channel whose key, name, and definition stay keeps its sessions. Each other
