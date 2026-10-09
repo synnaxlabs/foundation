@@ -267,7 +267,29 @@
   https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).
   Amended (2026-10-08T17:39:11Z, #1940): `tcp::Options::unsent_bytes_max` is a
   `NonZeroUsize`. A bound of 0 has no meaning in its doc, and the drivers did not agree
-  on it: Linux and the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per
-  call, and `sim` never wrote. No caller gives 0.
-  Decided by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/issues/1940).
+  on it: Linux read it as the host sysctl `net.ipv4.tcp_notsent_lowat`, by default no
+  bound, the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per call, and
+  `sim` never wrote. No caller gives 0. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1940). The Linux text:
+  `laptop.director`, 2026-10-09T01:51:29Z
+  (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
+  Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on exec.
+  On Linux, the call that opens the socket sets that and non-blocking, so a child that
+  another thread spawns never holds it. macOS has no such flag, and Tokio sets it in a
+  second call on an accepted stream too, so on macOS that child may hold the socket and
+  its port, as the doc of `os::net()` says. A Foundation node spawns no process, so only
+  tests see it, and CI runs on Linux. Lost: `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn
+  side, which std does not set, and which needs a spawn seam and `unsafe` for tests
+  only. Decided by `laptop.architect-2` (2026-10-08T21:01:28Z:
+  https://github.com/synnaxlabs/foundation/issues/2000). On macOS, a child that another
+  thread spawns during a lookup may also hold the sockets that the C library opens for
+  it, and a child spawned after a lookup may hold a socket that the C library keeps
+  open. `os` keeps this gap for the same reason. It cannot set the flags of the sockets
+  of a lookup, because the C library opens them, and it cannot open them another way
+  without its own resolver. Lost: a resolver in `os`, which changes what each lookup
+  gives on macOS. Trigger: the first change that makes a node spawn a process closes
+  each macOS gap of this amendment on the spawn side. Decided by `laptop.architect`
+  (2026-10-09T02:37:32Z:
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
+  that the C library keeps open, 2026-10-09T02:42:31Z:
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413).
