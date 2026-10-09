@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -44,6 +44,10 @@ fn sends(count: usize, length: usize) -> Vec<Vec<u8>> {
 const BOOLEAN: u32 = 1;
 const UINT16: u32 = 5;
 const STRING: u32 = 12;
+
+/// The lifecycle states of a server.
+const STOPPED: c_int = 0;
+const STOPPING: c_int = 2;
 
 /// A value of the parameters of `openConnection`.
 #[derive(Clone, Copy)]
@@ -2075,7 +2079,7 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             let url = c"opc.tcp://plc.example:4840";
-            // SAFETY: the loop outlives the server, which the test leaks.
+            // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
                 ffi::test::shim_server_new(side.events().raw(), PORT, url.as_ptr())
             };
@@ -2093,6 +2097,9 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
             assert_eq!(status, Status::GOOD);
             side.drive(Span::SECOND).await;
+            // SAFETY: the server is stopped.
+            let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+            assert_eq!(status, Status::GOOD);
         })
         .expect("the run ends");
 }
@@ -2410,13 +2417,17 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
             assert_eq!(status, Status::GOOD);
+            // SAFETY: the server lives.
+            let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+            assert_eq!(state, STOPPING);
             side.drive(Span::SECOND).await;
             assert_eq!(side.connections(), 0);
-            // The copy leaves a server on an external loop in `STOPPING`, so the
-            // delete fails and the server leaks.
             // SAFETY: the server lives.
+            let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+            assert_eq!(state, STOPPED);
+            // SAFETY: the server is stopped.
             let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
-            assert_eq!(status, Status::BAD_INTERNAL_ERROR);
+            assert_eq!(status, Status::GOOD);
             side.calls()
         })
         .expect("the run ends");

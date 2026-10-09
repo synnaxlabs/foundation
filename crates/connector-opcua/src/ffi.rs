@@ -522,6 +522,7 @@ pub(crate) mod test {
         pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> c_int;
         pub(crate) fn shim_server_discovery_url(
             server: *mut Server,
             index: usize,
