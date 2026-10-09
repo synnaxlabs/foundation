@@ -4222,7 +4222,50 @@ mod port {
         fn an_applied_channel_has_a_key_at_mesh_time() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
-            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            let millis = i64::try_from(applied_key(&mut sim, &host).as_u128() >> 80);
+            let start = sim::node::Config::default().wall.nanos() / 1_000_000;
+            let millis = millis.unwrap();
+            assert!(
+                (start..start + 1_000).contains(&millis),
+                "{millis} ms is not in the first second of {start} ms"
+            );
+        }
+
+        /// A channel that an apply makes while mesh time is before 1970 has the time 0.
+        #[test]
+        fn an_applied_channel_before_1970_has_a_key_at_the_epoch() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = sim.node(sim::node::Config {
+                cores: NonZeroUsize::new(2).unwrap(),
+                wall: types::time::Stamp::EPOCH - Span::HOUR,
+                ..sim::node::Config::default()
+            });
+            let identity = Identity {
+                key: OWN,
+                private_key: KEY,
+            };
+            write_key(&mut sim, &host, identity::encode(&identity).to_vec());
+            assert_eq!(applied_key(&mut sim, &host).as_u128() >> 80, 0);
+        }
+
+        /// A channel key made before the clock has mesh time has the time 0.
+        #[test]
+        fn a_channel_key_before_mesh_time_has_the_time_0() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 1);
+            let key = sim
+                .run_on(&host, |host, _| async move {
+                    let (_driver, clock) = ::clock::Clock::new(host.clock());
+                    crate::channel_key(&clock, &host.entropy())
+                })
+                .expect("the run ends");
+            assert_eq!(key.as_u128() >> 80, 0);
+        }
+
+        /// The key of the index `plant.time` that an apply makes on a node of `host`,
+        /// which [`keyed`] made, alone in its region.
+        fn applied_key(sim: &mut sim::Sim, host: &sim::node::Node) -> channel::Key {
+            let node = start(host, region(&[member(OWN, &KEY, host)]));
             let made = Arc::new(Mutex::new(None));
             let out = Arc::clone(&made);
             let text = format!(
@@ -4249,13 +4292,7 @@ mod port {
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
-            let key = made.lock().unwrap().take().expect("a channel");
-            let millis = i64::try_from(key.as_u128() >> 80).unwrap();
-            let start = sim::node::Config::default().wall.nanos() / 1_000_000;
-            assert!(
-                (start..start + 1_000).contains(&millis),
-                "{millis} ms is not in the first second of {start} ms"
-            );
+            made.lock().unwrap().take().expect("a channel")
         }
 
         /// A node with a region whose port does not bind drops a task of `operate`
@@ -4280,6 +4317,32 @@ mod port {
             };
             assert_eq!(node.join(), Err(error));
             drop(held);
+        }
+
+        /// A node with a region whose disk budget holds no ring drops a task of
+        /// `operate` uncalled, and `join` gives the disk error.
+        #[test]
+        fn operate_on_a_regional_node_with_too_little_disk_drops_the_task() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
+            let disk = Size::from_bytes(smallest);
+            let node = Node::start(Config {
+                region: Some(region(&[member(OWN, &KEY, &host)])),
+                disk,
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
+            });
+            node.operate(|_| async {});
+            assert_eq!(sim.run(), Ok(()));
+            let min = Size::from_bytes(8_437_760);
+            assert_eq!(
+                node.join(),
+                Err(Error::Disk {
+                    disk,
+                    cores: 2,
+                    min
+                })
+            );
         }
 
         /// `operate` refuses a node with no region, which has no mesh to operate on.

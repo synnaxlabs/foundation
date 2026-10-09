@@ -815,23 +815,29 @@ impl Serve {
     }
 }
 
-/// The operations on `mesh`. A new channel key is a UUIDv7 at the latest edge of mesh
-/// time read through `time`, with random bits from `entropy`.
+/// A new channel key: a UUIDv7 at the latest edge of mesh time read through `time`,
+/// with random bits from `entropy`.
+fn channel_key(
+    time: &clock::Reader,
+    entropy: &env::entropy::Entropy,
+) -> types::channel::Key {
+    // The time only orders keys, so a key before mesh time or 1970 has the time 0.
+    let at = time
+        .now()
+        .mesh
+        .map_or(Stamp::EPOCH, |mesh| mesh.latest.max(Stamp::EPOCH));
+    let mut random = [0; 16];
+    entropy.fill(&mut random);
+    types::channel::Key::v7(at, u128::from_le_bytes(random))
+}
+
+/// The operations on `mesh`, whose keys [`channel_key`] makes.
 fn operations(
     mesh: mesh::Mesh,
     time: clock::Reader,
     entropy: env::entropy::Entropy,
 ) -> ops::Node {
-    let key = move || {
-        // The time only orders keys, so a key before mesh time or 1970 has the time 0.
-        let at = time
-            .now()
-            .mesh
-            .map_or(Stamp::EPOCH, |mesh| mesh.latest.max(Stamp::EPOCH));
-        let mut random = [0; 16];
-        entropy.fill(&mut random);
-        types::channel::Key::v7(at, u128::from_le_bytes(random))
-    };
+    let key = move || channel_key(&time, &entropy);
     let front_ends = BTreeMap::from([("hcl", ops::FrontEnd { read: hcl })]);
     ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
 }
