@@ -580,17 +580,19 @@ impl<'f> Located<'f> {
 struct Unit<'f> {
     /// Its connectors, in name order.
     connectors: Vec<&'f Name>,
+    /// Its indexes, in name order.
+    indexes: Vec<&'f Name>,
     /// The fix of each of its diagnostics, or `None` when no placement wins for a
     /// connector or an index of it.
     fix: Option<Fix<'f>>,
 }
 
-/// Connectors linked by the indexes that they write, before the fix of their unit.
+/// Connectors and the indexes that link them.
 struct Linked<'f> {
     /// Its connectors, in name order.
     connectors: Vec<&'f Name>,
-    /// The placements that win for its indexes.
-    owners: BTreeSet<&'f Name>,
+    /// Its indexes, in name order.
+    indexes: Vec<&'f Name>,
 }
 
 /// Places each connector, with its `node` as the writer. Reports
@@ -647,10 +649,12 @@ fn connectors<'f>(
             diagnostics.extend(unplaced(model.label(name), placed));
         }
     }
-    for (name, index) in indexes {
-        if index.apart().is_some() {
-            continue;
-        }
+    let linked: BTreeMap<_, _> = units
+        .iter()
+        .flat_map(|unit| unit.indexes.iter().map(move |index| (*index, unit)))
+        .collect();
+    for (name, unit) in linked {
+        let index = &indexes[name];
         let Ok(placed) = &index.placed else {
             continue;
         };
@@ -661,9 +665,9 @@ fn connectors<'f>(
         let Some((at, message)) = split(name, placed.placement, theirs) else {
             continue;
         };
-        let unit = &units[of[index.writers[0].name]];
-        let fix = unit.fix.as_ref();
-        let fix = fix.expect("invariant: a placement wins for a split unit");
+        let Some(fix) = &unit.fix else {
+            unreachable!("invariant: the unit of the index {name} has no fix");
+        };
         diagnostics.push(Diagnostic::new(
             SPLIT_PLACEMENT,
             model.label(at),
@@ -710,11 +714,19 @@ fn units<'f>(
     let elsewhere = |placement: &Name, node: &Name| {
         home(placement).is_some_and(|home| home != node)
     };
-    let unit = |Linked { connectors, owners }: Linked<'f>| {
+    let unit = |linked: Linked<'f>| {
+        let Linked {
+            connectors,
+            indexes: names,
+        } = linked;
         let node = located[connectors[0]].connector.node;
         let mut winners = connectors.iter().filter_map(|c| located[c].winner());
         let target = winners.next();
         let spread = |p: &Name| nodes[p].iter().any(|other| *other != node);
+        let owners: BTreeSet<_> = names
+            .iter()
+            .filter_map(|name| indexes[name].placed.as_ref().ok()?.placement)
+            .collect();
         let owners: Vec<_> = owners.into_iter().collect();
         let fix = match (target, owners.as_slice()) {
             (Some(t), _) if elsewhere(t, node) && spread(t) => {
@@ -732,18 +744,26 @@ fn units<'f>(
             (None, []) => None,
             (None, _) => Some(Fix::Regroup { owners, node }),
         };
-        Unit { connectors, fix }
+        Unit {
+            connectors,
+            indexes: names,
+            fix,
+        }
     };
     (linked.into_iter().map(unit).collect(), of)
 }
 
-/// The connectors of `located` by unit, and the position of the unit of each
-/// connector. Each index whose writers are on one node links them.
+/// The connectors of `located` by unit, with the indexes that link them, and the
+/// position of the unit of each connector. Each index whose writers are on one node
+/// links them.
 fn link<'f>(
     located: &BTreeMap<&'f Name, Located<'f>>,
     indexes: &BTreeMap<&'f Name, Index<'f>>,
 ) -> (Vec<Linked<'f>>, BTreeMap<&'f Name, usize>) {
-    let linked: Vec<_> = indexes.values().filter(|i| i.apart().is_none()).collect();
+    let joining: Vec<_> = indexes
+        .iter()
+        .filter(|(_, index)| index.apart().is_none())
+        .collect();
     let position: BTreeMap<_, _> = located.keys().copied().zip(0..).collect();
     let mut parent: Vec<usize> = (0..located.len()).collect();
     let root = |parent: &mut Vec<usize>, mut i: usize| {
@@ -753,7 +773,7 @@ fn link<'f>(
         }
         i
     };
-    for index in &linked {
+    for (_, index) in &joining {
         if let Some((first, rest)) = index.writers.split_first() {
             let first = root(&mut parent, position[first.name]);
             for writer in rest {
@@ -769,23 +789,16 @@ fn link<'f>(
         let unit = *roots.entry(root(&mut parent, i)).or_insert_with(|| {
             units.push(Linked {
                 connectors: Vec::new(),
-                owners: BTreeSet::new(),
+                indexes: Vec::new(),
             });
             units.len() - 1
         });
         units[unit].connectors.push(name);
         of.insert(name, unit);
     }
-    for index in linked {
-        if let (
-            Ok(Placed {
-                placement: Some(own),
-                ..
-            }),
-            Some(first),
-        ) = (&index.placed, index.writers.first())
-        {
-            units[of[first.name]].owners.insert(*own);
+    for (name, index) in joining {
+        if let Some(first) = index.writers.first() {
+            units[of[first.name]].indexes.push(*name);
         }
     }
     (units, of)
