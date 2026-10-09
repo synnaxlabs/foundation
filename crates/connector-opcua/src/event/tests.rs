@@ -374,6 +374,33 @@ fn a_timer_whose_due_time_leaves_the_range_of_the_clock_is_refused() {
     assert_eq!(f.ran(), []);
 }
 
+/// The interval, in ms, of a timer due `before` ticks before the last tick of the
+/// clock.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the loss is under 2,048 ticks, far inside the margins of the tests"
+)]
+fn due_before_the_end(f: &Fixture, before: f64) -> f64 {
+    let now = (f.now().0 / 100) as f64;
+    (i64::MAX as f64 - now - before) / 1.0e4
+}
+
+#[test]
+fn a_timer_due_within_1_s_of_the_end_of_the_clock_is_refused() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let within = due_before_the_end(&f, 5.0e6);
+    assert_eq!(
+        f.try_timer(record, number(1), within, ffi::CURRENT_TIME),
+        Err(Status::BAD_OUT_OF_RANGE)
+    );
+    let outside = due_before_the_end(&f, 2.0e7);
+    f.try_timer(record, number(2), outside, ffi::CURRENT_TIME)
+        .expect("a timer due 2 s before the end is in range");
+    assert!(f.events.next().is_some_and(|due| due > f.now()));
+}
+
 #[test]
 fn a_change_to_an_interval_out_of_range_is_refused_and_keeps_the_timer() {
     let mut f = Fixture::new();
