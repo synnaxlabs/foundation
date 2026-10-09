@@ -141,6 +141,25 @@ fn a_data_directory_that_is_a_file_fails() {
     );
 }
 
+/// The path shows as the line of `a_data_directory_with_a_newline_prints_one_line`
+/// shows it.
+#[test]
+fn a_data_directory_with_a_newline_that_is_a_file_fails_on_one_line() {
+    let rig = Rig::new();
+    std::fs::write(rig.dir.join("a\nb"), "").expect("write the file");
+    assert_eq!(
+        ended(&rig.run(&["start", "--data", "a\nb", "--name", "edge"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.data]: cannot write the data directory a\\nb: Not a directory \
+             (os error 20)\n\
+             fix: Let this user make and write a\\nb and each file in it, or give \
+             another directory with `--data`\n"
+        )
+    );
+}
+
 #[test]
 fn a_data_directory_that_the_user_cannot_write_fails() {
     use std::os::unix::fs::PermissionsExt;
