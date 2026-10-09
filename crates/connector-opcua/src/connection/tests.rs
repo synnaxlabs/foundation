@@ -2459,3 +2459,49 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
     }
     assert_eq!(reads.bytes(), ack);
 }
+
+#[test]
+fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            // SAFETY: the loop outlives the server, which the test deletes.
+            let server = unsafe {
+                ffi::test::shim_server_new(
+                    side.events().raw(),
+                    PORT,
+                    c"opc.tcp://:4840".as_ptr(),
+                )
+            };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: the loop outlives the client, which the test deletes.
+            let client = unsafe { ffi::shim_client_new(side.events().raw()) };
+            assert!(!client.is_null());
+            let url = c"opc.tcp://10.0.0.1:4840";
+            // SAFETY: the client lives, and copies the URL.
+            let status = Status(unsafe {
+                ffi::test::UA_Client_connectAsync(client, url.as_ptr())
+            });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // SAFETY: the server lives.
+            let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+            assert_eq!(state, ffi::test::Lifecycle::STOPPED);
+            // SAFETY: the server is stopped.
+            let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: nothing uses the client after it.
+            unsafe { ffi::UA_Client_delete(client) };
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
+}
