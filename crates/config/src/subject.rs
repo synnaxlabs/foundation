@@ -6,6 +6,7 @@ use document::value::{Kind, Value};
 use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
+use types::name::Name;
 
 use crate::openssh::{self, Error as Line};
 use crate::{Definition, Found};
@@ -18,7 +19,11 @@ const SUBJECT_IS_CONNECTOR: Code = Code::new("config.subject-is-connector");
 const KEYS: [&str; 1] = ["keys"];
 
 /// Checks a `subject` block and gives its subject.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    _: Option<&Name>,
+) -> Option<Definition> {
     let unknown = found.unknown(block, &KEYS);
     let fix = "Add a `keys` attribute with the line of a `.pub` file, such as \
                \"ssh-ed25519 AAAA... alice@laptop\"";

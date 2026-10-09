@@ -6,6 +6,7 @@ use document::{Block, read};
 use spec::access::{Action, Actions, Policy};
 use spec::definition;
 use types::authority::Authority;
+use types::name::Name;
 
 use crate::{Definition, Found};
 
@@ -27,7 +28,11 @@ const ACTIONS: [(&str, Action); 6] = [
 
 /// Checks an `access` block and gives its policy. With no `authority`, a write is
 /// capped at the least authority. An `authority` with no `write` is refused.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    _: Option<&Name>,
+) -> Option<Definition> {
     let unknown = found.unknown(block, &KEYS);
     let fix = "Add a `subjects` attribute with the subjects that it allows, such as \
                \"site_a.operators.*\"";
