@@ -731,6 +731,8 @@ mod tests {
         );
     }
 
+    /// No test of a caller makes the system refuse memory to the pool, so only this
+    /// test sees `Refused` moved to the arm that panics.
     #[test]
     fn check_pool_accepts_a_pool_with_no_block_now() {
         check_pool(&block::Error::Exhausted {
