@@ -1,9 +1,11 @@
 //! Children that the test spawns while other threads open sockets. A socket that
 //! another test opens with no close-on-exec flag would reach a child, so it runs in a
-//! test binary of its own, with this one test only.
+//! test binary of its own, with this one test only. Linux only: macOS opens a socket
+//! in two calls, and has no `/proc`.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
+#![cfg(target_os = "linux")]
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -56,7 +58,6 @@ fn held() -> Vec<String> {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
 fn no_child_holds_a_socket_that_another_thread_opens() {
     let threads = os::threads().expect("the OS gives the cores of this process");
     let stop = Arc::new(AtomicBool::new(false));
