@@ -358,12 +358,16 @@ impl State {
             .and_then(|c| c.callback)
             .expect("invariant: a connection that is not closing has its callback");
         callback.call(self.raw.get(), id, state, message);
-        self.table
+        // A run of the loop in the callback, as a synchronous disconnect makes, can
+        // give the `CLOSING` and take the callback.
+        if let Some(slot) = self
+            .table
             .borrow_mut()
             .get_mut(&id)
             .and_then(|c| c.callback.as_mut())
-            .expect("invariant: a connection keeps its callback until its `CLOSING`")
-            .context = callback.context;
+        {
+            slot.context = callback.context;
+        }
     }
 }
 

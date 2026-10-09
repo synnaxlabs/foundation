@@ -827,6 +827,61 @@ fn a_drive_ends_with_the_first_value_of_run() {
         .expect("the run ends");
 }
 
+/// Records the call, and on a read, closes the connection and runs the loop, as a
+/// synchronous disconnect from a response callback does.
+unsafe extern "C" fn close_and_run(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+) {
+    let read = state == ffi::ESTABLISHED && message.length > 0;
+    // SAFETY: the manager gives the arguments that it gives `record`.
+    unsafe { record(cm, id, application, context, state, params, message) };
+    if read {
+        // SAFETY: the manager lives through the test.
+        let members = unsafe { &*cm.cast::<Members>() };
+        // SAFETY: the member takes its own manager.
+        assert_eq!(Status(unsafe { (members.close)(cm, id) }), Status::GOOD);
+        let el = members.event_loop;
+        // SAFETY: the loop of the manager lives through the test.
+        let run = unsafe { (*el).run };
+        // SAFETY: the loop runs on this thread, outside a run of its own.
+        assert_eq!(Status(unsafe { run(el, 0) }), Status::GOOD);
+    }
+}
+
+/// A run of the loop inside a read callback gives the `CLOSING` of a close from that
+/// callback.
+#[test]
+fn a_run_of_the_loop_from_a_read_callback_gives_closing() {
+    let mut network = Network::new();
+    drop(network.serve(Some(b"ack")));
+    let remote = network.remote();
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side {
+                callback: close_and_run,
+                ..Side::new(&node)
+            };
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            side.states()
+        })
+        .expect("the run ends");
+    let states = [
+        ffi::OPENING,
+        ffi::ESTABLISHED,
+        ffi::ESTABLISHED,
+        ffi::CLOSING,
+    ];
+    assert_eq!(calls, states);
+}
+
 /// A send from the run that gives the value of a drive goes out before the drive
 /// ends, with no drive after it for 1 s.
 #[test]
