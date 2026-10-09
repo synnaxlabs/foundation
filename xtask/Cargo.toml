@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 comrak.workspace = true
+semver = "1"
 serde_json = "1"
 
 [lints]

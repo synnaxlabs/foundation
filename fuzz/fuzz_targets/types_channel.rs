@@ -2,6 +2,7 @@
 //! reads back to the same key.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 use types::channel::Key;

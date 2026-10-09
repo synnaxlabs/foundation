@@ -1,0 +1,11 @@
+[package]
+name = "unpatched"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+one = { package = "p", version = "1" }
+two = { package = "p", version = "2" }

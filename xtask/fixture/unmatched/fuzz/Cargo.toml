@@ -1,0 +1,11 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "a"
+path = "fuzz_targets/a.rs"
