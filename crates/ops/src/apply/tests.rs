@@ -518,7 +518,8 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
             "config.connector-home",
             "the placement `p` names the home `edge`, but the connector `site.c` runs \
              on the node `other`",
-            "Name `other` as the `home`, and keep `other` out of `standby` and `copies`",
+            "Name `other` as the `home`, and keep `other` out of `standby` and \
+             `copies`",
         );
         let cases = [
             (
@@ -526,8 +527,8 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
                 vec![problem(
                     "config.unplaced",
                     "no placement selects the index, and no connector writes it",
-                    "Select the index with a placement that names a `home`, or write it \
-                     with a connector",
+                    "Select the index with a placement that names a `home`, or write \
+                     it with a connector",
                 )],
             ),
             (
