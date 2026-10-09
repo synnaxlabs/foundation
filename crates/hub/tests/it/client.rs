@@ -1354,6 +1354,24 @@ async fn beside<T>(
 /// link, and each future of serve drop, and the hub lets go once the reply drops.
 #[test]
 fn holds_the_transport_until_the_reply_of_a_request_drops() {
+    let (held, with_reply, without_reply) = reply_holds(false);
+    assert_eq!(with_reply, held, "the reply holds the hub");
+    assert_eq!(without_reply, 1, "no task holds the transport");
+}
+
+/// A reply sent after the hub, the link, and each future of serve drop holds the region
+/// until its send ends, and the hub lets go after that.
+#[test]
+fn lets_go_of_the_transport_once_the_send_of_a_reply_ends() {
+    let (held, with_reply, without_reply) = reply_holds(true);
+    assert_eq!(with_reply, held, "the reply holds the hub");
+    assert_eq!(without_reply, 1, "no task holds the transport");
+}
+
+/// The count of the transport of a home with one served request: before the hub, its
+/// link, and the future of serve drop, after, and once the reply, sent when `sent`, and
+/// the region drop.
+fn reply_holds(sent: bool) -> (usize, usize, usize) {
     let outcome = Arc::new(Mutex::new(None));
     let kept = Arc::clone(&outcome);
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
@@ -1386,7 +1404,16 @@ fn holds_the_transport_until_the_reply_of_a_request_drops() {
         drop((hub, link, hello));
         clock.sleep(Span::SECOND).await;
         let with_reply = Rc::strong_count(&transport);
-        drop((request, region, session));
+        if sent {
+            request
+                .reply
+                .send(b"cd")
+                .await
+                .expect("the response is sent");
+        } else {
+            drop(request);
+        }
+        drop((region, session));
         clock.sleep(Span::SECOND).await;
         let without_reply = Rc::strong_count(&transport);
         *kept.lock().expect("not poisoned") = Some((held, with_reply, without_reply));
@@ -1404,11 +1431,9 @@ fn holds_the_transport_until_the_reply_of_a_request_drops() {
         })
         .await;
     });
-    let (held, with_reply, without_reply) = outcome
+    outcome
         .lock()
         .expect("not poisoned")
         .take()
-        .expect("the home ran");
-    assert_eq!(with_reply, held, "the reply holds the hub");
-    assert_eq!(without_reply, 1, "no task holds the transport");
+        .expect("the home ran")
 }
