@@ -186,7 +186,6 @@ impl Remote {
                 {
                     sender.reset(Code(refusal.code()));
                 }
-                (self.out, self.credit) = (None, None);
                 Err(ended)
             }
         }
@@ -261,11 +260,10 @@ impl Queue {
         Poll::Pending
     }
 
-    /// Ends the session with `ended` now, ahead of the frames that wait, unless it
-    /// ended. Wakes the task, which stops the stream.
+    /// Ends the session with `ended` after the frames that wait, unless it ended.
+    /// Wakes the task, which stops the stream.
     fn end(&mut self, ended: Ended) {
         if self.ended.is_none() {
-            self.frames.clear();
             self.ended = Some(ended);
             if let Some(task) = self.task.take() {
                 task.wake();

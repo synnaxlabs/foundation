@@ -1034,6 +1034,40 @@ fn a_remote_reader_lets_other_tasks_run_while_frames_wait() {
 }
 
 #[test]
+fn the_task_of_a_remote_reader_yields_after_a_streak_of_frames_that_wait() {
+    const FRAMES: i64 = 300;
+    remote(
+        56,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                for n in 0..FRAMES {
+                    write(&mut writer, &[10 + n], &[n]);
+                }
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            // The hub's tasks wait, so the frames wait in the transport.
+            test.paused.pause();
+            steps.open();
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            let polls = test.polls.get();
+            test.paused.resume();
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            assert_eq!(test.polls.get() - polls, 3, "128, 128, and 44 frames");
+            for _ in 0..FRAMES {
+                reader.next().await.expect("a frame");
+            }
+        },
+    );
+}
+
+#[test]
 fn a_reader_after_the_home_closed_the_held_session_dials_again() {
     remote(
         13,
@@ -1505,6 +1539,67 @@ fn a_complete_reader_whose_pool_has_no_room_for_its_credit_stops_the_stream_with
                 format!("the pool had no block for the reader: {expected}")
             );
             assert_eq!(reader.next().await.expect_err("ended"), ended);
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_whose_pool_has_no_room_for_a_credit_gives_the_frame_that_arrived()
+{
+    remote(
+        54,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            for n in 0..33 {
+                send_credit_frame(&mut sender, n).await;
+            }
+            let error = receiver.recv().await.expect_err("the reader stopped");
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(error, transport::Error::Reset { code: busy });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..32 {
+                reader.next().await.expect("a frame");
+            }
+            // The task queues the 33rd frame while the caller takes nothing.
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            let next = reader.next();
+            let blocks = fill(&test.pool);
+            next.await.expect("the frame that arrived before the end");
+            let ended = reader.next().await.expect_err("the pool has no room");
+            let expected = test.pool.alloc(Credit::LEN).expect_err("the pool is full");
+            drop(blocks);
+            assert_eq!(ended, Ended::Pool(expected));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_remote_reader_that_drops_stops_its_stream_at_once() {
+    remote(
+        55,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            let error = receiver.recv().await.expect_err("the reader dropped");
+            assert_eq!(error, transport::Error::Reset { code: Code(0) });
+            node.clock().sleep(Span::from_nanos(100_000_000)).await;
+            let block = own_pool().alloc(1).expect("the pool has room");
+            let stopped = sender.send(block.freeze()).await.expect_err("stopped");
+            assert_eq!(stopped, transport::Error::Stopped { code: Code(0) });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let reader = test.reader(&["value"], Mode::Complete).await;
+            test.clock.sleep(Span::from_nanos(10_000_000)).await;
+            drop(reader);
             until(&test.clock, &steps.stopped).await;
         },
     );
