@@ -98,11 +98,11 @@ impl Rules {
                 peer,
             });
         }
-        live(hello.expires, now)?;
         let ends = now
             .latest
             .checked_add(CAP)
             .map_or(hello.expires, |cap| hello.expires.min(cap));
+        live(ends, now)?;
         Ok(Admitted { hello, ends })
     }
 
