@@ -134,7 +134,6 @@ pub(crate) fn refusal(error: &proof::Error) -> Refusal {
         proof::Error::Unsynced => Refusal::Unsynced,
         proof::Error::Via { .. } => Refusal::Via,
         proof::Error::Expired { .. } => Refusal::Expired,
-        proof::Error::Capped { .. } => Refusal::Capped,
         proof::Error::Changed { .. } => Refusal::Changed,
     }
 }
@@ -156,7 +155,7 @@ pub(crate) async fn hello(
 }
 
 /// Admits the first hello, then each renewal, until the program finishes the stream
-/// or the hello expires.
+/// or the hello ends.
 async fn renew(
     session: &Session,
     receiver: &mut Receiver,
@@ -166,7 +165,7 @@ async fn renew(
         return Ok(Served::Ended);
     }
     loop {
-        // A fresh wait for each renewal, since a renewal can move the expiry earlier.
+        // A fresh wait for each renewal, since a renewal can move the end earlier.
         let mut renewal = pin!(take(session, receiver, sender));
         let mut expiry = pin!(expiry(session));
         let renewed = poll_fn(|cx| match renewal.as_mut().poll(cx) {
@@ -226,7 +225,7 @@ async fn challenge(session: &Session, sender: &mut Sender) -> Result<[u8; 16], E
     Ok(nonce)
 }
 
-/// Waits until the hello that the link holds expires, and gives the refusal.
+/// Waits until the hello that the link holds ends, and gives the refusal.
 async fn expiry(session: &Session) -> Error {
     loop {
         let wait = {
@@ -235,19 +234,19 @@ async fn expiry(session: &Session) -> Error {
             let (admitted, _) = admitted
                 .as_ref()
                 .expect("invariant: the hello stream admitted a hello first");
-            let expires = admitted.hello().expires;
+            let ends = admitted.ends();
             let now = state
                 .time
                 .now()
                 .mesh
                 .expect("invariant: mesh time stays once the clock has synced");
-            if now.latest >= expires {
+            if now.latest >= ends {
                 return Error::Access(proof::Error::Expired {
-                    expires,
+                    expires: ends,
                     now: now.latest,
                 });
             }
-            state.time.reach(expires)
+            state.time.reach(ends)
         };
         wait.await;
     }
@@ -347,7 +346,7 @@ async fn respond(
 #[cfg(test)]
 mod tests {
     use types::time::Stamp;
-    use wire::hub::client::{CAPPED, CHANGED, EXPIRED, REFUSED, UNSYNCED, VIA};
+    use wire::hub::client::{CHANGED, EXPIRED, REFUSED, UNSYNCED, VIA};
 
     use super::*;
 
@@ -380,13 +379,6 @@ mod tests {
                     now: stamp,
                 },
                 EXPIRED,
-            ),
-            (
-                proof::Error::Capped {
-                    expires: stamp,
-                    cap: stamp,
-                },
-                CAPPED,
             ),
             (
                 proof::Error::Changed {
