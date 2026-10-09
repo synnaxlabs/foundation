@@ -23,20 +23,11 @@ mod compiler;
 mod tests {
     use std::path::Path;
 
-    use super::{child, compiler};
+    use super::child::{self, configure};
+    use super::compiler;
 
     /// The target of each build that these tests make.
     const TARGET: &str = "x86_64-unknown-linux-gnu";
-
-    /// Sets `build` to compile for `target` outside a build script.
-    fn configure<'a>(build: &'a mut cc::Build, target: &str) -> &'a mut cc::Build {
-        build
-            .target(target)
-            .host(target)
-            .opt_level(0)
-            .cargo_metadata(false)
-            .cargo_warnings(false)
-    }
 
     /// Gives the tool that `build` picks for `path`. No such file exists, so `cc`
     /// takes the family from the name, as it does for a compiler it cannot run.

@@ -15,6 +15,19 @@ pub(crate) fn running() -> bool {
     mark.is_some()
 }
 
+/// Sets `build` to compile for `target` outside a build script.
+pub(crate) fn configure<'a>(
+    build: &'a mut cc::Build,
+    target: &str,
+) -> &'a mut cc::Build {
+    build
+        .target(target)
+        .host(target)
+        .opt_level(0)
+        .cargo_metadata(false)
+        .cargo_warnings(false)
+}
+
 /// Runs the test `name` in a child process, and asserts that it passes. The child
 /// gets only `PATH`, `envs`, and, as `CC` unless `envs` sets it, the compiler that `cc`
 /// picks here without its flags, so `cc` reads C flags there only from `envs`.
@@ -29,19 +42,14 @@ pub(crate) fn run(name: &str, envs: &[(&str, &str)]) {
 }
 
 /// Runs the test `name` in a child process, and gives its output. The child gets only
-/// `PATH`, `envs`, and, as `CC`, the compiler that `cc` picks here without its flags.
+/// `PATH`, `envs`, and, as `CC` unless `envs` sets it, the compiler that `cc` picks
+/// here without its flags.
 pub(crate) fn output<'a>(
     name: &str,
     envs: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Output {
     let target = env!("CONNECTOR_OPCUA_TARGET");
-    let compiler = cc::Build::new()
-        .target(target)
-        .host(target)
-        .opt_level(0)
-        .cargo_metadata(false)
-        .cargo_warnings(false)
-        .get_compiler();
+    let compiler = configure(&mut cc::Build::new(), target).get_compiler();
     #[expect(
         clippy::disallowed_methods,
         reason = "`cc` finds the compiler on the PATH of the child process"
