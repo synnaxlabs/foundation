@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes `Scope` to the `scope` bench. Off by default.
+# Exposes `Scope` to the `scope` bench and `fuzz` to the fuzz targets. Off by default.
 sim = []
 
 [[bin]]

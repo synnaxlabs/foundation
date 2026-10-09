@@ -2958,15 +2958,20 @@ mod port {
         /// the node, which keeps the file.
         #[test]
         fn a_key_that_is_not_valid_stops_the_node() {
-            let mut tag = own();
-            tag[15] = b'2';
-            let crc = crc32c::crc32c(&tag[..64]);
-            tag[64..].copy_from_slice(&crc.to_le_bytes());
+            // Each tag byte with one bit changed, and the tag of the next form.
+            let edits = (0..16).map(|i| (i, own()[i] ^ 1)).chain([(15, b'2')]);
+            let tags = edits.map(|(i, byte)| {
+                let mut tag = own();
+                tag[i] = byte;
+                let crc = crc32c::crc32c(&tag[..64]);
+                tag[64..].copy_from_slice(&crc.to_le_bytes());
+                tag
+            });
             let mut changed = own();
             changed[40] ^= 1;
             let short = own()[..LEN - 1].to_vec();
             let long = [own(), vec![0]].concat();
-            for bytes in [short, long, tag, changed] {
+            for bytes in [short, long, changed].into_iter().chain(tags) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 write_key(&mut sim, &host, bytes.clone());
