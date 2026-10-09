@@ -270,10 +270,12 @@
   and its clones left to run. `Busy` stays for a live handle, and for a handle in
   another process or another `Files`. `Mode::Read` does not change. Each driver gives
   the wait: `os` by the order of its I/O queue, `sim` by an end time past the end of
-  each such call. `sim` gives each `Files` of a node as clones of one. One test of each
-  rule runs on `os` and on `sim`. This supersedes the `Busy` after a drop in the #392
-  sentence above and in the #1604 amendment. Lost: the wait in `Files`, which cannot
-  see the end of a dropped call without a change to `Driver`. Decided by
+  each such call. `sim` gives each `Files` of a node as clones of one. Each rule has one
+  test of the same name on `os` and on `sim` (`laptop.architect-2`, 2026-10-09,
+  https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6083166443). This
+  supersedes the `Busy` after a drop in the #392 sentence above and in the #1604
+  amendment. Lost: the wait in `Files`, which cannot see the end of a dropped call
+  without a change to `Driver`. Decided by
   `laptop.architect-2`, #1524, 2026-10-08T00:45:03Z
   (https://github.com/synnaxlabs/foundation/issues/1524#issuecomment-6049807436). The
   `File::remove` text: `laptop.architect-2`, 2026-10-08T01:03:54Z
