@@ -249,6 +249,12 @@ impl Side {
         self.manager.state().table.borrow().len()
     }
 
+    /// The length of the read buffer of each connection in the table.
+    fn buffers(&self) -> Vec<(usize, usize)> {
+        let table = self.manager.state().table.borrow();
+        table.iter().map(|(id, c)| (*id, c.buffer.len())).collect()
+    }
+
     fn states(&self) -> Vec<ConnectionState> {
         self.calls().iter().map(|(_, state, _)| *state).collect()
     }
@@ -1983,6 +1989,28 @@ fn notes_of(
         .into_iter()
         .map(|(id, state, bytes)| (id, state, String::from_utf8(bytes).expect("UTF-8")))
         .collect()
+}
+
+#[test]
+fn only_a_stream_that_reads_holds_a_read_buffer() {
+    let mut network = Network::new();
+    network.dial(Span::MILLISECOND, b"");
+    let peer = SocketAddr::new(network.peer.addresses()[0], PORT);
+    let buffers = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            assert_eq!(side.connect(peer), Status::GOOD);
+            let opened = side.buffers();
+            side.drive(Span::from_nanos(100_000_000)).await;
+            (opened, side.buffers())
+        })
+        .expect("the run ends");
+    assert_eq!(
+        buffers,
+        (vec![(1, 0), (2, 0)], vec![(1, 0), (3, READ_BYTES)])
+    );
 }
 
 #[test]
