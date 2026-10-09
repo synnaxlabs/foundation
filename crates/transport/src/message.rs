@@ -144,8 +144,7 @@ impl Reader {
     /// when it has none now, or `None` when the stream has ended. The reader never
     /// asks for a byte past the current message, so later messages stay with the
     /// source. No chunk from `source` outlives the call, except those of the whole
-    /// message that [`Step::Block`] gives, and, after an error, those of the message
-    /// until the caller clears it.
+    /// message that [`Step::Block`] gives, and those that an error leaves.
     ///
     /// After an error, the reader can hold bytes of the message; the caller clears it
     /// with [`Reader::clear`].
