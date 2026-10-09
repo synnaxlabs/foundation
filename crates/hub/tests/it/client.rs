@@ -1359,8 +1359,8 @@ fn holds_the_transport_until_the_reply_of_a_request_drops() {
     assert_eq!(without_reply, 1, "no task holds the transport");
 }
 
-/// A reply sent after the hub, the link, and each future of serve drop holds the region
-/// until its send ends, and the hub lets go after that.
+/// The hub lets go of the region once a reply, sent after the hub, the link, and each
+/// future of serve drop, ends its send.
 #[test]
 fn lets_go_of_the_transport_once_the_send_of_a_reply_ends() {
     let (held, with_reply, without_reply) = reply_holds(true);
