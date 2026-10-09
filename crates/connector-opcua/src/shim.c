@@ -202,14 +202,17 @@ static UA_DateTime el_next_timer(UA_EventLoop *el) {
     return UA_Timer_next(&loop->timer);
 }
 
-/* Whether the ticks of `interval_ms`, and their due time from `now` give or take the
-   1 s that the copy may move it by to batch timers, fit in `UA_DateTime`. False for
-   NaN. The copy casts and adds them unchecked. `now` is never negative, so ticks above
-   `-room` give a due time above it too. */
-static UA_Boolean in_range(UA_DateTime now, UA_Double interval_ms) {
+/* Whether the ticks of `interval_ms`, their due time from `now` give or take the 1 s
+   that the copy may move it by to batch timers, and the distance from `base` to `now`
+   fit in `UA_DateTime`. False for NaN. The copy casts, adds, and subtracts them
+   unchecked. `now` is never negative, so ticks above `-room` give a due time above it
+   too. */
+static UA_Boolean in_range(UA_DateTime now, UA_Double interval_ms,
+                           const UA_DateTime *base) {
+    const UA_DateTime room = UA_INT64_MAX - UA_DATETIME_SEC;
     UA_Double ticks = interval_ms * UA_DATETIME_MSEC;
-    UA_Double room = (UA_Double)(UA_INT64_MAX - UA_DATETIME_SEC);
-    return ticks < room - (UA_Double)now && ticks > -room;
+    return ticks < (UA_Double)room - (UA_Double)now && ticks > -(UA_Double)room &&
+           (!base || *base >= now - room);
 }
 
 static UA_StatusCode el_add_timer(UA_EventLoop *el, UA_Callback cb, void *application,
@@ -217,7 +220,7 @@ static UA_StatusCode el_add_timer(UA_EventLoop *el, UA_Callback cb, void *applic
                                   UA_DateTime *base, UA_TimerPolicy policy,
                                   UA_UInt64 *key) {
     UA_DateTime now = now_of(el);
-    if(!in_range(now, interval_ms))
+    if(!in_range(now, interval_ms, base))
         return UA_STATUSCODE_BADOUTOFRANGE;
     return UA_Timer_add(&loop_of(el)->timer, cb, application, data, interval_ms, now,
                         base, policy, key);
@@ -227,7 +230,7 @@ static UA_StatusCode el_modify_timer(UA_EventLoop *el, UA_UInt64 key,
                                      UA_Double interval_ms, UA_DateTime *base,
                                      UA_TimerPolicy policy) {
     UA_DateTime now = now_of(el);
-    if(!in_range(now, interval_ms))
+    if(!in_range(now, interval_ms, base))
         return UA_STATUSCODE_BADOUTOFRANGE;
     return UA_Timer_modify(&loop_of(el)->timer, key, interval_ms, now, base, policy);
 }

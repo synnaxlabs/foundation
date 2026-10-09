@@ -86,17 +86,18 @@ impl Fixture {
         interval_ms: f64,
         policy: ffi::Policy,
     ) -> u64 {
-        self.try_timer(callback, data, interval_ms, policy)
+        self.try_timer(callback, data, interval_ms, None, policy)
             .unwrap_or_else(|status| panic!("{status:?}"))
     }
 
-    /// Adds a timer that runs `callback` with `data`, and gives its key, or the
-    /// status of a refusal.
+    /// Adds a timer that runs `callback` with `data`, timed from `base` when given,
+    /// and gives its key, or the status of a refusal.
     fn try_timer(
         &self,
         callback: ffi::Callback,
         data: *mut c_void,
         interval_ms: f64,
+        mut base: Option<i64>,
         policy: ffi::Policy,
     ) -> Result<u64, Status> {
         let mut key = 0;
@@ -109,7 +110,7 @@ impl Fixture {
                 self.application(),
                 data,
                 interval_ms,
-                ptr::null_mut(),
+                base.as_mut().map_or(ptr::null_mut(), ptr::from_mut),
                 policy,
                 &raw mut key,
             )
@@ -117,15 +118,22 @@ impl Fixture {
         (status == Status::GOOD).then_some(key).ok_or(status)
     }
 
-    /// Changes the timer of `key`, and gives the status.
-    fn modify(&self, key: u64, interval_ms: f64, policy: ffi::Policy) -> Status {
+    /// Changes the timer of `key`, timed from `base` when given, and gives the
+    /// status.
+    fn modify(
+        &self,
+        key: u64,
+        interval_ms: f64,
+        mut base: Option<i64>,
+        policy: ffi::Policy,
+    ) -> Status {
         // SAFETY: the member takes its own loop and a key that it gave.
         Status(unsafe {
             (self.members().modify_timer)(
                 self.events.raw(),
                 key,
                 interval_ms,
-                ptr::null_mut(),
+                base.as_mut().map_or(ptr::null_mut(), ptr::from_mut),
                 policy,
             )
         })
@@ -336,7 +344,7 @@ fn a_timer_changes_its_interval_and_goes() {
     let start = f.now();
     let key = f.add(1, 10.0, ffi::CURRENT_TIME);
     f.advance(ms(5));
-    assert_eq!(f.modify(key, 50.0, ffi::ONCE), Status::GOOD);
+    assert_eq!(f.modify(key, 50.0, None, ffi::ONCE), Status::GOOD);
     assert_eq!(f.events.next(), Some(at(start, ms(55))));
     // SAFETY: as above.
     unsafe { (f.members().remove_timer)(f.events.raw(), key) };
@@ -364,7 +372,7 @@ fn a_timer_whose_due_time_leaves_the_range_of_the_clock_is_refused() {
     f.start();
     for (interval_ms, policy) in OUT_OF_RANGE {
         assert_eq!(
-            f.try_timer(record, number(1), interval_ms, policy),
+            f.try_timer(record, number(1), interval_ms, None, policy),
             Err(Status::BAD_OUT_OF_RANGE),
             "{interval_ms}"
         );
@@ -392,13 +400,84 @@ fn a_timer_due_within_1_s_of_the_end_of_the_clock_is_refused() {
     f.start();
     let within = due_before_the_end(&f, 5.0e6);
     assert_eq!(
-        f.try_timer(record, number(1), within, ffi::CURRENT_TIME),
+        f.try_timer(record, number(1), within, None, ffi::CURRENT_TIME),
         Err(Status::BAD_OUT_OF_RANGE)
     );
     let outside = due_before_the_end(&f, 2.0e7);
-    f.try_timer(record, number(2), outside, ffi::CURRENT_TIME)
+    f.try_timer(record, number(2), outside, None, ffi::CURRENT_TIME)
         .expect("a timer due 2 s before the end is in range");
     assert!(f.events.next().is_some_and(|due| due > f.now()));
+}
+
+/// The ticks of the clock, and the earliest base in range of them.
+fn earliest_base(f: &Fixture) -> (i64, i64) {
+    let now = i64::try_from(f.now().0 / 100).unwrap();
+    (now, now - (i64::MAX - 10_000_000))
+}
+
+#[test]
+fn a_timer_from_a_base_out_of_range_of_the_clock_is_refused() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let (now, earliest) = earliest_base(&f);
+    for base in [i64::MIN, earliest - 1] {
+        for (interval_ms, policy) in [(3.0, ffi::BASE_TIME), (0.0, ffi::ONCE)] {
+            assert_eq!(
+                f.try_timer(record, number(1), interval_ms, Some(base), policy),
+                Err(Status::BAD_OUT_OF_RANGE),
+                "{base} {interval_ms}"
+            );
+        }
+    }
+    assert_eq!(f.events.next(), None);
+    f.try_timer(record, number(1), 3.0, Some(earliest), ffi::BASE_TIME)
+        .expect("the earliest base is in range");
+    let into = (i128::from(now) - i128::from(earliest)) % 30_000;
+    let due = i128::from(now) + 30_000 - into;
+    assert_eq!(
+        f.events.next(),
+        Some(Monotonic(u64::try_from(due * 100).unwrap())),
+        "the due time keeps the phase of the base"
+    );
+}
+
+#[test]
+fn a_once_timer_from_the_earliest_base_or_a_past_interval_runs_at_the_next_run() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let (_, earliest) = earliest_base(&f);
+    f.try_timer(record, number(1), 0.0, Some(earliest), ffi::ONCE)
+        .expect("the earliest base is in range");
+    f.add(2, -1000.0, ffi::ONCE);
+    f.add(3, -9.0e14, ffi::ONCE);
+    let key = f.add(4, 10.0, ffi::ONCE);
+    assert_eq!(f.modify(key, -1000.0, None, ffi::ONCE), Status::GOOD);
+    let key = f.add(5, 10.0, ffi::ONCE);
+    assert_eq!(f.modify(key, 0.0, Some(earliest), ffi::ONCE), Status::GOOD);
+    f.run();
+    let mut ran = f.ran();
+    ran.sort_unstable();
+    assert_eq!(ran, [1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn a_change_to_a_base_out_of_range_is_refused_and_keeps_the_timer() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let start = f.now();
+    let (_, earliest) = earliest_base(&f);
+    let key = f.add(1, 10.0, ffi::ONCE);
+    for (interval_ms, policy) in [(3.0, ffi::BASE_TIME), (0.0, ffi::ONCE)] {
+        assert_eq!(
+            f.modify(key, interval_ms, Some(earliest - 1), policy),
+            Status::BAD_OUT_OF_RANGE,
+            "{interval_ms}"
+        );
+    }
+    assert_eq!(f.events.next(), Some(at(start, ms(10))));
 }
 
 #[test]
@@ -409,7 +488,7 @@ fn a_change_to_an_interval_out_of_range_is_refused_and_keeps_the_timer() {
     let key = f.add(1, 10.0, ffi::ONCE);
     for (interval_ms, policy) in OUT_OF_RANGE {
         assert_eq!(
-            f.modify(key, interval_ms, policy),
+            f.modify(key, interval_ms, None, policy),
             Status::BAD_OUT_OF_RANGE,
             "{interval_ms}"
         );
