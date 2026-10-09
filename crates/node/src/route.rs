@@ -1,5 +1,4 @@
-//! Shard 0's sessions: each stream goes to the server of the protocol its header
-//! names.
+//! Shard 0's sessions: each stream goes to the server of the protocol its header names.
 
 use std::collections::BTreeMap;
 use std::future::poll_fn;
@@ -20,15 +19,15 @@ use crate::scope::Scope;
 /// How long a stream may take to give its header, a patch as [`crate::WINDOW`] is.
 const HEADER: Span = Span::from_nanos(10_000_000_000);
 
-/// How many places the peers outside the region hold at once, a patch as [`HEADER`]
-/// is. A program holds one per session, and a node one for its key.
+/// How many places the peers outside the region hold at once, a patch as [`HEADER`] is.
+/// A program holds one per session, and a node one for its key.
 const PLACES: usize = 256;
 
-/// Serves each session of `transport` in its own future on `tasks`, until the
-/// transport stops, and gives the error that stopped it. Admits each session of a
-/// member of `mesh`'s region, and of another peer while it gets a place, of at most
-/// [`PLACES`]; closes each other session with `wire::session::REFUSED`. `route`
-/// decides each stream.
+/// Serves each session of `transport` in its own future on `tasks`, until the transport
+/// stops, and gives the error that stopped it. Admits each session of a member of
+/// `mesh`'s region, and of another peer while it gets a place, of at most [`PLACES`];
+/// closes each other session with `wire::session::REFUSED`. `route` decides each
+/// stream.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
     mesh: Option<Mesh>,
@@ -61,8 +60,8 @@ pub(crate) async fn accept(
     }
 }
 
-/// The places that the peers outside the region hold. A place is a token: it is
-/// held while a session's future holds it, and free once the last holder drops it.
+/// The places that the peers outside the region hold. A place is a token: it is held
+/// while a session's future holds it, and free once the last holder drops it.
 #[derive(Default)]
 struct Places {
     /// One token for all programs, one clone for each open session.
@@ -72,9 +71,9 @@ struct Places {
 }
 
 impl Places {
-    /// The place of a new session of `peer`: the place that the key of a node
-    /// still holds, else a new place while fewer than [`PLACES`] are held. `None`
-    /// when the bound is full.
+    /// The place of a new session of `peer`: the place that the key of a node still
+    /// holds, else a new place while fewer than [`PLACES`] are held. `None` when the
+    /// bound is full.
     fn take(&mut self, peer: Peer) -> Option<Rc<()>> {
         self.nodes.retain(|_, place| place.strong_count() > 0);
         // `Places` itself holds one count of `programs`.
@@ -116,10 +115,10 @@ async fn serve(
     }
 }
 
-/// Reads the header of `incoming`, its first message, and routes the stream that
-/// `peer` opened by its protocol. A `Mesh` stream of a node goes to `mesh`, and a
-/// `Hub` stream of a member of the region to `link`; each other stream, and one
-/// whose header does not arrive within [`HEADER`] on `clock`, is rejected.
+/// Reads the header of `incoming`, its first message, and routes the stream that `peer`
+/// opened by its protocol. A `Mesh` stream of a node goes to `mesh`, and a `Hub` stream
+/// of a member of the region to `link`; each other stream, and one whose header does
+/// not arrive within [`HEADER`] on `clock`, is rejected.
 async fn route(
     mut incoming: Incoming,
     peer: Peer,
