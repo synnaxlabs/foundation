@@ -443,17 +443,19 @@ fn plans_no_change_after_its_apply() {
     assert_eq!(plan.base, spec.pointer);
 }
 
-/// A device fixture with its connector as a [`Writer`] of `dev.p`, the channel that a
-/// `read` block writes. A `command` block only reads, so `dev.q_time` needs the
-/// placement.
+/// A device fixture with the kind of its connector made a [`Writer`] of `dev.p`, the
+/// channel that a `read` block writes. A `command` block only reads, so `dev.q_time`
+/// needs the placement.
 #[test]
 fn places_each_index_of_a_device_fixture_at_its_connector() {
     for device in DEVICES {
-        let cut = device.find("connector \"dev\"").expect("a connector");
+        let connector = device.find("connector \"dev\"").expect("a connector");
+        let start = connector + device[connector..].find("kind = ").expect("a kind");
+        let end = start + device[start..].find('\n').expect("a line");
         let text = format!(
-            "{}connector \"dev\" {{\n  kind = \"writer\"\n  node = \"edge\"\n  \
-             writes = [\"dev.p\"]\n}}\n",
-            &device[..cut]
+            "{}kind = \"writer\"\n  writes = [\"dev.p\"]{}",
+            &device[..start],
+            &device[end..]
         );
         let mut spec = Spec::create_empty();
         let plan = spec
