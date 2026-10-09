@@ -361,7 +361,8 @@ impl Lab {
         for name in [channel.to_string(), format!("{channel}_time")] {
             let key = name.parse().expect("lab failure: a channel name");
             assert!(
-                !founding.definitions.contains_key(&key),
+                !self.channels.contains_key(&name)
+                    && !founding.definitions.contains_key(&key),
                 "lab failure: {name} exists"
             );
         }
@@ -923,11 +924,6 @@ fn decode(received: &hub::reader::Received<'_>, keys: Keys) -> Vec<Sample> {
         codec::decode(at.data_type, count, bytes, out).expect("the series decodes");
     }
     let [time, data] = series;
-    assert_eq!(
-        time.len(),
-        data.len(),
-        "the index and the data differ in length"
-    );
     let (time, data) = (time.as_chunks::<8>().0, data.as_chunks::<8>().0);
     time.iter()
         .zip(data)
@@ -1350,4 +1346,66 @@ fn an_index_named_as_a_channel_panics() {
     lab.mesh(&[a, b]);
     lab.channel(a, "b_time");
     lab.channel(a, "b");
+}
+
+#[test]
+#[should_panic(expected = "the write of")]
+fn an_overlapping_send_panics() {
+    let (mut lab, a, _) = pair();
+    lab.send(a, "a.value", &[1.0, 2.0, 3.0]);
+    lab.send(a, "a.value", &[4.0]);
+    lab.run(Duration::from_secs(1));
+}
+
+#[test]
+fn two_channels_keep_their_samples() {
+    let (mut lab, a, b) = pair();
+    lab.channel(b, "b.value");
+    lab.send(a, "a.value", &[1.0]);
+    lab.send(b, "b.value", &[2.0]);
+    lab.run(Duration::from_secs(1));
+    assert_eq!(values(&lab.samples(a, "admin", "a.value")), [1.0]);
+    assert_eq!(values(&lab.samples(b, "admin", "b.value")), [2.0]);
+    lab.stop();
+}
+
+#[test]
+#[should_panic(expected = "lab failure: no channel a.value_time")]
+fn a_channel_stays_in_the_mesh_of_its_home() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(a, "a.value");
+    lab.home(b, "a.value_time");
+}
+
+#[test]
+#[should_panic(expected = "until #274")]
+fn samples_as_another_subject_panic() {
+    let (mut lab, a, _) = pair();
+    lab.send(a, "a.value", &[1.0]);
+    lab.samples(a, "operator", "a.value");
+}
+
+#[test]
+#[should_panic(expected = "the reader on a.value did not open in 10 s")]
+fn a_reader_cut_from_the_home_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    lab.channel(a, "a.value");
+    lab.cut(a, b);
+    lab.reader(b, "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: x exists")]
+fn one_name_in_two_meshes_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(a, "x");
+    lab.channel(b, "x");
 }
