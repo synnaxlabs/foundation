@@ -256,3 +256,35 @@
   no check per call. Lost: an end only at the home, which closes the session when the
   home's own definitions change, and which the reader may never see when the two nodes
   apply a spec at different times.
+  Amended (#2143) by `laptop.architect` (2026-10-09T13:40:05Z:
+  https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720):
+  `Hub::writer` waits for the node's first mesh time (`clock::Reader::reach` on
+  `hub::Config::time`, the reader of the home), as it waits for a home, so a hub caller
+  never sees `home::writer::Error::Unsynced`. The open first resolves its channels, so
+  an unknown channel fails at once. It then waits, and only then checks each home in its
+  loop, so it sees a change of the definitions during the wait, and the wait never comes
+  between a home check and the carry. The home check of the open ends only after a pass
+  over each index that waited for no home, because a home can move while the open waits
+  for another (#2164) (PR #2161, rounds 1 to 3, approved by `laptop.architect`,
+  2026-10-09T17:50:57Z:
+  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6086275768).
+  Supersedes "in the loop of `Writer::open`, before its second `resolve`" of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720.
+  A task gets mesh time from `writer::Writer::now`, which gives `home::Shard::now`
+  (HOME CLOCKS) and cannot fail, because mesh time stays once known. Lost:
+  `Hub::now() -> Option<Stamp>`, because each caller holds a writer and would `expect`
+  mesh time itself. Lost: a `hub::clock` export of `clock::Reader`, because each task
+  would compute the midpoint again, and a change of the home's rule would make its
+  stamps `Ahead`. Connector time sync adds what it needs with its own caller. Lost: a
+  writer that stamps the frame, because only the caller knows when it read each sample.
+  `writer::Writer::entries` gives the entry of each channel of
+  `writer::Config::channels`, in that order: its position in the entries of
+  `Writer::set`, as `Writer::draft` and `Draft::series_mut` take it. A channel named
+  twice has the same entry twice. A layer 3 caller knows only names, so each writer of
+  a kind needs this map. `Writer::open` computes it once, because the key set of a
+  writer never changes. Lost: `Writer::entry(&Name) -> Option<usize>`, because each
+  caller built `Config::channels`, so it knows the order, and a name not in the config
+  is a defect of the caller. Lost: a `hub` draft that takes the position of a channel
+  in `Config::channels`, because it would repeat each method of `Draft`
+  (`laptop.architect`, 2026-10-09T18:47:52Z:
+  https://github.com/synnaxlabs/foundation/issues/2170#issuecomment-6087166096).

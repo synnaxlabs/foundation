@@ -83,13 +83,32 @@
   adds no round trip. The hello has its own one-way stream: a node lets the peer open
   `streams_max` + 1 one-way streams, and does not give back the credit of the peer's
   hello stream when it ends, so after the hello the peer has at most `streams_max` open.
-  Until the peer's hello arrives, a node opens and accepts no stream; the caller bounds
-  that wait, with its other limits before admission (#563). A sender obeys only the
-  peer's values: each message is at most the peer's `message_bytes_max`, and the send
-  budget is the peer's `window_bytes`. A value over what the node can count counts as
-  the largest it can count. A peer breaks the protocol when its hello ends inside a
-  pair, misses a required id, has an id out of order, is over 256 bytes, has a
-  `message_bytes_max` below 1472 (architect, #1198:
+  Until the peer's hello arrives, a node opens and accepts no stream; a peer whose hello
+  has not arrived twice the idle timeout after the handshake breaks the protocol, with
+  the reason `a peer with no hello`. A check that comes after the idle timeout was also
+  due ends the session as timed out. QUIC counts the idle timeout again from each packet
+  from the peer, and from this side's first send after it that asks for an ack
+  (`laptop.architect-2`, #2149, 2026-10-09 16:42 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085189583; 17:07 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085581998; 18:14 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6086657957). A link
+  that loses most datagrams can also end an honest session with this error, when the
+  peer's hello and each resend of it are lost until the bound (`laptop.architect-2`,
+  #2149, 2026-10-09 17:21 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085801016). The idle
+  timeout is QUIC's: `idle`, or 3 PTO when that is longer. The second idle timeout is
+  for the probe that resends a hello that a cut the session lives through (PROBE GAP)
+  held back (`laptop.architect-2`, #1628, 2026-10-09 13:35 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858; twice
+  the idle timeout and `noq_proto::Connection::idle_timeout`, after a finding of
+  `breaker` on #2149, by `laptop.architect-2`, 14:19 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6082780054).
+  Supersedes the rule that the caller bounds that wait (#55, #563). A sender obeys only
+  the peer's values: each message is at most the peer's `message_bytes_max`, and the
+  send budget is the peer's `window_bytes`. A value over
+  what the node can count counts as the largest it can count. A peer breaks the protocol
+  when its hello ends inside a pair, misses a required id, has an id out of order, is
+  over 256 bytes, has a `message_bytes_max` below 1472 (architect, #1198:
   https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it, or
   resets. A peer whose QUIC transport parameters cannot take this node's whole hello at
   once (no one-way stream, or a stream or connection window under the hello) also breaks

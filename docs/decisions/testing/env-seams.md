@@ -400,3 +400,23 @@
   https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714; the
   registration that gives the socket back, 2026-10-09T05:25:55Z:
   https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074885496).
+  Amended (2026-10-09, #1732): `os::interrupt` holds SIGINT and SIGTERM. A thread of the
+  module `os::signal` takes them with `sigwait` and completes a future at the first, and
+  then takes them as with no hold, so a second one ends the process and a stop that
+  hangs can still be ended. `main` is to call it before it starts any other thread
+  (#1732), since the mask passes to each thread that starts after it. `pthread_sigmask`,
+  not `sigprocmask`, which POSIX does not specify in a process with threads. Like the
+  `resolve` thread of `os::net`, the signal thread has no handle. It lives until the
+  process ends, to take the second signal. Tokio's `signal` lost: its handler stays for
+  the life of the process and never gives back the default action, so a second signal
+  cannot end the process. A handler of our own lost: it reaches its pipe only through a
+  global. `os::files` makes `dir` and `dir/data` when they are not there, but not the
+  parents of `dir`, and syncs the holder of each at each call, so `main` is to make no
+  file call of its own and each failure of the data directory is `os::Error::Dir`
+  (`laptop.architect-2`, 2026-10-09T18:30:45Z:
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545; the sync
+  at each call, the thread with no handle, and the lost options: `laptop.architect-2`,
+  2026-10-09T18:40:55Z:
+  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087061440; the text
+  of the thread with no handle: `laptop.architect-2`, 2026-10-09T19:05:37Z:
+  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087447005).

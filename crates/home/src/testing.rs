@@ -25,8 +25,7 @@ pub struct Env {
 }
 
 /// A shard on the ring in `shard-0` of `env.files`, its interner, the mesh time once
-/// the clock has one (the midpoint of the clock's interval, as the shard stamps it),
-/// and the reader of that time.
+/// the clock has one ([`Shard::now`]), and the reader of that time.
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
@@ -67,9 +66,8 @@ pub async fn shard(env: Env) -> (Shard, Interner, Stamp, clock::Reader) {
         },
     });
     loop {
-        if let Some(now) = mesh.now().mesh {
-            let midpoint = now.earliest.nanos().midpoint(now.latest.nanos());
-            return (shard, interner, Stamp::from_nanos(midpoint), mesh);
+        if let Some(now) = shard.now() {
+            return (shard, interner, now, mesh);
         }
         env.clock.sleep(Span::from_nanos(1)).await;
     }

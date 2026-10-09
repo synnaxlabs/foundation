@@ -30,10 +30,6 @@ use types::time::Span;
 /// The port each node binds, on its host's first address.
 const PORT: u16 = 7000;
 
-/// The stamp of the first sample of [`Lab::send`], 2026-01-01 in nanoseconds. Each
-/// later sample is a millisecond later.
-const START: i64 = 1_767_225_600_000_000_000;
-
 /// The private key of the subject `admin`, the first admin of each mesh.
 const ADMIN: PrivateKey = PrivateKey([0; 32]);
 
@@ -61,15 +57,7 @@ pub(crate) struct Lab {
     /// The node of [`Lab::send`], and what a reader there got, by channel.
     sent: BTreeMap<String, (Node, Arc<Mutex<Got>>)>,
     /// The channels of [`Lab::channel`], by name.
-    channels: BTreeMap<String, Made>,
-}
-
-/// A channel of [`Lab::channel`].
-#[derive(Debug, Clone, Copy)]
-struct Made {
-    keys: Keys,
-    /// The samples that each [`Lab::send`] on it wrote.
-    sent: i64,
+    channels: BTreeMap<String, Keys>,
 }
 
 /// The keys of a channel of [`Lab::channel`] and of its index.
@@ -376,11 +364,8 @@ impl Lab {
             types::channel::Key::from_u128(next),
             types::channel::Key::from_u128(next + 1),
         );
-        let made = Made {
-            keys: Keys { index, data },
-            sent: 0,
-        };
-        self.channels.insert(channel.to_string(), made);
+        self.channels
+            .insert(channel.to_string(), Keys { index, data });
         let kind = Data::new(
             index,
             None,
@@ -431,8 +416,7 @@ impl Lab {
     }
 
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
-    /// simulation runs. The samples of each send on `channel` are stamped a
-    /// millisecond apart from [`START`], after those of the send before it. The first
+    /// simulation runs. Each sample is stamped with mesh time at its write. The first
     /// send on `channel` opens a reader at `node` for [`Lab::samples`].
     ///
     /// # Panics
@@ -447,10 +431,7 @@ impl Lab {
             let got = self.open(node, channel);
             self.sent.insert(channel.to_string(), (node, got));
         }
-        let made = self.made(channel);
-        let start = START + made.sent * 1_000_000;
-        let keys = made.keys;
-        made.sent += i64::try_from(values.len()).unwrap();
+        let keys = self.keys(channel);
         let member = &self.members[node.0];
         let clock = member.host.clock();
         let values = values.to_vec();
@@ -463,17 +444,11 @@ impl Lab {
                 lease: None,
                 channels: vec![name],
             };
-            let mut writer = loop {
-                match hub.writer(config.clone()).await {
-                    Err(writer::Error::Home(hub::home::writer::Error::Unsynced)) => {
-                        clock.sleep(Span::MILLISECOND).await;
-                    }
-                    opened => break opened.expect("lab failure: the writer opens"),
-                }
-            };
-            let stamps = (start..).step_by(1_000_000);
-            for (stamp, value) in stamps.zip(values) {
+            let opened = hub.writer(config).await;
+            let mut writer = opened.expect("lab failure: the writer opens");
+            for value in values {
                 clock.sleep(Span::MILLISECOND).await;
+                let stamp = writer.now().nanos();
                 let entries = writer.set().entries();
                 let (time, data) = (at(entries, keys.index), at(entries, keys.data));
                 let group = entries[time].group;
@@ -502,7 +477,7 @@ impl Lab {
     /// millisecond at a time until it opens: the hub gives only the frames written
     /// after the open.
     fn open(&mut self, node: Node, channel: &str) -> Arc<Mutex<Got>> {
-        let keys = self.made(channel).keys;
+        let keys = self.keys(channel);
         self.boot();
         let got = collect(&self.members[node.0], channel, keys);
         let step = Duration::from_millis(1);
@@ -511,10 +486,10 @@ impl Lab {
         got
     }
 
-    /// The channel `channel` of [`Lab::channel`].
-    fn made(&mut self, channel: &str) -> &mut Made {
-        let made = self.channels.get_mut(channel);
-        made.unwrap_or_else(|| panic!("lab failure: no `channel` made {channel}"))
+    /// The keys of the channel `channel` of [`Lab::channel`].
+    fn keys(&self, channel: &str) -> Keys {
+        let keys = self.channels.get(channel);
+        *keys.unwrap_or_else(|| panic!("lab failure: no `channel` made {channel}"))
     }
 
     /// Runs the simulation `step` at a time until `done` holds, at most `steps`
@@ -1257,7 +1232,7 @@ fn a_second_send_stamps_after_the_first() {
     lab.run(Duration::from_secs(1));
     let stored = lab.samples(a, "admin", "a.value");
     assert_eq!(values(&stored), [1.0, 2.0, 3.0]);
-    assert_eq!(stored[2].ns, START + 2_000_000);
+    assert!(stored[1].ns < stored[2].ns, "{stored:?}");
     assert_eq!(lab.received(reader), stored);
     lab.stop();
 }

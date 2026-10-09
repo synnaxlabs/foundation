@@ -173,16 +173,16 @@ impl Node {
     /// another, in order of core. Once each buffer has opened, shard 0 reads the node's
     /// key and private key from the file `node.key` in the data directory, and makes
     /// the file at the first start once it has mesh time, unless `create_key` made it,
-    /// then opens the mesh of [`Config::region`] when it has one, then serves the port
-    /// and admits every peer that proves its key, until its transport or the mesh's
-    /// group stops, which stops the node. Returns once each shard runs or one has
-    /// failed to start. When the disk budget holds no ring on each shard, no shard
-    /// starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the shard
-    /// count, and the least budget. A failed start, a shard with no memory, a data
-    /// directory that another node holds or that was made for another shard count, a
-    /// key file that is not valid, a file `name` that holds another name or that no
-    /// node wrote, or a buffer or a mesh that does not open stops the node, and
-    /// [`Node::join`] returns its error.
+    /// then opens the mesh of [`Config::region`] when it has one, then serves the port,
+    /// admits each member of the region and at most 256 sessions of other peers at
+    /// once, until its transport or the mesh's group stops, which stops the node.
+    /// Returns once each shard runs or one has failed to start. When the disk budget
+    /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
+    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
+    /// start, a shard with no memory, a data directory that another node holds or that
+    /// was made for another shard count, a key file that is not valid, a file `name`
+    /// that holds another name or that no node wrote, or a buffer or a mesh that does
+    /// not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -805,6 +805,7 @@ impl Serve {
                 Err(error) => return fail(error),
             };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
+        let clock = self.endpoint.clock.clone();
         // The endpoint's open takes the founding, so the definitions go first.
         let definitions = self
             .endpoint
@@ -840,7 +841,8 @@ impl Serve {
         let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
-            let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
+            let port =
+                route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
             let mut port = pin!(port);
             let mut group = pin!(group);
             let mut guard = pin!(guard);

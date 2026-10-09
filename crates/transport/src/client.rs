@@ -13,7 +13,7 @@ use crate::{Address, Error, MESSAGE_BYTES_MIN, POOL_RULE, Session, dial, port, q
 const WINDOW_BYTES_MIN: usize = 1 << 20;
 
 /// The idle timeout of a program. Keep-alives go out well inside it, so only a
-/// session whose node is gone ends.
+/// session whose node is gone, or sent no hello, ends.
 const IDLE: Span = Span::from_nanos(30 * Span::SECOND.nanos());
 
 /// A program's sessions to nodes. It dials a node with no node key, so the node sees
