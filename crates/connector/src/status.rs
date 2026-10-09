@@ -713,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_status_staged_when_the_pool_has_no_block_now() {
+    fn check_pool_accepts_a_pool_with_no_block_now() {
         check_pool(&block::Error::Exhausted {
             requested: 128,
             available: 64,
