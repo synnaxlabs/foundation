@@ -72,14 +72,7 @@ fn node(start: &Start) -> Result<(), Failure> {
     let show = show.map_err(failed)?;
     let shards = os::shards().map_err(failed)?;
     let wall = os::wall().map_err(failed)?;
-    let mut disks = Vec::new();
-    let mut handles = Vec::new();
-    for core in 0..shards.cores().get() {
-        let (disk, handle) = os::files(&start.data, &threads, &format!("files-{core}"))
-            .map_err(|error| data(&start.data, error))?;
-        disks.push(disk);
-        handles.push(handle);
-    }
+    let (disks, handles) = disks(&start.data, &threads, shards.cores().get())?;
     let mut disks = disks.into_iter();
     let node = node::Node::start(node::Config {
         shards,
@@ -120,6 +113,22 @@ fn node(start: &Start) -> Result<(), Failure> {
     let ended = stop.map(drop).map_err(failed);
     drop(show);
     joined.and(closed.map_err(failed)).and(ended)
+}
+
+/// The disk of each of `cores` shards on the data directory `dir`, and the handle of
+/// its I/O thread.
+fn disks(
+    dir: &Path,
+    threads: &Threads,
+    cores: usize,
+) -> Result<(Vec<os::Disk>, Vec<env::thread::Handle>), Failure> {
+    let files =
+        (0..cores).map(|core| os::files(dir, threads, &format!("files-{core}")));
+    let opened: Result<Vec<_>, _> = files.collect();
+    Ok(opened
+        .map_err(|error| data(dir, error))?
+        .into_iter()
+        .unzip())
 }
 
 /// The network of the node.
