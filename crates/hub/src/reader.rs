@@ -1,6 +1,6 @@
 //! Reader sessions: which frames one gets, why one does not open, and the session.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::rc::Rc;
@@ -13,7 +13,7 @@ use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
 use types::name::Name;
 
-use crate::State;
+use crate::{Removal, State};
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
 /// the hub sizes it from the link.
@@ -203,7 +203,7 @@ pub(crate) struct Session {
     state: Rc<RefCell<State>>,
     key: ::home::reader::Key,
     /// The channel whose removal ended the session.
-    removed: Rc<Cell<Option<channel::Key>>>,
+    removed: Removal,
     /// The slots of the reader's channels.
     slots: Box<[channel::Slot]>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
@@ -232,7 +232,7 @@ impl Session {
         let credit = Credit {
             state: Rc::clone(state),
             key,
-            removed: Rc::clone(&session.removed),
+            removed: session.removed.clone(),
         };
         (session, credit)
     }
@@ -325,7 +325,7 @@ impl Session {
 pub(crate) struct Credit {
     state: Rc<RefCell<State>>,
     key: ::home::reader::complete::Key,
-    removed: Rc<Cell<Option<channel::Key>>>,
+    removed: Removal,
 }
 
 impl Credit {

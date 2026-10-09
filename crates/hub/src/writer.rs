@@ -1,6 +1,6 @@
 //! Writer sessions: what one opens with, why one does not open, and the session.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::State;
+use crate::{Removal, State};
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -82,7 +82,7 @@ pub struct Writer {
     state: Rc<RefCell<State>>,
     key: ::home::writer::Key,
     /// The channel whose removal ended the writer.
-    removed: Rc<Cell<Option<channel::Key>>>,
+    removed: Removal,
     set: Arc<KeySet>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
@@ -190,7 +190,8 @@ impl Writer {
     ///
     /// # Panics
     ///
-    /// If `frame` is not of [`Self::set`] and is not labeled resend.
+    /// If `frame` is not of [`Self::set`] and is not labeled resend, and no channel of
+    /// the writer is removed.
     pub fn write(
         &mut self,
         label: Label,

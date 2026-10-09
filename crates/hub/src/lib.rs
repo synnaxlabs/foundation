@@ -127,10 +127,10 @@ impl Hub {
         Self(state)
     }
 
-    /// Makes the channels of `definitions` the channels that sessions may name. It
-    /// skips each definition that is not a channel. A known channel whose key, name,
-    /// and definition stay keeps its sessions. Each other known channel is removed,
-    /// and each session on it ends at once: [`writer::Failure::Removed`],
+    /// Makes the channels of `definitions`, in any order, the channels that sessions
+    /// may name. It skips each definition that is not a channel. A known channel whose
+    /// key, name, and definition stay keeps its sessions. Each other known channel is
+    /// removed, and each session on it ends at once: [`writer::Failure::Removed`],
     /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. Then each new
     /// channel is defined. The home carries each new index at once, and stops
     /// carrying each index whose key is not an index of `definitions`.
@@ -250,13 +250,23 @@ fn checked<'d>(
 #[derive(Debug)]
 struct Sessions<K>(hash::Map<K, Open>);
 
-/// The channels of an open session, and the cell where the hub puts the first of
-/// them that it removes. The session reads the cell, so its check costs the same
-/// while other sessions end.
+/// The channels of an open session, and its removal.
 #[derive(Debug)]
 struct Open {
     keys: Box<[Key]>,
-    removed: Rc<Cell<Option<Key>>>,
+    removal: Removal,
+}
+
+/// The first channel of a session that the hub removed, which the session reads at
+/// each call. It reads no map, so its check costs the same while other sessions end.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Removal(Rc<Cell<Option<Key>>>);
+
+impl Removal {
+    /// The key of the removed channel, or `None` while each channel stays.
+    pub(crate) fn get(&self) -> Option<Key> {
+        self.0.get()
+    }
 }
 
 impl<K> Default for Sessions<K> {
@@ -265,18 +275,17 @@ impl<K> Default for Sessions<K> {
     }
 }
 
-impl<K: Copy + Eq + Hash> Sessions<K> {
+impl<K: Copy + Ord + Hash> Sessions<K> {
     /// Opens the session `key` on `keys`, so that a removal of one of them ends it.
-    /// Returns the cell that names the removed channel.
-    fn add(&mut self, key: K, keys: Box<[Key]>) -> Rc<Cell<Option<Key>>> {
-        let removed = Rc::default();
+    fn add(&mut self, key: K, keys: Box<[Key]>) -> Removal {
+        let removal = Removal::default();
         let open = Open {
             keys,
-            removed: Rc::clone(&removed),
+            removal: removal.clone(),
         };
         let added = self.0.insert(key, open);
         assert!(added.is_none(), "invariant: the home gives each key once");
-        removed
+        removal
     }
 
     /// Returns whether the session `key` was open, and makes it not open.
@@ -284,17 +293,20 @@ impl<K: Copy + Eq + Hash> Sessions<K> {
         self.0.remove(&key).is_some()
     }
 
-    /// Puts the first channel of `removed` in the cell of each session on one of them.
-    /// Returns their keys, to close.
+    /// Puts the first channel of `removed` in the removal of each session on one of
+    /// them. Returns their keys in order, to close.
     fn end(&self, removed: &hash::Set<Key>) -> Vec<K> {
-        self.0
+        let mut ended: Vec<K> = self
+            .0
             .iter()
             .filter_map(|(&key, open)| {
                 let first = open.keys.iter().find(|key| removed.contains(key));
-                open.removed.set(first.copied());
+                open.removal.0.set(first.copied());
                 first.map(|_| key)
             })
-            .collect()
+            .collect();
+        ended.sort_unstable();
+        ended
     }
 }
 
@@ -353,9 +365,7 @@ impl State {
         for key in self.writers.end(removed) {
             self.close_writer(key);
         }
-        let mut ended = self.readers.end(removed);
-        ended.sort_unstable();
-        for key in ended {
+        for key in self.readers.end(removed) {
             if let Some(waker) = self.close_reader(key) {
                 waker.wake();
             }
