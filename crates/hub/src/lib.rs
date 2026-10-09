@@ -307,9 +307,9 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
             .0
             .iter()
             .filter_map(|(&key, open)| {
-                let first = open.keys.iter().find(|key| removed.contains(key));
-                open.removal.0.set(first.copied());
-                first.map(|_| key)
+                let first = open.keys.iter().find(|key| removed.contains(key))?;
+                open.removal.0.set(Some(*first));
+                Some(key)
             })
             .collect();
         ended.sort_unstable();
