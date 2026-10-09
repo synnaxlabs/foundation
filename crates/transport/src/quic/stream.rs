@@ -7979,7 +7979,8 @@ mod tests {
         /// A `Latest` claim that waits for room in the budget waits in no turn. So
         /// when a late reader gives a burst of credit as the credit of `Complete`
         /// ends, each `Complete` stream that holds QUIC room writes the rest of its
-        /// message.
+        /// message. Each rest holds room in the send budget, so together they are at
+        /// most one window.
         #[test]
         fn complete_streams_go_ahead_of_a_held_latest_by_their_credit_and_a_message_each()
          {
@@ -7998,9 +7999,10 @@ mod tests {
                         let case =
                             format!("{streams} of {size} B, alone {alone}, lag {lag}");
                         assert!(credit <= NARROW, "{credit} of {NARROW}; {case}");
-                        let bound = credit + streams * size;
+                        let rests = (streams * size).min(NARROW);
+                        let bound = credit + rests;
                         assert!(ahead <= bound, "{ahead} of {bound}; {case}");
-                        let bound = NARROW + streams * size;
+                        let bound = NARROW + rests;
                         assert!(read <= bound, "{read} of {bound}; {case}");
                     }
                 });
