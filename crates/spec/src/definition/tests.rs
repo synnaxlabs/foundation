@@ -1544,6 +1544,22 @@ proptest! {
 }
 
 #[test]
+fn decodes_the_longest_exclusion_fuzz_input_that_allows_read() {
+    let empty =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/longest_exclusion");
+    let read = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/longest_exclusion_read"
+    );
+    let error = Error::Access {
+        at: empty.len() - 2,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(empty), Err(error));
+    let decoded = Definition::decode(read).expect("a policy that allows read");
+    assert_eq!(decoded.encode(), read);
+}
+
+#[test]
 fn decodes_the_retention_fuzz_inputs_to_the_retention_reader() {
     let valid = include_bytes!("../../../../oracles/fuzz/spec_definition/retention");
     let negative =
