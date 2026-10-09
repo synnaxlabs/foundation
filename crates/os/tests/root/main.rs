@@ -137,8 +137,7 @@ fn a_create_on_fragmented_free_space_frees_the_blocks_past_the_end() {
 fn a_listener_that_an_operator_aborts_drops_with_no_panic() {
     let listener = os::net().listen(&sockets::LISTEN).unwrap();
     let local = listener.local();
-    let filter = format!("sport = :{}", local.port());
-    check(sudo("ss").args(["-K", "-t", "-l", &filter]));
+    check(sudo("ss").args(["-K", "-t", "-l", "src", &local.to_string()]));
     let refused = std::net::TcpStream::connect(local).unwrap_err();
     assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
     drop(listener);

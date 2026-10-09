@@ -1,5 +1,6 @@
 //! A TCP listener whose registration fails while a copy of its socket is open, as a
-//! child holds it from its fork to its exec.
+//! child holds it from its fork to its exec. The test takes a copy of each descriptor
+//! of the process for a moment, so it runs in a test binary of its own.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
