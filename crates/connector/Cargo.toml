@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-sim = ["hyper/server"]
+sim = ["hyper/server", "hub/sim"]
 
 [dependencies]
 bytes.workspace = true
@@ -19,9 +19,12 @@ document = { path = "../document" }
 types = { path = "../types" }
 
 [dev-dependencies]
+codec = { path = "../codec" }
 counting = { path = "../counting" }
+hub = { path = "../hub", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
+spec = { path = "../spec" }
 
 [[test]]
 name = "alloc"

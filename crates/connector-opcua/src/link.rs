@@ -210,7 +210,7 @@ fn the_shim_ignores_only_the_unused_parameters_of_the_headers() {
     // `cc` reads C flags from the environment, and `-w` there hides each warning.
     if !crate::child::running() {
         let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
-        crate::child::run(name, None);
+        crate::child::run(name, &[]);
         return;
     }
     assert_eq!(
@@ -264,11 +264,7 @@ fn the_shim_check_ignores_the_environment_of_cc() {
 #[test]
 fn the_shim_check_uses_the_compiler_of_cc() {
     let name = "link::the_shim_ignores_only_the_unused_parameters_of_the_headers";
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", name])
-        .env("CC", "/missing/gcc")
-        .output()
-        .unwrap();
+    let output = crate::child::output(name, &[("CC", "/missing/gcc")]);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("No such file or directory"), "{stdout}");
 }
@@ -454,6 +450,16 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
         }
     }
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
+}
+
+/// `build.rs` sets `cfg(asan)` exactly when the address sanitizer instruments the C, so
+/// the tests of the poisoning in `alloc` cannot turn off unseen.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
+fn asan_is_set_when_the_c_calls_the_address_sanitizer() {
+    let undefined = symbols("--undefined-only");
+    let instrumented = undefined.iter().any(|name| name.starts_with("__asan_"));
+    assert_eq!(cfg!(asan), instrumented, "{undefined:?}");
 }
 
 /// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
