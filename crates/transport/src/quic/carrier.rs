@@ -415,7 +415,7 @@ impl Session {
     ///
     /// Why the session ended, as [`Session::closed`] gives it, and
     /// [`Error::Closed`] with `Code(0)` once the session dropped.
-    pub(crate) fn ping(&self) -> impl Future<Output = Result<(), Error>> + 'static {
+    pub(crate) fn ping(&self) -> impl Future<Output = Result<(), Error>> + use<> {
         let acks = self.with(|endpoint, clock, slot, _| {
             endpoint.ping(clock.now(), self.key);
             slot.acks
