@@ -14,6 +14,7 @@ mod identity;
 mod name;
 mod route;
 mod scope;
+mod sector;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the publish task waits on hub writer sessions")

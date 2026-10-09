@@ -2,15 +2,15 @@
 //!
 //! The file is 277 bytes: the tag, the length of the name in one byte, the name with
 //! zero bytes after it up to [`Name::MAX_BYTES`], and the CRC32C of those 273 bytes
-//! (little-endian). It fits one sector, which a crash keeps whole or old. A file with
-//! no bytes, or with 277 zero bytes, is a name that a crash kept from being written.
+//! (little-endian), in one sector ([`crate::sector`]). A file with no bytes, or with
+//! 277 zero bytes, is a name that a crash kept from being written.
 
 use std::path::Path;
 
-use env::files::{File, Files, Mode};
+use env::files::{Files, Mode};
 use types::name::Name;
 
-use crate::Error;
+use crate::{Error, sector};
 
 /// The name of the file.
 pub(crate) const FILE: &str = "name";
@@ -20,8 +20,6 @@ const TAG: &[u8; 17] = b"foundation/name/1";
 const BODY: usize = TAG.len() + 1 + Name::MAX_BYTES;
 /// The length of the file: the body and its CRC32C.
 pub(crate) const LEN: usize = BODY + 4;
-/// The pool of the file's two blocks.
-const POOL: block::Config = block::Config { budget: 4096 };
 
 /// The name in the file `name` of `files`, or `None` when no node wrote one. Opens
 /// the file to read only, so it makes nothing and waits for no lock.
@@ -38,7 +36,9 @@ pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
     };
     match file.len() {
         0 => Ok(None),
-        len if len == LEN as u64 => decode(&load(&file).await?),
+        len if len == LEN as u64 => {
+            decode(&sector::read(&file).await.map_err(Error::Directory)?)
+        }
         _ => Err(Error::Name),
     }
 }
@@ -53,15 +53,12 @@ pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
 /// that a node did not write, and [`Error::Directory`] for a file call that fails.
 /// Writes nothing over a name.
 pub(crate) async fn keep(files: &Files, name: &Name) -> Result<(), Error> {
-    let path = Path::new(FILE);
-    let file = files
-        .open(path, Mode::Create { len: LEN as u64 })
-        .await
-        .map_err(|error| match error {
-            env::files::Error::Length { .. } => Error::Name,
-            error => Error::Directory(error),
-        })?;
-    if let Some(stored) = decode(&load(&file).await?)?
+    let opened = sector::open(files, Path::new(FILE)).await;
+    let (file, bytes) = opened.map_err(|error| match error {
+        env::files::Error::Length { .. } => Error::Name,
+        error => Error::Directory(error),
+    })?;
+    if let Some(stored) = decode(&bytes)?
         && stored != *name
     {
         return Err(Error::Renamed {
@@ -69,24 +66,9 @@ pub(crate) async fn keep(files: &Files, name: &Name) -> Result<(), Error> {
             given: name.clone(),
         });
     }
-    let pool = block::Pool::heap(POOL);
-    let block = pool
-        .copy(&encode(name))
-        .expect("invariant: the pool holds a name");
-    file.write_at(0, &[block]).await.map_err(Error::Directory)?;
-    file.sync().await.map_err(Error::Directory)?;
-    files
-        .sync_dir(Path::new(""))
+    sector::write(files, &file, &encode(name))
         .await
         .map_err(Error::Directory)
-}
-
-/// The bytes of `file`, which has [`LEN`] bytes.
-async fn load(file: &File) -> Result<[u8; LEN], Error> {
-    let pool = block::Pool::heap(POOL);
-    let into = pool.alloc(LEN).expect("invariant: the pool holds a name");
-    let read = file.read_at(0, into).await.map_err(Error::Directory)?;
-    Ok((&*read).try_into().expect("invariant: a read fills it"))
 }
 
 /// The bytes of the file that holds `name`.
@@ -96,8 +78,7 @@ fn encode(name: &Name) -> [u8; LEN] {
     bytes[..TAG.len()].copy_from_slice(TAG);
     bytes[TAG.len()] = u8::try_from(name.len()).expect("invariant: a name fits a u8");
     bytes[TAG.len() + 1..][..name.len()].copy_from_slice(name);
-    let crc = crc32c::crc32c(&bytes[..BODY]);
-    bytes[BODY..].copy_from_slice(&crc.to_le_bytes());
+    sector::seal(&mut bytes);
     bytes
 }
 
