@@ -70,7 +70,10 @@
   datagram after the kernel refuses GSO; there is no `sendmmsg`. After `EIO` or
   `EINVAL` on a GSO send, `noq-udp` sends the first datagram alone. Only when it goes
   out does `noq-udp` store 1 as its `max_gso_segments`, and from then on each datagram
-  goes out alone; that is the only GSO flag. Each half has its own `dup` of the
+  goes out alone; that is the only GSO flag (`laptop.architect-2`, 2026-10-08 21:15
+  UTC, https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
+  Supersedes the store of 1 on `EIO` or `EINVAL` of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541. Each half has its own `dup` of the
   socket. The receiver registers for readable at its first poll, in a field of its
   driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
