@@ -38,7 +38,6 @@ use std::task::Poll;
 use document::diagnostic::Diagnostic;
 use document::{Document, Source};
 use env::thread::Handle;
-use types::ed25519::PrivateKey;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
 
@@ -86,7 +85,7 @@ pub struct Config<M> {
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
     /// `node`, and the `acceptance` lab, which writes the file first with
-    /// [`create_key`], give `Some`. Give the same value at each start: the node keeps
+    /// `create_key`, give `Some`. Give the same value at each start: the node keeps
     /// no copy of it, and until the mesh stores it (#1209), a log opened with another
     /// value checks proofs against the wrong voters and starts at another spec. A patch
     /// until the node keeps its region in its data directory when it founds or joins
@@ -166,7 +165,7 @@ impl Node {
     /// not there. The shards open their buffers one after another, in order of core.
     /// Once each buffer has opened, shard 0 reads the node's key and private key from
     /// the file `node.key` in the data directory, and makes the file at the first start
-    /// once it has mesh time, unless [`create_key`] made it, then opens the mesh of
+    /// once it has mesh time, unless `create_key` made it, then opens the mesh of
     /// [`Config::region`] when it has one, then serves the port and admits every peer
     /// that proves its key, until its transport or the mesh's group stops, which stops
     /// the node. Returns once each shard runs or one has failed to start. When the disk
@@ -384,18 +383,19 @@ impl Node {
 
 /// Makes the file `node.key` in `files`, the data directory of a node that has not
 /// started, with `key` and `private_key`, and makes it durable. Each start of the node
-/// then uses them. For tests and tools that must know a node's key before its first
-/// start; a node that starts with no file makes its own key.
+/// then uses them. For tests that must know a node's key before its first start; a
+/// node that starts with no file makes its own key.
 ///
 /// # Errors
 ///
 /// [`Error::Directory`] with [`env::files::Error::Exists`] when the file is there and
 /// holds a key, and [`Error::Directory`] for a file call that fails. It writes nothing
 /// over a key.
+#[cfg(feature = "sim")]
 pub async fn create_key(
     files: &env::files::Files,
     key: types::node::Key,
-    private_key: PrivateKey,
+    private_key: types::ed25519::PrivateKey,
 ) -> Result<(), Error> {
     identity::store(files, &identity::Identity { key, private_key }).await
 }

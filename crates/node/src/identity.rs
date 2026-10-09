@@ -5,7 +5,7 @@
 //! keeps whole or old, so a write never tears it. 68 zero bytes are a key that a crash
 //! kept from being written.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use env::files::{File, Files, Mode};
 use types::ed25519::PrivateKey;
@@ -77,11 +77,12 @@ pub(crate) async fn load(
 /// [`Error::Directory`] with [`env::files::Error::Exists`] when the file holds 68
 /// bytes that are not all zero, with [`env::files::Error::Length`] when it has another
 /// length that is not 0, and with the error of each other file call that fails.
+#[cfg(feature = "sim")]
 pub(crate) async fn store(files: &Files, identity: &Identity) -> Result<(), Error> {
     let pool = block::Pool::heap(POOL);
     let (file, bytes) = read(files, &pool).await.map_err(Error::Directory)?;
     if bytes != [0; LEN] {
-        let path = PathBuf::from(FILE);
+        let path = std::path::PathBuf::from(FILE);
         return Err(Error::Directory(env::files::Error::Exists { path }));
     }
     write(files, &file, &pool, identity)

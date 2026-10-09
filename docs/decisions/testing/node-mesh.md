@@ -95,6 +95,10 @@
   panics. No scenario adds a node after a run. Trigger: a scenario that does needs a new
   ruling on where the lab calls `create_key`. Trigger: when #1744 lands, the lab founds
   its region through the node, and `create_key` stays only if a tool still needs it.
+  Until a tool calls it, `create_key` is behind the `sim` feature (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6073816041).
+  Trigger: a tool that needs a node's key before its first start takes it out of
+  `sim`, with a new ruling.
   Lost: a second copy of the format in `acceptance`; a restart of each node and a read
   of its key from outside `node`; a form that gives back only the public key, as the lab
   signs each card with the private key. Decided by `laptop.architect-2` at
