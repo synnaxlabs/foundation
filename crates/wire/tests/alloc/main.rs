@@ -1,7 +1,6 @@
 //! The hub messages on a frame's path, and the body counters of client requests and
-//! blob chunks, make no heap allocation. This binary has no
-//! test harness: the count covers each thread, and a harness allocates on its own
-//! thread at any time.
+//! blob chunks, make no heap allocation. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
