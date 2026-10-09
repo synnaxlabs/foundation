@@ -1876,6 +1876,76 @@ fn a_complete_reader_ends_at_a_frame_past_the_grant_while_its_credit_waits() {
 }
 
 #[test]
+fn a_reader_whose_credit_waits_when_the_session_ends_sends_no_later_credit() {
+    const BODY: usize = 16_320;
+    const FIRST: usize = 40;
+    remote_sized(
+        146,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let (session, mut sender, mut receiver) = fake_open(&transport).await;
+            let mut second = session.accept().await.expect("a second stream");
+            for _ in 0..FIRST {
+                send_frame(&mut sender, BODY).await.expect("sends");
+            }
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            let stopped = loop {
+                if let Err(error) = send_frame(&mut sender, BODY).await {
+                    break error;
+                }
+            };
+            let malformed = Code(Refusal::Malformed.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: malformed });
+            // The session ended. Now the home takes the second reader's keys, so the
+            // session has room again.
+            loop {
+                let quiet = node.clock().sleep(Span::from_nanos(300_000_000));
+                match race(second.receiver.recv(), quiet).await {
+                    Ok(keys) => drop(keys.expect("a message").expect("open")),
+                    Err(()) => break,
+                }
+            }
+            steps.again.store(true, Ordering::Relaxed);
+            // The credit drops with its sender, which resets with code 0.
+            let got = receiver.recv().await;
+            assert_eq!(
+                got.map(|m| m.map(|b| b.to_vec())),
+                Err(transport::Error::Reset { code: Code(0) })
+            );
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            test.tasks.spawn(async move {
+                drop(hub.reader(&names, Mode::Complete).await);
+            });
+            // The 33rd take puts the credit on its way, and it waits for room.
+            for _ in 0..33 {
+                reader.next().await.expect("a frame");
+            }
+            until(&test.clock, &steps.again).await;
+            reader
+                .next()
+                .await
+                .expect("a frame that arrived before the end");
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            let (_, ended) = super::take_all(&mut reader).await;
+            let window = u64::try_from(WINDOW).expect("a u64");
+            assert_eq!(
+                ended,
+                Ended::Credit {
+                    limit_bytes: window
+                }
+            );
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+        },
+    );
+}
+
+#[test]
 fn a_complete_reader_whose_waiting_credit_fails_to_send_ends_at_a_frame_past_the_grant()
 {
     const BODY: usize = 16_320;

@@ -168,7 +168,9 @@ impl Remote {
         } = &mut *self;
         let next = poll_fn(|cx| {
             ready!(streak.poll(cx));
-            poll_credit(out, credit, limit, cx);
+            if queue.borrow().ended.is_none() {
+                poll_credit(out, credit, limit, cx);
+            }
             let polled = queue.borrow_mut().poll_take(cx);
             streak.count(&polled);
             polled
@@ -441,6 +443,7 @@ enum Out {
     Idle(Sender),
     /// A credit on its way, which owns the sender until the stream holds all of the
     /// credit. A dropped [`Remote::take`] never cuts it: a cut send resets the stream.
+    /// Once the session ended, nothing polls it, so it never reaches the home.
     Sending(Pin<Box<dyn Future<Output = Sent>>>),
 }
 
