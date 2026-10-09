@@ -45,7 +45,9 @@
   Amended by `laptop.architect` (2026-10-09T09:12:45Z,
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207; "the task
   of the remote reader", 2026-10-09T09:25:27Z,
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582). A remote
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582).
+  Supersedes the one more dial of
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101. A remote
   reader holds the state, so it counts as a session of the hub. Decided by
   `laptop.architect`: the region (2026-10-08T20:07:32Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), and no

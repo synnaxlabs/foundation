@@ -22,9 +22,9 @@ use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 use super::{Ended, Error, Mode, Streak, WINDOW};
 use crate::State;
 
-/// The opens of [`connect`]. The home's node runs one dial to this node at a time, so
-/// its session beats at most the session that was open and one that this node dialed
-/// before that session arrived.
+/// The most opens of one [`connect`]. The home's node runs one dial to this node at a
+/// time, so its session beats at most the session that was open and one that this node
+/// dialed before that session arrived.
 const TRIES: u32 = 3;
 
 /// A reader session on one stream to the home. A task opens the stream, takes each

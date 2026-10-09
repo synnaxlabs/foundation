@@ -122,8 +122,10 @@
   (2026-10-09T09:12:45Z,
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207; "the task
   of the remote reader", 2026-10-09T09:25:27Z,
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582). A
-  complete reader sends `Credit` once its grant is half a window (512 KiB) short of the
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582).
+  Supersedes the one more dial of
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101. A complete
+  reader sends `Credit` once its grant is half a window (512 KiB) short of the
   frames given back plus a window. A task on `hub::Config::tasks` takes each frame off
   the stream of a remote reader as it arrives, so the node takes each byte that it let
   the home send (STREAM WIRE), and an idle caller never holds the window of its session.
