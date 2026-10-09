@@ -78,3 +78,29 @@
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
   Supersedes item 3 of
   https://github.com/synnaxlabs/foundation/pull/1926#issuecomment-6066382854.
+  Changed by #1969: `Hub::define` takes a spec's definitions and skips each that is not
+  a channel (`laptop.architect`, 2026-10-08T18:49:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1969#issuecomment-6066796714).
+  Supersedes the argument of `Hub::define` in
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349.
+  Amended (2026-10-08T19:18:09Z, #340): the hub takes the region's mesh
+  (`hub::Config::mesh`, `None` for a node with no region), and `hub::Config::node` stays
+  the one source of this node's key. `define` never carries an index. A writer, a
+  reader, or an open that `Link::serve` gives waits until the mesh names a home for each
+  of its indexes. At this node, the first such session carries the index, once: a later
+  carry does nothing (`home::Shard::carry`), so the hub keeps no set of carried indexes
+  (`laptop.architect`, 2026-10-08T19:30:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067505377). With no
+  mesh, this node is the home of each index. No frame comes before a session, so nothing
+  waits on the carry. When the home is another node, `writer::Error::Remote` and
+  `reader::Error::Remote` give it, and `serve` stops the stream with `NOT_HOME`. A
+  stopped mesh gives `Mesh` with why it stopped (code `FAILED` in `serve`). Trigger:
+  4d-b of #340 removes `reader::Error::Remote` when the hub reads from another node.
+  Decided by `laptop.architect`: the mesh (2026-10-08T18:42:42Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536), the
+  split and `reader::Error::Remote` (2026-10-08T18:51:16Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273), and one
+  carry rule (2026-10-08T19:18:09Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
+  supersedes "`define` carries at once" in item 2 of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.

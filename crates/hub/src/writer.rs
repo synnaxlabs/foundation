@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::State;
+use crate::{Away, State};
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -39,6 +39,14 @@ pub enum Error {
     Home(::home::writer::Error),
     /// The writer names no channel.
     Empty,
+    /// The home of an index of the writer is `home`, another node. A writer writes
+    /// only at the home of each of its indexes.
+    Remote {
+        /// The home.
+        home: types::node::Key,
+    },
+    /// The mesh stopped, so the home of an index is not known.
+    Mesh(mesh::Stopped),
 }
 
 impl fmt::Display for Error {
@@ -47,11 +55,26 @@ impl fmt::Display for Error {
             Self::Unknown(name) => write!(f, "no channel is named {name}"),
             Self::Home(error) => error.fmt(f),
             Self::Empty => f.write_str("a writer names at least one channel"),
+            Self::Remote { home } => write!(
+                f,
+                "the home of an index of the writer is node {home}, and a writer \
+                 writes only at this node"
+            ),
+            Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(home) => Self::Remote { home },
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
 
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
@@ -65,7 +88,7 @@ pub struct Writer {
 
 impl Writer {
     /// Opens a writer on `config.channels` and their indexes.
-    pub(crate) fn open(
+    pub(crate) async fn open(
         state: &Rc<RefCell<State>>,
         config: Config,
     ) -> Result<Self, Error> {
@@ -78,24 +101,30 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
-        let mut borrowed = state.borrow_mut();
-        let borrowed = &mut *borrowed;
         let mut groups: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = Vec::new();
-        let mut positions = hash::Map::default();
-        let mut data = hash::Set::default();
-        for name in &channels {
-            let channel = borrowed
-                .channels
-                .get(name)
-                .ok_or_else(|| Error::Unknown(name.clone()))?;
-            let at = *positions.entry(channel.index).or_insert_with(|| {
-                groups.push((channel.index, Vec::new()));
-                groups.len() - 1
-            });
-            if channel.key != channel.index && data.insert(channel.key) {
-                groups[at].1.push((channel.key, channel.data_type));
+        {
+            let borrowed = state.borrow();
+            let mut positions = hash::Map::default();
+            let mut data = hash::Set::default();
+            for name in &channels {
+                let channel = borrowed
+                    .channels
+                    .get(name)
+                    .ok_or_else(|| Error::Unknown(name.clone()))?;
+                let at = *positions.entry(channel.index).or_insert_with(|| {
+                    groups.push((channel.index, Vec::new()));
+                    groups.len() - 1
+                });
+                if channel.key != channel.index && data.insert(channel.key) {
+                    groups[at].1.push((channel.key, channel.data_type));
+                }
             }
         }
+        for (index, _) in &groups {
+            crate::carry(state, *index).await?;
+        }
+        let mut borrowed = state.borrow_mut();
+        let borrowed = &mut *borrowed;
         let groups: Vec<_> = groups
             .iter()
             .map(|(index, data)| Group {
