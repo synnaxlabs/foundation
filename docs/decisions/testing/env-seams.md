@@ -273,12 +273,13 @@
   (https://github.com/synnaxlabs/foundation/issues/1940). The Linux text:
   `laptop.director`, 2026-10-09T01:51:29Z
   (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
-  Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on
-  exec. On Linux, the call that opens the socket sets that and non-blocking, so a child
-  that another thread spawns never holds it. macOS has no such flag, and Tokio sets it
-  in a second call on an accepted stream too, so on macOS that child may hold the socket
-  and its port, as the doc of `os::net()` says. A Foundation node spawns no process, so
-  only tests see it, and CI runs on Linux. Lost: `POSIX_SPAWN_CLOEXEC_DEFAULT` on the
-  spawn side, which std does not set, and which needs a spawn seam and `unsafe` for
-  tests only. Decided by `laptop.architect-2` (2026-10-08T21:01:28Z:
-  https://github.com/synnaxlabs/foundation/issues/2000).
+  Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on exec.
+  On Linux, the call that opens the socket sets that and non-blocking, so a child that
+  another thread spawns never holds it. macOS has no such flag, and Tokio sets it in a
+  second call on an accepted stream too, so on macOS that child may hold the socket and
+  its port, as the doc of `os::net()` says. On macOS, a child that another thread spawns
+  during a lookup may also hold the sockets that the C library opens for it. A
+  Foundation node spawns no process, so only tests see it, and CI runs on Linux. Lost:
+  `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn side, which std does not set, and which
+  needs a spawn seam and `unsafe` for tests only. Decided by `laptop.architect-2`
+  (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000).
