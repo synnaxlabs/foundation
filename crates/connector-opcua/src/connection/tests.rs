@@ -16,7 +16,7 @@ use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
 
-use super::{LINGER, MESSAGES, Manager, OPTIONS, READ_BYTES};
+use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
@@ -30,9 +30,11 @@ const PORT: u16 = 4840;
 /// The delay of a link of the sim.
 const DELAY: Span = Span::from_nanos(250_000);
 
-/// Gives `count` sends of `length` bytes, each of other bytes.
-fn sends(count: u8, length: usize) -> Vec<Vec<u8>> {
-    (0..count)
+/// Gives `count` sends of `length` bytes, each of other bytes than the 255 before it.
+fn sends(count: usize, length: usize) -> Vec<Vec<u8>> {
+    (0..=u8::MAX)
+        .cycle()
+        .take(count)
         .map(|k| (0..=u8::MAX).cycle().take(length).map(|b| b ^ k).collect())
         .collect()
 }
@@ -224,10 +226,10 @@ impl Side {
     async fn drive(&self, span: Span) -> usize {
         let runs = Cell::new(0);
         let mut end = self.clock.sleep(span);
-        let mut drive = pin!(self.manager.drive(|| {
+        let mut drive = pin!(self.manager.drive(|_| {
             runs.set(runs.get() + 1);
             self.run();
-            None::<Infallible>
+            Poll::<Infallible>::Pending
         }));
         poll_fn(|cx| {
             if let Poll::Ready(never) = drive.as_mut().poll(cx) {
@@ -810,13 +812,81 @@ fn a_drive_ends_with_the_first_value_of_run() {
             assert_eq!(side.connect(remote), Status::GOOD);
             let at = side
                 .manager
-                .drive(|| {
+                .drive(|_| {
                     side.run();
-                    (side.calls().len() == 2).then(|| side.clock.now())
+                    if side.calls().len() == 2 {
+                        Poll::Ready(side.clock.now())
+                    } else {
+                        Poll::Pending
+                    }
                 })
                 .await;
             assert_eq!(at, start + DELAY + DELAY);
             assert_eq!(side.states(), [ffi::OPENING, ffi::ESTABLISHED]);
+        })
+        .expect("the run ends");
+}
+
+/// A send from the run that gives the value of a drive goes out before the drive
+/// ends, with no drive after it for 1 s.
+#[test]
+fn a_send_from_the_run_that_ends_a_drive_goes_out() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let due = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            let due = side.clock.now() + Span::from_nanos(10_000_000);
+            let later = Later {
+                side: &side,
+                action: Action::Send,
+                remote,
+            };
+            side.add_timer(act, 10.0, ptr::from_ref(&later).cast_mut().cast());
+            side.manager
+                .drive(|_| {
+                    side.run();
+                    if side.clock.now() >= due {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            side.clock.sleep(Span::SECOND).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            due
+        })
+        .expect("the run ends");
+    let reads = reads.lock().expect("no panic under the lock");
+    let parts: Vec<_> = reads.parts.iter().map(|(at, b)| (*at, &b[..])).collect();
+    assert_eq!(parts, [(due + DELAY, &b"late"[..])]);
+}
+
+/// `run` polls its own source with the context it gets, and the wake of that source
+/// runs it again, with no timer of the loop.
+#[test]
+fn a_source_that_run_polls_wakes_the_drive() {
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            let start = side.clock.now();
+            let mut source = side.clock.sleep(Span::SECOND);
+            let at = side
+                .manager
+                .drive(|cx| {
+                    side.run();
+                    Pin::new(&mut source).poll(cx).map(|()| side.clock.now())
+                })
+                .await;
+            assert_eq!(at, start + Span::SECOND);
         })
         .expect("the run ends");
 }
@@ -944,9 +1014,13 @@ fn a_closing_with_no_stream_drops_the_connection_at_once() {
             assert_eq!(side.connect(remote), Status::GOOD);
             assert_eq!(side.close(1), Status::GOOD);
             let mut end = side.clock.sleep(Span::SECOND);
-            let mut drive = pin!(side.manager.drive(|| {
+            let mut drive = pin!(side.manager.drive(|_| {
                 side.run();
-                (side.connections() == 0).then(|| side.clock.now())
+                if side.connections() == 0 {
+                    Poll::Ready(side.clock.now())
+                } else {
+                    Poll::Pending
+                }
             }));
             let at = poll_fn(|cx| {
                 if Pin::new(&mut end).poll(cx).is_ready() {
@@ -1174,41 +1248,6 @@ fn a_close_writes_each_send_to_a_peer_that_writes_as_it_reads() {
     assert_eq!(reads.bytes(), sends.concat());
 }
 
-/// The chunks of one message come with no pass between, so a message of more
-/// chunks than [`MESSAGES`] goes out whole.
-#[test]
-fn a_message_of_more_chunks_than_the_bound_goes_out() {
-    let mut network = Network::new();
-    let reads = network.serve(None);
-    let remote = network.remote();
-    let mut chunks = sends(u8::try_from(MESSAGES).unwrap() + 1, 1 << 16);
-    let (last, rest) = chunks.split_last_mut().unwrap();
-    for chunk in rest {
-        chunk[3] = b'C';
-    }
-    last[3] = b'F';
-    let written = chunks.clone();
-    let states = network
-        .sim
-        .run_on(&network.local.clone(), move |node, _| async move {
-            let side = Side::new(&node);
-            assert_eq!(side.connect(remote), Status::GOOD);
-            side.drive(Span::SECOND).await;
-            for chunk in &written {
-                assert_eq!(side.send(1, chunk), Status::GOOD);
-            }
-            side.drive(Span::SECOND).await;
-            assert_eq!(side.close(1), Status::GOOD);
-            side.drive(Span::SECOND).await;
-            side.states()
-        })
-        .expect("the run ends");
-    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
-    let reads = reads.lock().expect("no panic under the lock");
-    assert_eq!(reads.error, None);
-    assert_eq!(reads.bytes(), chunks.concat());
-}
-
 /// The peer reads nothing until 12 s, and the stream closes at 1 s and 6 s, when
 /// `child::running()`.
 #[test]
@@ -1262,8 +1301,8 @@ fn lingers() {
 fn a_close_drops_a_stream_that_takes_no_bytes_after_it_lingers() {
     assert_eq!(
         stderr("lingers"),
-        "connector-opcua: open62541 warning: connection 1: the close failed: \
-         10.0.0.2:4840 did not answer in time\n"
+        "connector-opcua: open62541 warning: connection 1: the close took 10s, so it \
+         drops the stream\n"
     );
 }
 
@@ -1275,8 +1314,8 @@ fn a_second_drive_of_a_manager_panics() {
         .sim
         .run_on(&network.local.clone(), move |node, _| async move {
             let side = Side::new(&node);
-            let mut first = pin!(side.manager.drive(|| None::<Infallible>));
-            let mut second = pin!(side.manager.drive(|| None::<Infallible>));
+            let mut first = pin!(side.manager.drive(|_| Poll::<Infallible>::Pending));
+            let mut second = pin!(side.manager.drive(|_| Poll::<Infallible>::Pending));
             poll_fn(|cx| {
                 assert!(first.as_mut().poll(cx).is_pending());
                 assert!(second.as_mut().poll(cx).is_pending());
@@ -1371,7 +1410,7 @@ fn a_reset_of_a_closed_connection_drops_it_before_it_lingers() {
     );
 }
 
-/// Sends one more message than [`MESSAGES`] with no poll between, when `child::running()`.
+/// Sends one more than [`SENDS`] with no poll between, when `child::running()`.
 #[test]
 fn send_past_the_bound() {
     if !child::running() {
@@ -1380,7 +1419,7 @@ fn send_past_the_bound() {
     let mut network = Network::new();
     let reads = network.serve(None);
     let remote = network.remote();
-    let sends = sends(u8::try_from(MESSAGES).unwrap(), 100);
+    let sends = sends(SENDS, 100);
     let written = sends.clone();
     let states = network
         .sim
@@ -1407,7 +1446,7 @@ fn send_past_the_bound() {
 fn a_send_past_the_bound_closes_the_connection_with_a_warning() {
     assert_eq!(
         stderr("send_past_the_bound"),
-        "connector-opcua: open62541 warning: connection 1: 16 messages wait, so it \
+        "connector-opcua: open62541 warning: connection 1: 256 sends wait, so it \
          closes\n"
     );
 }
