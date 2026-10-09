@@ -1,6 +1,16 @@
 //! Implements the `env` seams on the real operating system: monotonic and wall clocks,
 //! files, randomness, and threads, and the memory of block pools. The only crate
 //! allowed to call them.
+//!
+//! # Panics in shards and threads
+//!
+//! A panic ends its shard or dedicated thread only where panics unwind, as in tests. A
+//! release build aborts the process at a panic. Tokio catches a panic in the poll or
+//! the drop of a task that code spawns with `tokio::spawn`, or on a shard with
+//! `tokio::task::spawn_local`, not through [`env::tasks::Tasks`], and the shard or
+//! thread runs on. Tokio drops such a task during the unwind of a panic in its poll, so
+//! a panic in that drop aborts the process. A panic in the drop of the payload of a
+//! panic can escape Tokio's catches and end the shard or thread.
 
 use std::fmt;
 use std::path::Path;
@@ -81,13 +91,8 @@ pub fn entropy() -> env::entropy::Entropy {
 /// core `i` of [`env::shards::Config::core`] pins to the `i`-th CPU of the set. Only
 /// Linux can pin: elsewhere [`env::shards::Shards::pinnable`] is `false`.
 ///
-/// A panic ends the shard only where panics unwind, as in tests. A release build
-/// aborts the process at a panic. Tokio catches a panic in the poll or the drop of a
-/// task that code spawns with `tokio::spawn` or `tokio::task::spawn_local`, not
-/// through [`env::tasks::Tasks`], and the shard runs on. Tokio drops such a task
-/// during the unwind of a panic in its poll, so a panic in that drop aborts the
-/// process. A panic in the drop of the payload of a panic can escape Tokio's catches
-/// and end the shard.
+/// A panic ends a shard as the crate doc states
+/// ([panics](crate#panics-in-shards-and-threads)).
 ///
 /// # Errors
 ///
@@ -102,14 +107,9 @@ pub fn shards() -> Result<env::shards::Shards, Error> {
 /// CPU of the affinity set, whatever thread starts it.
 ///
 /// The body runs in the context of the runtime but outside its `block_on`, so it may
-/// start and block on a Tokio runtime of its own. A panic of a body, in its call, its
-/// poll, or its drop, makes its join give [`env::thread::Panicked`], where panics
-/// unwind, but a panic in a drop during the unwind of a panic aborts the process.
-/// Tokio catches a panic in the poll or the drop of a task that the body spawns with
-/// `tokio::spawn` or `tokio::task::spawn_local`, and the thread runs on. Tokio drops
-/// such a task during the unwind of a panic in its poll, so a panic in that drop
-/// aborts the process. A panic in the drop of the payload of a panic can escape
-/// Tokio's catches and end the thread.
+/// start and block on a Tokio runtime of its own. A panic in the call, the poll, or the
+/// drop of a body ends its thread as the crate doc states
+/// ([panics](crate#panics-in-shards-and-threads)).
 ///
 /// # Errors
 ///
