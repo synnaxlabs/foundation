@@ -9,6 +9,3 @@ publish = false
 [dev-dependencies]
 me = { package = "p", path = "." }
 up = { package = "p", version = "1" }
-
-[patch.crates-io]
-p = { path = "../../patches/p" }

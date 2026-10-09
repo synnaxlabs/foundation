@@ -233,8 +233,8 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// that the `root` graph does not build, and for each edge of the `fuzz` graph that
 /// resolves a requirement on crates.io, which a copy that the `root` graph builds
 /// meets, to another package. Cargo applies a patch to each such requirement. It fails
-/// on an edge to a package with the name of a copy, not a copy, that no requirement
-/// resolves.
+/// on an edge to a package with the name of a copy that no requirement resolves, when
+/// the package is not a copy or the edge is of a package with an edge to itself.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
@@ -265,29 +265,26 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             {
                 continue;
             }
-            for requirement in
+            for (requirement, parsed) in
                 dependent.requirements(dependency, edge, edges, &packages)?
             {
                 if requirement["source"].as_str() != Some(CRATES_IO) {
                     continue;
                 }
-                let text = field::text(requirement, "req")?;
-                let parsed = VersionReq::parse(text).map_err(|error| {
-                    format!(
-                        "`{}` needs `{}` `{text}`: {error}",
-                        dependent.id, dependency.name
-                    )
-                })?;
                 let Some((copy, _)) = built.iter().find(|(copy, version)| {
                     copy.name == dependency.name && parsed.matches(version)
                 }) else {
                     continue;
                 };
                 problems.push(format!(
-                    "fuzz/Cargo.toml builds `{}` `{text}` of `{}` from `{}`, not from \
+                    "fuzz/Cargo.toml builds `{}` `{}` of `{}` from `{}`, not from \
                      the copy `{}` that meets it. Give fuzz/Cargo.toml the \
                      [patch.crates-io] table of the root Cargo.toml.",
-                    dependency.name, dependent.id, dependency.manifest, copy.manifest
+                    dependency.name,
+                    requirement["req"].as_str().unwrap_or_default(),
+                    dependent.id,
+                    dependency.manifest,
+                    copy.manifest
                 ));
                 break;
             }
@@ -341,20 +338,22 @@ impl<'a> Package<'a> {
     }
 
     /// The requirements of the package that `edge` of its node in the resolve, to
-    /// `dependency`, resolves: those on `dependency` under the name of the edge, of a
-    /// kind and target of the edge. `edges` are the edges of the node, and `packages`
-    /// the packages of the graph. Cargo names an edge from a package to itself by the
-    /// lib target, whatever the rename, so such an edge resolves each requirement on
-    /// the package, of a kind and target of the edge, that no other edge resolves. It
-    /// fails when none is.
+    /// `dependency`, resolves, each with its version requirement: those on
+    /// `dependency` under the name of the edge, of a kind and target of the edge, that
+    /// the version of `dependency` meets. `edges` are the edges of the node, and
+    /// `packages` the packages of the graph. Cargo names an edge from a package to
+    /// itself by the lib target, whatever the rename, so such an edge resolves each
+    /// such requirement that no other edge resolves. It fails when none is, or on a
+    /// version requirement that does not parse.
     fn requirements(
         &self,
         dependency: &Package<'_>,
         edge: &Value,
         edges: &[Value],
         packages: &[Package<'_>],
-    ) -> Result<Vec<&'a Value>, String> {
+    ) -> Result<Vec<(&'a Value, VersionReq)>, String> {
         let name = field::text(edge, "name")?;
+        let version = dependency.release()?;
         let kinds = field::list(edge, "dep_kinds")?;
         let mut taken = Vec::new();
         if dependency.id == self.id {
@@ -371,9 +370,9 @@ impl<'a> Package<'a> {
                 continue;
             }
             let named = match requirement["rename"].as_str() {
-                _ if dependency.id == self.id => {
-                    !taken.iter().any(|other| std::ptr::eq(*other, requirement))
-                }
+                _ if dependency.id == self.id => !taken
+                    .iter()
+                    .any(|(other, _)| std::ptr::eq(*other, requirement)),
                 Some(rename) => rename.replace('-', "_") == name,
                 None => dependency.lib()? == name,
             };
@@ -381,8 +380,20 @@ impl<'a> Package<'a> {
                 kind["kind"] == requirement["kind"]
                     && kind["target"] == requirement["target"]
             });
-            if named && kind {
-                resolved.push(requirement);
+            if !named || !kind {
+                continue;
+            }
+            let text = field::text(requirement, "req")?;
+            let parsed = VersionReq::parse(text).map_err(|error| {
+                format!(
+                    "`{}` needs `{}` `{text}`: {error}",
+                    self.id, dependency.name
+                )
+            })?;
+            // Cargo writes a requirement with no version as `*`, which meets a
+            // pre-release too.
+            if parsed == VersionReq::STAR || parsed.matches(&version) {
+                resolved.push((requirement, parsed));
             }
         }
         if resolved.is_empty() {
@@ -702,18 +713,40 @@ mod tests {
         assert_eq!(patched("selfname"), Ok(Vec::new()));
     }
 
+    /// The problem of the requirement `^1` of `p` 1.4.0, the case `case` of the
+    /// fixture `patched`, that resolves to the package itself.
+    fn itself(case: &str) -> String {
+        let root = crate::fixture().join("patched");
+        let case = root.join("cases").join(case);
+        format!(
+            "fuzz/Cargo.toml builds `p` `^1` of `path+file://{0}#p@1.4.0` from \
+             `{0}/Cargo.toml`, not from the copy `{1}/patches/p/Cargo.toml` that \
+             meets it. Give fuzz/Cargo.toml the [patch.crates-io] table of the root \
+             Cargo.toml.",
+            case.display(),
+            root.display()
+        )
+    }
+
     #[test]
     fn refuses_a_self_edge_that_a_patch_resolves_for_a_requirement_the_copy_meets() {
-        let case = crate::fixture().join("patched/cases/selfpatch");
+        assert_eq!(patched("selfpatch"), Ok(vec![itself("selfpatch")]));
+    }
+
+    #[test]
+    fn refuses_a_self_edge_beside_an_edge_of_the_same_name_kind_and_target() {
+        assert_eq!(patched("selfcfg"), Ok(vec![itself("selfcfg")]));
+    }
+
+    #[test]
+    fn refuses_a_release_beside_a_self_edge_whose_version_meets_its_requirement() {
+        let case = crate::fixture().join("patched/cases/selfrelease");
         assert_eq!(
-            patched("selfpatch"),
-            Ok(vec![format!(
-                "fuzz/Cargo.toml builds `p` `^1` of `path+file://{0}#p@1.4.0` from \
-                 `{0}/Cargo.toml`, not from the copy `{1}/patches/p/Cargo.toml` \
-                 that meets it. Give fuzz/Cargo.toml the [patch.crates-io] table of \
-                 the root Cargo.toml.",
-                case.display(),
-                crate::fixture().join("patched").display()
+            patched("selfrelease"),
+            Ok(vec![unmet(
+                "^1",
+                &format!("path+file://{}#p@1.4.0", case.display()),
+                "1.5.0"
             )])
         );
     }
@@ -896,6 +929,44 @@ mod tests {
     fn names_an_edge_that_no_requirement_names() {
         let fuzz = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
         assert_eq!(unpatched(&root(), &fuzz), Err(unresolved(&id("1.3.0"))));
+    }
+
+    /// `noq-proto` `version` of the `fuzz` workspace, with a requirement on itself
+    /// with a path and no version.
+    fn own(version: &str) -> Value {
+        let id = format!("path+file:///w/fuzz#noq-proto@{version}");
+        let mut own = package("noq-proto", &id, "/w/fuzz/Cargo.toml");
+        own = needs(own, "noq-proto", "*");
+        own["dependencies"][0]["source"] = Value::Null;
+        own
+    }
+
+    #[test]
+    fn names_an_edge_to_a_copy_beside_a_self_edge_that_no_requirement_names() {
+        let me = "path+file:///w/fuzz#noq-proto@9.0.0";
+        let own = package("noq-proto", me, "/w/fuzz/Cargo.toml");
+        let fuzz = fuzz(&[copy(), own], &[(me, PATCHED), (me, me)]);
+        assert_eq!(
+            unpatched(&root(), &fuzz),
+            Err(format!(
+                "`{me}` has no requirement that its edge `noq_proto` to `{PATCHED}` \
+                 resolves"
+            ))
+        );
+    }
+
+    #[test]
+    fn passes_an_edge_to_another_name_beside_a_self_edge() {
+        let me = "path+file:///w/fuzz#noq-proto@9.0.0";
+        let fuzz = fuzz(&[own("9.0.0"), crc()], &[(me, me), (me, CRC)]);
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn pairs_a_requirement_with_no_version_with_a_pre_release() {
+        let me = "path+file:///w/fuzz#noq-proto@9.0.0-dev";
+        let fuzz = fuzz(&[own("9.0.0-dev")], &[(me, me)]);
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
     }
 
     #[test]

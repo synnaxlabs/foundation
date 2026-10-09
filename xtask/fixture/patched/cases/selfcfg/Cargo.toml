@@ -6,9 +6,11 @@ publish = false
 
 [workspace]
 
-[dev-dependencies]
-me = { package = "p", path = "." }
+[target.'cfg(unix)'.dev-dependencies]
 up = { package = "p", version = "1" }
 
+[target.'cfg( unix )'.dev-dependencies]
+up = { package = "p", version = "0.9" }
+
 [patch.crates-io]
-p = { path = "../../patches/p" }
+p = { path = "." }
