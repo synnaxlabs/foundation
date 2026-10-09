@@ -606,8 +606,8 @@ struct Shard {
 
 impl Shard {
     /// Opens the ring. Gives the slot of each index of the build, then each other
-    /// slot up to that of `SPARE`: an edit can change the index of an entry. An edit
-    /// that writes `SPARE` hides the slots after it.
+    /// slot up to a new data slot of `SPARE`, which comes after each slot the open
+    /// made: an edit can change the index of an entry.
     async fn open(&self) -> std::result::Result<(Buffer, Vec<Slot>), Error> {
         let mut table = Slots::new();
         let config = Config {
