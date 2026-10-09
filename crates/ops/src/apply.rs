@@ -1,10 +1,12 @@
 //! Applies a plan file to the spec of the region.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use types::channel;
+use types::name::Name;
 
 use crate::error::{self, Error, Problem};
 use crate::front_end;
@@ -16,11 +18,14 @@ mod tests;
 
 /// Applies the plan in `bytes`, read from the plan file at `path`, to the spec of
 /// `mesh`. A new channel gets its key from `key`, as
-/// [`config::plan::Plan::definitions`] states.
+/// [`config::plan::Plan::definitions`] states. `members` and `kinds` are the names of
+/// the members and the connector kinds of the node that applies, read at the apply.
 ///
 /// # Errors
 ///
-/// - [`Error::Config`] with `ops.path-not-utf8` when `path` is not UTF-8.
+/// - [`Error::Config`] with `ops.path-not-utf8` when `path` is not UTF-8, or with each
+///   problem of [`config::plan::check`] on the definitions after the plan, with no
+///   place.
 /// - [`Error::Plan`] when `bytes` are not a plan, or when the plan holds a change that
 ///   `plan` does not make from the spec at its base, such as one at a reserved label.
 /// - [`Error::Behind`] when the node does not use the newest spec.
@@ -36,6 +41,8 @@ pub(crate) async fn apply(
     path: &Path,
     bytes: &[u8],
     mesh: &mesh::Mesh,
+    members: &BTreeSet<Name>,
+    kinds: &connector::kind::Table,
     key: impl FnMut() -> channel::Key,
 ) -> Result<Applied, Error> {
     let file = path.to_str().ok_or_else(|| {
@@ -56,6 +63,10 @@ pub(crate) async fn apply(
         pointer
     } else {
         let definitions = planned.definitions(&applied, key).map_err(Error::Plan)?;
+        config::plan::check(&definitions, members, kinds).map_err(|diagnostics| {
+            let problems = diagnostics.into_iter().map(|d| Problem::of(d, &[]));
+            Error::Config(problems.collect())
+        })?;
         mesh.apply(planned.base, definitions, planned.homes)
             .await
             .map_err(|error| match error {

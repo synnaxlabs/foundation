@@ -61,8 +61,14 @@
   status 1, fix `Plan again`. Each other error of `Mesh::apply` is `ops.apply`, status
   1, with its `Display` as the message and the fix `Fix the cause in the message, then
   plan and apply again`. There is no `ops.reserved-change`: `Plan::definitions` refuses
-  a change at a reserved label (FIRST ADMIN). `ops.behind` and the `ops.apply` fix
-  decided by `laptop.architect-2` (2026-10-08T23:51:37Z, items 1 and 2 of
+  a change at a reserved label (FIRST ADMIN). After `definitions`, each problem of
+  `config::plan::check` is a `Config` problem with its own code and no place, status 2
+  (PLAN FILE): plan
+  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071877567, approved
+  by `laptop.architect-2` (2026-10-09T00:48:39Z,
+  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
+  `ops.behind` and the `ops.apply` fix decided by `laptop.architect-2`
+  (2026-10-08T23:51:37Z, items 1 and 2 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913). The
   order and the codes `ops.stale-plan` and `ops.apply` are steps 3 and 4 of the plan
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586, approved

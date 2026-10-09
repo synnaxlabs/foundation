@@ -79,7 +79,7 @@
   `config.writer-nodes`, and `config.unknown-node`. #2013 PR 2 makes
   `spec::access::Policy::new` refuse an empty `allow`, so `Plan::decode` refuses it, and
   adds `config.duplicate-name`, `config.subject-is-connector`, and `config.private-key`
-  to `check`. #2013 PR 3 makes apply call it after `definitions` and before
+  to `check`. The `ops` apply calls it after `definitions` and before
   `Mesh::apply`, with the members and the kind table of the node that applies, as both
   can change after `plan`. Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
   (https://github.com/synnaxlabs/foundation/issues/2013). The rules are in `config`
