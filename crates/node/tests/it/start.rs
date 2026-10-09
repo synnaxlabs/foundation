@@ -29,7 +29,7 @@ fn a_node_prints_that_it_runs_as_json() {
         ended(&rig.stop()),
         (
             Some(0),
-            "{\"data\":\"foundation-data\",\"name\":\"edge\"}\n",
+            "{\"name\":\"edge\",\"data\":\"foundation-data\"}\n",
             ""
         )
     );
@@ -105,7 +105,7 @@ fn a_name_file_that_holds_no_name_fails() {
             "",
             "error[node.name]: the file `name` in the data directory foundation-data \
              is not a node name\n\
-             fix: Restore it from a backup of this node\n"
+             fix: Remove it, and start the node with its name\n"
         )
     );
 }

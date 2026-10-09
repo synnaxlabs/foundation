@@ -171,7 +171,7 @@ fn failure(start: &Start, error: &node::Error) -> Failure {
         node::Error::Name => (
             NAME,
             format!("the file `name` in the data directory {data} is not a node name"),
-            "Restore it from a backup of this node".to_owned(),
+            "Remove it, and start the node with its name".to_owned(),
         ),
         error => return failed(error),
     };
