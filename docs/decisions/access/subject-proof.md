@@ -26,13 +26,13 @@
   program connected to it, else the node whose transport session forwarded it. A hello
   is live at a node while the latest mesh time is before `Admitted::ends`: the earlier
   of `expires` and `proof::CAP` (15 minutes) past the latest mesh time at its admission.
-  Lost: `access` decodes the signed bytes of the
-  hello itself (design B), because `access` then owns a decoder of outside input and the
-  hello's wire form, which HUB WIRE gives to `wire`; a free
-  `verify` of any `&Hello`, which accepts a key that the program picked when a caller
-  skips `admit`; and `Error::Connection`, which the signature makes needless. `admit`
-  does not check `nonce`: the node that `via` names checks that it is the challenge
-  that it sent (#1748; `laptop.architect`, 2026-10-08T08:10:33Z,
+  Lost: `access` decodes the signed bytes of the hello itself (design B), because
+  `access` then owns a decoder of outside input and the hello's wire form, which HUB
+  WIRE gives to `wire`; a free `verify` of any `&Hello`, which accepts a key that the
+  program picked when a caller skips `admit`; and `Error::Connection`, which the
+  signature makes needless. `admit` does not check `nonce`: the node that `via` names
+  checks that it is the challenge that it sent (#1748; `laptop.architect`,
+  2026-10-08T08:10:33Z,
   https://github.com/synnaxlabs/foundation/pull/1834#issuecomment-6055629911). A
   hosted proof waits on #1832. Decided by `laptop.architect` at
   2026-10-08T07:35:46Z
