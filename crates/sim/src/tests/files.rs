@@ -1762,6 +1762,58 @@ fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle() {
     }
 }
 
+/// What a write open of `a` gives when its node pauses while the open and a
+/// `File::remove` of `a`, which a fault fails, are in flight.
+fn open_beside_failed_handle_remove_in_pause(value: u64) -> Option<Error> {
+    run(value, MIB, |node, tasks| async move {
+        let file = create(&node, "a", KIB).await;
+        node.fail_file(Path::new("a"), Operation::Remove);
+        tasks.spawn(async move {
+            assert_eq!(file.remove().await, Err(io("a", Operation::Remove, 5)));
+        });
+        node.clock().sleep(Span::from_nanos(1)).await;
+        let files = node.files();
+        let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+        pend(open.as_mut()).await;
+        node.pause(Span::MILLISECOND);
+        open.await.map(drop).err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle_in_a_pause() {
+    for value in 0..32 {
+        assert_eq!(
+            open_beside_failed_handle_remove_in_pause(value),
+            None,
+            "value {value}"
+        );
+    }
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_remove_at_the_end_of_true_time() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: types::time::Stamp::from_nanos(i64::MIN),
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    let found = sim
+        .run_on(&node, |node, _| async move {
+            let files = node.files();
+            drop(create(&node, "a", KIB).await);
+            node.clock().sleep_until(Monotonic(u64::MAX - 5)).await;
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(remove.as_mut()).await;
+            drop(remove);
+            files.open(Path::new("a"), Mode::Write).await.map(drop)
+        })
+        .unwrap();
+    assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+}
+
 /// What a write open of `a` gives after a `File::remove` of it is polled once and
 /// dropped, then what a create gives, and the names in the data directory a
 /// millisecond after the create.

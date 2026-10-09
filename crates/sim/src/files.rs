@@ -79,7 +79,9 @@ impl Call {
     /// The path whose file a call of `path` replaces, makes, or removes.
     fn changes<'a>(&'a self, path: &'a Path) -> Option<&'a Path> {
         match self {
-            Self::Open(Mode::Write | Mode::Create { .. }) | Self::Remove => Some(path),
+            Self::Open(Mode::Write | Mode::Create { .. })
+            | Self::Remove
+            | Self::Unlink { .. } => Some(path),
             Self::Rename { to, .. } => Some(to),
             _ => None,
         }
@@ -252,11 +254,9 @@ impl Files {
     }
 
     /// The time that a call of `node` that changes what `path` names ends no earlier
-    /// than: one nanosecond past the end of the last call on `path` that a dropped
-    /// future or handle left to run, or of a remove through a handle, live or not, or
-    /// zero. The nanosecond lets the task of a live remove close its handle first. A
-    /// call on `path` uses it, or the file that it names, or a file that a rename to
-    /// it moves there.
+    /// than: the end of the last call on `path` that a dropped future or handle left
+    /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
+    /// uses it, or the file that it names, or a file that a rename to it moves there.
     fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
@@ -282,7 +282,7 @@ impl Files {
                 Some(handle) => inodes.contains(&handle.inode),
                 None => disk::normal(&flight.path) == path,
             })
-            .map_or(Monotonic::default(), |(at, _)| Monotonic(at.0 + 1))
+            .map_or(Monotonic::default(), |(at, _)| *at)
     }
 
     /// The true time at which the first call in flight ends.
