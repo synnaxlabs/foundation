@@ -1594,3 +1594,121 @@ fn a_power_cut_keeps_a_prefix_in_the_order_that_the_calls_end() {
     let prefixes = [names(&[]), names(&["x"]), names(&["y"]), names(&["x", "y"])];
     assert_eq!(outcomes, BTreeSet::from(prefixes));
 }
+
+#[test]
+fn a_crash_closes_each_file_that_its_node_holds() {
+    let (mut sim, node) = disk(0);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        drop(create(&node, "a", 0).await);
+        let _held = create(&node, "b", 0).await;
+        pending::<()>().await;
+    });
+    assert_eq!(node.file_closes(), ["a", "b"].map(PathBuf::from));
+}
+
+#[test]
+fn a_crash_closes_a_leaked_file_and_gives_its_path() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            Box::leak(Box::new(create(&node, "a", 0).await));
+        });
+        crash_after(&mut sim, &node, crash, |_| async {});
+        assert_eq!(node.file_closes(), [PathBuf::from("a")], "{crash:?}");
+    }
+}
+
+#[test]
+fn a_crash_gives_the_normal_path_of_each_file_that_it_closes() {
+    let (mut sim, node) = disk(0);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        let mut held = create(&node, "./a", 0).await;
+        held.rename(Path::new("./c")).await.unwrap();
+        let _held = held;
+        Box::leak(Box::new(create(&node, "./b", 0).await));
+        pending::<()>().await;
+    });
+    assert_eq!(node.file_closes(), ["c", "b"].map(PathBuf::from));
+}
+
+#[test]
+fn a_crash_closes_the_leaked_files_in_the_order_of_their_opens() {
+    let (mut sim, node) = disk(0);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        Box::leak(Box::new(create(&node, "./d", 0).await));
+        let _held = create(&node, "./a", 0).await;
+        Box::leak(Box::new(create(&node, "./b", 0).await));
+        let read = node.files().open(Path::new("d"), Mode::Read).await.unwrap();
+        Box::leak(Box::new(read));
+        pending::<()>().await;
+    });
+    assert_eq!(node.file_closes(), ["a", "d", "b", "d"].map(PathBuf::from));
+}
+
+#[test]
+fn a_crash_closes_the_leaked_files_in_the_order_that_their_opens_started() {
+    let mut ended_first = BTreeSet::new();
+    for seed in 0..32 {
+        let (mut sim, node) = disk(seed);
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&ended);
+        crash_after(&mut sim, &node, Crash::Process, move |node| async move {
+            let files = node.files();
+            let mut x = pin!(files.open(Path::new("x"), Mode::Create { len: 0 }));
+            let mut y = pin!(files.open(Path::new("y"), Mode::Create { len: 0 }));
+            let (mut fx, mut fy) = (None, None);
+            poll_fn(|cx| {
+                if fx.is_none()
+                    && let Poll::Ready(file) = x.as_mut().poll(cx)
+                {
+                    log.lock().unwrap().push("x");
+                    fx = Some(file.unwrap());
+                }
+                if fy.is_none()
+                    && let Poll::Ready(file) = y.as_mut().poll(cx)
+                {
+                    log.lock().unwrap().push("y");
+                    fy = Some(file.unwrap());
+                }
+                if fx.is_some() && fy.is_some() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            Box::leak(Box::new((fx, fy)));
+            pending::<()>().await;
+        });
+        ended_first.insert(ended.lock().unwrap()[0]);
+        assert_eq!(
+            node.file_closes(),
+            ["x", "y"].map(PathBuf::from),
+            "seed {seed}"
+        );
+    }
+    assert_eq!(ended_first, BTreeSet::from(["x", "y"]));
+}
+
+#[test]
+fn a_file_dropped_before_its_dropped_rename_ends_gives_the_path_of_its_open() {
+    for seed in 0..8 {
+        let (mut sim, node) = disk(seed);
+        crash_after(&mut sim, &node, Crash::Process, |node| async move {
+            let mut file = create(&node, "a", KIB).await;
+            let mut rename = Box::pin(file.rename(Path::new("b")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+            drop(rename);
+            drop(file);
+        });
+        let listed = sim
+            .run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
+        assert_eq!(listed, [Path::new("b")], "seed {seed}");
+        assert_eq!(node.file_closes(), [PathBuf::from("a")], "seed {seed}");
+    }
+}
