@@ -176,8 +176,9 @@ impl Hub {
     /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. Then each new
     /// channel is defined. The home stops carrying each index whose key is not an index
     /// of `definitions`, and carries an index from the first session that finds this
-    /// node is its home. A reader of a new channel at the key of a removed data channel
-    /// takes no series of the removed one.
+    /// node is its home. A reader of a data channel takes each series of its key with
+    /// its sample type, also one written before a removal, so a rename or a move of
+    /// index keeps the history of the channel.
     ///
     /// # Panics
     ///
