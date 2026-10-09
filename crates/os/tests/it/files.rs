@@ -833,6 +833,56 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
         .await;
         let file = open.as_mut().await.unwrap();
         assert_eq!(read(&file, &pool, 0, 4).await, [1; 4]);
+        let second = files.open(Path::new("a"), Mode::Write).await.map(drop);
+        assert_eq!(second, Err(Error::Busy { path: "a".into() }));
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_open_waits_for_a_dropped_call_on_the_file_that_its_path_names() {
+    run(|files, data| async move {
+        let (mut file, pool) = (create(&files, "a", KIB).await, pool());
+        let parts = [block(&pool, &[1; 512])];
+        let mut renamed = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            let mut renamed = Box::pin(file.rename(Path::new("b")));
+            pend(&mut renamed, context);
+            renamed
+        })
+        .await;
+        assert_eq!(renamed.as_mut().await, Ok(()));
+        drop(renamed);
+        drop(file);
+        let found = files.open(Path::new("b"), Mode::Write).await.map(drop);
+        assert_eq!(found, Ok(()));
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
+    run(|files, data| async move {
+        let mut file = create(&files, "a", KIB).await;
+        // The drop of this future drops the rename and then the file. The first poll
+        // starts the sync of the rename; the second, after the sync ends, starts the
+        // rename itself.
+        let mut rename = Box::pin(async move { file.rename(Path::new("b")).await });
+        stalled(&files, &data, |context| pend(&mut rename, context)).await;
+        files.free().await.unwrap();
+        let mut open = stalled(&files, &data, |context| {
+            pend(&mut rename, context);
+            drop(rename);
+            let mut open = Box::pin(files.open(Path::new("b"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        assert_eq!(open.as_mut().await.map(drop), Ok(()));
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("b")]);
     });
 }
 
