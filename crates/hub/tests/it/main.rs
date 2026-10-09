@@ -32,10 +32,16 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
+#[path = "../common/net.rs"]
+mod net;
+
 mod client;
 mod definitions;
 mod link;
+#[path = "../common/node.rs"]
+mod node;
 mod region;
+mod remote;
 mod serve;
 
 /// The node key of the hub under test.
@@ -74,6 +80,12 @@ const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (4, "value-b", I64, 3),
     (5, "value-c", I64, 1),
 ];
+/// The key of `time` in [`CHANNELS`].
+const TIME: channel::Key = channel::Key::from_u128(CHANNELS[0].0);
+/// The key of `value` in [`CHANNELS`].
+const VALUE: channel::Key = channel::Key::from_u128(CHANNELS[1].0);
+/// The key of `time-b` in [`CHANNELS`].
+const TIME_B: channel::Key = channel::Key::from_u128(CHANNELS[2].0);
 
 /// What one test gets: a hub on one shard, with [`CHANNELS`] defined.
 struct Test {
@@ -92,8 +104,8 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
-    /// The mesh of the node's region, which the hub holds too.
-    region: Option<mesh::Mesh>,
+    /// The node's region, which the hub holds too.
+    region: Option<hub::Region>,
     hub: Hub,
 }
 
@@ -105,7 +117,7 @@ impl Test {
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
-        region: Option<mesh::Mesh>,
+        region: Option<hub::Region>,
     ) -> Self {
         let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -145,7 +157,10 @@ impl Test {
             node: NODE,
             time: mesh.clone(),
             entropy: node.entropy(),
-            mesh: region.clone(),
+            region: region.as_ref().map(|region| hub::Region {
+                mesh: region.mesh.clone(),
+                transport: Rc::clone(&region.transport),
+            }),
         });
         hub.set_definitions(&channels());
         Self {
@@ -358,7 +373,7 @@ fn write(writer: &mut Writer, stamps: &[i64], values: &[i64]) -> Vec<Outcome> {
     write_series(writer, &[(1, stamps), (2, values)])
 }
 
-/// Writes the samples of each channel by key, in one group: the first is its index.
+/// Writes the samples of each channel by key, as [`draft`] makes them.
 fn write_series(writer: &mut Writer, channels: &[(u128, &[i64])]) -> Vec<Outcome> {
     written(writer, channels).expect("the home takes it")
 }
@@ -372,25 +387,27 @@ fn written(
     writer.write(LIVE, draft).map(<[_]>::to_vec)
 }
 
-/// A frame of the samples of each channel by key, in one group: the first is its
-/// index.
+/// A frame of the samples of each channel by key. The count of each group is that of
+/// its index's samples.
 fn draft(writer: &Writer, channels: &[(u128, &[i64])]) -> frame::Draft {
     let set = writer.set();
-    let entries: Vec<_> = channels.iter().map(|&(key, _)| entry(set, key)).collect();
-    let group = set.entries()[entries[0]].group;
-    let mut series: Vec<_> = (entries.iter().zip(channels))
-        .map(|(&entry, (_, samples))| (entry, samples.len() * 8))
+    let mut series: Vec<_> = channels
+        .iter()
+        .map(|&(key, samples)| (entry(set, key), samples.len() * 8))
         .collect();
     series.sort_unstable();
     let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-    for (&entry, (_, samples)) in entries.iter().zip(channels) {
+    for &(key, samples) in channels {
+        let entry = entry(set, key);
         let bytes = draft.series_mut(entry).expect("the series is present");
-        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(*samples) {
+        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(samples) {
             *bytes = sample.to_le_bytes();
         }
+        if set.index(entry) == entry {
+            let count = u32::try_from(samples.len()).expect("a short frame");
+            draft.set_count(set.entries()[entry].group, count);
+        }
     }
-    let count = u32::try_from(channels[0].1.len()).expect("a short frame");
-    draft.set_count(group, count);
     draft
 }
 
@@ -509,6 +526,22 @@ fn without(names: &[&str]) -> BTreeMap<Name, Definition> {
 }
 
 #[test]
+fn gives_the_entry_of_each_channel_of_the_config_in_its_order() {
+    run(4, |test| async move {
+        let names = ["value-c", "value-b", "time", "value-b", "value"];
+        let writer = test.writer("a", &names).await;
+        let keys: Vec<_> = writer
+            .entries()
+            .iter()
+            .map(|&entry| writer.set().entries()[entry].key.as_u128())
+            .collect();
+        assert_eq!(keys, [5, 4, 1, 4, 2]);
+        let time = writer.set().groups()[0];
+        assert_eq!(writer.entries()[2], time, "the entry of the index");
+    });
+}
+
+#[test]
 fn opens_no_session_on_an_unknown_name() {
     run(2, |test| async move {
         let writer = test.hub.writer(config("a", &["value", "nope"])).await;
@@ -575,20 +608,67 @@ fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after()
 fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
     unsynced(5, |mut test| async move {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
-        let error = test
-            .hub
-            .writer(config("a", &["value"]))
-            .await
-            .expect_err("an error");
-        let unsynced = hub::home::writer::Error::Unsynced;
-        assert_eq!(error, writer::Error::Home(unsynced));
-        assert_eq!(error.to_string(), "the node has no mesh time yet");
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        test.clock.sleep(Span::SECOND).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
         test.sync().await;
-        let mut writer = test.writer("a", &["value"]).await;
-        let now = test.now();
-        assert_eq!(write(&mut writer, &[now], &[1]), [applied(0)]);
+        let synced = test.clock.now();
+        let mut writer = opening.await.expect("opens");
+        let waited = test.clock.now() - synced;
+        assert!(
+            waited <= Span::SECOND,
+            "opened {waited} after sync, more than 1 s"
+        );
+        let now = writer.now();
+        assert_eq!(now.nanos(), test.now());
+        assert_eq!(write(&mut writer, &[now.nanos()], &[1]), [applied(0)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [1]);
+    });
+}
+
+#[test]
+fn opens_no_writer_with_a_lease_of_zero() {
+    run(9, |test| async move {
+        let config = writer::Config {
+            lease: Some(Span::ZERO),
+            ..config("a", &["value"])
+        };
+        let error = test.hub.writer(config).await.expect_err("a lease of zero");
+        let lease = hub::home::writer::Error::Lease { span: Span::ZERO };
+        assert_eq!(error, writer::Error::Home(lease));
+        let want =
+            format!("control lease must be longer than zero, got {}", Span::ZERO);
+        assert_eq!(error.to_string(), want);
+    });
+}
+
+/// A writer on an unknown channel fails before the node has mesh time.
+#[test]
+fn opens_no_writer_on_an_unknown_name_before_the_node_has_mesh_time() {
+    unsynced(10, |test| async move {
+        let Poll::Ready(opened) = poll_once(test.hub.writer(config("a", &["nothing"])))
+        else {
+            panic!("the open fails before mesh time");
+        };
+        let error = opened.expect_err("no channel is named nothing");
+        assert_eq!(error, writer::Error::Unknown(name("nothing")));
+    });
+}
+
+/// A writer that waits for mesh time finds a channel that a call removed meanwhile
+/// unknown.
+#[test]
+fn opens_no_writer_on_a_channel_removed_while_it_waits_for_mesh_time() {
+    unsynced(8, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        hub.set_definitions(&without(&["value"]));
+        test.sync().await;
+        let error = opening.await.expect_err("value was removed");
+        assert_eq!(error, writer::Error::Unknown(name("value")));
     });
 }
 

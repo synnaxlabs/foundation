@@ -27,7 +27,7 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// before the drop, or [`Error::Unreachable`] with each attempt's cause, in the order
 /// started, when none connects.
 pub(crate) async fn dial(
-    dialer: &quic::Dialer,
+    carrier: &quic::Handle,
     peer: PublicKey,
     addresses: &[Address],
 ) -> Result<quic::Session, Error> {
@@ -37,9 +37,9 @@ pub(crate) async fn dial(
         Address::Tcp(_) => 1,
         Address::Relay { .. } => 2,
     });
-    let clock = dialer.clock();
+    let clock = carrier.clock();
     let mut dial = Dial {
-        dialer,
+        carrier,
         peer,
         addresses,
         causes: Vec::new(),
@@ -53,7 +53,7 @@ pub(crate) async fn dial(
 
 /// The attempts of one [`dial`].
 struct Dial<'a> {
-    dialer: &'a quic::Dialer,
+    carrier: &'a quic::Handle,
     clock: Clock,
     peer: PublicKey,
     addresses: Vec<Address>,
@@ -73,7 +73,7 @@ impl Dial<'_> {
                 return Poll::Ready(ended);
             }
             // After the attempts, so one that connected before a break wins.
-            if let Err(error) = self.dialer.check() {
+            if let Err(error) = self.carrier.check() {
                 return Poll::Ready(Err(error));
             }
             let next = self.causes.len();
@@ -133,7 +133,7 @@ impl Dial<'_> {
     fn start(&mut self, index: usize) -> Result<(), Error> {
         match self.addresses[index] {
             Address::Udp(remote) if let Some(remote) = route(remote) => {
-                let session = self.dialer.dial(self.peer, remote)?;
+                let session = self.carrier.dial(self.peer, remote)?;
                 self.flying.push((index, session));
                 self.causes.push(None);
                 self.sleep.reset(self.clock.now() + STAGGER);
@@ -478,8 +478,8 @@ mod tests {
             ];
             testing::carrier(&client, CLIENT, move |carrier, node| async move {
                 let clock = node.clock();
-                let dialer = carrier.dialer();
-                let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+                let handle = carrier.handle();
+                let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
                 let after_stagger =
                     super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
                 for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
@@ -582,8 +582,8 @@ mod tests {
         let other = address(&impostor_node);
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(other), Address::Udp(PORT_ZERO)];
-            let dialer = carrier.dialer();
-            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -606,8 +606,8 @@ mod tests {
         let other = address(&impostor_node);
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(PORT_ZERO), Address::Udp(other)];
-            let dialer = carrier.dialer();
-            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -721,8 +721,8 @@ mod tests {
                     self.0.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            let dialer = carrier.dialer();
-            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let count = Arc::new(Count(AtomicUsize::new(0)));
             let waker = Waker::from(Arc::clone(&count));
             let poll = dial.as_mut().poll(&mut Context::from_waker(&waker));

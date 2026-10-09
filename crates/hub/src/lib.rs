@@ -7,6 +7,8 @@ mod commit;
 mod link;
 pub mod reader;
 pub mod serve;
+#[cfg(feature = "sim")]
+pub mod testing;
 pub mod writer;
 
 use std::cell::{Cell, RefCell};
@@ -61,18 +63,28 @@ pub struct Config {
     /// The node's key set interner, which owns the slot table that the home's buffer
     /// opened with.
     pub interner: Interner,
-    /// Where the hub spawns its commit task.
+    /// Where the hub spawns its commit task and the task of each remote reader.
     pub tasks: env::tasks::Tasks,
     /// This node's key. A client's hello must name it as `via`.
     pub node: types::node::Key,
-    /// Mesh time, which the hub checks each hello and request against.
+    /// Mesh time, which the hub checks each hello and request against, and which
+    /// [`Hub::writer`] waits for: the reader that `home` was made with.
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
-    /// The region's mesh, or `None` for a node with no region. The mesh names the home
-    /// of each index and the address of each member. With `None`, this node is the
-    /// home of each index.
-    pub mesh: Option<::mesh::Mesh>,
+    /// The node's region, or `None` for a node with no region. With `None`, this node
+    /// is the home of each index.
+    pub region: Option<Region>,
+}
+
+/// What the hub of a node in a region reads homes from, and reaches them on.
+#[derive(Debug)]
+pub struct Region {
+    /// The region's mesh. It names the home of each index and the addresses of each
+    /// member.
+    pub mesh: ::mesh::Mesh,
+    /// The transport of this shard. The hub dials the home of each remote reader on it.
+    pub transport: Rc<transport::Transport>,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -87,8 +99,15 @@ struct State {
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
+    remotes: reader::remote::Sessions,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
+    /// Each served open from its first key to its session, by a key from `opened`.
+    opens: Sessions<u64>,
+    /// The waker of each open in `opens`.
+    waiting: hash::Map<u64, Waker>,
+    /// The count of served opens.
+    opened: u64,
     /// The readers that [`::home::Shard::woken`] gave last.
     woken: Vec<::home::reader::Key>,
     commit: commit::Signal,
@@ -99,7 +118,10 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
-    mesh: Option<::mesh::Mesh>,
+    region: Option<Region>,
+    /// Where the hub spawns the task of each remote reader.
+    tasks: env::tasks::Tasks,
+    bodies: serve::client::Bodies,
 }
 
 impl Hub {
@@ -118,7 +140,7 @@ impl Hub {
             node,
             time,
             entropy,
-            mesh,
+            region,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -127,7 +149,11 @@ impl Hub {
             indexes: hash::Map::default(),
             writers: Sessions::default(),
             readers: Sessions::default(),
+            remotes: reader::remote::Sessions::default(),
             wakers: hash::Map::default(),
+            opens: Sessions::default(),
+            waiting: hash::Map::default(),
+            opened: 0,
             woken: Vec::new(),
             commit: commit::Signal::default(),
             failed: None,
@@ -135,7 +161,9 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
-            mesh,
+            region,
+            tasks: tasks.clone(),
+            bodies: serve::client::Bodies::default(),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -169,15 +197,17 @@ impl Hub {
         self.0.borrow_mut().set(&checked(&channels));
     }
 
-    /// Opens a writer session on `config.channels` and the index of each. While the
-    /// mesh names no home for an index, it waits for one.
+    /// Opens a writer session on `config.channels` and the index of each. It waits
+    /// for the node's first mesh time, and while the mesh names no home for an index,
+    /// for one.
     ///
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
     /// name that no channel has, then, for the first index whose home is not this
     /// node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the mesh
-    /// stopped. Else [`writer::Error::Home`] when the home refuses the writer.
+    /// stopped. Else [`writer::Error::Home`] for a lease that is not longer than zero:
+    /// never `Unsynced`.
     pub async fn writer(
         &self,
         config: writer::Config,
@@ -185,19 +215,24 @@ impl Hub {
         Writer::open(&self.0, config).await
     }
 
-    /// Opens a reader session on `channels`, which share one index, as
-    /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, as a
-    /// view of only `channels` and their index. A complete reader gets each live frame
-    /// written after the returned future resolves, until it misses one
-    /// ([`reader::Mode::Complete`]).
+    /// Opens a reader session on `channels`, which share one index. While the mesh
+    /// names no home for the index, it waits for one. At the home of another node,
+    /// each open reader holds one stream of the one session to it, so it also waits
+    /// while that home allows this node no more streams, until another reader there
+    /// drops. It gets each frame of the index, as a view of only `channels` and their
+    /// index. A complete reader gets each live frame written after the returned future
+    /// resolves, until it misses one ([`reader::Mode::Complete`]).
     ///
     /// # Errors
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
     /// another index than the first. [`reader::Error::Empty`] for no name. Then
-    /// [`reader::Error::Remote`] when the home of the index is not this node, and
-    /// [`reader::Error::Mesh`] when the mesh stopped.
+    /// [`reader::Error::Mesh`] when the mesh stopped. At the home of another node:
+    /// [`reader::Error::Transport`] when the dial or the stream fails,
+    /// [`reader::Error::Refused`] when the home refuses the session,
+    /// [`reader::Error::Message`] for a reply that breaks the hub protocol, and
+    /// [`reader::Error::Pool`] when the shard's pool has no block for the open.
     pub async fn reader(
         &self,
         channels: &[Name],
@@ -254,15 +289,15 @@ fn checked<'d>(
     named
 }
 
-/// The open sessions of one kind, by home key, with the channels of each. A session
-/// is open while it is here.
+/// The open sessions of one kind, by key, with the channels of each. A session is
+/// open while it is here.
 #[derive(Debug)]
 struct Sessions<K>(hash::Map<K, Open>);
 
 /// The channels of an open session, and its removal.
 #[derive(Debug)]
 struct Open {
-    keys: Box<[Key]>,
+    keys: Vec<Key>,
     removal: Removal,
 }
 
@@ -289,12 +324,29 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
     fn add(&mut self, key: K, keys: Box<[Key]>) -> Removal {
         let removal = Removal::default();
         let open = Open {
-            keys,
+            keys: keys.into_vec(),
             removal: removal.clone(),
         };
         let added = self.0.insert(key, open);
-        assert!(added.is_none(), "invariant: the home gives each key once");
+        assert!(added.is_none(), "invariant: each key is added once");
         removal
+    }
+
+    /// The channels of the open session `key`, to add to.
+    fn keys_mut(&mut self, key: K) -> &mut Vec<Key> {
+        &mut self
+            .0
+            .get_mut(&key)
+            .expect("invariant: the session is open")
+            .keys
+    }
+
+    /// Makes the open session `key` not open, and gives its channels.
+    fn take(&mut self, key: K) -> Vec<Key> {
+        self.0
+            .remove(&key)
+            .expect("invariant: the session is open")
+            .keys
     }
 
     /// Returns whether the session `key` was open, and makes it not open.
@@ -366,7 +418,8 @@ impl State {
         }
     }
 
-    /// Ends each session on a channel of `removed`, and closes it at the home.
+    /// Ends each session on a channel of `removed`, and closes each local one at the
+    /// home.
     fn end(&mut self, removed: &hash::Set<Key>) {
         for key in self.writers.end(removed) {
             self.close_writer(key);
@@ -376,6 +429,13 @@ impl State {
                 waker.wake();
             }
         }
+        for key in self.opens.end(removed) {
+            self.opens.remove(key);
+            if let Some(waker) = self.waiting.remove(&key) {
+                waker.wake();
+            }
+        }
+        self.remotes.end(removed);
     }
 
     /// Closes the writer `key` at the home, unless a removal closed it.
@@ -401,6 +461,27 @@ impl State {
         let channel = Channel(channel.clone());
         self.indexes.insert(channel.key(), channel.index());
         self.channels.insert(name.clone(), channel);
+    }
+
+    /// A block of `len` bytes from the home's pool.
+    ///
+    /// # Errors
+    ///
+    /// [`block::Error::Exhausted`] or [`block::Error::Refused`] when the pool has no
+    /// block for it now.
+    ///
+    /// # Panics
+    ///
+    /// When `len` is over the pool's largest block: each caller asks for at most that.
+    fn alloc(&self, len: usize) -> Result<block::Unique, block::Error> {
+        self.home.pool().alloc(len).map_err(|error| match error {
+            block::Error::TooLarge { .. } => {
+                unreachable!(
+                    "invariant: no caller asks for more than the largest block"
+                )
+            }
+            block::Error::Exhausted { .. } | block::Error::Refused { .. } => error,
+        })
     }
 
     /// Carries `index` at the home. A later carry does nothing.
@@ -457,28 +538,38 @@ enum Away {
     Mesh(::mesh::Stopped),
 }
 
-/// Waits until the mesh names this node the home of `index`. With no mesh, this node
-/// is the home. It changes no state, so the caller checks its channels again after
-/// it, then carries `index` with no `await` between.
-async fn home(
+/// Waits until the mesh names this node the home of each of `indexes`, in one pass
+/// that waits for none, so a home that moves while it waits for another is seen. With
+/// no mesh, this node is the home. It changes no state, so the caller checks its
+/// channels again, or reads their removal, after it, then carries `indexes` with no
+/// `await` between.
+async fn homes(
     state: &Rc<RefCell<State>>,
-    index: types::channel::Key,
+    indexes: &[types::channel::Key],
 ) -> Result<(), Away> {
-    let (watch, node) = {
-        let state = state.borrow();
-        (
-            state.mesh.as_ref().map(|mesh| mesh.watch(index)),
-            state.node,
-        )
-    };
-    if let Some(mut watch) = watch {
-        loop {
-            match watch.next().await.map_err(Away::Mesh)? {
-                Some(home) if home == node => break,
-                Some(home) => return Err(Away::Remote(home)),
-                None => {}
+    loop {
+        let mut waited = false;
+        for &index in indexes {
+            let (watch, node) = {
+                let state = state.borrow();
+                (
+                    state.region.as_ref().map(|region| region.mesh.watch(index)),
+                    state.node,
+                )
+            };
+            let Some(mut watch) = watch else {
+                return Ok(());
+            };
+            loop {
+                match watch.next().await.map_err(Away::Mesh)? {
+                    Some(home) if home == node => break,
+                    Some(home) => return Err(Away::Remote(home)),
+                    None => waited = true,
+                }
             }
         }
+        if !waited {
+            return Ok(());
+        }
     }
-    Ok(())
 }

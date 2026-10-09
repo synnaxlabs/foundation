@@ -332,6 +332,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-opcua"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "env",
+ "types",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -542,6 +551,7 @@ dependencies = [
  "connector",
  "connector-influx",
  "connector-modbus",
+ "connector-opcua",
  "crc32c",
  "document",
  "env",
@@ -843,7 +853,10 @@ dependencies = [
  "block",
  "buffer",
  "clock",
+ "config-hcl",
+ "connector",
  "crc32c",
+ "document",
  "env",
  "estimate",
  "home",

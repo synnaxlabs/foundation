@@ -45,9 +45,41 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
             shim.flag(flag);
         }
     }
+    // `shim.c` builds its event loop on the copy's timer, which has no public header.
+    shim.include(copy.join("arch/common"));
     for source in sources.lines() {
         library.file(copy.join(source));
     }
     shim.file(root.join("src/shim.c"));
     Builds { library, shim }
+}
+
+/// The file that `asan` preprocesses, relative to the crate.
+pub(crate) const PROBE: &str = "build/asan.c";
+
+/// Whether `tool` compiles C with `-fsanitize=address`, by its compiler and its flags,
+/// `CFLAGS` included.
+///
+/// # Errors
+///
+/// When `tool` cannot preprocess `PROBE`: the message names the program that ran,
+/// which is the C compiler wrapper (from the `CC` variables or `RUSTC_WRAPPER`) when
+/// `cc` uses one, and gives the reason or the standard error of `tool`.
+pub(crate) fn asan(tool: &Tool) -> Result<bool, String> {
+    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(PROBE);
+    let mut command = tool.to_command();
+    let output = command.arg("-E").arg(&probe).output();
+    let reason = match output {
+        Ok(output) if output.status.success() => {
+            let mut lines = output.stdout.split(|&byte| byte == b'\n');
+            return Ok(lines.any(|line| line.trim_ascii() == b"connector_opcua_asan"));
+        }
+        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+        Err(e) => e.to_string(),
+    };
+    Err(format!(
+        "connector-opcua: {} cannot preprocess {}: {reason}",
+        Path::new(command.get_program()).display(),
+        probe.display()
+    ))
 }

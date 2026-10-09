@@ -18,7 +18,36 @@
   config from the working directory, so a run from outside the repository with
   `--manifest-path` builds the registry release with no error (`laptop.architect-2`,
   2026-10-08T14:16:19Z,
-  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714). The PR
+  https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714).
+  `cargo xtask fuzz` fails when `fuzz/` builds a copy that the root does not build, or
+  when a package of the `fuzz` graph has an edge to another package of the name of a
+  copy that the root builds, and a requirement on crates.io, of a kind and target of
+  the edge, that both the copy and that package meet. A requirement that the copy does
+  not meet passes. A requirement that resolves to another package always gives such an
+  edge, so the check has no false pass. Its cost is a false refusal of a requirement
+  of the kind and target of one that resolves to another package, also when it
+  resolves to the copy or to nothing, such as an optional dependency that is off.
+  `fuzz/Cargo.lock` at `8df01ff28` has one package of each copy's name, so no such
+  case exists there (`laptop.architect`, 2026-10-09T06:40:13Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6075796048; the rule
+  approved at `8df01ff28` by `laptop.architect` at 2026-10-09T07:11:50Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076247492, and
+  `laptop.architect-2` at 2026-10-09T07:14:50Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076285542; this
+  text approved at `13fcc225a` by `laptop.architect` at 2026-10-09T07:29:12Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076487552, and
+  `laptop.architect-2` at 2026-10-09T07:29:40Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076494258).
+  Supersedes the text, item 2 (an optional dependency that is off passes), and item 3
+  (the pair by edge name) of
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, the text
+  of https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166, and
+  the two limits of
+  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462.
+  The task checks the graphs of `cargo metadata --locked`, not the text of the two
+  tables: a patch that `fuzz/` does not use changes no code that it tests
+  (`laptop.architect-2`, 2026-10-09T04:27:21Z,
+  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074258921). The PR
   that changes a copy of a Rust crate lists its mutants as `docs/dependencies.md`,
   "Local patches", states (`laptop.architect-2`, 2026-10-08T11:36:09Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058989337, and
@@ -28,6 +57,21 @@
   how a test outside the copy checks each changed line, for the approval of the
   architect of `connector-opcua` (#435; `laptop.architect-2`, 2026-10-08T11:24:06Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
+  #2106 did so for `cmpDue`, the split key, and the rename of the time parameter of
+  `UA_Timer_process` in `arch/common/timer.c` of open62541, at `652692759`: a hand
+  mutant of each changed line fails a test or the build, except the release form of
+  a `UA_assert` line, which builds to the same code with `UA_DEBUG` off (approved by
+  `laptop.architect-2`, 2026-10-09T04:52:13Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074512538).
+  It did so for the swapped results of `cmpBatchWindow` at `17a75f322` (approved by
+  `laptop.architect-2`, 2026-10-09T05:27:21Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634), for
+  its tests and its row in `docs/dependencies.md` at `7a0913317` (approved by
+  `laptop.architect-2`, 2026-10-09T06:23:46Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6075586406), and
+  for the table of its hand mutants in the #2106 body at `7a0913317` (approved by
+  `laptop.architect-2`, 2026-10-09T06:28:29Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6075645938).
   A change of a file that the copy command of a C copy generates (the thread-local
   block of the open62541 `config.h`) is made again after each run of that command, as
   a change of a release file is, and a test fails when it is lost (`laptop.architect-2`,

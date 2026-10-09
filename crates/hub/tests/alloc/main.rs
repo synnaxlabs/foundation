@@ -11,21 +11,20 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-#[path = "../common/shard.rs"]
-mod shard;
+#[path = "../common/node.rs"]
+mod node;
 #[path = "../common/woken.rs"]
 mod woken;
 
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use common::{SETTLE, hub};
+use common::{SETTLE, hub, name};
 use home::reader::Next;
 use home::reader::complete::Charge;
 use hub::Hub;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
-use shard::name;
 use types::authority::Authority;
 use woken::Woken;
 
@@ -278,11 +277,13 @@ fn main() {
             .await
             .expect("opens");
         for n in 0..WARM + COUNTED {
+            let stamped = ALLOCATOR.count(|| writer.now()).1;
             let written = write(&mut writer, now + n);
             node.clock().sleep(SETTLE).await;
             let read = read(&mut reader);
             if n >= WARM {
-                assert_eq!((written, read), (0, 0), "frame {n} allocated");
+                let counts = (stamped, written, read);
+                assert_eq!(counts, (0, 0, 0), "frame {n} allocated");
             }
         }
         let now = now + WARM + COUNTED;

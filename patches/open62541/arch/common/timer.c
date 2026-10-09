@@ -22,7 +22,20 @@ cmpId(const UA_UInt64 *a, const UA_UInt64 *b) {
     return (*a < *b) ? ZIP_CMP_LESS : ZIP_CMP_MORE;
 }
 
-ZIP_FUNCTIONS(UA_TimerTree, UA_TimerEntry, treeEntry, UA_DateTime, nextTime, cmpDateTime)
+/* Orders by due time, then by id, so that entries due at one time run in the order
+ * of their adds. Each key must be the nextTime of an entry. */
+static enum ZIP_CMP
+cmpDue(const UA_DateTime *a, const UA_DateTime *b) {
+    enum ZIP_CMP order = cmpDateTime(a, b);
+    if(order != ZIP_CMP_EQ)
+        return order;
+    const size_t at = offsetof(UA_TimerEntry, nextTime);
+    const UA_TimerEntry *x = (const UA_TimerEntry*)((const char*)a - at);
+    const UA_TimerEntry *y = (const UA_TimerEntry*)((const char*)b - at);
+    return cmpId(&x->id, &y->id);
+}
+
+ZIP_FUNCTIONS(UA_TimerTree, UA_TimerEntry, treeEntry, UA_DateTime, nextTime, cmpDue)
 ZIP_FUNCTIONS(UA_TimerIdTree, UA_TimerEntry, idTreeEntry, UA_UInt64, id, cmpId)
 
 static UA_DateTime
@@ -89,12 +102,13 @@ findTimer2Batch(void *context, UA_TimerEntry *compare) {
     return (te->interval == compare->interval) ? te : NULL;
 }
 
-/* Window-based comparison for batching */
+/* Window-based comparison for batching. ZIP_ITER_KEY reads LESS as a window
+ * below the entry. */
 static enum ZIP_CMP
 cmpBatchWindow(const UA_TimerBatchWindow *window, const UA_DateTime *nextTime) {
-    if(*nextTime < window->earliest)
-        return ZIP_CMP_LESS;
     if(*nextTime > window->latest)
+        return ZIP_CMP_LESS;
+    if(*nextTime < window->earliest)
         return ZIP_CMP_MORE;
     return ZIP_CMP_EQ;
 }
@@ -306,23 +320,26 @@ processEntryCallback(void *context, UA_TimerEntry *te) {
 }
 
 UA_DateTime
-UA_Timer_process(UA_Timer *t, UA_DateTime now) {
+UA_Timer_process(UA_Timer *t, UA_DateTime currentTime) {
     UA_LOCK(&t->timerMutex);
 
-    /* Move all entries <= now to the processTree */
+    /* Move all entries <= currentTime to the processTree. The split key is an
+     * entry, as cmpDue needs, after each entry due at currentTime. */
+    UA_TimerEntry bound = {.nextTime = currentTime,
+                           .id = UA_UINT64_MAX};
     UA_TimerTree processTree;
     ZIP_INIT(&processTree);
-    ZIP_UNZIP(UA_TimerTree, &t->tree, &now, &processTree, &t->tree);
+    ZIP_UNZIP(UA_TimerTree, &t->tree, &bound.nextTime, &processTree, &t->tree);
 
     /* Consistency check. The smallest not-processed entry isn't ready. */
     UA_assert(!ZIP_MIN(UA_TimerTree, &t->tree) ||
-              ZIP_MIN(UA_TimerTree, &t->tree)->nextTime > now);
+              ZIP_MIN(UA_TimerTree, &t->tree)->nextTime > currentTime);
         
     /* Iterate over the entries that need processing in-order. This also
      * moves them back to the regular time-ordered tree. */
     struct TimerProcessContext ctx;
     ctx.t = t;
-    ctx.now = now;
+    ctx.now = currentTime;
     ZIP_ITER(UA_TimerTree, &processTree, processEntryCallback, &ctx);
         
     /* Compute the timestamp of the earliest next callback */

@@ -43,7 +43,7 @@ use crate::message::Reader;
 use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
-pub(crate) use self::carrier::{Carrier, Dialer, Session};
+pub(crate) use self::carrier::{Carrier, Handle, Session};
 pub use self::end::Ended;
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
@@ -107,8 +107,9 @@ pub(crate) enum Event {
     /// [`Endpoint::accept`] has a stream for `key`.
     Incoming { key: connection::Key },
     /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
-    /// comes first when the peer's hello arrives. A peer may never send its hello:
-    /// the caller bounds that wait.
+    /// comes first when the peer's hello arrives. When the peer's hello has not arrived
+    /// twice the idle timeout after [`Event::Connected`], the key gets
+    /// [`Event::Closed`] in its place.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -116,6 +117,8 @@ pub(crate) enum Event {
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
     /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
+    /// The peer acknowledged a packet sent after the last [`Endpoint::ping`] of `key`.
+    Acked { key: connection::Key },
     /// [`Endpoint::datagrams`] has a datagram of `key` to take. It comes when one
     /// arrives and none waited, so take them all after it.
     Datagram { key: connection::Key },
@@ -231,27 +234,19 @@ impl Endpoint {
     /// When [`Endpoint::timeout`] must next run, or `None` with no connection.
     pub(crate) fn deadline(&self) -> Option<Monotonic> {
         let connections = self.connections.iter().flatten();
-        let deadline = connections
-            .filter_map(|connection| connection.inner.poll_timeout())
-            .min()?;
+        let deadline = connections.filter_map(Connection::deadline).min()?;
         let nanos = deadline.duration_since(self.epoch).as_nanos();
         Some(Monotonic(u64::try_from(nanos).unwrap_or(u64::MAX)))
     }
 
-    /// Runs the timers due at `now`: loss detection, keep-alives, and the idle
-    /// timeout.
+    /// Runs the timers due at `now`: loss detection, keep-alives, the idle timeout,
+    /// and the wait for each peer's hello.
     pub(crate) fn timeout(&mut self, now: Monotonic) {
         let now = self.instant(now);
         for handle in (0..self.connections.len()).map(ConnectionHandle) {
-            let Some(connection) = &mut self.connections[handle.0] else {
-                continue;
-            };
-            if connection
-                .inner
-                .poll_timeout()
-                .is_some_and(|deadline| deadline <= now)
+            if let Some(connection) = &mut self.connections[handle.0]
+                && connection.timeout(now, &mut self.events)
             {
-                connection.inner.handle_timeout(now);
                 self.drive(handle, now);
             }
         }
@@ -317,6 +312,18 @@ impl Endpoint {
         let closed = connection.close(now, code);
         self.events.extend(closed);
         self.drive(key.handle, now);
+    }
+
+    /// Pings the peer on the connection of `key`: [`Event::Acked`] follows once the
+    /// peer acknowledges the ping or a later packet. Does nothing when the connection
+    /// ended.
+    pub(crate) fn ping(&mut self, now: Monotonic, key: connection::Key) {
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        connection.ping();
+        self.drive(key.handle, self.instant(now));
     }
 
     /// Opens a stream of `class` that goes both ways. `None` until the peer's hello
@@ -718,8 +725,6 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
-        // noq-proto answers a short header only with a stateless reset.
-        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -748,8 +753,9 @@ impl Endpoint {
                 }
             }
             Some(DatagramEvent::Response(response)) => {
+                let reset = reply.first().is_some_and(|form| form & 0x80 == 0);
                 let admitted =
-                    !short || self.resets.admit(now, response.destination.ip());
+                    !reset || self.resets.admit(now, response.destination.ip());
                 admitted.then_some(response)
             }
         };
@@ -1141,6 +1147,30 @@ mod tests {
                 endpoint.connect(later, server(), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
+            });
+        }
+    }
+
+    mod ping {
+        use super::*;
+
+        fn acks(side: &Side) -> Vec<&Event> {
+            let acked = |event: &&Event| matches!(event, Event::Acked { .. });
+            events(side).into_iter().filter(acked).collect()
+        }
+
+        // The server acknowledged the client's handshake packets, all before the mark.
+        #[test]
+        fn gives_acked_once_the_peer_acknowledges_a_packet_after_it() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, server());
+                let key = pair.client.key.expect("a key");
+                let now = pair.now();
+                pair.client.endpoint.ping(now, key);
+                pair.run(DELAY);
+                assert!(acks(&pair.client).is_empty());
+                pair.run(Duration::from_millis(100));
+                assert_eq!(acks(&pair.client), [&Event::Acked { key }]);
             });
         }
     }
