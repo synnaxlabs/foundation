@@ -85,13 +85,13 @@ fn an_applied_index_gets_a_home_and_keeps_it() {
 }
 
 #[test]
-#[ignore = "waits on #274, #337, #2145"]
+#[ignore = "waits on #274, #337, #1957, #2145"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
     check(Front::Cli);
 }
 
 #[test]
-#[ignore = "waits on #274, #337, #2145"]
+#[ignore = "waits on #274, #337, #1957, #2145"]
 fn plan_and_apply_through_mcp() {
     check(Front::Mcp);
 }

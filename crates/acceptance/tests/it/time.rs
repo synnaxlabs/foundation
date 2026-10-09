@@ -6,7 +6,7 @@ use crate::lab::Lab;
 const MAX_ERROR_NS: u64 = 1_000_000_000;
 
 #[test]
-#[ignore = "waits on #274, #336, #2145"]
+#[ignore = "waits on #274, #336, #1957, #2145"]
 fn every_sample_carries_a_time_error_bound_that_holds_true_time() {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud");
