@@ -473,8 +473,9 @@ fn a_repeated_timer_due_within_1_s_of_the_last_date_after_a_run_is_refused() {
         }
     }
     let outside = repeated_before_the_last_date(2.0e7);
-    for (n, policy) in [(1, ffi::CURRENT_TIME), (2, ffi::BASE_TIME)] {
-        let base = Some(now + 30_000_000);
+    // Distinct due times, since no code may depend on the order of a tie.
+    for (n, policy, base) in [(1, ffi::CURRENT_TIME, 0), (2, ffi::BASE_TIME, 10_000)] {
+        let base = Some(now + 30_000_000 + base);
         f.try_timer(record, number(n), outside, base, policy)
             .expect("a repeated timer due 2 s before the last date is in range");
     }
