@@ -636,18 +636,6 @@ fn reads_each_name_as_github_shows_it() {
             "{line}"
         );
     }
-    for line in ["Findings\\: 2", "&#32;Findings: 2"] {
-        let comment =
-            ROUND.replace("Findings: none", &format!("{line}\nFindings: none"));
-        assert_eq!(
-            check(&record(vec![bot(&comment)])),
-            vec![
-                "review round 3 has findings (2). Fix or answer them, then run another \
-                 round."
-            ],
-            "{line}"
-        );
-    }
     for (plain, shown) in [
         ("Reviewers: reviewer", "Reviewers\\: reviewer"),
         ("Deferred: none", "Deferred\\: none"),
@@ -665,6 +653,42 @@ fn reads_each_name_as_github_shows_it() {
             "{shown}"
         );
     }
+}
+
+#[test]
+fn reads_each_field_as_github_shows_it() {
+    for line in [
+        "Findings\\: 2",
+        "&#32;Findings: 2",
+        "Findings:\t2",
+        "Findings:&#32;2",
+        "Findings:&nbsp;2",
+    ] {
+        let comment =
+            ROUND.replace("Findings: none", &format!("{line}\nFindings: none"));
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run another \
+                 round."
+            ],
+            "{line}"
+        );
+    }
+    let range = ROUND.replace(
+        "Range: `38cba24f",
+        "Range\\: `aaaaaaaa..bbbbbbbb`\nRange: `38cba24f",
+    );
+    assert_ne!(range, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&range)])),
+        vec![
+            "review round 3 skips `breaker`, but its range changes code at `a.rs:2`.",
+            "review round 3 ends at bbbbbbbb, not at the head \
+             c77c67d72fd8d37964334c80e14dd8b5a1d5b6fb. A commit after the round needs \
+             a new round; only a clean merge of the base does not.",
+        ]
+    );
 }
 
 #[test]
