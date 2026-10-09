@@ -217,8 +217,8 @@ impl Node {
     }
 
     /// The path of each file descriptor that the node closed or dropped, in order,
-    /// since the run started: the path of its open, or of its last rename. A crash
-    /// drops each descriptor that a task of the node holds.
+    /// since the run started: the path of its open, or of its last rename, with only
+    /// its names. A crash drops each descriptor that a task of the node holds.
     #[must_use]
     pub fn file_closes(&self) -> Vec<PathBuf> {
         lock(&self.0.shared).files().closed(self.0.node)

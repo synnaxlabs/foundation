@@ -1603,9 +1603,10 @@ fn the_node_gives_the_path_of_each_file_that_it_closed_in_order() {
         b.close().await;
         drop(a);
         d.remove().await.unwrap();
+        drop(create(&node, "./e", 0).await);
     })
     .unwrap();
-    assert_eq!(node.file_closes(), ["c", "a", "d"].map(PathBuf::from));
+    assert_eq!(node.file_closes(), ["c", "a", "d", "e"].map(PathBuf::from));
 }
 
 #[test]
