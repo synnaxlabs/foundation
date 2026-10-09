@@ -737,28 +737,29 @@ impl Serve {
         let opened = self.endpoint.open(identity, files, pool, tasks.clone());
         let (transport, mesh) = opened.await;
         let freed = transport.ended();
-        let mesh = match mesh {
-            Ok(mesh) => mesh,
-            Err(error) => {
-                fail(error);
-                drop(transport);
-                return freed.await;
-            }
-        };
-        let hub = hub::Hub::new(hub::Config {
-            home,
-            interner,
-            tasks: tasks.clone(),
-            node: key,
-            time: self.time,
-            entropy,
-            mesh: mesh.clone(),
-        });
-        hub.define(definitions.iter().flatten());
-        let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        let group = stopped(mesh.as_ref());
-        // The port's future holds the mesh, so it drops before the wait.
-        {
+        let (inbox, time) = (self.inbox, self.time);
+        // Each part that holds the transport or the node's stop drops as this block
+        // ends, on each path, so that the port is freed before `lock` drops.
+        let served = async move {
+            let mesh = match mesh {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    fail(error);
+                    return None;
+                }
+            };
+            let hub = hub::Hub::new(hub::Config {
+                home,
+                interner,
+                tasks: tasks.clone(),
+                node: key,
+                time,
+                entropy,
+                mesh: mesh.clone(),
+            });
+            hub.define(definitions.iter().flatten());
+            let ended = mesh.as_ref().map(mesh::Mesh::ended);
+            let group = stopped(mesh.as_ref());
             let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
             let mut port = pin!(port);
             let mut group = pin!(group);
@@ -773,8 +774,10 @@ impl Serve {
                 // a task's drop.
                 ended.map(|error| error.map_or((), fail))
             });
-            self.inbox.serve(hub, tasks, stop).await;
-        }
+            inbox.serve(hub, tasks, stop).await;
+            ended
+        };
+        let ended = served.await;
         if let Some(ended) = ended {
             ended.await;
         }
