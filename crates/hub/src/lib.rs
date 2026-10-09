@@ -22,7 +22,6 @@ use types::channel::Key;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
-use types::sample::Type;
 
 use channel::Channel;
 pub use link::{Link, Served};
@@ -95,8 +94,8 @@ struct State {
     home: ::home::Shard,
     interner: Interner,
     channels: hash::Map<Name, Channel>,
-    /// The index and sample type of each channel in `channels`, by key.
-    defined: hash::Map<Key, (Key, Type)>,
+    /// Each channel in `channels`, by key.
+    defined: hash::Map<Key, Channel>,
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
@@ -180,8 +179,9 @@ impl Hub {
     /// [`reader::Ended::Removed`], and [`serve::Error::Removed`]. Then each new
     /// channel is defined. The home stops carrying each index whose key is not an index
     /// of `definitions`, and carries an index from the first session that finds this
-    /// node is its home. A reader of a new channel at the key of a removed data channel
-    /// takes no series of the removed one.
+    /// node is its home. A reader of a data channel takes each series of its key with
+    /// its sample type, also one written before a removal, so a rename or a move of
+    /// index keeps the history of the channel.
     ///
     /// # Panics
     ///
@@ -476,8 +476,7 @@ impl State {
     /// Makes `channel` known to sessions as `name`.
     fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
         let channel = Channel(channel.clone());
-        self.defined
-            .insert(channel.key(), (channel.index(), channel.sample()));
+        self.defined.insert(channel.key(), channel.clone());
         self.channels.insert(name.clone(), channel);
     }
 
@@ -524,8 +523,10 @@ impl State {
                 if key == index {
                     return slot;
                 }
-                let (_, sample) = self.defined[&key];
-                assigned.data(key, sample)
+                let defined = self.defined.get(&key);
+                let channel =
+                    defined.expect("invariant: each key of a session is defined");
+                assigned.data(key, channel.sample())
             })
             .collect()
     }
