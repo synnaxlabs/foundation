@@ -424,26 +424,30 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
-/// cannot bind or call one. The `tests` folder, each file named `tests.rs`, and this
-/// file are only for tests.
+/// cannot bind or call one. Only the paths in `skipped` are for tests.
 #[test]
 fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
-    let mut dirs = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let skipped = [
+        "tests",
+        "src/link.rs",
+        "src/alloc/tests.rs",
+        "src/event/tests.rs",
+    ]
+    .map(|path| root.join(path));
+    let mut dirs = vec![root.to_path_buf()];
     let mut drawn = Vec::new();
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_str().unwrap();
-            if path.is_dir() {
-                if name != "tests" {
-                    dirs.push(path);
-                }
+            if skipped.contains(&path) {
                 continue;
             }
-            if path.extension() != Some("rs".as_ref())
-                || name == "tests.rs"
-                || name == "link.rs"
-            {
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if path.extension() != Some("rs".as_ref()) {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
