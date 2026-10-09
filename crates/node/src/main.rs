@@ -53,8 +53,8 @@ fn node(start: &Start) -> Result<(), Failure> {
     let (called, call) = mpsc::channel();
     let mut line = Vec::new();
     start.running(&name, &mut line);
-    // Its own thread, which lives until the process ends, so a standard output that
-    // nobody reads blocks neither shard 0 nor the stop.
+    // Its own thread, so a standard output that nobody reads blocks neither shard 0
+    // nor the stop.
     let show = threads.start("show", move || async move {
         #[expect(
             clippy::disallowed_methods,

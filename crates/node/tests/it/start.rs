@@ -200,13 +200,28 @@ fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
     let rig = Rig::new();
     let (reader, mut writer) = std::io::pipe().expect("make a pipe");
     let stdout = writer.try_clone().expect("clone the pipe");
-    // It fills the pipe long before the node starts, and ends when the test drops
-    // `reader`.
+    let wchan = |task: &std::path::Path| {
+        std::fs::read_to_string(task.join("wchan")).unwrap_or_default()
+    };
+    let (sent, filler) = std::sync::mpsc::channel();
+    // It fills the pipe, and ends when the test drops `reader`.
     #[expect(
         clippy::disallowed_methods,
         reason = "a process test fills a pipe of another process"
     )]
-    std::thread::spawn(move || while writer.write_all(&[0; 4096]).is_ok() {});
+    std::thread::spawn(move || {
+        let task = std::fs::read_link("/proc/thread-self").expect("read the task");
+        let task = std::path::Path::new("/proc").join(task);
+        sent.send(task).expect("the test waits for the task");
+        while writer.write_all(&[0; 4096]).is_ok() {}
+    });
+    let filler = rig.wait("the filler sends its task", || {
+        filler.try_recv().map_err(|error| error.to_string())
+    });
+    rig.wait("the pipe is full", || {
+        let wait = wchan(&filler);
+        wait.contains("pipe_write").then_some(()).ok_or(wait)
+    });
     let mut node = rig.spawn(&["start", "--name", "edge"], stdout.into());
     let pid = node.pid();
     rig.wait(
@@ -214,7 +229,7 @@ fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
         || {
             let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("list");
             let waits: Vec<String> = (tasks.map(|task| task.expect("read").path()))
-                .filter_map(|task| std::fs::read_to_string(task.join("wchan")).ok())
+                .map(|task| wchan(&task))
                 .collect();
             let blocked = waits.iter().any(|wait| wait.contains("pipe_write"));
             blocked.then_some(()).ok_or_else(|| waits.join("\n"))
