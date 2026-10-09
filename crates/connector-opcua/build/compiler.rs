@@ -45,6 +45,8 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
             shim.flag(flag);
         }
     }
+    // `shim.c` builds its event loop on the copy's timer, which has no public header.
+    shim.include(copy.join("arch/common"));
     for source in sources.lines() {
         library.file(copy.join(source));
     }

@@ -42,7 +42,7 @@ fn narrow(interner: &mut Interner) -> Arc<KeySet> {
 
 /// The group of `narrow` with its first data channel at entry 0, before its index.
 fn late(interner: &mut Interner) -> Arc<KeySet> {
-    interner.slots().assign(key(1));
+    interner.slots().data(key(1));
     narrow(interner)
 }
 
@@ -50,8 +50,11 @@ fn late(interner: &mut Interner) -> Arc<KeySet> {
 /// data channel of each group follows, then the second of each, so the data of the
 /// groups alternate.
 fn wide(interner: &mut Interner) -> Arc<KeySet> {
-    for n in 0..3 * GROUPS {
-        interner.slots().assign(key(n));
+    for n in 0..GROUPS {
+        interner.slots().index(key(n));
+    }
+    for n in GROUPS..3 * GROUPS {
+        interner.slots().data(key(n));
     }
     let data: Vec<_> = (0..GROUPS)
         .map(|group| [(key(GROUPS + group), F64), (key(2 * GROUPS + group), F64)])
