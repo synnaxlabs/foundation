@@ -2071,14 +2071,11 @@ fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
     Some(recovered.expect("the last open ends") == tail(3, Some(30)))
 }
 
-/// A known defect, <https://github.com/synnaxlabs/foundation/issues/1310>: the
-/// remove of a dropped open can still run and remove the ring that the next open
-/// made, so a kill loses an entry that the next open committed. This pins the loss
-/// on 6 runs that hang on the delay of each file call before the drop. A change that
-/// moves those delays makes them keep the entry, and the defect stays: the search in
-/// the issue then finds the runs again.
+/// The next open waits for the remove of a dropped open, so a kill keeps the entry
+/// that the next open committed. Each of the 6 runs drops the open while a remove of
+/// its ring is in flight.
 #[test]
-fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
+fn a_dropped_open_keeps_the_ring_of_the_next_open() {
     let cases = [
         (143_161, 70_000),
         (150_046, 120_000),
@@ -2089,7 +2086,7 @@ fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
     ];
     for (seed, after) in cases {
         let kept = drop_an_open_then_commit(seed, after);
-        assert_eq!(kept, Some(false), "seed {seed}, drop at {after} ns");
+        assert_eq!(kept, Some(true), "seed {seed}, drop at {after} ns");
     }
 }
 

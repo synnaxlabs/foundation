@@ -759,35 +759,367 @@ fn hold_while_another_create_fails(mode: Mode) {
 
 /// A remove that drops while it waits for room in the full queue of the I/O thread
 /// never runs.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
     run(|files, data| async move {
         create(&files, "a", KIB).await.close().await;
-        let mode = rustix::fs::Mode::from_raw_mode(0o600);
-        rustix::fs::mkfifoat(rustix::fs::CWD, data.join("p"), mode).unwrap();
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        // The I/O thread blocks in the open of the FIFO until a writer opens it.
-        let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
-        assert!(blocker.as_mut().poll(&mut context).is_pending());
-        // 64 is the depth of the queue of the I/O thread.
-        let mut frees: Vec<_> = (0..64).map(|_| Box::pin(files.free())).collect();
-        for free in &mut frees {
-            assert!(free.as_mut().poll(&mut context).is_pending());
-        }
-        let mut remove = Box::pin(files.remove(Path::new("a")));
-        assert!(remove.as_mut().poll(&mut context).is_pending());
-        drop(remove);
-        let flags = rustix::fs::OFlags::WRONLY;
-        let writer = rustix::fs::open(data.join("p"), flags, mode).unwrap();
-        drop(blocker.await.unwrap());
-        drop(writer);
+        let frees = stalled(&files, &data, |context| {
+            // 64 is the depth of the queue of the I/O thread.
+            let mut frees: Vec<_> = (0..64).map(|_| Box::pin(files.free())).collect();
+            for free in &mut frees {
+                pend(free, context);
+            }
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(&mut remove, context);
+            drop(remove);
+            frees
+        })
+        .await;
         for free in frees {
             free.await.unwrap();
         }
         files.free().await.unwrap();
         let found = files.open(Path::new("a"), Mode::Read).await.map(drop);
         assert_eq!(found, Ok(()));
+    });
+}
+
+/// Runs `start` while the I/O thread of `files` blocks in the open of a FIFO, so each
+/// call that `start` polls once waits in the queue, and then frees the thread.
+async fn stalled<T>(
+    files: &Files,
+    data: &Path,
+    start: impl FnOnce(&mut std::task::Context<'_>) -> T,
+) -> T {
+    mkfifo(&data.join("p"));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
+    assert!(blocker.as_mut().poll(&mut context).is_pending());
+    let started = start(&mut context);
+    let writer = rustix::fs::open(
+        data.join("p"),
+        rustix::fs::OFlags::WRONLY,
+        rustix::fs::Mode::empty(),
+    );
+    drop(blocker.await.unwrap());
+    drop(writer.unwrap());
+    std::fs::remove_file(data.join("p")).unwrap();
+    started
+}
+
+/// Makes a FIFO at `path`. A child process, such as `mkfifo`, would hold the files of
+/// the tests on other threads open until it starts, and so keep their locks.
+fn mkfifo(path: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        let mode = rustix::fs::Mode::from_raw_mode(0o600);
+        rustix::fs::mkfifoat(rustix::fs::CWD, path, mode).unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `path` ends in a NUL and lives past the call.
+        #[expect(unsafe_code, reason = "`rustix` has no `mkfifoat` on macOS")]
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "{}", std::io::Error::last_os_error());
+    }
+}
+
+/// Polls `future` once, and expects it to wait.
+fn pend<F: Future>(
+    future: &mut std::pin::Pin<Box<F>>,
+    context: &mut std::task::Context<'_>,
+) {
+    assert!(future.as_mut().poll(context).is_pending());
+}
+
+#[test]
+fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
+    run(|files, data| async move {
+        let (file, pool) = (create(&files, "a", KIB).await, pool());
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut open = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            drop(file);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        let file = open.as_mut().await.unwrap();
+        assert_eq!(read(&file, &pool, 0, 4).await, [1; 4]);
+        let second = files.open(Path::new("a"), Mode::Write).await.map(drop);
+        assert_eq!(second, Err(Error::Busy { path: "a".into() }));
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_removed_file() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&files, "a", big as u64).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut open = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            drop(file);
+            drop(parts);
+            pool.alloc(big).unwrap_err();
+            let mut open =
+                Box::pin(files.open(Path::new("a"), Mode::Create { len: KIB }));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        drop(open.as_mut().await.unwrap());
+        drop(pool.alloc(big).unwrap());
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_the_calls_of_a_dropped_close() {
+    run(|files, data| async move {
+        let (file, pool) = (create(&files, "a", KIB).await, pool());
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut open = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            let mut close = Box::pin(file.close());
+            pend(&mut close, context);
+            drop(close);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        assert_eq!(open.as_mut().await.map(drop), Ok(()));
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_call_on_the_file_that_its_path_names() {
+    run(|files, data| async move {
+        let (mut file, pool) = (create(&files, "a", KIB).await, pool());
+        let parts = [block(&pool, &[1; 512])];
+        let mut renamed = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            let mut renamed = Box::pin(file.rename(Path::new("b")));
+            pend(&mut renamed, context);
+            renamed
+        })
+        .await;
+        assert_eq!(renamed.as_mut().await, Ok(()));
+        drop(renamed);
+        drop(file);
+        let found = files.open(Path::new("b"), Mode::Write).await.map(drop);
+        assert_eq!(found, Ok(()));
+    });
+}
+
+#[test]
+fn a_create_waits_for_a_dropped_read_of_a_reader_on_its_path_after_a_rename() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let mut writer = create(&files, "a", big as u64).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        let mut renamed = stalled(&files, &data, |context| {
+            let mut read = Box::pin(reader.read_at(0, pool.alloc(big).unwrap()));
+            pend(&mut read, context);
+            drop(read);
+            drop(reader);
+            pool.alloc(big).unwrap_err();
+            let mut renamed = Box::pin(writer.rename(Path::new("b")));
+            pend(&mut renamed, context);
+            renamed
+        })
+        .await;
+        assert_eq!(renamed.as_mut().await, Ok(()));
+        drop(renamed);
+        drop(writer);
+        drop(create(&files, "a", KIB).await);
+        drop(pool.alloc(big).unwrap());
+    });
+}
+
+#[test]
+fn a_create_waits_for_a_dropped_read_of_a_stale_reader_of_a_removed_file() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let mut writer = create(&files, "a", big as u64).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        let mut remove = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(files.remove(Path::new("b")));
+            pend(&mut remove, context);
+            let mut read = Box::pin(reader.read_at(0, pool.alloc(big).unwrap()));
+            pend(&mut read, context);
+            drop(read);
+            drop(reader);
+            pool.alloc(big).unwrap_err();
+            remove
+        })
+        .await;
+        assert_eq!(remove.as_mut().await, Ok(()));
+        drop(remove);
+        drop(writer);
+        drop(create(&files, "b", KIB).await);
+        drop(pool.alloc(big).unwrap());
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
+    run(|files, data| async move {
+        let mut file = create(&files, "a", KIB).await;
+        // The drop of this future drops the rename and then the file. The first poll
+        // starts the sync of the rename; the second, after the sync ends, starts the
+        // rename itself.
+        let mut rename = Box::pin(async move { file.rename(Path::new("b")).await });
+        stalled(&files, &data, |context| pend(&mut rename, context)).await;
+        files.free().await.unwrap();
+        let mut open = stalled(&files, &data, |context| {
+            pend(&mut rename, context);
+            drop(rename);
+            let mut open = Box::pin(files.open(Path::new("b"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        assert_eq!(open.as_mut().await.map(drop), Ok(()));
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("b")]);
+    });
+}
+
+#[test]
+fn a_create_after_a_dropped_remove_keeps_its_file() {
+    run(|files, data| async move {
+        create(&files, "a", KIB).await.close().await;
+        let mut made = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(&mut remove, context);
+            drop(remove);
+            let mut made =
+                Box::pin(files.open(Path::new("a"), Mode::Create { len: KIB }));
+            pend(&mut made, context);
+            made
+        })
+        .await;
+        made.as_mut().await.unwrap().close().await;
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a")]);
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_remove_and_then_a_create_stays() {
+    run(|files, data| async move {
+        let file = create(&files, "a", KIB).await;
+        let mut open = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            drop(remove);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        let found = open.as_mut().await.map(drop);
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        create(&files, "a", KIB).await.close().await;
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a")]);
+    });
+}
+
+#[test]
+fn a_rename_waits_for_a_dropped_remove_of_its_new_name() {
+    run(|files, data| async move {
+        create(&files, "b", KIB).await.close().await;
+        let mut file = create(&files, "a", KIB).await;
+        let mut renamed = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(files.remove(Path::new("b")));
+            pend(&mut remove, context);
+            drop(remove);
+            let mut renamed = Box::pin(file.rename(Path::new("b")));
+            pend(&mut renamed, context);
+            renamed
+        })
+        .await;
+        assert_eq!(renamed.as_mut().await, Ok(()));
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("b")]);
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_the_handle_whose_future_lives() {
+    run(|files, data| async move {
+        let file = create(&files, "a", KIB).await;
+        let (mut remove, mut open) = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            (remove, open)
+        })
+        .await;
+        let found = open.as_mut().await.map(drop);
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        assert_eq!(remove.as_mut().await, Ok(()));
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle() {
+    run(|files, data| async move {
+        files.create_dir(Path::new("d")).await.unwrap();
+        let file = create(&files, "d/a", KIB).await;
+        let locked = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(data.join("d"), locked).unwrap();
+        let (mut remove, mut open) = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            let mut open = Box::pin(files.open(Path::new("d/a"), Mode::Write));
+            pend(&mut open, context);
+            (remove, open)
+        })
+        .await;
+        let found = open.as_mut().await.map(drop);
+        let removed = remove.as_mut().await;
+        let open = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(data.join("d"), open).unwrap();
+        assert_eq!(removed, Err(io("d/a", Operation::Remove, 13)));
+        assert_eq!(found, Ok(()));
+    });
+}
+
+#[test]
+fn a_remove_waits_for_a_dropped_create() {
+    run(|files, data| async move {
+        let mut removed = stalled(&files, &data, |context| {
+            let mode = Mode::Create { len: KIB };
+            let mut create = Box::pin(files.open(Path::new("a"), mode));
+            pend(&mut create, context);
+            drop(create);
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(&mut remove, context);
+            remove
+        })
+        .await;
+        assert_eq!(removed.as_mut().await, Ok(()));
+        assert!(files.list(Path::new("")).await.unwrap().is_empty());
     });
 }
 
@@ -812,4 +1144,52 @@ fn a_new_directory_takes_the_setgid_bit_of_its_parent() {
     let mode = std::fs::Permissions::from_mode(0o2750);
     std::fs::set_permissions(&scratch.0, mode).unwrap();
     assert_eq!(opened(&scratch.0), [0o2700, 0o600, 0o2700]);
+}
+
+#[test]
+fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&files, "a", big as u64).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut remove = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            drop(parts);
+            pool.alloc(big).unwrap_err();
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            remove
+        })
+        .await;
+        let found = remove.as_mut().await;
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        drop(pool.alloc(big).unwrap());
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_a_handle_whose_path_names_another_file() {
+    run(|files, data| async move {
+        let file = create(&files, "a", KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let (mut remove, mut open) = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            let mode = Mode::Create { len: KIB };
+            let mut open = Box::pin(files.open(Path::new("a"), mode));
+            pend(&mut open, context);
+            (remove, open)
+        })
+        .await;
+        assert_eq!(open.as_mut().await.map(drop), Ok(()));
+        let found = poll_fn(|cx| Poll::Ready(remove.as_mut().poll(cx))).await;
+        assert_eq!(
+            found,
+            Poll::Ready(Err(Error::NotFound { path: "a".into() }))
+        );
+    });
 }
