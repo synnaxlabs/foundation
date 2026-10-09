@@ -33,6 +33,7 @@ use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
 mod client;
+mod link;
 mod region;
 mod serve;
 
