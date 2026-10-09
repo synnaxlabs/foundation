@@ -188,8 +188,9 @@ mod tests {
     use std::io::IoSliceMut;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
     use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::Poll;
+    use std::task::{Context, Poll, Wake, Waker};
 
     use env::net::udp;
     use sim::node::Node;
@@ -712,11 +713,25 @@ mod tests {
         });
         let addresses = [Address::Udp(address(&server))];
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            struct Count(AtomicUsize);
+            impl Wake for Count {
+                fn wake(self: Arc<Self>) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             let dialer = carrier.dialer();
             let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
-            assert!(testing::poll_once(dial.as_mut()).await.is_none());
+            let count = Arc::new(Count(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&count));
+            let poll = dial.as_mut().poll(&mut Context::from_waker(&waker));
+            assert!(poll.is_pending());
             drop(carrier);
             node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+            assert_eq!(
+                count.0.load(Ordering::Relaxed),
+                1,
+                "the drop wakes the dial"
+            );
             let closed = Error::Closed { code: Code(0) };
             assert_eq!(dial.await.err(), Some(closed));
         });
