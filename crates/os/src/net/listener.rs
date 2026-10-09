@@ -98,9 +98,10 @@ impl Drop for Listener {
     expect(unused_variables, reason = "macOS has no call that stops the listen")
 )]
 fn stop(fd: BorrowedFd<'_>) {
-    // The close follows, so nothing can act on a failure here.
     #[cfg(target_os = "linux")]
-    let _stopped = rustix::net::shutdown(fd, rustix::net::Shutdown::Read);
+    if let Err(e) = rustix::net::shutdown(fd, rustix::net::Shutdown::Read) {
+        panic!("invariant: the listener {fd:?} stops its listen once, not {e:?}");
+    }
 }
 
 /// Registers `listener` with the I/O driver of this thread. A failed registration
