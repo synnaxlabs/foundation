@@ -1,7 +1,10 @@
 //! What the message codecs of this crate have in common: a writer that fills one
-//! message field by field, and a reader of the fields of one message.
+//! message field by field, a reader of the fields of one message, and the count of a
+//! body.
 
 use std::mem;
+
+pub(crate) mod body;
 
 /// Fills `out` from the front, one field at a time.
 pub(crate) struct Writer<'o>(&'o mut [u8]);

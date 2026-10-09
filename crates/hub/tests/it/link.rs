@@ -1,13 +1,10 @@
 //! The client sessions that `Link::serve` serves, over a real transport from a program
 //! to a simulated node: the hello stream, and the request streams.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
 
 use access::proof::{Error as Refusal, Field};
 use hub::{Served, serve};
@@ -146,21 +143,31 @@ where
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
-        let live = Live::default();
+        let mut accepted = 0;
         while let Ok(mut incoming) = session.accept().await {
+            accepted += 1;
             let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
-            let held = live.hold();
             tasks.spawn(async move {
                 header(&mut incoming).await;
                 let got = answer(link.serve(incoming), &clock).await;
                 kept.lock().expect("not poisoned").push(got);
-                drop(held);
             });
         }
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
-        // The shard drops its tasks when this future ends, so a stream task that has
-        // not pushed its result yet would lose it.
-        live.ended().await;
+        // The end of this future drops each serve task that has not yet recorded.
+        let deadline = node.clock().now() + Span::SECOND;
+        loop {
+            let recorded = kept.lock().expect("not poisoned").len();
+            if recorded == accepted {
+                break;
+            }
+            let now = node.clock().now();
+            assert!(
+                now < deadline,
+                "{recorded} of {accepted} serve tasks recorded"
+            );
+            node.clock().sleep(Span::MICROSECOND).await;
+        }
         drop((link, test));
     };
     run_program_on(seed, wire, home, program);
@@ -169,51 +176,6 @@ where
     Home {
         served,
         closed: closed.expect("the session closed"),
-    }
-}
-
-/// The tasks that [`Live::ended`] waits for.
-#[derive(Default)]
-struct Live(Rc<RefCell<Count>>);
-
-#[derive(Default)]
-struct Count {
-    held: usize,
-    waiter: Option<Waker>,
-}
-
-/// One task that [`Live::ended`] waits for, until it drops.
-struct Held(Rc<RefCell<Count>>);
-
-impl Live {
-    fn hold(&self) -> Held {
-        self.0.borrow_mut().held += 1;
-        Held(Rc::clone(&self.0))
-    }
-
-    /// Ends when no [`Held`] is left.
-    async fn ended(&self) {
-        std::future::poll_fn(|cx| {
-            let mut count = self.0.borrow_mut();
-            if count.held == 0 {
-                return Poll::Ready(());
-            }
-            count.waiter = Some(cx.waker().clone());
-            Poll::Pending
-        })
-        .await;
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        let mut count = self.0.borrow_mut();
-        count.held -= 1;
-        if count.held == 0
-            && let Some(waker) = count.waiter.take()
-        {
-            waker.wake();
-        }
     }
 }
 
@@ -343,7 +305,7 @@ pub(super) async fn header(incoming: &mut Incoming) {
 }
 
 /// What `serve` gave for one stream, once it replied to a request with its body
-/// reversed after [`HOLD`].
+/// reversed after [`HOLD`], or the error of that reply.
 async fn answer(
     serve: impl Future<Output = Result<Served, serve::Error>>,
     clock: &env::clock::Clock,
@@ -354,7 +316,7 @@ async fn answer(
             let subject = request.admitted.hello.subject.clone();
             let reply: Vec<u8> = request.body.iter().rev().copied().collect();
             clock.sleep(HOLD).await;
-            request.reply.send(&reply).await.expect("sends the reply");
+            request.reply.send(&reply).await?;
             Ok(Got::Request(subject, request.body))
         }
     }
@@ -836,6 +798,24 @@ fn stops_a_second_request_while_one_is_open() {
     assert_eq!(
         serve::Error::Pending.to_string(),
         "the program sent a request while another request waits for its reply"
+    );
+}
+
+/// A serve task that still holds its reply when the session closes ends after the
+/// home's accept loop, and its result still counts.
+#[test]
+fn keeps_the_result_of_a_reply_that_fails_once_the_session_closed() {
+    let home = session(99, true, |mut agent| async move {
+        agent.admit().await;
+        let _held = agent.request(2, b"ab").await;
+        agent.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Stream(closed_with(0))),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
     );
 }
 
