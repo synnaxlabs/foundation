@@ -9,7 +9,10 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use connector::kind::Table;
+use connector::cancel;
+use connector::kind::{self, Channels, Context, Table};
+use document::Document;
+use document::diagnostic::{Code, Diagnostic};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
@@ -138,12 +141,21 @@ fn founded<F: Future<Output = ()> + 'static>(
 
 /// The plan of `texts` on the spec that `mesh` uses.
 async fn plan_on(mesh: &Mesh, texts: &[(&str, &str)]) -> (Output, config::plan::Plan) {
+    plan_among(mesh, texts, &members()).await
+}
+
+/// The plan of `texts` on the spec that `mesh` uses, with the members `members`.
+async fn plan_among(
+    mesh: &Mesh,
+    texts: &[(&str, &str)],
+    members: &BTreeSet<Name>,
+) -> (Output, config::plan::Plan) {
     let spec = mesh.spec().await.expect("a spec");
     plan(
         &files(texts),
         spec.pointer.expect("a spec in use"),
         &spec.definitions,
-        &members(),
+        members,
         &front_ends(),
         &kinds(),
     )
@@ -153,6 +165,11 @@ async fn plan_on(mesh: &Mesh, texts: &[(&str, &str)]) -> (Output, config::plan::
 /// The one member, `edge`.
 fn members() -> BTreeSet<Name> {
     BTreeSet::from([name("edge")])
+}
+
+/// `edge` and `other`.
+fn two() -> BTreeSet<Name> {
+    BTreeSet::from([name("edge"), name("other")])
 }
 
 /// The kinds of the connectors of the fixtures.
@@ -500,6 +517,218 @@ fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
             assert_eq!(error, Error::Config(vec![problem]));
             assert_eq!(mesh.pointer(), base);
         }
+    });
+}
+
+/// A kind that refuses each config.
+struct Refuser;
+
+impl kind::Kind for Refuser {
+    type Config = ();
+
+    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+        let code = Code::new("test.refused");
+        Err(vec![Diagnostic::new(
+            code,
+            None,
+            "refused".into(),
+            "Fix it".into(),
+        )])
+    }
+
+    fn discover(
+        &self,
+        _: &cancel::Token,
+    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), kind::Error>> {
+        std::future::ready(Ok(()))
+    }
+}
+
+/// The plan with each change and home of `plans`, which share a base.
+fn merged(plans: Vec<config::plan::Plan>) -> config::plan::Plan {
+    let mut plans = plans.into_iter();
+    let mut merged = plans.next().expect("a plan");
+    for plan in plans {
+        assert_eq!(plan.base, merged.base);
+        merged.changes.extend(plan.changes);
+        merged.homes.extend(plan.homes);
+    }
+    merged
+}
+
+/// A connector `at` of the kind `opcua` on `node`, which writes each of `writes`.
+fn connector(at: &str, node: &str, writes: &[&str]) -> String {
+    let reads = writes
+        .iter()
+        .map(|write| format!("  read \"{write}\" {{}}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    format!(
+        "connector \"{at}\" {{\n  kind = \"opcua\"\n  node = \"{node}\"\n{reads}}}\n"
+    )
+}
+
+/// A placement `at` that selects `select` with the home `home`.
+fn placement(at: &str, select: &str, home: &str) -> String {
+    format!("placement \"{at}\" {{\n  select = {select}\n  home = \"{home}\"\n}}\n")
+}
+
+/// A `Config` problem with no place.
+fn problem(code: &str, message: &str, fix: &str) -> crate::error::Problem {
+    crate::error::Problem {
+        code: code.into(),
+        message: message.into(),
+        fix: fix.into(),
+        place: None,
+        notes: Vec::new(),
+    }
+}
+
+const A_TIME: &str = "channel \"a.time\" { kind = \"index\" }\n";
+
+/// The plan of the placement `t`, which wins for the connector `a`, and the placement
+/// `r`, which wins for its index `a.time`.
+async fn split(mesh: &Mesh) -> config::plan::Plan {
+    let t = format!(
+        "{A_TIME}{}{}",
+        connector("a", "edge", &["a.time"]),
+        placement("t", "[\"a\", \"a.*\"]", "edge")
+    );
+    let (_, t) = plan_on(mesh, &[("t.hcl", &t)]).await;
+    let r = placement("r", "\"a.time\"", "edge");
+    let (_, r) = plan_on(mesh, &[("r.hcl", &r)]).await;
+    merged(vec![t, r])
+}
+
+#[test]
+fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let (_, placed) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let mut unplaced = placed.clone();
+        unplaced.changes.remove(&name("p.@placement"));
+        unplaced.homes.clear();
+        let writer = |at, node| format!("{A_TIME}{}", connector(at, node, &["a.time"]));
+        let (_, on_edge) = plan_on(&mesh, &[("w.hcl", &writer("w", "edge"))]).await;
+        let other = writer("v", "other");
+        let (_, on_other) = plan_among(&mesh, &[("v.hcl", &other)], &two()).await;
+        let stray = connector("site.c", "other", &[]);
+        let (_, stray) = plan_among(&mesh, &[("c.hcl", &stray)], &two()).await;
+        let writer_nodes = problem(
+            "config.writer-nodes",
+            "connectors on the nodes `other` and `edge` write the index `a.time`, so \
+             it has no one home",
+            "Run each connector that writes `a.time` on one node",
+        );
+        let connector_home = problem(
+            "config.connector-home",
+            "the placement `p` names the home `edge`, but the connector `site.c` runs \
+             on the node `other`",
+            "Name `other` as the `home`, and keep `other` out of `standby` and `copies`",
+        );
+        let cases = [
+            (
+                unplaced,
+                vec![problem(
+                    "config.unplaced",
+                    "no placement selects the index, and no connector writes it",
+                    "Select the index with a placement that names a `home`, or write it \
+                     with a connector",
+                )],
+            ),
+            (
+                merged(vec![on_edge.clone(), on_other.clone()]),
+                vec![writer_nodes.clone()],
+            ),
+            (
+                merged(vec![placed.clone(), stray.clone()]),
+                vec![connector_home.clone()],
+            ),
+            (
+                split(&mesh).await,
+                vec![problem(
+                    "config.split-placement",
+                    "the placement `r` wins for the index `a.time`, but the placement \
+                     `t` wins for the connector `a`",
+                    "Make the placement `t` win for the connector `a` and its indexes",
+                )],
+            ),
+            (
+                merged(vec![on_edge, on_other, placed, stray]),
+                vec![writer_nodes, connector_home],
+            ),
+        ];
+        for (planned, problems) in cases {
+            let error =
+                apply(path(), &planned.encode(), &mesh, &two(), &kinds(), keys(0))
+                    .await
+                    .expect_err("a plan that check refuses");
+            assert_eq!(error, Error::Config(problems));
+            assert_eq!(mesh.pointer(), base);
+        }
+    });
+}
+
+#[test]
+fn refuses_a_config_that_its_kind_refuses_at_the_apply() {
+    solo(|mesh| async move {
+        let base = mesh.pointer();
+        let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let refusing = Table::new().with("influx", Reader).with("opcua", Refuser);
+        let error = apply(
+            path(),
+            &plant.encode(),
+            &mesh,
+            &members(),
+            &refusing,
+            keys(0),
+        )
+        .await
+        .expect_err("a config that its kind refuses");
+        let refused = problem("test.refused", "refused", "Fix it");
+        assert_eq!(error, Error::Config(vec![refused]));
+        assert_eq!(mesh.pointer(), base);
+    });
+}
+
+#[test]
+fn refuses_a_plan_with_only_a_home_on_a_node_that_left() {
+    solo(|mesh| async move {
+        let site = placed_site().replace("home = \"edge\"", "home = \"other\"");
+        let (_, mut site) = plan_among(&mesh, &[("site.hcl", &site)], &two()).await;
+        let homes = std::mem::take(&mut site.homes);
+        apply(path(), &site.encode(), &mesh, &two(), &kinds(), keys(0))
+            .await
+            .expect("a plan with no home applies");
+        let pointer = mesh.pointer();
+        site.base = pointer;
+        site.changes.clear();
+        site.homes = homes;
+        let error = apply(
+            path(),
+            &site.encode(),
+            &mesh,
+            &members(),
+            &kinds(),
+            keys(10),
+        )
+        .await
+        .expect_err("a home on a node that left");
+        let problem = problem(
+            "config.unknown-node",
+            "no node of the mesh is named `other`",
+            "Name a node of the mesh",
+        );
+        assert_eq!(error, Error::Config(vec![problem]));
+        assert_eq!(mesh.pointer(), pointer);
     });
 }
 
