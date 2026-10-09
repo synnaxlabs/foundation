@@ -1067,57 +1067,41 @@ mod tests {
     }
 
     #[test]
-    fn applies_the_writes_of_a_kind_at_its_authority_over_a_lower_holder() {
-        let refusals = refusals(Some(Authority(1)), |start| Write {
-            authority: Authority(2),
-            ..Write::new(start, vec![7])
-        });
-        assert_eq!(refusals, [None]);
+    fn gives_a_kind_control_only_over_a_holder_of_lower_authority() {
+        for (kind, holder, want) in [
+            (1, 1, Some(Refusal::Waiting)),
+            (2, 1, None),
+            (2, 2, Some(Refusal::Waiting)),
+        ] {
+            let refusals = refusals(Some(Authority(holder)), move |start| Write {
+                authority: Authority(kind),
+                ..Write::new(start, vec![7])
+            });
+            assert_eq!(refusals, [want], "kind {kind}, holder {holder}");
+        }
     }
 
-    #[test]
-    fn refuses_the_write_of_a_kind_after_its_lease_runs_out() {
-        let refusals = refusals(None, |start| Write {
-            lease: Some(Span::SECOND),
-            gap: Span::from_nanos(3 * Span::SECOND.nanos()),
-            ..Write::new(start, vec![7, 8])
-        });
-        assert_eq!(refusals, [None, Some(Refusal::Expired)]);
-    }
-
-    #[test]
-    fn refuses_the_write_of_a_kind_at_the_authority_of_its_holder() {
-        let refusals = refusals(Some(Authority(2)), |start| Write {
-            authority: Authority(2),
-            ..Write::new(start, vec![7])
-        });
-        assert_eq!(refusals, [Some(Refusal::Waiting)]);
-    }
-
-    /// The refusals of two writes of a kind with `lease`, `gap_ms` milliseconds apart.
-    fn two_writes(lease: Option<Span>, gap_ms: i64) -> Vec<Option<Refusal>> {
+    /// The refusals of two writes of a kind with `lease`, `gap` apart.
+    fn two_writes(lease: Option<Span>, gap: Span) -> Vec<Option<Refusal>> {
         refusals(None, move |start| Write {
             lease,
-            gap: Span::from_nanos(gap_ms * 1_000_000),
+            gap,
             ..Write::new(start, vec![7, 8])
         })
     }
 
     #[test]
-    fn applies_the_writes_of_a_kind_with_no_lease_at_any_gap() {
-        assert_eq!(two_writes(None, 3_000), [None, None]);
+    fn applies_the_writes_of_a_kind_with_no_lease_a_day_apart() {
+        assert_eq!(two_writes(None, Span::DAY), [None, None]);
     }
 
     #[test]
-    fn applies_the_write_of_a_kind_before_its_lease_runs_out() {
-        let three_seconds = Span::from_nanos(3 * Span::SECOND.nanos());
-        assert_eq!(two_writes(Some(three_seconds), 2_000), [None, None]);
-    }
-
-    #[test]
-    fn refuses_the_write_of_a_kind_just_after_its_lease_runs_out() {
+    fn refuses_the_write_of_a_kind_once_its_lease_runs_out() {
+        let lease = Some(Span::SECOND);
+        let just_before = Span::from_nanos(Span::SECOND.nanos() - 1);
+        assert_eq!(two_writes(lease, just_before), [None, None]);
         assert_eq!(
-            two_writes(Some(Span::SECOND), 1_500),
+            two_writes(lease, Span::SECOND),
             [None, Some(Refusal::Expired)]
         );
     }
