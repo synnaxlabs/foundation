@@ -22,12 +22,12 @@ const HEADER: Span = Span::from_nanos(10_000_000_000);
 
 /// How many places the peers outside the region hold at once, a patch as [`HEADER`]
 /// is. A program holds one per session, and a node one for its key.
-const SESSIONS: usize = 256;
+const PLACES: usize = 256;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
 /// transport stops, and gives the error that stopped it. Admits each session of a
-/// member of `mesh`'s region, and of another peer while it gets a place of
-/// [`SESSIONS`]; closes each other session with `wire::session::REFUSED`. `route`
+/// member of `mesh`'s region, and of another peer while it gets one of
+/// the [`PLACES`]; closes each other session with `wire::session::REFUSED`. `route`
 /// decides each stream.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
@@ -73,11 +73,13 @@ struct Places {
 
 impl Places {
     /// The place of a new session of `peer`: the place that the key of a node
-    /// still holds, else a new place while fewer than [`SESSIONS`] are held. `None`
+    /// still holds, else a new place while fewer than [`PLACES`] are held. `None`
     /// when the bound is full.
     fn take(&mut self, peer: Peer) -> Option<Rc<()>> {
         self.nodes.retain(|_, place| place.strong_count() > 0);
-        let full = Rc::strong_count(&self.programs) - 1 + self.nodes.len() >= SESSIONS;
+        // `Places` holds one clone of `programs`.
+        let held = Rc::strong_count(&self.programs) - 1 + self.nodes.len();
+        let full = held >= PLACES;
         match peer {
             Peer::Client if full => None,
             Peer::Client => Some(Rc::clone(&self.programs)),
