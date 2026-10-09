@@ -168,7 +168,7 @@ struct Count {
 
 impl Driver for Count {
     fn spawn(&self, task: Task) {
-        self.live.n.set(self.live.n.get() + 1);
+        self.live.n.set(self.live.n.get().strict_add(1));
         let held = Held(Rc::clone(&self.live));
         self.tasks.spawn(async move {
             let _held = held;
@@ -203,7 +203,7 @@ struct Held(Rc<Live>);
 
 impl Drop for Held {
     fn drop(&mut self) {
-        self.0.n.set(self.0.n.get() - 1);
+        self.0.n.set(self.0.n.get().strict_sub(1));
         if let Some(waker) = self.0.waiter.take() {
             waker.wake();
         }
