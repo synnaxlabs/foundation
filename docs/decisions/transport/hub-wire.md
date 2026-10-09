@@ -102,8 +102,8 @@
   needs a clock in `hub` and a wait queue for each session, and the end frees the
   frames the session pins (`mesh` ends its stream in the same case). The class rule and
   code 18 were decided by the architect (2026-10-07T21:34:19Z,
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), the end
-  of a session on `BUSY` by the architect (2026-10-07T21:47:56Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
+  `BUSY` and the end of a session on it by the architect (2026-10-07T21:47:56Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084).
   Lost: a `message_bytes_max` of at least the largest pool block (a client or a
   foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
