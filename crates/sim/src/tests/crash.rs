@@ -1635,12 +1635,14 @@ fn a_crash_gives_the_normal_path_of_each_file_that_it_closes() {
 fn a_crash_closes_the_leaked_files_in_the_order_of_their_opens() {
     let (mut sim, node) = disk(0);
     crash_after(&mut sim, &node, Crash::Process, |node| async move {
-        Box::leak(Box::new(create(&node, "./b", 0).await));
-        let _held = create(&node, "./a", 0).await;
         Box::leak(Box::new(create(&node, "./d", 0).await));
+        let _held = create(&node, "./a", 0).await;
+        Box::leak(Box::new(create(&node, "./b", 0).await));
+        let read = node.files().open(Path::new("d"), Mode::Read).await.unwrap();
+        Box::leak(Box::new(read));
         pending::<()>().await;
     });
-    assert_eq!(node.file_closes(), ["a", "b", "d"].map(PathBuf::from));
+    assert_eq!(node.file_closes(), ["a", "d", "b", "d"].map(PathBuf::from));
 }
 
 #[test]
