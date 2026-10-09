@@ -298,6 +298,7 @@ mod tests {
         )
     }
 
+    /// A private call, as `sim` has no link-local address (#2075).
     #[test]
     fn a_route_keeps_the_scope_of_a_link_local_address_and_no_flow_label() {
         let ip = "fe80::1".parse().expect("an IPv6 address");
