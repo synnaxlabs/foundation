@@ -21,6 +21,10 @@ const TAG: &[u8; 17] = b"foundation/name/1";
 const BODY: usize = TAG.len() + 1 + Name::MAX_BYTES;
 /// The length of the file: the body and its CRC32C.
 pub(crate) const LEN: usize = BODY + 4;
+const _: () = assert!(
+    Name::MAX_BYTES <= u8::MAX as usize,
+    "one byte holds the length"
+);
 
 /// The name in the file `name` of `files`, or `None` when no node wrote one. Opens
 /// the file to read only, so it makes nothing and waits for no lock.
