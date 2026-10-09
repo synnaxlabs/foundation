@@ -101,8 +101,9 @@
   placement selects the index. A connector only reads a command index, so command
   indexes leave the unit (same ruling of 18:36:00Z). When the connectors that write an
   index are on two nodes, `config.writer-nodes` reports it and the index gets no
-  `config.split-placement`, as no one fix can hold for each writer (`laptop.architect`,
-  OWED). Its fix
+  `config.split-placement`, because no one fix holds for each writer
+  (`laptop.architect`, 2026-10-09T22:37:54Z,
+  https://github.com/synnaxlabs/foundation/issues/1961#issuecomment-6090432989). Its fix
   is "Make the placement `p` win for the connector `c` and its indexes", where `p` wins
   for `c`, or for the index when no placement selects `c` (same comment of 15:21:54Z,
   and `laptop.architect`, 2026-10-08T16:22:59Z). It is the target state that each other
