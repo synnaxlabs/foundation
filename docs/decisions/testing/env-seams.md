@@ -302,7 +302,7 @@
   another thread spawns holds it only from its fork to its exec (the window,
   `laptop.architect-2`, 2026-10-09T05:02:07Z:
   https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714). macOS has
-  no such flag, and Tokio sets it in a second call on an accepted stream too, so on
+  no such flag, and std sets it in a second call on an accepted stream too, so on
   macOS that child may hold the socket and its port, as the doc of `os::net()` says. A
   Foundation node spawns no process, so only tests see it, and CI runs on Linux. Lost:
   `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn side, which std does not set, and which
