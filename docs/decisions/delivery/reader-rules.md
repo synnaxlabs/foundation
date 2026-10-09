@@ -39,18 +39,22 @@
   taken over, and on the home's interval when the position changed. A session open at a
   crash restores as closed at the restore. The home drops a grant, ack, or close for a
   key it gave that is no longer open: a late message after a close or a takeover. A take
-  of such a key gives nothing. A key is the home's own value, in memory only, and keys
-  start again at a restore. No hub message carries a key: the home maps each one to a
-  key it gave, so a key it never gave is a defect of the home and panics. Complete and
-  latest sessions have separate key types, so a call in the wrong mode does not compile
-  (advisor, #725; the take and the key rule: architect, #1038). Only a named complete
-  session needs mesh time to close. One `Readers::close(key, now)` ends each session:
-  `now` is `None` before the home first has mesh time, and a close with `None` of an
-  open named complete session panics. `Readers::open_named_latest` takes a stamp, and
-  no other open does, so the home opens unnamed readers before the first estimate. A
-  named complete session has a `complete::Key` (#1024). One close replaces
-  `Readers::close_named`, so the caller never picks a close by the mode of the session
-  (`laptop.architect`, 2026-10-08T11:12:45Z:
+  of such a key gives nothing. After a home sheds an index (HOME SURFACE), a call with a
+  key of a reader of the index panics until the home carries it again; after that carry,
+  the home drops the call as late (`laptop.architect`, 2026-10-08T22:24:43Z:
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814). A key
+  is the home's own value, in memory only, and keys start again at a restore. No hub
+  message carries a key: the home maps each one to a key it gave, so a key it never gave
+  is a defect of the home and panics. Complete and latest sessions have separate key
+  types, so a call in the wrong mode does not compile (advisor, #725; the take and the
+  key rule: architect, #1038). Only a named complete session needs mesh time to close.
+  One `Readers::close(key, now)` ends each session: `now` is `None` before the home
+  first has mesh time, and a close with `None` of an open named complete session panics.
+  `Readers::open_named_latest` takes a stamp, and no other open does, so the home opens
+  unnamed readers before the first estimate. A named complete session has a
+  `complete::Key` (#1024). One close replaces `Readers::close_named`, so the caller
+  never picks a close by the mode of the session (`laptop.architect`,
+  2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367). One
   `delivery::named::Key { subject, name }` keys a named reader in `Reader::Named`,
   `Record`, and `Readers::open_named_latest`, in place of two `Name` values (the
