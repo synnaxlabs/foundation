@@ -3466,7 +3466,8 @@ mod tests {
 
         /// A cap one byte higher, or a floor one byte lower, changes the order only
         /// while the credit sits on that byte, so it moves at most one message by one
-        /// turn. No seam test kills it yet (#2157).
+        /// turn. No seam test kills it, nor a cap up to 13 KiB higher or a floor up to
+        /// 8 KiB lower, which the light-load tests read within their bound (#2157).
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
@@ -8108,7 +8109,7 @@ mod tests {
         /// The size of a message after the light load. A class goes ahead by its
         /// credit, the rest of one message, and the message its stream holds, so a
         /// small message lets the lead show a cap 2% too high.
-        const PART: usize = MESSAGE_MAX / 16;
+        const PART: usize = MESSAGE_MAX / 64;
 
         /// Runs [`ahead_after_a_light_load`], and checks the lead against the credit
         /// of `light`, `credit` windows, and two messages.
