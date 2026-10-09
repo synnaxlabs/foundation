@@ -85,9 +85,8 @@
   keeps the index of the next datagram, so the retry with the same transmit sends only
   the datagrams that did not go out (`laptop.architect-2`, 2026-10-09 07:15 UTC,
   https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463). A
-  different transmit in place of the one that got `Pending` loses its first
-  datagrams, as many as went out before the `Pending` (`laptop.architect-2`,
-  2026-10-09 12:48 UTC,
+  different transmit in place of the one that got `Pending` loses its first datagrams,
+  as many as went out before the `Pending` (`laptop.architect-2`, 2026-10-09 12:48 UTC,
   https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081197695). Each
   half has its own `dup` of the socket. The receiver registers for readable at its
   first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
