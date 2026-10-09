@@ -30,12 +30,12 @@ mod tests;
 /// - [`Error::Behind`] when the node does not use the newest spec.
 /// - [`Error::Stale`] when the spec in use is not the base of the plan, or when
 ///   another change applies first.
-/// - [`Error::Apply`] with each other error of [`mesh::Mesh::apply`], and when the
-///   group of `mesh` stopped.
+/// - [`Error::Stopped`] when the group of `mesh` stopped, before or during the apply.
+/// - [`Error::Apply`] with each other error of [`mesh::Mesh::apply`].
 ///
 /// A plan with no change and no home proposes nothing and gives the spec in use, so
-/// it makes no other plan stale. No error changes the spec. Only `Apply`, and `Stale`
-/// when another change applies first, can come after a proposal.
+/// it makes no other plan stale. No error changes the spec. Only `Apply`, `Stopped`,
+/// and `Stale` when another change applies first, can come after a proposal.
 pub(crate) async fn apply(
     path: &Path,
     bytes: &[u8],
@@ -67,6 +67,7 @@ pub(crate) async fn apply(
             .await
             .map_err(|error| match error {
                 mesh::Error::Stale { base, pointer } => Error::Stale { base, pointer },
+                mesh::Error::Stopped(stopped) => Error::Stopped(stopped),
                 error => Error::Apply(error),
             })?
     };
