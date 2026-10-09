@@ -447,7 +447,7 @@ fn a_timer_from_a_base_out_of_range_of_the_clock_is_refused() {
 
 #[test]
 fn a_once_timer_from_the_latest_base_waits() {
-    let mut f = Fixture::new();
+    let f = Fixture::new();
     f.start();
     f.try_timer(record, number(1), 0.0, Some(LATEST_BASE), ffi::ONCE)
         .expect("the latest base is in range");
