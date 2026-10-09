@@ -3,6 +3,8 @@
 use std::net::SocketAddr;
 use std::os::fd::BorrowedFd;
 
+use rustix::net::SocketType;
+
 /// Turns off the UDP checksum of the socket bound to `local`, so that Linux refuses
 /// each GSO send on it with `EINVAL`, as a card that cannot segment does.
 #[expect(
@@ -17,7 +19,9 @@ pub(crate) fn refuse(local: SocketAddr) {
             // SAFETY: the descriptor stays open for this call: the caller holds
             // the socket, and another descriptor that closes gives only an error.
             let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::net::getsockname(fd)
+            // A TCP socket of another test can hold the same address.
+            let udp = rustix::net::sockopt::socket_type(fd) == Ok(SocketType::DGRAM);
+            udp && rustix::net::getsockname(fd)
                 .ok()
                 .and_then(|name| SocketAddr::try_from(name).ok())
                 == Some(local)
