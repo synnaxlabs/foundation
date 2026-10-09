@@ -11,8 +11,6 @@ pub(crate) struct Status(pub(crate) u32);
 
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
-    #[cfg(test)]
-    pub(crate) const BAD_NOT_SUPPORTED: Self = Self(0x803D_0000);
     pub(crate) const BAD_NOT_FOUND: Self = Self(0x803E_0000);
     #[cfg(test)]
     pub(crate) const BAD_INVALID_ARGUMENT: Self = Self(0x80AB_0000);
@@ -287,6 +285,13 @@ pub(crate) struct Hooks {
         context: *mut c_void,
         callback: ConnectionCallback,
     ) -> u32,
+    pub(crate) listen: unsafe extern "C" fn(
+        state: *mut c_void,
+        port: u16,
+        application: *mut c_void,
+        context: *mut c_void,
+        callback: ConnectionCallback,
+    ) -> u32,
     pub(crate) send:
         unsafe extern "C" fn(state: *mut c_void, id: usize, buffer: *mut Bytes) -> u32,
     pub(crate) close: unsafe extern "C" fn(state: *mut c_void, id: usize) -> u32,
@@ -354,6 +359,10 @@ pub(crate) mod test {
     use super::{
         Bytes, ConnectionCallback, ConnectionManager, EventLoop, KeyValueMap, at,
     };
+
+    /// `UA_Server`, which Rust holds only by pointer.
+    #[repr(C)]
+    pub(crate) struct Server([u8; 0]);
 
     /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
     /// offsets.
@@ -482,5 +491,10 @@ pub(crate) mod test {
         ) -> u32;
         pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
         pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
+
+        pub(crate) fn shim_server_new(el: *mut EventLoop, port: u16) -> *mut Server;
+        pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
     }
 }

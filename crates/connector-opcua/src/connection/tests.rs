@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use env::clock::Clock;
-use env::net::{Tcp, tcp};
+use env::net::{Listener, Tcp, tcp};
 use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
@@ -111,9 +111,15 @@ struct Side {
 
 impl Side {
     fn new(node: &node::Node) -> Self {
+        Self::with(node, None)
+    }
+
+    /// A side whose manager accepts on `listener`.
+    fn with(node: &node::Node, listener: Option<Listener>) -> Self {
         let clock = node.clock();
+        let net = node.net();
         let manager =
-            Manager::new(Clock::clone(&clock), node.net(), &mut Rng::from_seed(0));
+            Manager::new(Clock::clone(&clock), net, listener, &mut Rng::from_seed(0));
         let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });
@@ -175,6 +181,14 @@ impl Side {
     /// Sends `bytes` on connection `id` in a buffer of the manager.
     fn send(&self, id: usize, bytes: &[u8]) -> Status {
         send_on(self.cm(), id, bytes)
+    }
+
+    /// Opens a listen connection on `port` with the callback of the side.
+    fn listen(&self, port: u16) -> Status {
+        self.open(&[
+            ("listen", Value::Boolean(true)),
+            ("port", Value::UInt16(port)),
+        ])
     }
 
     fn close(&self, id: usize) -> Status {
@@ -342,6 +356,47 @@ impl Network {
 
     fn remote(&self) -> SocketAddr {
         SocketAddr::new(self.peer.addresses()[0], PORT)
+    }
+
+    /// The address that a listening side binds.
+    fn listening(&self) -> SocketAddr {
+        SocketAddr::new(self.local.addresses()[0], PORT)
+    }
+
+    /// Connects from the peer to [`Self::listening`] after `delay`, writes `say`,
+    /// records what it reads until the stream ends, and closes. A connect that fails
+    /// records its error.
+    fn dial(&self, delay: Span, say: &[u8]) -> Arc<Mutex<Reads>> {
+        let say = say.to_vec();
+        let reads = Arc::new(Mutex::new(Reads::default()));
+        let slot = Arc::clone(&reads);
+        let net = self.peer.net();
+        let clock = self.peer.clock();
+        let config = tcp::Config {
+            remote: self.listening(),
+            options: OPTIONS,
+        };
+        let shard = env::shards::Config {
+            name: "dial".into(),
+            core: None,
+        };
+        let handle = self.peer.shards().start(shard, move |_| async move {
+            clock.sleep(delay).await;
+            let mut stream = match net.connect(&config).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let mut reads = slot.lock().expect("no panic under the lock");
+                    reads.ended = Some(clock.now());
+                    reads.error = Some(e.to_string());
+                    return;
+                }
+            };
+            write(&mut stream, &say).await;
+            read_all(&mut stream, &clock, &slot, Span::ZERO).await;
+            drop(poll_fn(|cx| stream.poll_close(cx)).await);
+        });
+        drop(handle.expect("the shard starts"));
+        reads
     }
 
     /// Accepts one stream on the peer, and runs `peer` on it with the clock of the
@@ -585,7 +640,7 @@ fn a_drop_drops_a_closing_that_waits() {
 }
 
 #[test]
-fn an_open_without_its_parameters_or_to_listen_is_refused_with_no_call() {
+fn an_open_without_its_parameters_is_refused_with_no_call() {
     let mut network = Network::new();
     let calls = network
         .sim
@@ -600,18 +655,10 @@ fn an_open_without_its_parameters_or_to_listen_is_refused_with_no_call() {
                 ]),
                 side.open(&[
                     ("listen", Value::Boolean(true)),
-                    ("port", Value::UInt16(PORT)),
+                    ("port", Value::String("4840")),
                 ]),
             ];
-            assert_eq!(
-                statuses,
-                [
-                    Status::BAD_INVALID_ARGUMENT,
-                    Status::BAD_INVALID_ARGUMENT,
-                    Status::BAD_INVALID_ARGUMENT,
-                    Status::BAD_NOT_SUPPORTED,
-                ]
-            );
+            assert_eq!(statuses, [Status::BAD_INVALID_ARGUMENT; 4]);
             side.calls()
         })
         .expect("the run ends");
@@ -1790,4 +1837,264 @@ fn a_closing_from_a_run_in_a_callback_gets_the_context_it_wrote() {
     assert_eq!(late.last(), Some(&closing), "a close with no run");
     let nested = closing_context(mark_close_and_run);
     assert_eq!(nested.last(), Some(&closing), "a close and a run");
+}
+
+/// Gives a listener of `node` at [`Network::listening`].
+fn listener(node: &node::Node) -> Listener {
+    let listen = tcp::Listen {
+        local: SocketAddr::new(node.addresses()[0], PORT),
+        backlog: 4,
+        options: OPTIONS,
+    };
+    node.net().listen(&listen).expect("the port is free")
+}
+
+/// Gives a side on `node` whose manager accepts on [`listener`], with the callback
+/// [`adopt`].
+fn listening(node: &node::Node) -> Side {
+    let mut side = Side::with(node, Some(listener(node)));
+    side.callback = adopt;
+    side
+}
+
+/// Records a call as [`record`] does, with the context that the call saw as the
+/// first byte of the message. A call with no context writes the id as the context. A
+/// first `ESTABLISHED` with a context, of an accepted connection, writes 10 times the
+/// id as its context and sends `hi`.
+unsafe extern "C" fn adopt(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    _: *const KeyValueMap,
+    message: Bytes,
+) {
+    // SAFETY: `open` passes the calls of a live side.
+    let calls = unsafe { &*application.cast::<RefCell<Vec<Call>>>() };
+    // SAFETY: the manager gives the slot of the connection for the call.
+    let seen = unsafe { *context }.addr();
+    let mut bytes = vec![u8::try_from(seen).expect("a small context")];
+    if message.length > 0 {
+        // SAFETY: the manager gives `length` bytes at `data` for the call.
+        bytes.extend(unsafe {
+            std::slice::from_raw_parts(message.data, message.length)
+        });
+    }
+    calls.borrow_mut().push((id, state, bytes));
+    let accepted = state == ffi::ESTABLISHED && message.length == 0 && seen != 0;
+    if seen == 0 {
+        // SAFETY: as above.
+        unsafe { *context = ptr::without_provenance_mut(id) };
+    } else if accepted && seen < 10 {
+        // SAFETY: as above.
+        unsafe { *context = ptr::without_provenance_mut(10 * id) };
+        assert_eq!(send_on(cm, id, b"hi"), Status::GOOD);
+    }
+}
+
+#[test]
+fn each_accepted_stream_is_a_connection_with_the_context_of_the_listen() {
+    let mut network = Network::new();
+    let first = network.dial(Span::from_nanos(1_000_000), b"a");
+    let second = network.dial(Span::from_nanos(2_000_000), b"b");
+    let late = network.dial(Span::from_nanos(500_000_000), b"c");
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = listening(&node);
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            assert_eq!(side.calls(), [(1, ffi::ESTABLISHED, vec![0])]);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            assert_eq!(side.send(2, b"late"), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    assert_eq!(
+        calls,
+        [
+            (1, ffi::ESTABLISHED, vec![0]),
+            (2, ffi::ESTABLISHED, vec![1]),
+            (2, ffi::ESTABLISHED, vec![20, b'a']),
+            (3, ffi::ESTABLISHED, vec![1]),
+            (3, ffi::ESTABLISHED, vec![30, b'b']),
+            (1, ffi::CLOSING, vec![1]),
+        ]
+    );
+    let bytes = |reads: &Mutex<Reads>| reads.lock().expect("no panic").bytes();
+    assert_eq!(bytes(&first), b"hilate");
+    assert_eq!(bytes(&second), b"hi");
+    let late = late.lock().expect("no panic under the lock");
+    assert_eq!(
+        late.error.as_deref(),
+        Some("10.0.0.1:4840 refused the connection")
+    );
+}
+
+/// Fails the listener once it accepted one stream, when `child::running()`.
+#[test]
+fn failed_listener() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    let first = network.dial(Span::ZERO, b"a");
+    let at = network.listening();
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = listening(&node);
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::from_nanos(10_000_000)).await;
+            node.fail_listener(at);
+            side.drive(Span::from_nanos(10_000_000)).await;
+            assert_eq!(side.close(1), Status::BAD_NOT_FOUND);
+            assert_eq!(side.send(2, b"on"), Status::GOOD);
+            side.drive(Span::from_nanos(10_000_000)).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    assert_eq!(
+        calls,
+        [
+            (1, ffi::ESTABLISHED, vec![0]),
+            (2, ffi::ESTABLISHED, vec![1]),
+            (2, ffi::ESTABLISHED, vec![20, b'a']),
+            (1, ffi::CLOSING, vec![1]),
+        ]
+    );
+    assert_eq!(first.lock().expect("no panic").bytes(), b"hion");
+}
+
+#[test]
+fn an_accept_error_gives_closing_of_the_listen_and_a_warning() {
+    assert_eq!(
+        stderr("failed_listener"),
+        "connector-opcua: open62541 warning: connection 1: the accept failed: \
+         network call failed with OS error 5\n"
+    );
+}
+
+/// Opens a listen on `port`, with a listener at [`PORT`] unless `none`, and a second
+/// listen when `twice`, when `child::running()`.
+fn listen_and_abort(port: u16, none: bool, twice: bool) {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = if none {
+                Side::new(&node)
+            } else {
+                listening(&node)
+            };
+            side.listen(port);
+            if twice {
+                side.listen(port);
+            }
+        })
+        .expect("the run ends");
+}
+
+#[test]
+fn listen_with_no_listener() {
+    listen_and_abort(PORT, true, false);
+}
+
+#[test]
+fn listen_twice() {
+    listen_and_abort(PORT, false, true);
+}
+
+#[test]
+fn listen_on_another_port() {
+    listen_and_abort(PORT + 1, false, false);
+}
+
+/// Runs the test `name` of this module in a child process, asserts that it aborts,
+/// and gives its panic message. The test harness writes the message to stdout.
+fn abort(name: &str) -> String {
+    let output = child::output(&format!("connection::tests::{name}"), &[]);
+    assert!(!output.status.success(), "{name} ends");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let message = stdout
+        .lines()
+        .skip_while(|line| {
+            !line.contains("panicked at crates/connector-opcua/src/connection.rs")
+        })
+        .nth(1);
+    message.expect(&stdout).to_owned()
+}
+
+#[test]
+fn a_listen_with_no_listener_or_after_a_listen_aborts() {
+    let message = "a listen open takes the listener that `Manager::new` got";
+    assert_eq!(abort("listen_with_no_listener"), message);
+    assert_eq!(abort("listen_twice"), message);
+}
+
+#[test]
+fn a_listen_on_a_port_other_than_the_listener_aborts() {
+    assert_eq!(
+        abort("listen_on_another_port"),
+        "a listen open on port 4841, but the listener is at 10.0.0.1:4840"
+    );
+}
+
+/// Gives the `HEL` message of a client that asks for `url`, with buffers of 64 KiB
+/// and no limit on a message or its chunks.
+fn hel(url: &str) -> Vec<u8> {
+    let length = u32::try_from(32 + url.len()).expect("a short URL");
+    let url_length = u32::try_from(url.len()).expect("a short URL");
+    let mut bytes = b"HELF".to_vec();
+    for field in [length, 0, 1 << 16, 1 << 16, 0, 0, url_length] {
+        bytes.extend(field.to_le_bytes());
+    }
+    bytes.extend(url.as_bytes());
+    bytes
+}
+
+#[test]
+fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
+    let mut network = Network::new();
+    let reads = network.dial(Span::MILLISECOND, &hel("opc.tcp://10.0.0.1:4840"));
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::with(&node, Some(listener(&node)));
+            // SAFETY: the loop outlives the server, which the test deletes.
+            let server =
+                unsafe { ffi::test::shim_server_new(side.events().raw(), PORT) };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            // The copy leaves a server on an external loop in `STOPPING`, so the
+            // delete fails and the server leaks.
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+            assert_eq!(status, Status::BAD_INTERNAL_ERROR);
+            side.calls()
+        })
+        .expect("the run ends");
+    assert_eq!(calls, []);
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.error, None);
+    assert!(reads.ended.is_some());
+    let mut ack = b"ACKF".to_vec();
+    for field in [28_u32, 0, 1 << 16, 1 << 16, 1 << 29, 1 << 14] {
+        ack.extend(field.to_le_bytes());
+    }
+    assert_eq!(reads.bytes(), ack);
 }

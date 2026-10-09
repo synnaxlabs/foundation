@@ -7,6 +7,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client_config_default.h>
+#include <open62541/server_config_default.h>
 #include <open62541/plugin/eventloop.h>
 #include <open62541/types.h>
 #include <open62541/util.h>
@@ -379,6 +380,8 @@ void shim_loop_free(UA_EventLoop *el) {
 typedef struct {
     UA_StatusCode (*open)(void *state, UA_String host, UA_UInt16 port, void *application,
                           void *context, UA_ConnectionManager_connectionCallback callback);
+    UA_StatusCode (*listen)(void *state, UA_UInt16 port, void *application, void *context,
+                            UA_ConnectionManager_connectionCallback callback);
     UA_StatusCode (*send)(void *state, uintptr_t id, UA_ByteString *buffer);
     UA_StatusCode (*close)(void *state, uintptr_t id);
 } shim_hooks;
@@ -428,21 +431,24 @@ static UA_StatusCode cm_free(UA_EventSource *es) {
     return UA_STATUSCODE_BADINTERNALERROR;
 }
 
-/* Opens a client connection to the `address` and `port` of `params`. */
+/* Listens on the `port` of `params`, or opens a client connection to its `address`
+ * and `port`. The listener of the manager sets the address of a listen. */
 static UA_StatusCode cm_open(UA_ConnectionManager *cm, const UA_KeyValueMap *params,
                              void *application, void *context,
                              UA_ConnectionManager_connectionCallback callback) {
+    struct shim_cm *s = cm_of(cm);
     const UA_Boolean *listen = (const UA_Boolean *)UA_KeyValueMap_getScalar(
         params, UA_QUALIFIEDNAME(0, "listen"), &UA_TYPES[UA_TYPES_BOOLEAN]);
-    if(listen && *listen)
-        return UA_STATUSCODE_BADNOTSUPPORTED;
-    const UA_String *address = (const UA_String *)UA_KeyValueMap_getScalar(
-        params, UA_QUALIFIEDNAME(0, "address"), &UA_TYPES[UA_TYPES_STRING]);
     const UA_UInt16 *port = (const UA_UInt16 *)UA_KeyValueMap_getScalar(
         params, UA_QUALIFIEDNAME(0, "port"), &UA_TYPES[UA_TYPES_UINT16]);
-    if(!address || !port)
+    if(!port)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    struct shim_cm *s = cm_of(cm);
+    if(listen && *listen)
+        return s->hooks->listen(s->state, *port, application, context, callback);
+    const UA_String *address = (const UA_String *)UA_KeyValueMap_getScalar(
+        params, UA_QUALIFIEDNAME(0, "address"), &UA_TYPES[UA_TYPES_STRING]);
+    if(!address)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
     return s->hooks->open(s->state, *address, *port, application, context, callback);
 }
 
@@ -535,4 +541,18 @@ UA_Client *shim_client_new(UA_EventLoop *el) {
         return NULL;
     }
     return UA_Client_newWithConfig(&config);
+}
+
+/* Gives a server on `el` with the minimal config for `port`, or NULL on a failure. */
+UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port) {
+    UA_ServerConfig config;
+    memset(&config, 0, sizeof(config));
+    config.logging = &loop_of(el)->logger;
+    config.eventLoop = el;
+    config.externalEventLoop = true;
+    if(UA_ServerConfig_setMinimal(&config, port, NULL) != UA_STATUSCODE_GOOD) {
+        UA_ServerConfig_clear(&config);
+        return NULL;
+    }
+    return UA_Server_newWithConfig(&config);
 }

@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use env::clock::{Clock, Sleep};
-use env::net::{self, Net, Tcp, tcp};
+use env::net::{self, Listener, Net, Tcp, tcp};
 use env::rng::Rng;
 use types::time::Span;
 
@@ -46,7 +46,12 @@ const PARTS: usize = 16;
 /// How long a closed connection may write what waits before it drops its stream.
 const LINGER: Span = Span::from_nanos(10_000_000_000);
 
-static HOOKS: ffi::Hooks = ffi::Hooks { open, send, close };
+static HOOKS: ffi::Hooks = ffi::Hooks {
+    open,
+    listen,
+    send,
+    close,
+};
 
 /// A TCP connection manager and the loop it is linked into, on the thread that made
 /// it. Delete each client and server on its loop before it drops.
@@ -57,16 +62,22 @@ pub(crate) struct Manager {
 
 impl Manager {
     /// Makes a loop on `clock` and `rng`, as [`Loop::new`] does, and a manager that
-    /// connects through `net`, linked first into the event sources of the loop, where
-    /// a client finds it.
+    /// connects through `net` and accepts on `listener`, linked first into the event
+    /// sources of the loop, where a client or server finds it.
     ///
     /// # Panics
     ///
     /// When a C allocation fails.
-    pub(crate) fn new(clock: Clock, net: Net, rng: &mut Rng) -> Self {
+    pub(crate) fn new(
+        clock: Clock,
+        net: Net,
+        listener: Option<Listener>,
+        rng: &mut Rng,
+    ) -> Self {
         let events = Loop::new(Clock::clone(&clock), rng);
         let state = NonNull::from(Box::leak(Box::new(State {
             net,
+            listener: Cell::new(listener),
             clock,
             raw: Cell::new(ptr::null_mut()),
             events: events.raw(),
@@ -210,6 +221,8 @@ impl Drop for Manager {
 /// since C may call a hook again.
 struct State {
     net: Net,
+    /// The listener until a listen open takes it.
+    listener: Cell<Option<Listener>>,
     clock: Clock,
     raw: Cell<*mut ffi::ConnectionManager>,
     events: *mut ffi::EventLoop,
@@ -294,7 +307,7 @@ impl State {
             };
             connection.stream =
                 match std::mem::replace(&mut connection.stream, Stream::Closed) {
-                    Stream::Connecting(_) => Stream::Closed,
+                    Stream::Connecting(_) | Stream::Listening(_) => Stream::Closed,
                     Stream::Open(tcp) => Stream::Closing {
                         tcp,
                         linger: self.clock.sleep_until(self.clock.now() + LINGER),
@@ -320,7 +333,10 @@ impl State {
             .get_mut(&id)
             .expect("invariant: only `Step::Gone` of this id removes it")
             .take_stream();
-        if matches!(stream, Stream::Connecting(_) | Stream::Open(_)) {
+        if matches!(
+            stream,
+            Stream::Connecting(_) | Stream::Open(_) | Stream::Listening(_)
+        ) {
             self.queue_closing(id);
         }
     }
@@ -359,6 +375,7 @@ impl State {
                     return;
                 }
                 Step::Established => self.call(id, ffi::ESTABLISHED, &mut []),
+                Step::Accepted(tcp) => self.accept(id, tcp),
                 Step::Read(mut buffer, n) => {
                     self.call(id, ffi::ESTABLISHED, &mut buffer[..n]);
                     self.table
@@ -369,6 +386,43 @@ impl State {
                 }
             }
         }
+    }
+
+    /// Adds a connection with `callback` and `stream`, and gives its key.
+    fn insert(&self, callback: Callback, stream: Stream, buffer: Box<[u8]>) -> usize {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        let connection = Connection {
+            callback: Some(callback),
+            stream,
+            sends: VecDeque::new(),
+            sent: 0,
+            buffer,
+        };
+        self.table.borrow_mut().insert(id, connection);
+        id
+    }
+
+    /// Adds `tcp`, which listen connection `listen` accepted, as a new connection
+    /// with the context that `listen` has now, and gives it `ESTABLISHED`.
+    fn accept(&self, listen: usize, tcp: Tcp) {
+        let callback = self
+            .table
+            .borrow()
+            .get(&listen)
+            .and_then(|c| c.callback.as_ref())
+            .map(|c| Callback {
+                application: c.application,
+                context: Rc::new(Cell::new(c.context.get())),
+                function: c.function,
+            })
+            .expect(
+                "invariant: a listen connection keeps its callback while it listens",
+            );
+        let buffer = vec![0; READ_BYTES].into_boxed_slice();
+        let id = self.insert(callback, Stream::Open(tcp), buffer);
+        self.call(id, ffi::ESTABLISHED, &mut []);
+        self.wake(id);
     }
 
     /// Calls the connection callback of `id` with `state` and `message`.
@@ -442,6 +496,7 @@ impl Callback {
 
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
+    Listening(Listener),
     Open(Tcp),
     /// It gives no more reads, drops what the peer sends while it writes what waits,
     /// closes its side, then reads until the peer closes its side, so the drop sends
@@ -476,6 +531,7 @@ struct Connection {
 enum Step {
     Waiting,
     Established,
+    Accepted(Tcp),
     Read(Box<[u8]>, usize),
     Ended,
     Gone,
@@ -512,6 +568,11 @@ impl Connection {
                     Ok(Step::Established)
                 }
                 Poll::Ready(Err(e)) => Err(Failure::Net("connect", e)),
+            },
+            Stream::Listening(listener) => match listener.poll_accept(cx) {
+                Poll::Pending => Ok(Step::Waiting),
+                Poll::Ready(Ok(tcp)) => Ok(Step::Accepted(tcp)),
+                Poll::Ready(Err(e)) => Err(Failure::Net("accept", e)),
             },
             Stream::Open(tcp) => {
                 if !self.buffer.is_empty() {
@@ -682,24 +743,51 @@ unsafe extern "C" fn open(
         })
         .await
     });
-    let id = state.next.get();
-    state.next.set(id + 1);
     let callback = Callback {
         application,
         context: Rc::new(Cell::new(context)),
         function: callback,
     };
-    state.table.borrow_mut().insert(
-        id,
-        Connection {
-            callback: Some(callback),
-            stream: Stream::Connecting(connect),
-            sends: VecDeque::new(),
-            sent: 0,
-            buffer: Box::default(),
-        },
-    );
+    let id = state.insert(callback, Stream::Connecting(connect), Box::default());
     state.call(id, ffi::OPENING, &mut []);
+    state.wake(id);
+    Status::GOOD.0
+}
+
+/// The hook of `openConnection` for a server: takes the listener of the manager into
+/// a new connection, and gives `ESTABLISHED` before it returns. Each stream it accepts
+/// is a new connection that gets `ESTABLISHED`, with the context of the listen
+/// connection at the accept.
+///
+/// # Panics
+///
+/// When the manager has no listener or gave it to an earlier listen open, or when the
+/// listener is not on `port`. A panic in a hook aborts.
+unsafe extern "C" fn listen(
+    state: *mut c_void,
+    port: u16,
+    application: *mut c_void,
+    context: *mut c_void,
+    callback: ffi::ConnectionCallback,
+) -> u32 {
+    // SAFETY: C passes the state of `shim_cm_new`.
+    let state = unsafe { self::state(state) };
+    let listener = state
+        .listener
+        .take()
+        .expect("a listen open takes the listener that `Manager::new` got");
+    let local = listener.local();
+    assert!(
+        local.port() == port,
+        "a listen open on port {port}, but the listener is at {local}"
+    );
+    let callback = Callback {
+        application,
+        context: Rc::new(Cell::new(context)),
+        function: callback,
+    };
+    let id = state.insert(callback, Stream::Listening(listener), Box::default());
+    state.call(id, ffi::ESTABLISHED, &mut []);
     state.wake(id);
     Status::GOOD.0
 }
