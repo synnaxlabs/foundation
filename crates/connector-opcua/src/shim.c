@@ -202,19 +202,33 @@ static UA_DateTime el_next_timer(UA_EventLoop *el) {
     return UA_Timer_next(&loop->timer);
 }
 
+/* Whether the due time of `interval_ms` from `now`, and the 1 s that the copy may move
+   it by to batch timers, fit in `UA_DateTime`. False for NaN. The copy casts and adds
+   it unchecked. */
+static UA_Boolean in_range(UA_DateTime now, UA_Double interval_ms) {
+    UA_Double ticks = interval_ms * UA_DATETIME_MSEC;
+    UA_Double room = (UA_Double)(UA_INT64_MAX - UA_DATETIME_SEC);
+    return ticks < room - (UA_Double)now && ticks > -room - (UA_Double)now;
+}
+
 static UA_StatusCode el_add_timer(UA_EventLoop *el, UA_Callback cb, void *application,
                                   void *data, UA_Double interval_ms,
                                   UA_DateTime *base, UA_TimerPolicy policy,
                                   UA_UInt64 *key) {
-    return UA_Timer_add(&loop_of(el)->timer, cb, application, data, interval_ms,
-                        now_of(el), base, policy, key);
+    UA_DateTime now = now_of(el);
+    if(!in_range(now, interval_ms))
+        return UA_STATUSCODE_BADOUTOFRANGE;
+    return UA_Timer_add(&loop_of(el)->timer, cb, application, data, interval_ms, now,
+                        base, policy, key);
 }
 
 static UA_StatusCode el_modify_timer(UA_EventLoop *el, UA_UInt64 key,
                                      UA_Double interval_ms, UA_DateTime *base,
                                      UA_TimerPolicy policy) {
-    return UA_Timer_modify(&loop_of(el)->timer, key, interval_ms, now_of(el), base,
-                           policy);
+    UA_DateTime now = now_of(el);
+    if(!in_range(now, interval_ms))
+        return UA_STATUSCODE_BADOUTOFRANGE;
+    return UA_Timer_modify(&loop_of(el)->timer, key, interval_ms, now, base, policy);
 }
 
 static void el_remove_timer(UA_EventLoop *el, UA_UInt64 key) {

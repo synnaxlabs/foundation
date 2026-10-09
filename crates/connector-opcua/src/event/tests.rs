@@ -86,6 +86,19 @@ impl Fixture {
         interval_ms: f64,
         policy: ffi::Policy,
     ) -> u64 {
+        self.try_timer(callback, data, interval_ms, policy)
+            .unwrap_or_else(|status| panic!("{status:?}"))
+    }
+
+    /// Adds a timer that runs `callback` with `data`, and gives its key, or the
+    /// status of a refusal.
+    fn try_timer(
+        &self,
+        callback: ffi::Callback,
+        data: *mut c_void,
+        interval_ms: f64,
+        policy: ffi::Policy,
+    ) -> Result<u64, Status> {
         let mut key = 0;
         // SAFETY: each callback of the tests reads the probe, which lives as long as
         // the loop, and a `data` that outlives the run.
@@ -101,8 +114,21 @@ impl Fixture {
                 &raw mut key,
             )
         });
-        assert_eq!(status, Status::GOOD);
-        key
+        (status == Status::GOOD).then_some(key).ok_or(status)
+    }
+
+    /// Changes the timer of `key`, and gives the status.
+    fn modify(&self, key: u64, interval_ms: f64, policy: ffi::Policy) -> Status {
+        // SAFETY: the member takes its own loop and a key that it gave.
+        Status(unsafe {
+            (self.members().modify_timer)(
+                self.events.raw(),
+                key,
+                interval_ms,
+                ptr::null_mut(),
+                policy,
+            )
+        })
     }
 
     /// Gives a delayed callback that runs `callback` with `context`.
@@ -310,17 +336,7 @@ fn a_timer_changes_its_interval_and_goes() {
     let start = f.now();
     let key = f.add(1, 10.0, ffi::CURRENT_TIME);
     f.advance(ms(5));
-    // SAFETY: the member takes its own loop and a key that it gave.
-    let status = Status(unsafe {
-        (f.members().modify_timer)(
-            f.events.raw(),
-            key,
-            50.0,
-            ptr::null_mut(),
-            ffi::ONCE,
-        )
-    });
-    assert_eq!(status, Status::GOOD);
+    assert_eq!(f.modify(key, 50.0, ffi::ONCE), Status::GOOD);
     assert_eq!(f.events.next(), Some(at(start, ms(55))));
     // SAFETY: as above.
     unsafe { (f.members().remove_timer)(f.events.raw(), key) };
@@ -328,6 +344,50 @@ fn a_timer_changes_its_interval_and_goes() {
     f.advance(ms(1000));
     f.run();
     assert_eq!(f.ran(), []);
+}
+
+/// Intervals whose due time leaves the range of the clock's ticks, or is not a number.
+const OUT_OF_RANGE: [(f64, ffi::Policy); 4] = [
+    (922_337_203_685_477.0, ffi::CURRENT_TIME),
+    (f64::INFINITY, ffi::BASE_TIME),
+    (f64::NAN, ffi::ONCE),
+    (f64::NEG_INFINITY, ffi::ONCE),
+];
+
+#[test]
+fn a_timer_whose_due_time_leaves_the_range_of_the_clock_is_refused() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    for (interval_ms, policy) in OUT_OF_RANGE {
+        assert_eq!(
+            f.try_timer(record, number(1), interval_ms, policy),
+            Err(Status::BAD_OUT_OF_RANGE),
+            "{interval_ms}"
+        );
+    }
+    assert_eq!(f.events.next(), None);
+    f.run();
+    assert_eq!(f.ran(), []);
+}
+
+#[test]
+fn a_change_to_an_interval_out_of_range_is_refused_and_keeps_the_timer() {
+    let mut f = Fixture::new();
+    f.start();
+    let start = f.now();
+    let key = f.add(1, 10.0, ffi::ONCE);
+    for (interval_ms, policy) in OUT_OF_RANGE {
+        assert_eq!(
+            f.modify(key, interval_ms, policy),
+            Status::BAD_OUT_OF_RANGE,
+            "{interval_ms}"
+        );
+    }
+    assert_eq!(f.events.next(), Some(at(start, ms(10))));
+    f.advance(ms(10));
+    f.run();
+    assert_eq!(f.ran(), [1]);
 }
 
 #[test]
