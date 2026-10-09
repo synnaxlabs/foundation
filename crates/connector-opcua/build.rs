@@ -34,7 +34,7 @@ fn build() {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     };
-    let compiler::Builds { library, shim } =
+    let compiler::Builds { mut library, shim } =
         compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
     let tool = library.get_compiler();
     if let Err(e) = compiler::check(&tool) {
@@ -43,7 +43,8 @@ fn build() {
     if compiler::asan(&tool) {
         println!("cargo::rustc-cfg=asan");
     }
+    // The copy and the shim call each other, so they share one archive: a linker that
+    // reads each archive once, such as GNU ld, finds no order of two that links.
+    library.objects(shim.compile_intermediates());
     library.compile("open62541");
-    // The copy calls into the shim, so the shim links after it.
-    shim.compile("shim");
 }

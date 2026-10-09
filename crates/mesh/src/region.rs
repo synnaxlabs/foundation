@@ -15,7 +15,7 @@ use raft::Voters;
 use spec::definition::Definition;
 
 use crate::card;
-use crate::change::{Change, Join, Malformed};
+use crate::change::{self, Change, Join, Malformed};
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
@@ -109,6 +109,14 @@ impl State {
         self.members.get(&key)
     }
 
+    /// The name of each member.
+    pub(crate) fn names(&self) -> BTreeSet<Name> {
+        self.members
+            .values()
+            .map(|member| member.card.card().name.clone())
+            .collect()
+    }
+
     /// The key of the member whose card holds `public_key`, or `None` when none does.
     pub(crate) fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
         let mut members = self.members.iter();
@@ -172,7 +180,7 @@ impl State {
                 homes,
                 ..
             } => {
-                self.move_pointer(base, root, &holders)?;
+                self.move_pointer(base, root, &holders, &homes)?;
                 let mut moved = false;
                 for (index, home) in homes {
                     if let Entry::Vacant(vacant) = self.homes.entry(index) {
@@ -198,6 +206,7 @@ impl State {
         base: Pointer,
         root: Digest,
         holders: &BTreeSet<node::Key>,
+        homes: &BTreeMap<channel::Key, node::Key>,
     ) -> Result<(), Refused> {
         if base != self.pointer {
             return Err(Refused::Stale {
@@ -206,7 +215,7 @@ impl State {
             });
         }
         quorum(&self.voters, holders)?;
-        self.pointer = base.next(root);
+        self.pointer = change::pointer(base, root, homes);
         Ok(())
     }
 
@@ -598,8 +607,25 @@ mod tests {
             root: digest(2),
         };
         assert_eq!(state.pointer(), moved);
+        assert_eq!(state.apply(homed(spec(1, 2, 2, &[]), &[(7, 1)])), Ok(true));
+        assert_eq!(state.pointer(), moved.next(digest(2)));
+    }
+
+    #[test]
+    fn a_spec_change_at_the_base_root_with_no_home_leaves_the_pointer() {
+        let mut state = state();
+        assert_eq!(state.apply(spec(0, 1, 2, &[3])), Ok(false));
+        let moved = state.pointer();
         assert_eq!(state.apply(spec(1, 2, 2, &[])), Ok(false));
-        assert_eq!(state.pointer().version, 2);
+        assert_eq!(state.pointer(), moved);
+        let refused = Refused::Stale {
+            base: Pointer {
+                version: 0,
+                root: FOUNDING,
+            },
+            pointer: moved,
+        };
+        assert_eq!(state.apply(spec(0, 1, 1, &[])), Err(refused));
     }
 
     /// `spec` with the home `[(index, home)]` of each pair of `homes`.
@@ -1385,8 +1411,13 @@ mod tests {
                     }
                     (Ok(moved), Change::Spec { base, root, homes, .. }) => {
                         prop_assert_eq!(before.pointer(), base);
-                        let next = base.version.checked_add(1).unwrap();
-                        prop_assert_eq!(state.pointer(), Pointer { version: next, root });
+                        let next = if root == base.root && homes.is_empty() {
+                            base
+                        } else {
+                            let version = base.version.checked_add(1).unwrap();
+                            Pointer { version, root }
+                        };
+                        prop_assert_eq!(state.pointer(), next);
                         for (&index, &home) in &homes {
                             let kept = before.home(index).unwrap_or(home);
                             prop_assert_eq!(state.home(index), Some(kept));
