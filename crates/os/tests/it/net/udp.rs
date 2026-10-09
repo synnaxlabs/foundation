@@ -367,8 +367,7 @@ fn an_any_v6_socket_talks_plain_ipv4() {
     });
 }
 
-/// Linux holds all of 127.0.0.0/8 on the loopback. macOS ignores each IPv4 source
-/// until #1972 patches `noq-udp`.
+/// Linux holds all of 127.0.0.0/8 on the loopback, and macOS holds only 127.0.0.1.
 #[test]
 #[cfg(target_os = "linux")]
 fn a_source_address_picks_the_local_address() {
@@ -526,6 +525,40 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
                 send(&mut sender, &to).await,
                 expected,
                 "a socket on {local}, source {source:?}, to {destination}"
+            );
+        }
+    });
+}
+
+/// ENV SEAMS: `os` gives the kernel's answer for a source that is not local.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_source_that_is_not_local_gives_the_answer_of_macos() {
+    on_thread("udp-far-source", || async {
+        let net = net();
+        let any_v4 = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
+        let any_v6 = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let to_v4 = SocketAddr::new(LOCALHOST.into(), 9);
+        let to_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9);
+        let cases = [
+            (any_v4, IpAddr::from([192, 0, 2, 1]), to_v4),
+            (any_v4, IpAddr::from([127, 0, 0, 2]), to_v4),
+            (
+                any_v6,
+                IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
+                to_v6,
+            ),
+        ];
+        for (local, source, destination) in cases {
+            let (mut sender, _) = bind(&net, local);
+            let to = Transmit {
+                source: Some(source),
+                ..transmit(destination, b"x")
+            };
+            assert_eq!(
+                send(&mut sender, &to).await,
+                Err(Error::Io { code: 49 }),
+                "a socket on {local}, source {source}"
             );
         }
     });
