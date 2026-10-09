@@ -496,7 +496,7 @@ impl<'a> Shown<'a> {
                 _ => {}
             }
         }
-        let at = html.into_iter().chain(tagged(body, &codes)).min();
+        let at = html.into_iter().chain(tagged(body, &starts, &codes)).min();
         shown.html = at.map(|at| body[at..line_end(body, at)].trim());
         shown
     }
@@ -547,15 +547,16 @@ fn texts<'a, 'n>(
 
 /// `text` with each line ended by `\n`, with no spaces or tabs at the end of a line,
 /// and with each tab in the spaces, tabs, and `>` at the start of a line replaced by
-/// spaces to the next multiple of 4 columns. Neither changes what GitHub shows. A
-/// line number then gives the offset of its line, and comrak gives the right column
+/// spaces to the next multiple of 4 columns. None of these changes what GitHub shows.
+/// A line number then gives the offset of its line, and comrak gives the right column
 /// after a tab that a quote or a list item takes in part.
 fn normalized(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
-        let line = rest[..end].trim_end_matches([' ', '\t']);
+    for (i, line) in lines(text).enumerate() {
+        if i > 0 {
+            normalized.push('\n');
+        }
+        let line = line.trim_end_matches([' ', '\t']);
         let content = line.trim_start_matches([' ', '\t', '>']);
         let start = normalized.len();
         for c in line[..line.len() - content.len()].chars() {
@@ -568,12 +569,8 @@ fn normalized(text: &str) -> String {
             }
         }
         normalized.push_str(content);
-        if end == rest.len() {
-            return normalized;
-        }
-        normalized.push('\n');
-        rest = rest[end..].strip_prefix("\r\n").unwrap_or(&rest[end + 1..]);
     }
+    normalized
 }
 
 /// The text after `## Review round ` in `line` when it starts with it after at most
@@ -586,15 +583,14 @@ fn heading(line: &str) -> Option<&str> {
         .strip_prefix("## Review round ")
 }
 
-/// The start of the first line of `body` whose source, after the indent and the marks
-/// of quotes, list items, and footnote labels ([`note`]), starts with raw HTML: `<`
-/// and a letter, `!`, `/`, or `?` that is not an autolink. A line in a code block
+/// The first of the line starts `starts` of `body` whose line, after the indent and
+/// the marks of quotes, list items, and footnote labels ([`note`]), starts with raw
+/// HTML: `<` and a letter, `!`, `/`, or `?` that is not an autolink. A line in a code block
 /// (`codes`) does not count. GitHub reads some of these lines as an HTML block where
 /// comrak does not, such as `<source>`. GitHub reads the blocks of a comment before its
 /// spans, so a line inside a code span, a link, or a link definition counts too.
-fn tagged(body: &str, codes: &[Range<usize>]) -> Option<usize> {
-    let starts = body.match_indices('\n').map(|(i, _)| i + 1);
-    std::iter::once(0).chain(starts).find(|&start| {
+fn tagged(body: &str, starts: &[usize], codes: &[Range<usize>]) -> Option<usize> {
+    starts.iter().copied().find(|&start| {
         let line = &body[start..line_end(body, start)];
         let mut rest = unmarked(line);
         let at = |rest: &str| start + line.len() - rest.len();
