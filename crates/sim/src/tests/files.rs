@@ -1705,6 +1705,50 @@ fn a_create_does_not_wait_for_a_live_rename_to_its_path() {
     assert!(found.contains(&None), "{found:?}");
 }
 
+/// Whether the block of a dropped write of a handle is still in use when a rename of
+/// the handle from `a` to `b` ends.
+fn block_held_after_rename(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let mut file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        file.rename(Path::new("b")).await.unwrap();
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_rename_does_not_wait_for_the_dropped_write_of_its_handle() {
+    assert!((0..32).any(block_held_after_rename));
+}
+
+/// Whether a remove through a handle of `a` is still in flight when a create of `b`
+/// ends.
+fn create_beside_handle_remove_of_another_path(value: u64) -> bool {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        let file = create(&node, "a", KIB).await;
+        let mut remove = Box::pin(file.remove());
+        pend(remove.as_mut()).await;
+        files
+            .open(Path::new("b"), Mode::Create { len: KIB })
+            .await
+            .unwrap();
+        poll_fn(|cx| Poll::Ready(remove.as_mut().poll(cx).is_pending())).await
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_remove_through_a_handle_of_another_path() {
+    assert!((0..32).any(create_beside_handle_remove_of_another_path));
+}
+
 /// Whether `a` is still there when a create of `b` ends, which starts once a remove
 /// of `a` is polled once and its future drops.
 fn create_beside_dropped_remove(value: u64) -> bool {
