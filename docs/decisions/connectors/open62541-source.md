@@ -264,3 +264,15 @@
   close or an error before it: approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731,
   2026-10-09 18:21 UTC).
+  A server listens on the listener that its owner gives the manager at `new`. Each
+  accepted stream is a new connection that gets `ESTABLISHED`, with the context of the
+  listen connection at the accept. An accept error closes the listen connection with a
+  warning, also an error of one stream after which the listener stays usable, because
+  `env` gives both as `Error::Io`. This holds only while the one server is the test
+  server: before a server serves users, the manager must keep listening after an error
+  of one stream. Lost: the manager binds its own listener with `Net::listen` from the
+  parameters, which puts the bind address, backlog, and socket options of a node into
+  parameters that open62541 fills; and a second constructor `Manager::listening`, which
+  adds a surface for one field. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
+  2026-10-09 20:26 UTC).
