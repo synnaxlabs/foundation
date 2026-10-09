@@ -1,15 +1,22 @@
 //! Shard 0's sessions: each stream goes to the server of the protocol its header
 //! names.
 
+use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 use hub::{Hub, Link};
 use mesh::Mesh;
 use transport::stream::Incoming;
 use transport::{Code, Error, Peer, Session, Transport};
+use types::time::Span;
 use wire::Protocol;
 
 use crate::scope::Scope;
+
+/// How long a stream may take to give its header, a patch as [`crate::WINDOW`] is.
+const HEADER: Span = Span::from_nanos(10_000_000_000);
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
 /// transport stops, and gives the error that stopped it. Admits every peer to a
@@ -18,6 +25,7 @@ pub(crate) async fn accept(
     transport: Rc<Transport>,
     mesh: Option<Mesh>,
     hub: Hub,
+    clock: env::clock::Clock,
     tasks: env::tasks::Tasks,
 ) -> Error {
     let mut sessions = Scope::new(tasks.clone());
@@ -25,7 +33,8 @@ pub(crate) async fn accept(
         match transport.accept().await {
             Ok(session) => {
                 let link = hub.link(session.clone());
-                let serve = serve(session, mesh.clone(), link, tasks.clone());
+                let serve =
+                    serve(session, mesh.clone(), link, clock.clone(), tasks.clone());
                 sessions.spawn(Box::pin(serve));
             }
             Err(error) => return error,
@@ -40,21 +49,41 @@ async fn serve(
     session: Session,
     mesh: Option<Mesh>,
     link: Link,
+    clock: env::clock::Clock,
     tasks: env::tasks::Tasks,
 ) {
     let mut streams = Scope::new(tasks);
     while let Ok(incoming) = session.accept().await {
-        let route = route(incoming, session.peer(), mesh.clone(), link.clone());
+        let peer = session.peer();
+        let route = route(incoming, peer, mesh.clone(), link.clone(), clock.clone());
         streams.spawn(Box::pin(route));
     }
 }
 
 /// Reads the header of `incoming`, its first message, and routes the stream that
 /// `peer` opened by its protocol. A `Mesh` stream of a node goes to `mesh`, and a
-/// `Hub` stream of a member of the region to `link`; each other stream is rejected.
-async fn route(mut incoming: Incoming, peer: Peer, mesh: Option<Mesh>, link: Link) {
-    let Ok(first) = incoming.receiver.recv().await else {
-        return;
+/// `Hub` stream of a member of the region to `link`; each other stream, and one
+/// whose header does not arrive within [`HEADER`] on `clock`, is rejected.
+async fn route(
+    mut incoming: Incoming,
+    peer: Peer,
+    mesh: Option<Mesh>,
+    link: Link,
+    clock: env::clock::Clock,
+) {
+    let first = {
+        let mut recv = pin!(incoming.receiver.recv());
+        let mut late = pin!(clock.sleep(HEADER));
+        poll_fn(|cx| match recv.as_mut().poll(cx) {
+            Poll::Ready(first) => Poll::Ready(Some(first)),
+            Poll::Pending => late.as_mut().poll(cx).map(|()| None),
+        })
+        .await
+    };
+    let first = match first {
+        Some(Ok(first)) => first,
+        Some(Err(_)) => return,
+        None => return reject(incoming),
     };
     let Some(protocol) = first.as_deref().and_then(header) else {
         return reject(incoming);

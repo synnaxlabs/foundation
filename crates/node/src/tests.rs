@@ -2822,6 +2822,62 @@ mod port {
         assert_eq!(node.join(), Ok(()));
     }
 
+    /// The node rejects a stream whose header has not arrived 10 s after the stream
+    /// did. On a link of 4 KB/s, a first message of 60 KiB takes about 16 s, so the
+    /// reply half resets before the message arrives.
+    #[test]
+    fn a_header_late_by_10_s_is_rejected() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = keyed(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let slow = sim::link::Config {
+            rate: Some(std::num::NonZeroU64::new(4_000).unwrap()),
+            ..sim::link::Config::default()
+        };
+        sim.link(&peer, &host, slow);
+        let listen = listen(&host);
+        let out = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&out);
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let (transport, pool) = transport(&own, tasks, CLIENT);
+            let session = transport
+                .dial(KEY.public(), &[Address::Udp(listen)])
+                .await
+                .expect("a session");
+            let mut late = wire::header::encode(wire::Protocol::Mesh).to_vec();
+            late.resize(60 << 10, 0);
+            let mut block = pool.alloc(late.len()).unwrap();
+            block.copy_from_slice(&late);
+            let (mut sender, mut reply) =
+                session.open(Class::Complete).await.expect("a stream");
+            let start = own.clock().now();
+            sender.send(block.freeze()).await.expect("it sends");
+            let read = reply.recv().await.map(|m| m.map(|b| b.to_vec()));
+            *seen.lock().unwrap() = Some((own.clock().now() - start, read));
+            session.closed().await;
+            drop((sender, transport));
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
+        let (waited, read) = out.lock().unwrap().take().expect("the peer reads");
+        let code = Code(wire::header::REJECTED);
+        assert_eq!(read, Err(transport::Error::Reset { code }));
+        let (header, bound) = (10 * Span::SECOND.nanos(), 11 * Span::SECOND.nanos());
+        assert!(
+            (header..bound).contains(&waited.nanos()),
+            "reset after {waited:?}"
+        );
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
     mod key {
         use super::*;
         use crate::identity::{FILE, LEN};
@@ -3592,7 +3648,9 @@ mod port {
                     }),
                 });
                 hub.set_definitions(&region(&members).definitions);
-                let port = route::accept(transport, Some(mesh.clone()), hub, tasks);
+                let clock = own.clock();
+                let port =
+                    route::accept(transport, Some(mesh.clone()), hub, clock, tasks);
                 let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
                 poll_fn(|cx| {
                     let stopped = port.as_mut().poll(cx);
@@ -4337,8 +4395,14 @@ mod port {
                     }),
                 });
                 hub.set_definitions(&definitions);
-                let port =
-                    route::accept(transport, Some(mesh.clone()), hub.clone(), tasks);
+                let clock = own.clock();
+                let port = route::accept(
+                    transport,
+                    Some(mesh.clone()),
+                    hub.clone(),
+                    clock,
+                    tasks,
+                );
                 let (mut port, mut act) =
                     (pin!(port), pin!(act(hub, mesh.clone(), own)));
                 poll_fn(|cx| {

@@ -763,6 +763,7 @@ impl Serve {
                 Err(error) => return fail(error),
             };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
+        let clock = self.endpoint.clock.clone();
         // The endpoint's open takes the founding, so the definitions go first.
         let definitions = self
             .endpoint
@@ -798,7 +799,8 @@ impl Serve {
         let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
-            let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
+            let port =
+                route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
             let mut port = pin!(port);
             let mut group = pin!(group);
             let mut guard = pin!(guard);
