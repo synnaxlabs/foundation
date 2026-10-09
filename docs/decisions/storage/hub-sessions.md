@@ -298,10 +298,11 @@
   https://github.com/synnaxlabs/foundation/issues/2170#issuecomment-6087166096).
   Amended (#2185): `Hub::new` states when the hub lets go of the region, so `node` cites
   the hub and not one of its tasks. The hub holds the home and `hub::Config::region`
-  until the hub, each of its sessions, each `Link`, each future of `Link::serve`, each
-  `serve::client::Reply`, and each future of `Reply::send` drop, and each task of the
-  hub ends at its next poll after that, holding neither. Lost: `Hub::ended`, because the
-  event that `node` waits for is the free port, which the transport gives, so a hub
-  future adds a surface whose one caller must still wait for the transport
-  (`laptop.architect`, 2026-10-09T21:38:13Z:
+  until the hub and each value and future that it gave, directly or through another such
+  value, drop, and each task of the hub ends at its next poll after that, holding
+  neither (`laptop.architect`, 2026-10-09T23:21:55Z, the class in place of a list of
+  holders: https://github.com/synnaxlabs/foundation/pull/2197#issuecomment-6090938158).
+  Lost: `Hub::ended`, because the event that `node` waits for is the free port, which
+  the transport gives, so a hub future adds a surface whose one caller must still wait
+  for the transport (`laptop.architect`, 2026-10-09T21:38:13Z:
   https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674).
