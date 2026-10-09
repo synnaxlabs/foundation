@@ -273,6 +273,11 @@ impl<'a> Layout<'a> {
         Self::checked(set, ends, Sizes::Ends)
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it made a hub write 13 to 19 ns slower"
+    )]
+    #[inline(always)]
     fn checked(
         set: &'a KeySet,
         series: &'a [(usize, usize)],
@@ -353,6 +358,9 @@ impl<'a> Layout<'a> {
     /// # Errors
     ///
     /// The pool's error when it cannot give the block.
+    // Without the hint, fat LTO keeps it out of `Draft::new` once that has two
+    // callers, which made a hub write 13 to 19 ns slower.
+    #[inline]
     pub fn draft(self, pool: &block::Pool, form: Form) -> Result<Draft, block::Error> {
         let Self {
             set,
