@@ -2736,6 +2736,14 @@ impl Connection {
         self.spaces[SpaceId::Data].number_spaces[&PathId::ZERO].largest_acked_packet_pn
     }
 
+    /// How long the connection lives with nothing from the peer, as the idle timer
+    /// counts it: the negotiated idle timeout, at least 3 PTO of the Data space. `None`
+    /// when neither side set an idle timeout. Foundation patch.
+    pub fn idle_timeout(&self) -> Option<Duration> {
+        let pto = self.max_pto_for_space(SpaceKind::Data);
+        self.idle_timeout.map(|timeout| cmp::max(timeout, 3 * pto))
+    }
+
     /// Update traffic keys spontaneously
     ///
     /// This can be useful for testing key updates, as they otherwise only happen infrequently.
