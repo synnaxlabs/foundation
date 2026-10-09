@@ -164,6 +164,16 @@ impl Disk {
         }
     }
 
+    /// The inode that `path` names, when it names one.
+    pub(crate) fn inode(&self, path: &Path) -> Option<u64> {
+        let segments = segments(path);
+        let (name, parent) = segments.split_last()?;
+        match &self.inodes[&self.dir(parent).ok()?] {
+            Inode::Dir(dir) => dir.entries.get(*name).copied(),
+            Inode::File(_) => unreachable!("invariant: `dir` gives a directory"),
+        }
+    }
+
     /// Directory `key`.
     fn dir_mut(&mut self, key: u64) -> &mut Dir {
         match self.inodes.get_mut(&key) {

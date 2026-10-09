@@ -75,6 +75,15 @@ impl Call {
             _ => None,
         }
     }
+
+    /// The path whose file a call of `path` replaces, makes, or removes.
+    fn changes<'a>(&'a self, path: &'a Path) -> Option<&'a Path> {
+        match self {
+            Self::Open(Mode::Write | Mode::Create { .. }) | Self::Remove => Some(path),
+            Self::Rename { to, .. } => Some(to),
+            _ => None,
+        }
+    }
 }
 
 /// The error of `operation` on `path`, which failed by `cause`.
@@ -223,7 +232,10 @@ impl Files {
                 before = disk.file(handle.inode).start_read(range, &mut self.rng);
             }
         }
-        let at = Monotonic(now.0.saturating_add(delay));
+        let mut at = Monotonic(now.0.saturating_add(delay));
+        if let Some(path) = call.changes(&path) {
+            at = at.max(self.left(node, path));
+        }
         self.queue.insert((at, key));
         let flight = Flight {
             node,
@@ -237,6 +249,37 @@ impl Files {
         };
         self.flights.insert(key, flight);
         key
+    }
+
+    /// The end of the last call on `path` of `node` that a dropped future or handle
+    /// left to run, or zero. A call on `path` uses it, or the file that it names, or a
+    /// file that a rename to it moves there.
+    fn left(&self, node: usize, path: &Path) -> Monotonic {
+        let path = disk::normal(path);
+        let left = || {
+            self.queue
+                .iter()
+                .rev()
+                .map(|(at, key)| (*at, &self.flights[key]))
+        };
+        let left =
+            || left().filter(|(_, flight)| flight.node == node && flight.dropped);
+        let mut inodes: BTreeSet<_> =
+            self.disks[node].inode(&path).into_iter().collect();
+        for (_, flight) in left() {
+            if let Call::Rename { handle, to } = &flight.call
+                && disk::normal(to) == path
+            {
+                inodes.insert(handle.inode);
+            }
+        }
+        let on = |flight: &Flight| match flight.call.handle() {
+            Some(handle) => inodes.contains(&handle.inode),
+            None => disk::normal(&flight.path) == path,
+        };
+        left()
+            .find(|(_, flight)| on(flight))
+            .map_or(Monotonic::default(), |(at, _)| at)
     }
 
     /// The true time at which the first call in flight ends.
