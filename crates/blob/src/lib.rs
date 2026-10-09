@@ -45,8 +45,8 @@ pub enum Error {
         /// The digest of the bytes.
         found: Digest,
     },
-    /// A put would leave fewer bytes free on the disk than [`Config::floor_bytes`].
-    /// Nothing is written.
+    /// A put would leave less free on the disk than [`Config::floor_bytes`]. Nothing
+    /// is written.
     Floor {
         /// The bytes of the chunk.
         len: usize,
@@ -76,8 +76,8 @@ impl fmt::Display for Error {
                 floor_bytes,
             } => write!(
                 f,
-                "a put of {len} bytes would leave fewer than the {floor_bytes} bytes \
-                 that the store keeps free: the disk has {free_bytes} bytes free"
+                "a put of {len} bytes would leave less than the floor of {floor_bytes} \
+                 bytes free on a disk with {free_bytes} free"
             ),
             Self::Stray { path } => write!(
                 f,
@@ -1880,8 +1880,8 @@ mod tests {
             };
             assert_eq!(
                 floor.to_string(),
-                "a put of 3000 bytes would leave fewer than the 2048 bytes that the \
-                 store keeps free: the disk has 4096 bytes free"
+                "a put of 3000 bytes would leave less than the floor of 2048 bytes \
+                 free on a disk with 4096 free"
             );
         }
     }
