@@ -150,12 +150,13 @@
   (`laptop.architect`, 2026-10-09T05:24:32Z:
   https://github.com/synnaxlabs/foundation/issues/2112#issuecomment-6074871156;
   2026-10-09T00:55:16Z:
-  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). The call
-  checks the definitions before it changes anything: two channels with one key or one
-  name, or a data channel whose index is not an index of the definitions, panic. This
-  changes "A known key or name panics", "The hub keeps the key, the sample type, and the
-  index of each", and "The PR that defines channels at each new spec decides what a
-  known, renamed, or removed channel does" in
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). For a
+  served open, this supersedes the check again after each wait that the second comment
+  states for each open. The call checks the definitions before it changes anything: two
+  channels with one key or one name, or a data channel whose index is not an index of
+  the definitions, panic. This changes "A known key or name panics", "The hub keeps the
+  key, the sample type, and the index of each", and "The PR that defines channels at
+  each new spec decides what a known, renamed, or removed channel does" in
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
   session ends at its next call, under which a writer keeps the control of a removed
   index until it calls, and a reader that waits in `next` needs a wake anyway; and the
