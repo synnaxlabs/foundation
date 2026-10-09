@@ -175,7 +175,7 @@ impl Nightly {
             .arg("-vV")
             .output()
             .map_err(|e| format!("{command}: {e}"))?;
-        host(&output).map_err(|e| format!("{command}: {e}"))
+        parse_host(&output).map_err(|e| format!("{command}: {e}"))
     }
 
     /// A command that runs `tool` of this toolchain through rustup, at the workspace
@@ -190,8 +190,8 @@ impl Nightly {
 }
 
 /// The host triple in `output`, from `rustc -vV`, or its exit status and stderr when it
-/// failed.
-fn host(output: &Output) -> Result<String, String> {
+/// failed. The error does not name the command, which the caller adds.
+fn parse_host(output: &Output) -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("{}: {}", output.status, stderr.trim()));
@@ -264,16 +264,16 @@ mod tests {
     }
 
     #[test]
-    fn host_reads_the_host_of_rustc() {
+    fn parse_host_reads_the_host_of_rustc() {
         let text = "rustc 1.93.0-nightly (abc 2026-10-01)\nbinary: rustc\n\
                     host: x86_64-unknown-linux-gnu\nrelease: 1.93.0-nightly\n";
         assert_eq!(
-            host(&output(0, text, "")),
+            parse_host(&output(0, text, "")),
             Ok("x86_64-unknown-linux-gnu".into())
         );
         let text = "rustc 1.93.0-nightly\nrelease: 1.93.0\n";
         assert_eq!(
-            host(&output(0, text, "")),
+            parse_host(&output(0, text, "")),
             Err(format!("gives no host: {text}"))
         );
     }
@@ -300,13 +300,16 @@ mod tests {
     }
 
     #[test]
-    fn host_names_the_error_of_rustc() {
+    fn parse_host_names_the_error_of_rustc() {
         let error = "error: toolchain 'nightly-x' is not installed\n";
         assert_eq!(
-            host(&output(1, "", error)),
+            parse_host(&output(1, "", error)),
             Err("exit status: 1: error: toolchain 'nightly-x' is not installed".into())
         );
-        assert_eq!(host(&output(2, "", "")), Err("exit status: 2: ".into()));
+        assert_eq!(
+            parse_host(&output(2, "", "")),
+            Err("exit status: 2: ".into())
+        );
     }
 
     #[test]
