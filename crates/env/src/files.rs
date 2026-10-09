@@ -22,7 +22,8 @@ pub const SECTOR: usize = 512;
 
 /// The files under one data directory. Paths are relative to it: a call panics on an
 /// absolute path or a `..` segment. The handle cannot leave the thread that made it,
-/// so each shard has its own. Clones use the same directory.
+/// so each shard has its own. Clones use the same directory and driver, and each rule
+/// on the calls of this `Files` holds for its clones too.
 ///
 /// A call whose future drops can still run, and then it ends as it would have.
 ///
