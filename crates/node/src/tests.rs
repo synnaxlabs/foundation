@@ -2902,13 +2902,13 @@ mod port {
 
     /// The node waits at most 3 s for the drain, so a probe takes the lock before a
     /// peer with a one-way delay of 4 s sees its close. The close is not paced, so it
-    /// leaves at the drop and arrives one delay later, also when the node stops 20.3 s
-    /// in, when a paced close would wait about 0.43 s.
+    /// leaves at the drop and arrives one delay later, also when the node stops 12.1 s
+    /// in, when a paced close would wait about 0.57 s.
     #[test]
     fn a_peer_with_a_delay_over_3_s_sees_its_close_after_the_lock_is_free() {
         let closed = transport::Error::PeerClosed { code: Code(0) };
         let delay = Span::from_nanos(4 * Span::SECOND.nanos());
-        let run = Span::from_nanos(20_300 * Span::MILLISECOND.nanos());
+        let run = Span::from_nanos(12_100 * Span::MILLISECOND.nanos());
         let (seen, after) = stop_with_a_peer(delay, run);
         assert_eq!(seen, [Event::Locked(Ok(())), Event::Closed(closed)]);
         let late = after.nanos() - delay.nanos();
@@ -2919,13 +2919,13 @@ mod port {
     }
 
     /// A peer whose one-way delay is under 3 s sees its close first, also when the
-    /// node stops 8.8 s in, just after its handshake confirms, when the pacer of the
-    /// connection would hold a packet for about 0.4 s.
+    /// node stops 14.7 s in, when the pacer of the connection would hold the close
+    /// until after the lock is free.
     #[test]
     fn a_peer_with_a_delay_under_3_s_sees_its_close_first_after_the_handshake() {
         let closed = transport::Error::PeerClosed { code: Code(0) };
         let delay = Span::from_nanos(2_900 * Span::MILLISECOND.nanos());
-        let run = Span::from_nanos(8_800 * Span::MILLISECOND.nanos());
+        let run = Span::from_nanos(14_700 * Span::MILLISECOND.nanos());
         let (seen, _) = stop_with_a_peer(delay, run);
         assert_eq!(seen, [Event::Closed(closed), Event::Locked(Ok(()))]);
     }
