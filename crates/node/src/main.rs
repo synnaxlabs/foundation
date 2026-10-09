@@ -480,6 +480,7 @@ mod tests {
         assert_eq!(DISK_MOST, Size::from_bytes(8_589_934_592));
     }
 
+    /// Through `first`, as a process test cannot set the memory and disk of the host.
     #[test]
     fn a_first_start_sizes_the_pool_from_memory_and_the_disk_budget_from_disk() {
         let budget = Budget {
