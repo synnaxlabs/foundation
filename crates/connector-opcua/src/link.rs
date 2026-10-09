@@ -400,6 +400,29 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }
 
+/// The shim takes no value from the PCG32 generator of the copy, which OPEN62541
+/// SOURCE bars for each nonce, key, and session token of Foundation code.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
+fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
+    let shim: Vec<_> = std::fs::read_dir(env!("OUT_DIR"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with("-shim.o"))
+        .collect();
+    assert_eq!(shim.len(), 1, "{shim:?}");
+    let undefined = names(&shim, "--undefined-only");
+    assert!(
+        undefined.contains("UA_Client_newWithConfig"),
+        "{undefined:?}"
+    );
+    let drawn: Vec<_> = ["UA_UInt32_random", "UA_Guid_random"]
+        .into_iter()
+        .filter(|name| undefined.contains(*name))
+        .collect();
+    assert!(drawn.is_empty(), "the shim calls {drawn:?}");
+}
+
 /// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
 /// Clang with libgcc 9.3.1 or later, or with `-rtlib=compiler-rt`. The host build does
 /// not show it. So this preprocesses each source of the copy as the host build does,
