@@ -74,3 +74,14 @@
   https://github.com/synnaxlabs/foundation/pull/1991#issuecomment-6069608203).
   Supersedes the `node::Config::key` clause of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400.
+  The request bodies that one hub holds are at most `hub::serve::BODIES_BYTES_MAX`, 2 ×
+  `BODY_BYTES_MAX` (32 MiB). A link reserves a body's declared length when it decodes
+  the `Request`, before it allocates or reads a byte of the body, and the reservation
+  ends when the link frees the request. A body that does not fit stops with `BUSY`
+  (`serve::Error::Bodies`), and the link takes its next request. A node holds at most
+  the cap times the count of its hubs that serve links. A stalled request holds its
+  reservation until its stream or session ends; only an admitted subject can do this.
+  Lost: pool blocks for a body, which take the blocks that live writes need; a cap on
+  links as the bound, 16 MiB times the links. Decided by `laptop.architect`
+  (2026-10-08,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483).
