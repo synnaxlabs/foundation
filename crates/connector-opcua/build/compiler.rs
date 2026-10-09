@@ -55,12 +55,32 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
 }
 
 impl Builds {
-    /// Gives both builds the address sanitizer of the Rust build, and returns whether
-    /// it did. `sanitize` is the comma list of `cfg(sanitize)`. When it holds
-    /// `address`, the C runs under the address and undefined behavior sanitizers, and
-    /// stops at the first error.
-    pub(crate) fn sanitize(&mut self, sanitize: &str) -> bool {
-        let address = sanitize.split(',').any(|name| name == "address");
+    /// Gives both builds the sanitizers of the Rust build, and returns whether the C
+    /// builds with the address sanitizer. `env` gives the variables of a build script.
+    /// When `cfg(sanitize)` holds `address`, the C runs under the address and undefined
+    /// behavior sanitizers, and stops at the first error. Under `cfg(fuzzing)`, it
+    /// gives libFuzzer its coverage.
+    ///
+    /// # Errors
+    ///
+    /// A sanitizer other than `address` and `leak`, which the C does not follow, and
+    /// which reports false errors or misses the C without it.
+    pub(crate) fn sanitize(
+        &mut self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<bool, String> {
+        let sanitize = env("CARGO_CFG_SANITIZE").unwrap_or_default();
+        let mut names = sanitize.split(',').filter(|name| !name.is_empty());
+        if let Some(name) = names
+            .clone()
+            .find(|name| !matches!(*name, "address" | "leak"))
+        {
+            return Err(format!(
+                "connector-opcua: the C does not build with the sanitizer `{name}` of \
+                 the Rust build; it follows only `address` and `leak`"
+            ));
+        }
+        let address = names.any(|name| name == "address");
         if address {
             // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
             // function type, which `-fsanitize=function` stops on.
@@ -70,12 +90,10 @@ impl Builds {
                 "-fno-sanitize-recover=all",
             ]);
         }
-        address
-    }
-
-    /// Gives both builds the coverage that libFuzzer reads, for a `cfg(fuzzing)` build.
-    pub(crate) fn fuzz(&mut self) {
-        self.add(&["-fsanitize=fuzzer-no-link"]);
+        if env("CARGO_CFG_FUZZING").is_some() {
+            self.add(&["-fsanitize=fuzzer-no-link"]);
+        }
+        Ok(address)
     }
 
     /// Adds `flags` to both builds. A compiler that is not clang gives way to `clang`,

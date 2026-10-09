@@ -39,15 +39,9 @@ fn build() {
         reason = "cargo gives a build script the cfgs of its target only in the \
                   environment"
     )]
-    let (sanitize, fuzzing) = (
-        std::env::var("CARGO_CFG_SANITIZE").unwrap_or_default(),
-        std::env::var_os("CARGO_CFG_FUZZING"),
-    );
-    if builds.sanitize(&sanitize) {
+    let asan = builds.sanitize(|name| std::env::var(name).ok());
+    if asan.unwrap_or_else(|e| panic!("{e}")) {
         println!("cargo::rustc-cfg=asan");
-    }
-    if fuzzing.is_some() {
-        builds.fuzz();
     }
     let compiler::Builds { mut library, shim } = builds;
     if let Err(e) = compiler::check(&library.get_compiler()) {
