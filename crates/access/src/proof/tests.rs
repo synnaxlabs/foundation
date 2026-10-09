@@ -854,9 +854,9 @@ fn names_each_refusal_and_its_fix() {
                 expires: Stamp::from_nanos(2_000_000_000),
                 now: Stamp::from_nanos(3_000_000_000),
             },
-            "the hello expired at 1970-01-01T00:00:02.000000000Z, at or before the \
+            "the hello ended at 1970-01-01T00:00:02.000000000Z, at or before the \
              mesh time 1970-01-01T00:00:03.000000000Z",
-            "Send a new hello with a later expiry",
+            "Renew the hello before it ends",
         ),
     ];
     for (error, message, fix) in cases {

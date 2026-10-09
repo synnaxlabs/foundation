@@ -24,9 +24,9 @@
   signed with another key or for another connection gives `Error::Signature`, and no
   connection check exists. `peer` is the node that carried the hello: this node when the
   program connected to it, else the node whose transport session forwarded it. A hello
-  is live while the latest mesh time is before `expires`, and the node holds it live
-  until the earlier of `expires` and `proof::CAP` (15 minutes) past the latest mesh time
-  at its admission (`Admitted::ends`). Lost: `access` decodes the signed bytes of the
+  is live at a node while the latest mesh time is before `Admitted::ends`: the earlier
+  of `expires` and `proof::CAP` (15 minutes) past the latest mesh time at its admission.
+  Lost: `access` decodes the signed bytes of the
   hello itself (design B), because `access` then owns a decoder of outside input and the
   hello's wire form, which HUB WIRE gives to `wire`; a free
   `verify` of any `&Hello`, which accepts a key that the program picked when a caller

@@ -219,9 +219,10 @@ pub enum Error {
         /// The node that carried the hello.
         peer: node::Key,
     },
-    /// The hello expired at `expires`, at or before the latest mesh time `now`.
+    /// The hello is no longer live at `expires`: its expiry, or [`Admitted::ends`] of
+    /// an admitted hello. `now` is at or after it.
     Expired {
-        /// When the hello expires.
+        /// When the hello stops being live.
         expires: Stamp,
         /// The latest the mesh time can be.
         now: Stamp,
@@ -272,7 +273,7 @@ impl Error {
             }
             Self::Signature => "Sign the exact bytes with the key of the hello",
             Self::Via { .. } => "Name the node that the program connects to as `via`",
-            Self::Expired { .. } => "Send a new hello with a later expiry",
+            Self::Expired { .. } => "Renew the hello before it ends",
             Self::Changed { .. } => {
                 "Renew with the subject, key, `via`, and connection of the hello it \
                  renews"
@@ -297,7 +298,7 @@ impl fmt::Display for Error {
             }
             Self::Expired { expires, now } => write!(
                 f,
-                "the hello expired at {expires}, at or before the mesh time {now}"
+                "the hello ended at {expires}, at or before the mesh time {now}"
             ),
             Self::Changed { field } => {
                 write!(
