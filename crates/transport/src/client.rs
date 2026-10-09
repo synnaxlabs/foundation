@@ -169,8 +169,9 @@ mod tests {
     const OTHER: PrivateKey = PrivateKey([3; 32]);
 
     /// Starts a transport for `SERVER` at `[::]` on `node` that accepts `sessions`
-    /// sessions in turn. On each, it checks that the peer is a program, echoes the first
-    /// message of the first stream, and waits until the program drops the session.
+    /// sessions in turn. On each, it checks that the peer is a program, echoes the
+    /// first message of the first stream, and waits until the program drops the
+    /// session.
     fn serve(node: &Node, sessions: usize) {
         testing::shard(node, SERVER, move |config, node| async move {
             // A program's pool has the budget of this one.
