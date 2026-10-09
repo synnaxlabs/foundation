@@ -313,6 +313,10 @@
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
   2026-10-09 20:26 UTC). The two constructors: decided by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505). The
+  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505,
+  2026-10-09 21:12 UTC), after the ruling of `laptop.director`. Supersedes the one
+  constructor of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286. The
   parameters of the first callbacks: approved by `laptop.architect-2` at `feb6c21a4`
-  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550).
+  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550,
+  2026-10-09 21:25 UTC).

@@ -245,7 +245,8 @@ impl Side {
         self.manager.state().table.borrow().len()
     }
 
-    /// The length of the read buffer of each connection in the table.
+    /// The length of the read buffer of each connection in the table. No call of
+    /// open62541 shows it, and `tests/memory.rs` cannot reach the private manager.
     fn buffers(&self) -> Vec<(usize, usize)> {
         let table = self.manager.state().table.borrow();
         table.iter().map(|(id, c)| (*id, c.buffer.len())).collect()
