@@ -110,14 +110,14 @@
   wins for the connector `b`", with ", and the placement `r` wins for the connector
   `c`" for each more, and "no placement selects the connector `c`" for a writer with no
   winner. When no placement selects the index, the message starts "no placement selects
-  the index `i.time`". Each diagnostic of a unit gives one fix with one target `t`: the
-  winner of the first connector of the unit, in name order, that a placement selects,
-  else the placement that wins for the indexes of the unit. The fix is "Make the
-  placement `t` win for the connectors `a` and `b` and their indexes", so one edit
-  applies it. This also holds for the `config.connector-home` of a connector of the
-  unit whose winner is not `t`. The `config.connector-home` at `t` keeps the case 1
-  fix, which names `n` as the home of `t`. A unit of one connector `c` keeps "the
-  connector `c` and its indexes" in each fix (same comment of 15:21:54Z, and
+  the index `i.time`". Each `config.split-placement` of a unit gives one fix with one
+  target `t`: the winner of the first connector of the unit, in name order, that a
+  placement selects, else the placement that wins for the indexes of the unit. The fix
+  is "Make the placement `t` win for the connectors `a` and `b` and their indexes", so
+  one edit applies it. This also holds for the `config.connector-home` of a connector
+  of the unit whose winner is not `t`. The `config.connector-home` at `t` keeps the
+  case 1 fix, which names `n` as the home of `t`. A unit of one connector `c` keeps
+  "the connector `c` and its indexes" in each fix (same comment of 15:21:54Z, and
   `laptop.architect`, 2026-10-08T16:22:59Z, and `laptop.architect`,
   2026-10-09T22:58:00Z,
   https://github.com/synnaxlabs/foundation/pull/2194#issuecomment-6090684061). When no
