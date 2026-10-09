@@ -63,8 +63,8 @@ impl Cause {
                      reference definition, in the paragraph that starts with the line \
                      `{line}`, which the check cannot read"
                 ),
-                "Write each link and image on one line, and put a blank line after each \
-                 link reference definition",
+                "Write each link and image on one line, and put a blank line after \
+                 each link reference definition",
             ),
         };
         format!("review round {number} has {cause}. {remedy}, {FORMAT}")
@@ -117,9 +117,10 @@ struct Round {
 /// A round comment that does not parse.
 #[derive(Debug)]
 struct Malformed {
-    /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form,
-    /// or the check cannot read it ([`Shown::hiding`]).
-    fixed: bool,
+    /// Its problem counts also in an old round that is not the last: it has a
+    /// `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form, or the
+    /// check cannot read it ([`Shown::hiding`]).
+    binding: bool,
     problem: String,
 }
 
@@ -207,7 +208,7 @@ fn problems(
                 problems.extend(unnamed(round, &record.files, last, code_change)?);
             }
             Err(e) => {
-                if !*old || last || e.fixed {
+                if !*old || last || e.binding {
                     problems.push(e.problem.clone());
                 }
             }
@@ -342,7 +343,12 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 /// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = normalized(body);
-    let shown = Shown::read(&body, old);
+    let shown = Shown::read(&body);
+    // An old round is taken as written, except where the check cannot read it.
+    let hiding = shown
+        .hiding
+        .iter()
+        .find(|(_, cause)| !old || matches!(cause, Cause::Misplaced));
     let number = shown.number.or(shown.html_number.filter(|_| !old))?;
     let text = &shown.text;
     let lines = shown.fields().iter().map(String::as_str);
@@ -350,8 +356,8 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
     let findings = field("Findings: ");
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
-    let fixed = [reviewers, range, findings].iter().any(Option::is_some)
-        || shown.hiding.is_some();
+    let binding =
+        [reviewers, range, findings].iter().any(Option::is_some) || hiding.is_some();
     let performance = |reviewers: Option<&BTreeSet<String>>| {
         let performer =
             reviewers.map_or_else(|| performer(text), |r| r.contains("performance"));
@@ -364,7 +370,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let Ok(number) = number.parse::<u32>() else {
         let problem = format!("`## Review round {number}` has no round number");
         return Some(Parsed {
-            round: Err(Malformed { fixed, problem }),
+            round: Err(Malformed { binding, problem }),
             performance: performance(None),
         });
     };
@@ -372,7 +378,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
-        if let Some((line, cause)) = shown.hiding {
+        if let Some(&(line, cause)) = hiding {
             return Err(cause.problem(number, line));
         }
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
@@ -401,7 +407,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
             hot,
         })
     };
-    let round = fields().map_err(|problem| Malformed { fixed, problem });
+    let round = fields().map_err(|problem| Malformed { binding, problem });
     let performance = performance(round.as_ref().ok().map(|r| &r.reviewers));
     Some(Parsed { round, performance })
 }
@@ -466,7 +472,8 @@ fn entries(lines: &[String]) -> (Vec<(&'static str, String)>, usize) {
 }
 
 /// Options for the GitHub extensions that change which lines are text or what they
-/// show: tables, footnotes, task lists, and strikethrough. Each footnote stays in place ([`Shown::read`] moves it).
+/// show: tables, footnotes, task lists, and strikethrough. Each footnote stays in
+/// place ([`Shown::read`] moves it).
 fn options() -> Options<'static> {
     let mut options = Options::default();
     let extension = &mut options.extension;
@@ -479,7 +486,7 @@ fn options() -> Options<'static> {
 }
 
 /// A comment read as GitHub reads Markdown: its text from its round heading on, and the
-/// first line that can hide text or that the check cannot read.
+/// lines that can hide text or that the check cannot read.
 #[derive(Debug, Default)]
 struct Shown<'a> {
     /// The text after `## Review round ` in the heading, or `None` when the comment
@@ -492,9 +499,9 @@ struct Shown<'a> {
     /// shows them ([`texts`]). A footnote with no reference is not shown. A paragraph
     /// that comrak places in the wrong lines ([`misplaced`]) gives no line.
     text: Vec<Vec<String>>,
-    /// The first line of the comment that can hide text on GitHub or that the check
-    /// cannot read, and its cause.
-    hiding: Option<(&'a str, Cause)>,
+    /// Each line of the comment that can hide text on GitHub or that the check cannot
+    /// read, with its cause, in order.
+    hiding: Vec<(&'a str, Cause)>,
     /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
@@ -503,9 +510,8 @@ struct Shown<'a> {
 
 impl<'a> Shown<'a> {
     /// Reads `body` ([`normalized`]). Its round heading is the first top-level
-    /// `## Review round ` heading. In an `old` round, only a [`Cause::Misplaced`]
-    /// paragraph is [`Shown::hiding`].
-    fn read(body: &'a str, old: bool) -> Self {
+    /// `## Review round ` heading.
+    fn read(body: &'a str) -> Self {
         let mut shown = Self::default();
         let starts: Vec<usize> = std::iter::once(0)
             .chain(body.match_indices('\n').map(|(i, _)| i + 1))
@@ -563,13 +569,11 @@ impl<'a> Shown<'a> {
             }
         }
         hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
-        // An old round is taken as written, except where the check cannot read it.
-        let hiding = hiding
+        hiding.sort_by_key(|(at, _)| *at);
+        shown.hiding = hiding
             .into_iter()
-            .filter(|(_, cause)| !old || matches!(cause, Cause::Misplaced));
-        let first = hiding.min_by_key(|(at, _)| *at);
-        shown.hiding =
-            first.map(|(at, cause)| (body[at..line_end(body, at)].trim(), cause));
+            .map(|(at, cause)| (body[at..line_end(body, at)].trim(), cause))
+            .collect();
         shown
     }
 
@@ -653,9 +657,9 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// The lines of text of `paragraph` as GitHub shows them: its text and code spans,
-/// each image as U+FFFC in place of its text, no invisible character (Unicode default ignorable), and
-/// each run of white space as one space, trimmed. A character that looks like another
-/// stays itself.
+/// each image as U+FFFC in place of its text, no invisible character (Unicode default
+/// ignorable), and each run of white space as one space, trimmed. A character that
+/// looks like another stays itself.
 fn texts<'n>(paragraph: &'n AstNode<'n>) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut fresh = true;
