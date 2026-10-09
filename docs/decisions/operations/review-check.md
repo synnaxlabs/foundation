@@ -19,9 +19,14 @@
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072253988), with the
   spaces and tabs at the end of each line removed, and each tab in the spaces, tabs, and
   `>` at the start of a line replaced by spaces to the next multiple of 4 columns: as
-  CommonMark with the GitHub extensions tables, footnotes, and task lists. The tag
-  filter acts only on raw HTML, which fails (corrected by the director at
-  2026-10-08T21:55:15Z,
+  CommonMark with the GitHub extensions tables, footnotes, task lists, and
+  strikethrough. Each field and end line is read in the text that GitHub shows on its
+  line: with its escapes and entities read, without the marks of emphasis and code
+  spans, with each image as one character that is not text, with no invisible character
+  (Unicode default ignorable), and with each run of white space as one space. The check
+  does not read a character as another character that looks the same, such as a Cyrillic
+  letter in place of a Latin one. The tag filter acts only on raw HTML, which fails
+  (corrected by the director at 2026-10-08T21:55:15Z,
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069788449). A line
   ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at 2026-10-08T04:42:33Z,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062). The
@@ -47,28 +52,26 @@
   and hide the text between them. It also fails when `comrak` places the text of a
   paragraph before the last line of the paragraph, as it does after a link or an image
   with a line break after its text and after a link reference definition in the
-  paragraph, since each line that it then gives is wrong. A field name or an end line
-  name is read in the source of its line, so it also fails when GitHub shows such a
-  name at the start of a line of a paragraph and the source of the line does not start
-  with it, as with an escape, an entity, or emphasis. The message names the first
+  paragraph, since each line that it then gives is wrong. The message names the first
   line with one of these causes, or the first line of the paragraph. A round comment
-  that fails by these rules gets an edit that puts the line in a code span, that writes
-  each link and image on one line and puts a blank line after each link reference
-  definition, or that writes each name as plain text, and the cutoff stays. A paragraph
-  that `comrak` places in the wrong lines fails in any round, also in one posted before
-  the cutoff, since the check cannot read it. In an old round, a `Hot path:` line, or a
-  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
-  line of text of a paragraph with its name at the start of its source, at any depth and
-  any indent, except in a paragraph that `comrak` places in the wrong lines. A line of a
-  code block or an HTML block does not count. Changed by
+  that fails by these rules gets an edit that puts the line in a code span, or that
+  writes each link and image on one line and puts a blank line after each link reference
+  definition, and the cutoff stays. A paragraph that `comrak` places in the wrong lines
+  fails in any round, also in one posted before the cutoff, since the check cannot read
+  it. In an old round, a `Hot path:` line, or a `Reviewers:` line of a round that does
+  not parse, counts where GitHub shows it at the start of a line of text of a paragraph,
+  at any depth and any indent, except in a paragraph that `comrak` places in the wrong
+  lines. A line of a code block or an HTML block does not count. Changed by
   https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
   at 2026-10-08T21:47:24Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983) and
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983),
   2026-10-09T00:29:41Z
-  (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
-  approved by the director at 2026-10-09T03:38:17Z
+  (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169), and
+  2026-10-09T03:40:52Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6073795680), approved
+  by the director at 2026-10-09T03:38:17Z
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6073771496).
   Supersedes the footnote label rule of
   https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522
