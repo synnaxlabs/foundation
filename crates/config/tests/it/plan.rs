@@ -1386,7 +1386,7 @@ connector \"a\" {
 }
 
 #[test]
-fn checks_an_index_only_against_the_nearest_connector_above_it() {
+fn checks_an_index_only_against_the_connector_that_writes_it() {
     let text = |e: &str| {
         format!(
             "\
@@ -2042,7 +2042,7 @@ connector \"b\" {
 }
 
 #[test]
-fn gives_no_split_placement_after_a_tie_at_the_nearest_connector() {
+fn gives_no_split_placement_after_a_tie_at_the_writer() {
     let text = "\
 channel \"d.e.time\" {
   kind = \"index\"
