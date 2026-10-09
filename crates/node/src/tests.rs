@@ -4248,7 +4248,70 @@ mod port {
             assert_eq!(applied_key(&mut sim, &host).as_u128() >> 80, 0);
         }
 
-        /// A channel key made before the clock has mesh time has the time 0.
+        /// A key made after the error of the wall clock becomes known is no earlier
+        /// than a key made while it was unknown, and both are near the wall.
+        #[test]
+        fn a_channel_key_after_the_wall_error_shrinks_is_no_earlier() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = sim.node(sim::node::Config {
+                cores: NonZeroUsize::new(2).unwrap(),
+                wall_error: None,
+                ..sim::node::Config::default()
+            });
+            let identity = Identity {
+                key: OWN,
+                private_key: KEY,
+            };
+            write_key(&mut sim, &host, identity::encode(&identity).to_vec());
+            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            let made = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&made);
+            let zero = host.clock().now();
+            let wall = host.clone();
+            let applied = Arc::new(Mutex::new(None));
+            let span = Arc::clone(&applied);
+            node.operate(move |ops| async move {
+                let first = apply_index(&ops, "a").await;
+                wall.set_wall_error(Some(Span::from_nanos(
+                    10 * Span::MILLISECOND.nanos(),
+                )));
+                wall.clock()
+                    .sleep(Span::from_nanos(600 * Span::SECOND.nanos()))
+                    .await;
+                let before = wall.clock().now();
+                let second = apply_index(&ops, "b").await;
+                let after = wall.clock().now();
+                out.lock().unwrap().extend([first, second]);
+                *span.lock().unwrap() = Some((before, after));
+            });
+            let eleven_minutes = Span::from_nanos(660 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(eleven_minutes), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let millis: Vec<i64> = made
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|key| i64::try_from(key.as_u128() >> 80).unwrap())
+                .collect();
+            let start = sim::node::Config::default().wall.nanos() / 1_000_000;
+            let [first, second] = millis[..] else {
+                panic!("two keys, not {millis:?}");
+            };
+            let (before, after) = applied.lock().unwrap().expect("a second apply");
+            let at = |time: types::time::Monotonic| {
+                start + i64::try_from((time.0 - zero.0) / 1_000_000).unwrap()
+            };
+            assert!((start..start + 1_000).contains(&first), "{first} ms");
+            let wall = at(before) - 1_000..=at(after) + 1_000;
+            assert!(wall.contains(&second), "{second} ms is not in {wall:?}");
+            assert!(first <= second, "{second} ms is before {first} ms");
+        }
+
+        /// A channel key made before the clock has mesh time has the time 0. It calls
+        /// `channel_key` directly: through `operate` the clock always has mesh time,
+        /// since shard 0 runs it before the mesh opens and the source measures at once.
         #[test]
         fn a_channel_key_before_mesh_time_has_the_time_0() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -4268,31 +4331,36 @@ mod port {
             let node = start(host, region(&[member(OWN, &KEY, host)]));
             let made = Arc::new(Mutex::new(None));
             let out = Arc::clone(&made);
-            let text = format!(
-                "channel \"plant.time\" {{ kind = \"index\" }}\n\
-                 placement \"plant\" {{\n  select = \"plant.*\"\n  home = \"plant.node{OWN}\"\n}}\n"
-            );
             node.operate(move |ops| async move {
-                let files = vec![(std::path::PathBuf::from("plant.hcl"), text)];
-                let (plan, _) = ops.plan(files).await.expect("a plan");
-                let path = std::path::Path::new("plant.plan");
-                ops.apply(path, &plan).await.expect("an apply");
-                let spec = ops.mesh().spec().await.expect("a spec");
-                let label = Kind::Channel.key("plant.time").unwrap();
-                let Some(Definition::Channel(channel)) = spec.definitions.get(&label)
-                else {
-                    panic!("a channel at plant.time");
-                };
-                *out.lock().unwrap() = Some(channel.key);
+                *out.lock().unwrap() = Some(apply_index(&ops, "time").await);
             });
-            assert_eq!(
-                sim.run_for(Span::from_nanos(30 * Span::SECOND.nanos())),
-                Ok(())
-            );
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
             made.lock().unwrap().take().expect("a channel")
+        }
+
+        const HALF_MINUTE: Span = Span::from_nanos(30 * Span::SECOND.nanos());
+
+        /// Applies the index `plant.<name>` homed on [`OWN`] through `ops`, and gives
+        /// its key.
+        async fn apply_index(ops: &ops::Node, name: &str) -> channel::Key {
+            let text = format!(
+                "channel \"plant.{name}\" {{ kind = \"index\" }}\n\
+                 placement \"plant\" {{\n  select = \"plant.*\"\n  home = \"plant.node{OWN}\"\n}}\n"
+            );
+            let files = vec![(std::path::PathBuf::from(format!("{name}.hcl")), text)];
+            let (plan, _) = ops.plan(files).await.expect("a plan");
+            let path = std::path::Path::new("plant.plan");
+            ops.apply(path, &plan).await.expect("an apply");
+            let spec = ops.mesh().spec().await.expect("a spec");
+            let label = Kind::Channel.key(&format!("plant.{name}")).unwrap();
+            let Some(Definition::Channel(channel)) = spec.definitions.get(&label)
+            else {
+                panic!("a channel at plant.{name}");
+            };
+            channel.key
         }
 
         /// A node with a region whose port does not bind drops a task of `operate`

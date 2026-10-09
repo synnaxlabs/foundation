@@ -117,8 +117,9 @@
   `ops::Node` that make `Output`, `Applied`, `Error`, and `Problem` public; a `hub` that
   gives the mesh. Decided by `laptop.architect-2` (2026-10-09T01:55:14Z,
   https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072660664).
-  Amended in review (2026-10-09, #2078): the key time is the latest edge of mesh time,
-  and 0 before the node has mesh time or before 1970: the time only orders keys, and the
-  random bits make each key unique. `ops::Node::mesh` gives the mesh, so the lab reads
-  the home of a channel. `node` also takes `document` and `connector`. The trigger above
-  also makes `ops::Node::plan`, `apply`, and `mesh` crate-private.
+  Amended in review (2026-10-09, #2078): the key time is the midpoint of mesh time,
+  which never goes back, and 0 before the node has mesh time or before 1970: the time
+  only orders keys, and the random bits make each key unique. `ops::Node::mesh` gives
+  the mesh, so the lab reads the home of a channel. `node` also takes `document` and
+  `connector`. The trigger above also makes `ops::Node::plan`, `apply`, and `mesh`
+  crate-private.
