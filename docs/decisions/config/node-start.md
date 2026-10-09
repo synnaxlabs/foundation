@@ -8,25 +8,27 @@
   on a running node. The first start on a data directory needs `--name`, and a later one
   reads the name there (NODE NAME). Once the node has claimed the data directory, a
   thread of `main` writes `Start::line`: `node edge runs in foundation-data. Stop it
-  with Ctrl-C.`, or `{"name":"edge","data":"foundation-data"}` with `--json`. `data` is
-  the path as given, and a path that is not UTF-8 is written lossily, as `Path::display`
-  does. The text form escapes `data` as `Start::fail` does, so a newline in it adds no
-  line. A write that fails changes nothing. A node that stops before the thread writes
-  can exit with no line. `Start::fail` writes an `ops::Failure { code, message, fix }`
-  as `cli` writes its own errors, and gives exit status 1. So `ops` keeps the one output
-  form, and `main` gives the facts. The codes: `node.busy`, `node.data`, `node.unnamed`,
-  `node.renamed`, `node.name`, and `node.failed`. `node.data` is "this user cannot write
-  the data directory": `os::Error::Dir`, and each `env::files::Error::Io` whose code is
-  `EACCES`, `EPERM`, or `EROFS`, in `node::Error::Directory` or in the
-  `buffer::Error::Files` of `node::Error::Buffer`. Its message is "cannot write the data
-  directory {data}: {error}", and its fix "Let this user make and write {data} and each
-  file in it, or give another directory with `--data`". Each other `Directory` error but
-  `Busy` is `node.failed`. Lost: `node.data` for the claim of `lock` alone, which leaves
-  a ring that the user cannot write on `node.failed`. `Node::stopper` gives a `Stopper`
-  that stops the node from another thread. A stop after the node ended does nothing.
-  Lost: a line that `node` writes itself, a second owner of the output form; an entry of
-  the table with a flag that each of its four users skips. Decided by
-  `laptop.architect-2` (2026-10-08T02:21:16Z,
+  with Ctrl-C.`, or `{"name":"edge","data":"foundation-data"}` with `--json`. Each form
+  writes `data` lossily, with one U+FFFD for each sequence of bytes that is not UTF-8,
+  as `Path::display` does. The text form also escapes it as `Start::fail` does, each
+  character but a quote as `char::escape_debug` does, so a newline in it adds no line,
+  and a backslash or a combining mark shows escaped. Lost: the path as given, which a
+  newline splits into two lines. A write that fails changes nothing. A node that stops
+  before the thread writes can exit with no line. `Start::fail` writes an `ops::Failure
+  { code, message, fix }` as `cli` writes its own errors, and gives exit status 1. So
+  `ops` keeps the one output form, and `main` gives the facts. The codes: `node.busy`,
+  `node.data`, `node.unnamed`, `node.renamed`, `node.name`, and `node.failed`.
+  `node.data` is "this user cannot write the data directory": `os::Error::Dir`, and each
+  `env::files::Error::Io` whose code is `EACCES`, `EPERM`, or `EROFS`, in
+  `node::Error::Directory` or in the `buffer::Error::Files` of `node::Error::Buffer`.
+  Its message is "cannot write the data directory {data}: {error}", and its fix "Let
+  this user make and write {data} and each file in it, or give another directory with
+  `--data`". Each other `Directory` error but `Busy` is `node.failed`. Lost: `node.data`
+  for the claim of `lock` alone, which leaves a ring that the user cannot write on
+  `node.failed`. `Node::stopper` gives a `Stopper` that stops the node from another
+  thread. A stop after the node ended does nothing. Lost: a line that `node` writes
+  itself, a second owner of the output form; an entry of the table with a flag that each
+  of its four users skips. Decided by `laptop.architect-2` (2026-10-08T02:21:16Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6050855867;
   2026-10-08T05:00:46Z, `--name` and the line,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6052649826;

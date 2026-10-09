@@ -33,9 +33,9 @@ pub struct Failure {
 
 impl Start {
     /// The line that tells that the node `name` runs in [`Start::data`], as text or
-    /// JSON, with its newline. Text escapes the data directory as [`Start::fail`] does,
-    /// so the line stays one line. JSON gives it with each byte that is not UTF-8 as
-    /// U+FFFD.
+    /// JSON, with its newline. Each gives the data directory lossily, with one U+FFFD
+    /// for each sequence of bytes that is not UTF-8, as `Path::to_string_lossy` does.
+    /// Text also escapes it as [`Start::fail`] does, so the line stays one line.
     #[must_use]
     pub fn line(&self, name: &Name) -> String {
         if self.json {

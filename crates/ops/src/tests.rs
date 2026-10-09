@@ -653,13 +653,13 @@ mod start {
         use std::os::unix::ffi::OsStrExt;
 
         let start = Start {
-            data: PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xffb")),
+            data: PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xf0\x9f\x98b\xffc")),
             json: true,
             name: None,
         };
         assert_eq!(
             start.line(&edge()),
-            "{\"name\":\"edge\",\"data\":\"a\u{fffd}b\"}\n"
+            "{\"name\":\"edge\",\"data\":\"a\u{fffd}b\u{fffd}c\"}\n"
         );
     }
 
