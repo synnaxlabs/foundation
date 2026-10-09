@@ -4,7 +4,6 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +12,7 @@ use hub::{Served, serve};
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Address, Class, Code, Port, Session};
+use transport::{Address, Class, Code, Session};
 use types::connection;
 use types::ed25519::{Pair, PrivateKey};
 use types::hello::Hello;
@@ -203,9 +202,8 @@ where
     };
     run_program(seed, home, move |node, tasks, at| async move {
         let mut agents = Vec::new();
-        for port in 0..SESSIONS {
-            let port = PORT + u16::try_from(port).expect("fits");
-            agents.push(Agent::dial_from(&node, tasks.clone(), at, port).await);
+        for _ in 0..SESSIONS {
+            agents.push(Agent::dial(&node, tasks.clone(), at).await);
         }
         let ends: Vec<_> = agents.iter().map(|agent| agent.session.clone()).collect();
         program(agents.try_into().ok().expect("an agent for each session")).await;
@@ -499,29 +497,15 @@ impl Agent {
         tasks: env::tasks::Tasks,
         at: Address,
     ) -> Self {
-        Self::dial_from(node, tasks, at, PORT).await
-    }
-
-    /// As [`Agent::dial`], from `port` of `node`.
-    async fn dial_from(
-        node: &sim::node::Node,
-        tasks: env::tasks::Tasks,
-        at: Address,
-        port: u16,
-    ) -> Self {
         let pool = own_pool();
-        let own = SocketAddr::new(node.addresses()[0], port);
-        let mut parts = Port::bind(&node.net(), own)
-            .expect("binds")
-            .split(NonZeroUsize::MIN);
         let config = transport::client::Config {
+            net: node.net(),
             clock: node.clock(),
             entropy: node.entropy(),
             tasks,
             pool: std::rc::Rc::clone(&pool),
         };
-        let client = transport::Client::new(config, parts.pop().expect("one part"))
-            .expect("a client");
+        let client = transport::Client::new(config).expect("a client");
         let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
         let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
         let mut hello = Stream {

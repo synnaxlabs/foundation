@@ -2340,17 +2340,15 @@ mod port {
         host: &sim::node::Node,
         tasks: env::tasks::Tasks,
     ) -> (transport::Client, Rc<block::Pool>) {
-        let (pool, part) = port(host);
+        let pool = pool();
         let config = transport::client::Config {
+            net: host.net(),
             clock: host.clock(),
             entropy: host.entropy(),
             tasks,
             pool: Rc::clone(&pool),
         };
-        (
-            transport::Client::new(config, part).expect("a client"),
-            pool,
-        )
+        (transport::Client::new(config).expect("a client"), pool)
     }
 
     /// Starts a peer on a new host of `sim` that dials the node at `listen` of `host`

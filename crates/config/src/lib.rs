@@ -4,6 +4,7 @@
 mod access;
 mod channel;
 mod connector;
+mod duplicate;
 mod node_settings;
 pub mod openssh;
 mod placement;
@@ -15,14 +16,13 @@ mod subject;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
-use document::diagnostic::{Code, Diagnostic, Note};
+use document::diagnostic::{Code, Diagnostic};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
 use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
@@ -146,13 +146,20 @@ fn checked<'a>(
             }
         }
     }
-    found.repeats();
+    let repeats = duplicate::in_labels(&mut found.labels);
+    found.diagnostics.extend(repeats);
     if found.diagnostics.is_empty() {
         Ok(found)
     } else {
         sort(&mut found.diagnostics);
         Err(found.diagnostics)
     }
+}
+
+/// The label of the definition of `kind` at tree key `key`, or `key` when it has no
+/// label form.
+pub(crate) fn label(kind: Kind, key: &Name) -> Name {
+    kind.label(key).unwrap_or_else(|| key.clone())
 }
 
 /// Sorts `diagnostics` by the [`order`] of each span.
@@ -184,9 +191,8 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// Each label of each tree key so far, with the kind of its block, by the key in
-    /// lowercase, so that keys that differ only in case collide.
-    labels: BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>,
+    /// Each label of each tree key so far.
+    labels: duplicate::Labels<'a>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The label of the first connector in [`order`] that a `connector` block in any
@@ -245,43 +251,8 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        self.labels
-            .entry(key.as_str().to_ascii_lowercase().into())
-            .or_default()
-            .push((label, kind));
+        duplicate::add(&mut self.labels, &key, label, kind);
         Some((key, label.span))
-    }
-
-    /// Reports each label of a tree key after the first in [`order`].
-    fn repeats(&mut self) {
-        for labels in self.labels.values_mut() {
-            labels.sort_by_key(|(label, _)| order(label.span));
-            let (first, earlier) = labels[0];
-            for &(label, later) in &labels[1..] {
-                let (earlier, keyword) = (earlier.as_str(), later.as_str());
-                let blocks = if earlier == keyword {
-                    format!("`{keyword}`")
-                } else {
-                    format!("`{earlier}` and `{keyword}`")
-                };
-                let mut diagnostic = Diagnostic::new(
-                    DUPLICATE_NAME,
-                    label.span,
-                    format!(
-                        "the name {:?} repeats the earlier `{earlier}` name {:?}",
-                        label.text, first.text
-                    ),
-                    format!(
-                        "Give each {blocks} block a name that differs by more than case"
-                    ),
-                );
-                diagnostic.notes.extend(first.span.map(|span| Note {
-                    span,
-                    text: "the earlier name".into(),
-                }));
-                self.diagnostics.push(diagnostic);
-            }
-        }
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -368,6 +339,7 @@ fn span(block: &Block, key: &str) -> Option<Span> {
 
 #[cfg(test)]
 mod tests {
+    use document::diagnostic::Note;
     use document::value::Kind;
     use document::{Attribute, Map, Position, Source};
     use proptest::prelude::*;
@@ -1623,7 +1595,8 @@ mod tests {
                 selector(&["edge.**"]),
                 actions.iter().copied().collect(),
                 Authority(authority),
-            );
+            )
+            .unwrap();
             let entry = Entry {
                 definition: Definition::Spec(definition::Definition::Access(policy)),
                 label_span: at(0, 1),
@@ -1805,15 +1778,38 @@ mod tests {
 
         #[test]
         fn refuses_an_empty_allow() {
-            assert_eq!(
-                check(&access(&attributes(list(vec![]), None))),
-                Err(vec![refused(
-                    "config.empty-allow",
-                    at(0, 15),
-                    "the `allow` list holds no action",
-                    "Add one or more actions, such as \"read\"",
-                )])
-            );
+            for authority in [None, Some(3)] {
+                assert_eq!(
+                    check(&access(&attributes(list(vec![]), authority))),
+                    Err(vec![refused(
+                        "config.empty-allow",
+                        at(0, 15),
+                        "the `allow` list holds no action",
+                        "Add one or more actions, such as \"read\"",
+                    )]),
+                    "{authority:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_empty_allow_only_when_each_other_attribute_reads() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes[0].1 = Kind::Integer(5);
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.bad-selector"]));
+        }
+
+        #[test]
+        fn refuses_an_empty_allow_only_when_each_attribute_is_known() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes.push(("deny", string("write")));
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.unknown-attribute"]));
         }
 
         #[test]

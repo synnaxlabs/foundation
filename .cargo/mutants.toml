@@ -89,6 +89,8 @@ exclude_re = [
   'crates/os/src/net/resolve\.rs:.*delete match arm \(libc::EAI_(AGAIN|MEMORY), _\)',
   # The list is C memory, so no test sees a leak (#1928).
   'crates/os/src/net/resolve\.rs:.*replace <impl Drop for List>::drop with \(\)',
+  # The flags of a socket share no bit, so `|` and `^` give the same flags.
+  'crates/os/src/net\.rs:.*replace \| with \^ in socket$',
   # Only a pool whose largest block is 1472 bytes tells `<` from `<=`. Block sizes are
   # 64 times 2^k times 5 to 8, so none is 1472: 1280, then 1536.
   'crates/transport/src/client\.rs:.*replace < with <= in Config::setup',
