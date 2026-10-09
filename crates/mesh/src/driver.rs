@@ -48,7 +48,7 @@ mod home;
 mod propose;
 mod send;
 mod stream;
-mod used;
+pub(crate) mod used;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -262,15 +262,9 @@ impl Mesh {
     /// A watch of the home of `index`.
     #[must_use]
     pub fn watch(&self, index: channel::Key) -> Watch {
-        let mut group = self.group.borrow_mut();
-        let slot = group.slot();
         Watch {
-            group: Rc::downgrade(&self.group),
-            stopped: Rc::clone(&group.stopped),
-            slot,
+            slot: Slot::new(&self.group),
             index,
-            given: None,
-            called: false,
         }
     }
 
@@ -576,16 +570,8 @@ impl std::error::Error for Unstamped {}
 
 /// A watch of the home of one index.
 pub struct Watch {
-    group: Weak<RefCell<Group>>,
-    // The cause of the group's stop, which this watch gives after the group drops.
-    stopped: Rc<OnceCell<Stopped>>,
-    // The key of this watch's waker in the group.
-    slot: u64,
+    slot: Slot<Option<node::Key>>,
     index: channel::Key,
-    // What the last call of `next` gave.
-    given: Option<node::Key>,
-    // Whether `next` returned before.
-    called: bool,
 }
 
 impl fmt::Debug for Watch {
@@ -609,6 +595,42 @@ impl Watch {
     /// [`Mesh`] of it drops. A group that stopped keeps its cause when each [`Mesh`]
     /// drops.
     pub async fn next(&mut self) -> Result<Option<node::Key>, Stopped> {
+        let index = self.index;
+        self.slot
+            .next(|group| {
+                let home = group.state.home(index);
+                (home, home)
+            })
+            .await
+    }
+}
+
+// The state of a watch that gives a value each time its key `K` changes: its waker's
+// place in `Group::watches`, which it frees when it drops, and the last key given.
+struct Slot<K> {
+    group: Weak<RefCell<Group>>,
+    // The cause of the group's stop, which the watch gives after the group drops.
+    stopped: Rc<OnceCell<Stopped>>,
+    key: u64,
+    // `None` until the first call of `next` returns.
+    given: Option<K>,
+}
+
+impl<K: PartialEq> Slot<K> {
+    fn new(group: &Rc<RefCell<Group>>) -> Self {
+        let mut held = group.borrow_mut();
+        Self {
+            group: Rc::downgrade(group),
+            stopped: Rc::clone(&held.stopped),
+            key: held.slot(),
+            given: None,
+        }
+    }
+
+    // The value that `read` gives at once on the first call, and after it, at the
+    // first wake of watches where its key differs from the last one given. The cause
+    // of the stop once the group stopped or dropped.
+    async fn next<T>(&mut self, read: impl Fn(&Group) -> (K, T)) -> Result<T, Stopped> {
         poll_fn(|cx| {
             if let Some(stopped) = self.stopped.get() {
                 return Poll::Ready(Err(stopped.clone()));
@@ -617,22 +639,22 @@ impl Watch {
                 return Poll::Ready(Err(Stopped::Dropped));
             };
             let mut group = group.borrow_mut();
-            let home = group.state.home(self.index);
-            if self.called && self.given == home {
-                group.watches.insert(self.slot, cx.waker().clone());
-                return Poll::Pending;
+            let (key, value) = read(&group);
+            if self.given.as_ref() != Some(&key) {
+                self.given = Some(key);
+                return Poll::Ready(Ok(value));
             }
-            (self.given, self.called) = (home, true);
-            Poll::Ready(Ok(home))
+            group.watches.insert(self.key, cx.waker().clone());
+            Poll::Pending
         })
         .await
     }
 }
 
-impl Drop for Watch {
+impl<K> Drop for Slot<K> {
     fn drop(&mut self) {
         if let Some(group) = self.group.upgrade() {
-            group.borrow_mut().watches.remove(&self.slot);
+            group.borrow_mut().watches.remove(&self.key);
         }
     }
 }
@@ -648,7 +670,8 @@ struct Group {
     stopped: Rc<OnceCell<Stopped>>,
     // The task of `run`, while it waits for an input.
     task: Option<Waker>,
-    // The task of each watch that waits in `Watch::next`.
+    // The task of each watch that waits, of a home or of the spec in use. Each
+    // polls again at any wake of watches.
     watches: BTreeMap<u64, Waker>,
     // Each proposal since the task last took a `Ready`. The next `Ready` holds the
     // entry of each, unless a new leader replaced the entry.
@@ -838,7 +861,7 @@ impl Group {
         waiting.chain(self.starter.take()).for_each(Waker::wake);
     }
 
-    // Applies each change in `committed`, and wakes the watches when a home moves.
+    // Applies each change in `committed`, and wakes each watch when a home moves.
     fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
         if let Some(last) = committed.last() {
             let last = last.at.index;
@@ -1302,6 +1325,8 @@ mod tests {
         puts: BTreeMap<u8, BTreeMap<Name, Definition>>,
         /// What the spec in use of each node was at its last read.
         specs: BTreeMap<u8, Seen>,
+        /// The pointer of each spec that the spec watch of each node gave, in order.
+        watched: BTreeMap<u8, Vec<Option<Pointer>>>,
     }
 
     /// The spec in use of a node at a read, and what the task of the spec held.
@@ -1840,6 +1865,13 @@ mod tests {
         let (reading, clock, specs) = (mesh.clone(), node.clock(), Arc::clone(board));
         tasks.spawn(async move {
             read(reading, clock, id, specs).await;
+        });
+        let (mut watch, watched) = (mesh.watch_spec(), Arc::clone(board));
+        tasks.spawn(async move {
+            while let Ok(spec) = watch.next().await {
+                let mut board = watched.lock().unwrap();
+                board.watched.entry(id).or_default().push(spec.pointer);
+            }
         });
     }
 
