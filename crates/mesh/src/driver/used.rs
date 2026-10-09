@@ -184,8 +184,8 @@ impl Used {
 
     // Records what the job for `pointer` gave. A read for a pointer that a newer one
     // replaced still sets the spec in use or `Spec::behind`. A get for one changes
-    // nothing.
-    fn settle(&mut self, pointer: Pointer, done: Done) {
+    // nothing. Returns whether the spec in use changed.
+    fn settle(&mut self, pointer: Pointer, done: Done) -> bool {
         let newest = self
             .newest
             .as_mut()
@@ -201,10 +201,10 @@ impl Used {
                     behind: None,
                 };
                 self.chunks = chunks;
-                return;
+                return true;
             }
             (Done::Failed { cause, .. }, None) => cause,
-            (Done::Got(..), None) => return,
+            (Done::Got(..), None) => return false,
             (Done::Failed { cause, got }, Some(newest)) => {
                 newest.got.extend(got);
                 newest.step = match &cause {
@@ -219,12 +219,13 @@ impl Used {
             (Done::Got(_, Ok(Some(chunk))), Some(newest)) => {
                 newest.got.push(chunk);
                 newest.step = Step::Read;
-                return;
+                return false;
             }
             (Done::Got(digest, Ok(None)), Some(_)) => missing(digest),
             (Done::Got(_, Err(error)), Some(_)) => Cause::Blob(error),
         };
         self.spec.behind = Some(Behind { pointer, cause });
+        false
     }
 }
 
@@ -434,19 +435,11 @@ pub(super) async fn keep(
             Gave::Read(Err(cause), got) => Done::Failed { cause, got },
         };
         let Some(group) = group.upgrade() else { return };
-        group.borrow_mut().settle_used(pointer, done);
-    }
-}
-
-impl Group {
-    // Records what the job for `pointer` gave, and wakes each call, and each watch when
-    // the pointer in use moved.
-    fn settle_used(&mut self, pointer: Pointer, done: Done) {
-        let before = self.used.spec.pointer;
-        self.used.settle(pointer, done);
-        self.wake_calls();
-        if self.used.spec.pointer != before {
-            self.wake_watches();
+        let mut group = group.borrow_mut();
+        let moved = group.used.settle(pointer, done);
+        group.wake_calls();
+        if moved {
+            group.wake_watches();
         }
     }
 }
@@ -561,25 +554,19 @@ impl Mesh {
     pub fn watch_spec(&self) -> Watch {
         Watch {
             slot: Slot::new(&self.group),
-            given: None,
-            called: false,
         }
     }
 }
 
 /// A watch of the spec that a node uses.
 pub struct Watch {
-    slot: Slot,
-    // The pointer in use that the last call of `next` gave.
-    given: Option<Pointer>,
-    // Whether `next` returned before.
-    called: bool,
+    slot: Slot<Option<Pointer>>,
 }
 
 impl fmt::Debug for Watch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Watch")
-            .field("given", &self.given)
+            .field("given", &self.slot.given.flatten())
             .finish_non_exhaustive()
     }
 }
@@ -595,15 +582,8 @@ impl Watch {
     /// [`Stopped`], the cause, at once, on each call after the group stops or each
     /// [`Mesh`] of it drops, as [`crate::Watch::next`] does.
     pub async fn next(&mut self) -> Result<Spec, Stopped> {
-        let spec = poll_fn(|cx| {
-            self.slot.poll(cx, |group| {
-                let spec = &group.used.spec;
-                (!self.called || self.given != spec.pointer).then(|| spec.clone())
-            })
-        })
-        .await?;
-        (self.given, self.called) = (spec.pointer, true);
-        Ok(spec)
+        let read = |group: &Group| (group.used.spec.pointer, group.used.spec.clone());
+        self.slot.next(read).await
     }
 }
 

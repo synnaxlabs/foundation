@@ -1,10 +1,12 @@
 //! Tests of the spec that a node uses: `Mesh::spec` on one node, across a power cut,
 //! and on a cluster of three voters.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use spec::definition::Kind;
 use spec::region::Problem;
 
-use super::apply::{base, create_large, create_subjects, pointer};
+use super::apply::{Counted, base, create_large, create_subjects, pointer};
 use super::*;
 use crate::used::Cause;
 
@@ -1283,6 +1285,10 @@ fn a_committed_spec_with_problems_wakes_no_watch_of_the_spec() {
         let mut watch = mesh.watch_spec();
         assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
         let mut waits = pin!(watch.next());
+        let counted = Arc::new(Counted(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counted));
+        let pending = waits.as_mut().poll(&mut Context::from_waker(&waker));
+        assert!(pending.is_pending());
         let second = commit(&mesh, base(), &create_admin()).await;
         let behind = mesh.spec().await.unwrap().behind;
         let cause = Some(Behind {
@@ -1290,7 +1296,7 @@ fn a_committed_spec_with_problems_wakes_no_watch_of_the_spec() {
             cause: admin(),
         });
         assert_eq!(behind, cause);
-        assert!(now(waits.as_mut()).await.is_pending());
+        assert_eq!(counted.0.load(Ordering::Relaxed), 0);
         let a = create_subjects(&["plant.a"], 1);
         let third = mesh.apply(second, a.clone(), BTreeMap::new()).await;
         assert_eq!(waits.await, Ok(in_use(third.unwrap(), &a)));
