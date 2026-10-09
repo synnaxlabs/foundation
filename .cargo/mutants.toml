@@ -58,6 +58,9 @@ exclude_re = [
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
+  # Only a counting allocator sees the buffer that a skipped free leaks, and no public
+  # call reaches the manager until #435 PR 6c, whose memory test removes this entry.
+  'crates/connector-opcua/src/connection\.rs:.*replace <impl Drop for Buffer>::drop with \(\)',
   # A fence changes the order of memory operations around a counter read, and no
   # result a test can see. Loom does not model a counter read.
   'crates/os/src/clock\.rs:.*replace (settle|hold) with \(\)',
