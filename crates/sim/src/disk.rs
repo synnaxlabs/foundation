@@ -825,10 +825,10 @@ fn within(start: u64, part: &Range<u64>) -> Range<usize> {
     index(part.start - start)..index(part.end - start)
 }
 
-/// The segments of a checked path: only its names, since `.` adds nothing.
 /// A directory, a name in it, and the inode that the name gives, if any.
 type Entry<'a> = (u64, &'a OsStr, Option<u64>);
 
+/// The segments of a checked path: only its names, since `.` adds nothing.
 fn segments(path: &Path) -> Vec<&OsStr> {
     (path.components())
         .filter_map(|component| match component {
