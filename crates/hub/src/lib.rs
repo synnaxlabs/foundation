@@ -96,6 +96,7 @@ struct State {
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
+    remotes: reader::remote::Sessions,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// The readers that [`::home::Shard::woken`] gave last.
@@ -138,6 +139,7 @@ impl Hub {
             indexes: hash::Map::default(),
             writers: Sessions::default(),
             readers: Sessions::default(),
+            remotes: reader::remote::Sessions::default(),
             wakers: hash::Map::default(),
             woken: Vec::new(),
             commit: commit::Signal::default(),
@@ -383,7 +385,8 @@ impl State {
         }
     }
 
-    /// Ends each session on a channel of `removed`, and closes it at the home.
+    /// Ends each session on a channel of `removed`, and closes each local one at the
+    /// home.
     fn end(&mut self, removed: &hash::Set<Key>) {
         for key in self.writers.end(removed) {
             self.close_writer(key);
@@ -393,6 +396,7 @@ impl State {
                 waker.wake();
             }
         }
+        self.remotes.end(removed);
     }
 
     /// Closes the writer `key` at the home, unless a removal closed it.

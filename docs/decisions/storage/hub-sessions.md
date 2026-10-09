@@ -217,3 +217,12 @@
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814;
   2026-10-08T22:09:38Z:
   https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).
+  Amended (#340): a remote reader ends at a removal as a local reader does. The hub
+  keeps each remote reader with its keys from before it dials the home, so a removal
+  during the open also ends it. A removal clears the frames that wait, so the reader
+  gives `reader::Ended::Removed` at its next take, wakes the caller that waits in
+  `next`, and drops its stream with code 0, as each end that is not a refusal does
+  (HUB WIRE). `Remote::take` reads this end from the queue it already reads, so it adds
+  no check per call. Lost: an end only at the home, which closes the session when the
+  home's own definitions change, and which the reader may never see when the two nodes
+  apply a spec at different times.

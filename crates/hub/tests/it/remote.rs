@@ -26,7 +26,7 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 use super::region::OTHER;
 use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
 use super::{
-    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, name, samples, write,
+    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, name, samples, without, write,
     write_series, write_wide,
 };
 
@@ -2524,4 +2524,102 @@ async fn send_until_stopped(sender: &mut Sender, n: usize, body: usize) {
             return;
         }
     }
+}
+
+/// The home's end of a stream that a removal at the reader dropped: the reader resets
+/// it with code 0.
+async fn reset_by_removal(
+    node: sim::node::Node,
+    mut receiver: Receiver,
+    steps: &Steps,
+) {
+    let got = receiver.recv().await;
+    assert_eq!(
+        got.map(|m| m.map(|b| b.to_vec())),
+        Err(transport::Error::Reset { code: Code(0) })
+    );
+    steps.stopped.store(true, Ordering::Relaxed);
+    until(&node.clock(), &steps.done).await;
+}
+
+/// Removes `value` from the definitions of `test`'s hub after `wait`, then sets
+/// `steps.again`.
+fn remove_value(test: &Test, wait: Span, steps: &Arc<Steps>) {
+    let (hub, clock, steps) = (test.hub.clone(), test.clock.clone(), Arc::clone(steps));
+    test.tasks.spawn(async move {
+        clock.sleep(wait).await;
+        hub.set_definitions(&without(&["value"]));
+        steps.again.store(true, Ordering::Relaxed);
+    });
+}
+
+#[test]
+fn a_removal_of_a_channel_wakes_a_remote_reader_that_waits_and_ends_it() {
+    remote(
+        7,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_session, _sender, receiver) = fake_open(&transport).await;
+            reset_by_removal(node, receiver, &steps).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            remove_value(&test, Span::from_nanos(100_000_000), &steps);
+            for _ in 0..2 {
+                let ended = reader.next().await.map(|_| ());
+                assert_eq!(ended, Err(Ended::Removed(VALUE)));
+            }
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_removal_of_a_channel_ends_a_remote_reader_before_the_frames_that_wait() {
+    remote(
+        7,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| {
+                write_three(test, kept)
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            let first = reader.next().await.expect("a frame");
+            assert_eq!(samples(&first, 2), [1, 2]);
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            test.hub.set_definitions(&without(&["value"]));
+            let ended = reader.next().await.map(|_| ());
+            assert_eq!(ended, Err(Ended::Removed(VALUE)));
+        },
+    );
+}
+
+#[test]
+fn a_removal_of_a_channel_while_a_remote_reader_opens_ends_it_at_its_first_take() {
+    remote(
+        7,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_session, mut sender, receiver) = fake_accept(&transport).await;
+            until(&node.clock(), &steps.again).await;
+            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            reset_by_removal(node, receiver, &steps).await;
+        },
+        |test, steps| async move {
+            remove_value(&test, Span::from_nanos(100_000_000), &steps);
+            let mut reader = test
+                .hub
+                .reader(&[name("value")], Mode::Complete)
+                .await
+                .expect("opens");
+            let ended = reader.next().await.map(|_| ());
+            assert_eq!(ended, Err(Ended::Removed(VALUE)));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
 }

@@ -39,6 +39,45 @@ pub(super) struct Remote {
     streak: Streak,
 }
 
+/// Each remote reader that may be open, so that a removal of one of its channels ends
+/// it.
+#[derive(Debug, Default)]
+pub(crate) struct Sessions(Vec<Opened>);
+
+/// The channels of a remote reader, and its queue.
+#[derive(Debug)]
+struct Opened {
+    keys: Box<[channel::Key]>,
+    queue: Weak<RefCell<Queue>>,
+}
+
+impl Sessions {
+    /// Adds `queue`, the queue of a session on `keys`, and drops each queue that went.
+    fn add(&mut self, keys: Box<[channel::Key]>, queue: &Rc<RefCell<Queue>>) {
+        self.0.retain(|opened| opened.queue.strong_count() > 0);
+        self.0.push(Opened {
+            keys,
+            queue: Rc::downgrade(queue),
+        });
+    }
+
+    /// Ends each session on a channel of `removed` with [`Ended::Removed`] and the
+    /// first such channel.
+    pub(crate) fn end(&mut self, removed: &hash::Set<channel::Key>) {
+        self.0.retain(|opened| {
+            let Some(queue) = opened.queue.upgrade() else {
+                return false;
+            };
+            let Some(&key) = opened.keys.iter().find(|key| removed.contains(key))
+            else {
+                return true;
+            };
+            queue.borrow_mut().remove(key);
+            false
+        });
+    }
+}
+
 /// The frames that the task took and the caller has not, and why the session ended.
 #[derive(Debug, Default)]
 struct Queue {
@@ -74,7 +113,8 @@ struct Inbound {
 impl Remote {
     /// Opens a session of `mode` on the channels of `data`, each with its sample type,
     /// and their index `index` at `home`, another node, and waits for the home to open
-    /// it. Then spawns the task that takes its frames.
+    /// it. Then spawns the task that takes its frames. A removal of a channel during
+    /// the open ends the session at its first take.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
         home: types::node::Key,
@@ -82,6 +122,9 @@ impl Remote {
         index: channel::Key,
         mode: Mode,
     ) -> Result<Self, Error> {
+        let keys = data.iter().map(|&(key, _)| key).chain([index]).collect();
+        let queue = Rc::new(RefCell::new(Queue::default()));
+        state.borrow_mut().remotes.add(keys, &queue);
         let mut held = hash::Set::default();
         held.insert(index);
         let data: Vec<_> = data
@@ -132,7 +175,6 @@ impl Remote {
             return Err(error);
         }
         let limit = Rc::new(Cell::new(WINDOW));
-        let queue = Rc::new(RefCell::new(Queue::default()));
         let checked = credit.map(|_| Rc::clone(&limit));
         let inbound = Inbound::new(state, receiver, decoder, &set, checked);
         let latest = mode == Mode::Latest;
@@ -216,6 +258,16 @@ impl Queue {
         }
         keep(&mut self.taker, cx);
         Poll::Pending
+    }
+
+    /// Ends the session with [`Ended::Removed`] and `key` before the frames that
+    /// wait, which it drops. Wakes the caller, and the task, which drops the stream.
+    fn remove(&mut self, key: channel::Key) {
+        self.frames.clear();
+        self.ended = Some(Ended::Removed(key));
+        for waker in [self.taker.take(), self.task.take()].into_iter().flatten() {
+            waker.wake();
+        }
     }
 
     /// Ends the session with `ended` after the frames that wait, unless it ended.
@@ -622,4 +674,25 @@ fn refusal(ended: &Ended) -> Option<Refusal> {
 
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).expect("invariant: a usize holds a u32")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_add_drops_each_queue_that_went_and_keeps_each_that_lives() {
+        let [a, b, c] = [1, 2, 3].map(channel::Key::from_u128);
+        let mut sessions = Sessions::default();
+        let first = Rc::new(RefCell::new(Queue::default()));
+        sessions.add(Box::new([a]), &first);
+        sessions.add(Box::new([b]), &Rc::new(RefCell::new(Queue::default())));
+        let third = Rc::new(RefCell::new(Queue::default()));
+        sessions.add(Box::new([c]), &third);
+        assert_eq!(sessions.0.len(), 2);
+        sessions.end(&[a].into_iter().collect());
+        assert_eq!(first.borrow().ended, Some(Ended::Removed(a)));
+        assert_eq!(third.borrow().ended, None);
+        assert_eq!(sessions.0.len(), 1);
+    }
 }
