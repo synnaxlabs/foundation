@@ -6,7 +6,8 @@ use std::ops::Range;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use comrak::nodes::{AstNode, LineColumn, NodeValue, Sourcepos};
+use comrak::{Arena, Options, parse_document};
 use serde_json::Value;
 
 use crate::field;
@@ -323,9 +324,9 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
-        if let Some((line, what)) = shown.hiding.filter(|_| !old) {
+        if let Some(line) = shown.html.filter(|_| !old) {
             return Err(format!(
-                "review round {number} has {what}, which can hide text on GitHub, in \
+                "review round {number} has raw HTML, which can hide text on GitHub, in \
                  the line `{line}`. Put the line in a code span, {FORMAT}"
             ));
         }
@@ -419,29 +420,36 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
     (values, lines.len())
 }
 
-/// The GitHub extensions that `pulldown-cmark` has.
-const OPTIONS: Options = Options::ENABLE_TABLES
-    .union(Options::ENABLE_FOOTNOTES)
-    .union(Options::ENABLE_STRIKETHROUGH)
-    .union(Options::ENABLE_TASKLISTS)
-    .union(Options::ENABLE_GFM);
+/// Options for the GitHub extensions that change which lines are text: tables,
+/// footnotes, strikethrough, task lists, autolinks, and quote kinds.
+fn options() -> Options<'static> {
+    let mut options = Options::default();
+    let extension = &mut options.extension;
+    extension.table = true;
+    extension.footnotes = true;
+    extension.strikethrough = true;
+    extension.tasklist = true;
+    extension.autolink = true;
+    extension.alerts = true;
+    options
+}
 
 /// A comment read as GitHub reads Markdown: its text from its round heading on, and the
-/// first line that can hide text on GitHub.
+/// first line with raw HTML.
 #[derive(Debug, Default)]
 struct Shown<'a> {
     /// The text after `## Review round ` in the heading, or `None` when the comment
     /// has no such heading at the top level.
     number: Option<&'a str>,
     /// Each top-level block after the heading: the index in `text` of a paragraph, or
-    /// `None` for any other block.
+    /// `None` for any other block. The footnotes come last, as GitHub shows them.
     blocks: Vec<Option<usize>>,
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
-    /// shows them: without the indent or the marks of a list item or a quote.
+    /// shows them: without the indent or the marks of a list item or a quote. A
+    /// footnote with no reference is not shown.
     text: Vec<Vec<&'a str>>,
-    /// The first line of the comment that can hide text on GitHub, and what it holds
-    /// ([`hiding`]).
-    hiding: Option<(&'a str, &'static str)>,
+    /// The first line of the comment with raw HTML, which can hide text on GitHub.
+    html: Option<&'a str>,
     /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
@@ -453,69 +461,43 @@ impl<'a> Shown<'a> {
     /// `## Review round ` heading.
     fn read(body: &'a str) -> Self {
         let mut shown = Self::default();
-        // Each open block, with the index in `text` of a paragraph. A tight list item
-        // holds the text of its paragraph with no paragraph event.
-        let mut open: Vec<Option<usize>> = Vec::new();
-        let (mut fresh, mut code) = (true, false);
-        let (mut html_line, mut notes, mut codes) = (None, Vec::new(), Vec::new());
-        for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
-            let start = body[..range.start].rfind('\n').map_or(0, |i| i + 1);
-            let line = &body[range.start..line_end(body, range.start)];
-            let paragraph = open.last().copied().flatten().filter(|_| fresh);
-            let html = matches!(event, Event::Html(_) | Event::InlineHtml(_));
-            if !code && html_line.is_none() && html {
-                html_line = Some(start);
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(body.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let at = |at: LineColumn| starts[at.line - 1] + at.column - 1;
+        let line_start = |line: usize| starts[line - 1];
+        let (mut html, mut codes) = (None, Vec::new());
+        let arena = Arena::new();
+        let root = parse_document(&arena, body, &options());
+        for node in root.descendants() {
+            let data = node.data.borrow();
+            let Sourcepos { start, end } = data.sourcepos;
+            let top = node.parent().is_some_and(|p| p.same_node(root));
+            let source =
+                || line_start(start.line)..line_end(body, line_start(end.line));
+            let index =
+                matches!(data.value, NodeValue::Paragraph).then(|| shown.text.len());
+            if top && shown.number.is_some() {
+                shown.blocks.push(index);
             }
-            match event {
-                Event::Start(Tag::FootnoteDefinition(_)) => notes.push(range.start),
-                Event::Start(Tag::CodeBlock(_)) => codes.push(range.clone()),
+            match &data.value {
+                NodeValue::Heading(_) if top && shown.number.is_none() => {
+                    shown.number = heading(&body[source()]);
+                    shown.text.clear();
+                }
+                NodeValue::Paragraph => shown.text.push(texts(body, node, at)),
+                NodeValue::CodeBlock(_) => codes.push(at(start)..source().end),
+                NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
+                    html = html.or(Some(line_start(start.line)));
+                    let block = top.then(|| &body[source()]);
+                    let number = || block?.split('\n').find_map(heading);
+                    shown.html_number = shown.html_number.or_else(number);
+                }
                 _ => {}
             }
-            // An `Html` event ends at `\n` only, so it can hold more than one line.
-            if matches!(event, Event::Html(_)) && open.len() == 1 {
-                let number = || lines(&body[start..range.end]).find_map(heading);
-                shown.html_number = shown.html_number.or_else(number);
-            }
-            match event {
-                Event::Start(tag) if !inline(tag.to_end()) => {
-                    code = matches!(tag, Tag::CodeBlock(_));
-                    let top = open.is_empty();
-                    let paragraph = matches!(tag, Tag::Paragraph | Tag::Item);
-                    let index = paragraph.then_some(shown.text.len());
-                    if top && shown.number.is_some() {
-                        shown.blocks.push(index);
-                    } else if top && matches!(tag, Tag::Heading { .. }) {
-                        shown.number = heading(line);
-                        shown.text.clear();
-                    }
-                    if paragraph {
-                        shown.text.push(Vec::new());
-                    }
-                    open.push(index);
-                    fresh = true;
-                }
-                Event::End(tag) if !inline(tag) => {
-                    open.pop();
-                    code = false;
-                }
-                Event::Rule => {
-                    if open.is_empty() && shown.number.is_some() {
-                        shown.blocks.push(None);
-                    }
-                    fresh = true;
-                }
-                Event::SoftBreak | Event::HardBreak => fresh = true,
-                Event::End(_) | Event::TaskListMarker(_) => {}
-                _ => {
-                    if let Some(paragraph) = paragraph {
-                        shown.text[paragraph].push(line);
-                        fresh = false;
-                    }
-                }
-            }
         }
-        let (label, tag) = starts(body, &notes, &codes);
-        shown.hiding = hiding(body, html_line.into_iter().chain(tag).min(), label);
+        let at = html.into_iter().chain(tagged(body, &codes)).min();
+        shown.html = at.map(|at| body[at..line_end(body, at)].trim());
         shown
     }
 
@@ -541,50 +523,57 @@ impl<'a> Shown<'a> {
     }
 }
 
-/// Whether the tag that `tag` ends is inline: it holds text within a line of a
-/// block.
-fn inline(tag: TagEnd) -> bool {
-    match tag {
-        TagEnd::Emphasis
-        | TagEnd::Strong
-        | TagEnd::Strikethrough
-        | TagEnd::Superscript
-        | TagEnd::Subscript
-        | TagEnd::Link
-        | TagEnd::Image => true,
-        TagEnd::Paragraph
-        | TagEnd::Heading(_)
-        | TagEnd::BlockQuote(_)
-        | TagEnd::CodeBlock
-        | TagEnd::HtmlBlock
-        | TagEnd::List(_)
-        | TagEnd::Item
-        | TagEnd::FootnoteDefinition
-        | TagEnd::DefinitionList
-        | TagEnd::DefinitionListTitle
-        | TagEnd::DefinitionListDefinition
-        | TagEnd::Table
-        | TagEnd::TableHead
-        | TagEnd::TableRow
-        | TagEnd::TableCell
-        | TagEnd::MetadataBlock(_) => false,
+/// The lines of text of `paragraph` in `body`, each from the start of its first span
+/// (`at` gives its offset) to the end of its line of source.
+fn texts<'a, 'n>(
+    body: &'a str,
+    paragraph: &'n AstNode<'n>,
+    at: impl Fn(LineColumn) -> usize,
+) -> Vec<&'a str> {
+    let mut lines = Vec::new();
+    let mut fresh = true;
+    for span in paragraph.descendants().skip(1) {
+        let data = span.data.borrow();
+        if matches!(data.value, NodeValue::SoftBreak | NodeValue::LineBreak) {
+            fresh = true;
+        } else if fresh {
+            let start = at(data.sourcepos.start);
+            lines.push(&body[start..line_end(body, start)]);
+            fresh = false;
+        }
     }
+    lines
 }
 
-/// `text` with each line ended by `\n` and with no spaces or tabs at the end of a line,
-/// which changes nothing that the check reads. pulldown-cmark 0.13.4 does not close a
-/// code block at a fence that a tab follows, or end a code block line at a lone `\r`,
-/// as the Markdown spec and GitHub do.
+/// `text` with each line ended by `\n`, with no spaces or tabs at the end of a line,
+/// and with each tab in the spaces, tabs, and `>` at the start of a line replaced by
+/// spaces to the next multiple of 4 columns. Neither changes what GitHub shows. A
+/// line number then gives the offset of its line, and comrak gives the right column
+/// after a tab that a quote or a list item takes in part.
 fn normalized(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(end) = rest.find(['\n', '\r']) {
-        normalized.push_str(rest[..end].trim_end_matches([' ', '\t']));
+    loop {
+        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
+        let line = rest[..end].trim_end_matches([' ', '\t']);
+        let content = line.trim_start_matches([' ', '\t', '>']);
+        let start = normalized.len();
+        for c in line[..line.len() - content.len()].chars() {
+            match c {
+                '\t' => {
+                    let columns = 4 - (normalized.len() - start) % 4;
+                    normalized.extend(std::iter::repeat_n(' ', columns));
+                }
+                c => normalized.push(c),
+            }
+        }
+        normalized.push_str(content);
+        if end == rest.len() {
+            return normalized;
+        }
         normalized.push('\n');
         rest = rest[end..].strip_prefix("\r\n").unwrap_or(&rest[end + 1..]);
     }
-    normalized.push_str(rest.trim_end_matches([' ', '\t']));
-    normalized
 }
 
 /// The text after `## Review round ` in `line` when it starts with it after at most
@@ -597,56 +586,23 @@ fn heading(line: &str) -> Option<&str> {
         .strip_prefix("## Review round ")
 }
 
-/// The first line of `body` that can hide text on GitHub, and what it holds, from the
-/// start of the first line with raw HTML and the start of the first with a label.
-fn hiding(
-    body: &str,
-    html: Option<usize>,
-    label: Option<usize>,
-) -> Option<(&str, &'static str)> {
-    const LABEL: &str = "a footnote label in GitHub's form that pulldown-cmark does \
-                         not read as a definition";
-    // On one line, the label comes first.
-    [label.map(|at| (at, LABEL)), html.map(|at| (at, "raw HTML"))]
-        .into_iter()
-        .flatten()
-        .min_by_key(|&(at, _)| at)
-        .map(|(at, what)| (body[at..line_end(body, at)].trim(), what))
-}
-
-/// The starts of the first line of `body` with a footnote label and of the first with
-/// raw HTML, each read from the source of the line after the indent and the marks of
-/// quotes, list items, and footnote definitions that `pulldown-cmark` reads (each
-/// starts at an offset in `notes`). A label is in GitHub's form ([`note`]) at no offset
-/// in `notes`: GitHub can read it as a footnote, and hides a footnote with no
-/// reference. Raw HTML is `<` and a letter, `!`, `/`, or `?` that is not an autolink.
-/// A line in a code block (`codes`) counts for neither. GitHub reads the blocks of a
-/// comment before its spans, so a line inside a code span, a link, or a link definition
-/// counts too.
-fn starts(
-    body: &str,
-    notes: &[usize],
-    codes: &[Range<usize>],
-) -> (Option<usize>, Option<usize>) {
-    let (mut label, mut html) = (None, None);
+/// The start of the first line of `body` whose source, after the indent and the marks
+/// of quotes, list items, and footnote labels ([`note`]), starts with raw HTML: `<`
+/// and a letter, `!`, `/`, or `?` that is not an autolink. A line in a code block
+/// (`codes`) does not count. GitHub reads some of these lines as an HTML block where
+/// comrak does not, such as `<source>`. GitHub reads the blocks of a comment before its
+/// spans, so a line inside a code span, a link, or a link definition counts too.
+fn tagged(body: &str, codes: &[Range<usize>]) -> Option<usize> {
     let starts = body.match_indices('\n').map(|(i, _)| i + 1);
-    for start in std::iter::once(0).chain(starts) {
+    std::iter::once(0).chain(starts).find(|&start| {
         let line = &body[start..line_end(body, start)];
         let mut rest = unmarked(line);
         let at = |rest: &str| start + line.len() - rest.len();
-        if codes.iter().any(|code| code.contains(&at(rest))) {
-            continue;
-        }
-        while let Some(after) = note(rest).filter(|_| notes.contains(&at(rest))) {
+        while let Some(after) = note(rest) {
             rest = unmarked(after);
         }
-        if note(rest).is_some() {
-            label = label.or(Some(start));
-        } else if tag(rest) {
-            html = html.or(Some(start));
-        }
-    }
-    (label, html)
+        !codes.iter().any(|code| code.contains(&at(rest))) && tag(rest)
+    })
 }
 
 /// Whether `text` starts with `<` and a letter, `!`, `/`, or `?`, and not with an
@@ -654,11 +610,14 @@ fn starts(
 fn tag(text: &str) -> bool {
     let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
     let autolink = || {
-        Parser::new_ext(text, OPTIONS)
-            .into_offset_iter()
-            .any(|(event, range)| {
-                range.start == 0 && matches!(event, Event::Start(Tag::Link { .. }))
-            })
+        let arena = Arena::new();
+        let root = parse_document(&arena, text, &options());
+        root.descendants().any(|node| {
+            let data = node.data.borrow();
+            let start = data.sourcepos.start;
+            matches!(data.value, NodeValue::Link(_))
+                && (start.line, start.column) == (1, 1)
+        })
     };
     text.strip_prefix('<').is_some_and(|l| l.starts_with(opens)) && !autolink()
 }
@@ -682,9 +641,8 @@ fn unmarked(line: &str) -> &str {
     }
 }
 
-/// The text after the footnote label at the start of `text`, as GitHub reads a label:
-/// `[^`, one or more characters other than `]`, space, or tab, then `]:`, with no
-/// backslash escapes.
+/// The text after the footnote label at the start of `text`: `[^`, one or more
+/// characters other than `]`, space, or tab, then `]:`.
 fn note(text: &str) -> Option<&str> {
     let (label, after) = text.strip_prefix("[^")?.split_once(']')?;
     let label = !label.is_empty() && !label.contains([' ', '\t']);

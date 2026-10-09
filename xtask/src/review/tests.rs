@@ -1158,6 +1158,10 @@ fn fails_a_round_with_raw_html() {
         ("> [^a]: <source", "> [^a]: <source"),
         ("[^a\\\\]: <source", "[^a\\\\]: <source"),
         ("- [^a]:<source", "- [^a]:<source"),
+        ("[^a\\]: <source", "[^a\\]: <source"),
+        ("[^\\]: <source", "[^\\]: <source"),
+        ("[^a[b]: <source", "[^a[b]: <source"),
+        ("[^`\\]: <source x`", "[^`\\]: <source x`"),
     ];
     for (html, line) in cases {
         let comment =
@@ -1241,89 +1245,84 @@ fn passes_a_round_whose_text_github_shows_as_text() {
     assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
 }
 
-/// The problem of a round 3 with a footnote label in GitHub's form that pulldown-cmark
-/// does not read as a definition, in `line`.
-fn label(line: &str) -> String {
-    format!(
-        "review round 3 has a footnote label in GitHub's form that pulldown-cmark does \
-         not read as a definition, which can hide text on GitHub, in the line \
-         `{line}`. Put the line in a code span, in the format of \
-         .claude/skills/review/SKILL.md, \"Round comment\"."
-    )
+/// The problem of a round 3 whose fields have no `Range:` line.
+fn rangeless() -> String {
+    "review round 3 has no `Range:` line. Write the round in the format of \
+     .claude/skills/review/SKILL.md, \"Round comment\"."
+        .to_string()
 }
 
 #[test]
-fn fails_a_round_whose_fields_github_reads_as_a_footnote() {
-    let hidden = ROUND.replace("\nReviewers:", "\n[^a\\]: x\nReviewers:");
-    assert_ne!(hidden, ROUND);
-    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
-}
-
-#[test]
-fn fails_a_round_with_a_footnote_label_that_pulldown_cmark_does_not_read() {
-    let cases = [
-        ("[^a\\]: x", "[^a\\]: x"),
-        ("[^\\]: x", "[^\\]: x"),
-        ("[^`\\]: <source x`", "[^`\\]: <source x`"),
-        ("[^a\\]: <source", "[^a\\]: <source"),
-        ("[^\\]: <source", "[^\\]: <source"),
-        ("[^a[b]: <source", "[^a[b]: <source"),
-        ("[^a[b]: x", "[^a[b]: x"),
-        ("> [^a\\]: x", "> [^a\\]: x"),
-        ("- [^a\\]: x", "- [^a\\]: x"),
-        ("[^1]: [^a\\]: x", "[^1]: [^a\\]: x"),
-        ("[^1]: [^2]: [^a\\]: x", "[^1]: [^2]: [^a\\]: x"),
-        ("a\n[^a\\]: x", "[^a\\]: x"),
-        ("[^a\\]: x](https://x.y)", "[^a\\]: x](https://x.y)"),
+fn hides_the_lines_of_a_footnote_with_no_reference() {
+    // GitHub reads each label as a footnote, which continues onto the fields, and
+    // hides it.
+    let fields = [
+        ROUND.replace("\nReviewers:", "\n[^a\\]: x\nReviewers:"),
+        ROUND.replace(
+            "## Review round 3\n\n",
+            "## Review round 3\n\n[x]: /u \"t\n[^a\\]: y\"\n",
+        ),
     ];
-    for (text, line) in cases {
-        let comment =
-            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
-        assert_ne!(comment, ROUND);
-        assert_eq!(
-            check(&record(vec![bot(&comment)])),
-            vec![label(line)],
-            "{text}"
-        );
-    }
-    let old = old("## Review round 1\n\nNo fields.\n\n[^a\\]: x");
-    assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
-}
-
-#[test]
-fn fails_a_footnote_label_on_a_line_inside_a_span() {
-    let cases = [
-        ("[x](https://x.y \"t\n[^a\\]: y\")", "[^a\\]: y\")"),
-        ("`x\n[^a\\]: y`", "[^a\\]: y`"),
-        ("> `x\n> [^a\\]: y`", "> [^a\\]: y`"),
-        ("*a `x\n[^a\\]: y` b*", "[^a\\]: y` b*"),
-    ];
-    for (text, line) in cases {
-        let hidden = ROUND.replace("but comments", &format!("but {text}"));
+    let spans = [
+        "[x](https://x.y \"t\n[^a\\]: y\")",
+        "`x\n[^a\\]: y`",
+        "> `x\n> [^a\\]: y`",
+        "*a `x\n[^a\\]: y` b*",
+    ]
+    .map(|text| ROUND.replace("but comments", &format!("but {text}")));
+    for hidden in fields.iter().chain(&spans) {
         assert_ne!(hidden, ROUND);
         assert_eq!(
-            check(&record(vec![bot(&hidden)])),
-            vec![label(line)],
-            "{text}"
+            check(&record(vec![bot(hidden)])),
+            vec![rangeless()],
+            "{hidden}"
         );
     }
-    let shown = ROUND.replace("but comments", "but `x\ny [^a\\]: z`");
-    assert_eq!(check(&record(vec![bot(&shown)])), Vec::<String>::new());
-    let marked = [
-        ("a `x\n  [^a\\]: y`", "[^a\\]: y`"),
-        ("> a `x\n> [^a\\]: y`", "> [^a\\]: y`"),
-        ("- a `x\n  [^a\\]: y`", "[^a\\]: y`"),
+    let end = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r[^a\\]: x\n");
+    assert_ne!(end, ROUND);
+    assert_eq!(check(&record(vec![bot(&end)])), vec![unended("Deferred")]);
+}
+
+#[test]
+fn passes_a_footnote_with_no_reference_that_hides_no_field() {
+    let cases = [
+        "[^a\\]: x",
+        "[^\\]: x",
+        "[^a[b]: x",
+        "> [^a\\]: x",
+        "- [^a\\]: x",
+        "[^1]: [^a\\]: x",
+        "[^1]: [^2]: [^a\\]: x",
+        "a\n[^a\\]: x",
+        "[^a\\]: x](https://x.y)",
+        "a `x\n  [^a\\]: y`",
+        "> a `x\n> [^a\\]: y`",
+        "- a `x\n  [^a\\]: y`",
+        "[^1]: - [^a\\]: x",
+        "[^1]: > [^a\\]: x",
+        "a\r[^a\\]: x",
+        "[^1]: x",
+        "> [^a]: x",
+        "[^a]: x\n[^b]: y",
+        "[^a\\\\]:x",
+        "`[^a\\]: x`",
+        "```\n[^a\\]: x\n```",
+        "> ```\n> [^a\\]: x\n> ```",
+        "    [^a\\]: x",
+        "- a\n\n      [^a\\]: x",
     ];
-    for (text, line) in marked {
+    for text in cases {
         let comment =
             ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
         assert_ne!(comment, ROUND);
         assert_eq!(
             check(&record(vec![bot(&comment)])),
-            vec![label(line)],
+            Vec::<String>::new(),
             "{text}"
         );
     }
+    let first = format!("[^a\\]: x\n\n{ROUND}");
+    assert_eq!(check(&record(vec![bot(&first)])), Vec::<String>::new());
 }
 
 #[test]
@@ -1368,84 +1367,33 @@ fn fails_raw_html_on_a_line_inside_a_span() {
 }
 
 #[test]
-fn fails_a_footnote_label_on_a_line_inside_a_link_definition_title() {
-    let hidden = ROUND.replace(
-        "## Review round 3\n\n",
-        "## Review round 3\n\n[x]: /u \"t\n[^a\\]: y\"\n",
-    );
-    assert_ne!(hidden, ROUND);
+fn reads_a_line_after_a_tab_that_a_list_item_takes_in_part() {
+    // The item takes 3 of the 4 columns of the tab, and the line continues the quote.
+    let hot = old("## Review round 1\n\nNo fields.\n\n*  > a\n\tHot path: `send`");
     assert_eq!(
-        check(&record(vec![bot(&hidden)])),
-        vec![label("[^a\\]: y\"")]
+        check(&record(vec![hot, bot(ROUND)])),
+        vec!["review round 1 names no performance, which this round requires."]
     );
-}
-
-#[test]
-fn passes_a_footnote_label_that_both_parsers_read() {
-    for text in [
-        "[^1]: x",
-        "> [^a]: x",
-        "[^a]: x\n[^b]: y",
-        "[^a\\\\]:x",
-        "`[^a\\]: x`",
-        "```\n[^a\\]: x\n```",
-        "> ```\n> [^a\\]: x\n> ```",
-        "    [^a\\]: x",
-        "- a\n\n      [^a\\]: x",
-    ] {
-        let comment =
-            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
-        assert_ne!(comment, ROUND);
-        assert_eq!(
-            check(&record(vec![bot(&comment)])),
-            Vec::<String>::new(),
-            "{text}"
-        );
-    }
-}
-
-#[test]
-fn fails_a_footnote_label_after_a_lone_carriage_return_in_a_code_block() {
-    // GitHub ends the code block at the `\r`, reads the label as a footnote, and
-    // hides the end lines, which continue it.
-    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r[^a\\]: x\n");
-    assert_ne!(hidden, ROUND);
-    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
-}
-
-#[test]
-fn fails_a_footnote_label_on_the_first_line() {
-    let hidden = format!("[^a\\]: x\n\n{ROUND}");
-    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
-}
-
-#[test]
-fn fails_a_footnote_label_after_a_lone_carriage_return() {
-    // GitHub reads the label as a footnote and hides it.
-    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\na\r[^a\\]: x\n\n");
-    assert_ne!(hidden, ROUND);
-    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
-}
-
-#[test]
-fn fails_a_footnote_label_after_the_marks_inside_a_footnote_definition() {
-    for line in ["[^1]: - [^a\\]: x", "[^1]: > [^a\\]: x"] {
-        let hidden =
-            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{line}\n\n"));
-        assert_ne!(hidden, ROUND);
-        assert_eq!(
-            check(&record(vec![bot(&hidden)])),
-            vec![label(line)],
-            "{line}"
-        );
-    }
+    let wide = ROUND.replace("weakening.\n\n", "weakening.\n\n*  > a\n\t\u{e9}\n\n");
+    assert_ne!(wide, ROUND);
+    assert_eq!(check(&record(vec![bot(&wide)])), Vec::<String>::new());
 }
 
 #[test]
 fn names_the_first_line_that_can_hide_text() {
-    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<b>\n\n[^a\\]: x\n\n");
-    assert_ne!(hidden, ROUND);
-    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<b>")]);
+    for (text, line) in [
+        ("<b>\n\n<source x", "<b>"),
+        ("<source x\n\n<b>", "<source x"),
+    ] {
+        let hidden =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            vec![raw(line)],
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -1543,11 +1491,20 @@ fn reads_the_blocks_of_the_extensions_of_github() {
         check(&record(vec![table, bot(ROUND)])),
         Vec::<String>::new()
     );
-    let footnote = ROUND.to_string() + "\n\n[^1]: Hot path: `send`";
+    let unreferenced = ROUND.to_string() + "\n\n[^1]: Hot path: `send`";
+    assert_eq!(
+        check(&record(vec![bot(&unreferenced)])),
+        Vec::<String>::new()
+    );
+    let footnote = unreferenced.replace("weakening.", "weakening.[^1]");
+    assert_ne!(footnote, unreferenced);
     assert_eq!(
         check(&record(vec![bot(&footnote)])),
         vec![unended("Deferred")]
     );
+    let early = ROUND.replace("weakening.\n\n", "weakening.[^1]\n\n[^1]: a\n\n");
+    assert_ne!(early, ROUND);
+    assert_eq!(check(&record(vec![bot(&early)])), vec![unended("Deferred")]);
     let rule = ROUND.to_string() + "\n\n***";
     assert_eq!(check(&record(vec![bot(&rule)])), vec![unended("Deferred")]);
 }

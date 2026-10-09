@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-pulldown-cmark.workspace = true
+comrak.workspace = true
 serde_json = "1"
 
 [lints]
