@@ -85,7 +85,10 @@
   block of that side's pool), and 2 `wire::header::MALFORMED` (a message that does not
   decode, comes from the wrong side, or breaks a rule above), which every protocol may
   use. The meanings of 18 and 19 were decided by the architect (2026-10-07T23:31:29Z,
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511). The
+  exception for a block larger than each block of the pool was decided by
+  `laptop.architect` (2026-10-08T23:44:54Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071260886).
   Supersedes the meanings of 18 and 19 in
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641 ("the
   home's buffer failed") and
@@ -192,10 +195,10 @@
   https://github.com/synnaxlabs/foundation/issues/1689#issuecomment-6050026992.
   At the reader's node (#340 PR 4d-b), a message that `wire::hub::Reader` refuses, or
   ends that `types` refuses, stops the stream with `MALFORMED`, and a pool with no
-  block for `Open`, its keys, a frame, or a `Credit` stops it with `BUSY`. A `Credit`
-  that still waits to send when the stream stops drops with its sender, so the home's
-  receive half resets with code 0, not the refusal code, until #2031 (`laptop.architect`,
-  2026-10-08T23:49:49Z:
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071319399). Each
-  later `next` gives the same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511).
+  block for `Open`, its keys, a frame, or a `Credit` stops it with `BUSY`. Each later
+  `next` gives the same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511). A
+  `Credit` that still waits to send when the stream stops drops with its sender, so the
+  home's receive half resets with code 0, not the refusal code, until #2031
+  (`laptop.architect`, 2026-10-08T23:49:49Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071319399).
