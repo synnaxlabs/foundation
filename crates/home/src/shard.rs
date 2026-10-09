@@ -612,8 +612,8 @@ impl Shard {
         reader::Key { slot, session }
     }
 
-    /// Drops the newest live frame of the index at `slot`. A latest reader of the index,
-    /// open or opened later, gets no frame until the index's next live frame.
+    /// Drops the newest live frame of the index at `slot`. A latest reader of the
+    /// index, open or opened later, gets no frame until the index's next live frame.
     ///
     /// # Panics
     ///
