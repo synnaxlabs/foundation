@@ -2568,7 +2568,7 @@ fn a_failed_rename_does_not_name_the_file() {
 
 /// Whether the block of a dropped read of a read handle of `a` is still in use when a
 /// create of `a` ends, after the write handle of the file renames it to `b`. The read
-/// is on `a`: the rename gives `b` only to the write handle.
+/// stays on `a`, which named its file.
 fn block_held_after_create_of_reader_path(value: u64) -> bool {
     run(value, MIB, move |node, _| async move {
         let (files, pool) = (node.files(), pool());
@@ -2696,4 +2696,34 @@ fn a_create_waits_for_a_dropped_read_of_a_stale_reader_of_a_removed_file() {
         .filter(|&value| block_held_after_create_beside_stale_reader(value))
         .collect();
     assert_eq!(held, Vec::<u64>::new());
+}
+
+/// Whether the block of a dropped write of a handle of `a` is still in use when a
+/// write open of `d` ends, after a rename of another file from `c` to `d`.
+fn block_held_after_open_of_other_rename_target(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        let mut other = create(&node, "c", KIB).await;
+        let file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        drop(file);
+        pool.alloc(big).unwrap_err();
+        other.rename(Path::new("d")).await.unwrap();
+        drop(other);
+        drop(files.open(Path::new("d"), Mode::Write).await.unwrap());
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_write_open_does_not_wait_for_a_dropped_write_of_another_file_after_a_rename() {
+    let held: Vec<_> = (0..256)
+        .filter(|&value| block_held_after_open_of_other_rename_target(value))
+        .collect();
+    assert!(!held.is_empty());
 }
