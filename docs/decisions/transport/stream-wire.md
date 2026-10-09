@@ -85,8 +85,9 @@
   hello stream when it ends, so after the hello the peer has at most `streams_max` open.
   Until the peer's hello arrives, a node opens and accepts no stream; a peer whose hello
   has not arrived `idle` after the handshake breaks the protocol, with the reason `a
-  peer with no hello` (architect-2, #1628:
-  https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858). A
+  peer with no hello` (`laptop.architect-2`, #1628, 2026-10-09 13:35 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858).
+  Supersedes the rule that the caller bounds that wait (#55, #563). A
   sender obeys only the peer's values: each message is at most the peer's
   `message_bytes_max`, and the send budget is the peer's `window_bytes`. A value over
   what the node can count counts as the largest it can count. A peer breaks the protocol
