@@ -234,7 +234,7 @@ impl Files {
         }
         let mut at = Monotonic(now.0.saturating_add(delay));
         if let Some(path) = call.changes(&path) {
-            at = at.max(self.dropped_end(node, path));
+            at = at.max(self.wait_end(node, path));
         }
         self.queue.insert((at, key));
         let flight = Flight {
@@ -251,19 +251,20 @@ impl Files {
         key
     }
 
-    /// The end of the last call on `path` of `node` that a dropped future or handle
-    /// left to run, or of a remove through a handle, or zero. A call on `path` uses
-    /// it, or the file that it names, or a file that a rename to it moves there.
-    fn dropped_end(&self, node: usize, path: &Path) -> Monotonic {
+    /// The end that a call of `node` that changes what `path` names waits for: that
+    /// of the last call on `path` that a dropped future or handle left to run, or of
+    /// a remove through a handle, live or not, or zero. A call on `path` uses it, or
+    /// the file that it names, or a file that a rename to it moves there.
+    fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
-        let dropped: Vec<_> = (self.queue.iter().rev())
+        let pending: Vec<_> = (self.queue.iter().rev())
             .map(|(at, key)| (*at, &self.flights[key]))
             .filter(|(_, flight)| {
                 let unlink = matches!(flight.call, Call::Unlink { .. });
                 flight.node == node && (flight.dropped || unlink)
             })
             .collect();
-        let moved = dropped.iter().filter_map(|(_, flight)| match &flight.call {
+        let moved = pending.iter().filter_map(|(_, flight)| match &flight.call {
             Call::Rename { handle, to } if disk::normal(to) == path => {
                 Some(handle.inode)
             }
@@ -274,7 +275,7 @@ impl Files {
             .into_iter()
             .chain(moved)
             .collect();
-        (dropped.iter())
+        (pending.iter())
             .find(|(_, flight)| match flight.call.handle() {
                 Some(handle) => inodes.contains(&handle.inode),
                 None => disk::normal(&flight.path) == path,
