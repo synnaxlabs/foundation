@@ -145,7 +145,6 @@ fn opens_a_named_complete_reader_at_the_live_frames_once_its_hold_ends() {
         first.next().await.expect("a frame");
         drop(first);
         test.clock.sleep(Span::SECOND).await;
-        test.clock.sleep(Span::SECOND).await;
         let open = named("a", "r", Mode::Complete, Span::SECOND);
         let mut reader = test.hub.reader(open).await.expect("opens");
         write(&mut writer, &[test.now()], &[8]);

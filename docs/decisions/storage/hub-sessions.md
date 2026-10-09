@@ -302,15 +302,16 @@
   open takes over the session, which ends with `Ended::Replaced` before the frames that
   wait for it, as the home closed it (`laptop.architect`, 2026-10-09T21:04:47Z:
   https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192).
-  Supersedes the plan test of
+  Supersedes the plan test "after the frames that wait for it" of
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057332703. A named
   complete reader that opens while the home holds its position resumes where its last
   complete session opened, and ends with `Ended::Behind` when a frame was released
-  between that open and this one (`laptop.architect`, 2026-10-09T21:04:47Z:
-  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192). Trigger:
-  #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack. A named
-  open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader panics
-  (`laptop.architect`, 2026-10-08T10:01:19Z:
+  between that open and this one (`laptop.architect`, 2026-10-09T21:04:47Z and
+  21:28:24Z: https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192
+  and https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089555802).
+  Trigger: #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack.
+  A named open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader
+  panics (`laptop.architect`, 2026-10-08T10:01:19Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A named
   reader whose index has its home at another node gives `reader::Error::Remote { home }`
   (`laptop.architect`, 2026-10-09T19:33:23Z:
