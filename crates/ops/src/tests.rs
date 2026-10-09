@@ -648,6 +648,34 @@ mod start {
         );
     }
 
+    #[test]
+    fn line_and_fail_give_the_data_directory_in_one_form() {
+        let data = "it's \"b\\c\"\ne\u{301}";
+        let start = Start {
+            data: PathBuf::from(data),
+            json: false,
+            name: None,
+        };
+        let shown = "it's \"b\\\\c\"\\ne\\u{301}";
+        assert_eq!(
+            start.line(&edge()),
+            format!("node edge runs in {shown}. Stop it with Ctrl-C.\n")
+        );
+        let failure = Failure {
+            code: Code::new("node.data"),
+            message: format!("cannot write the data directory {data}: x"),
+            fix: "y".to_owned(),
+        };
+        let mut text = Vec::new();
+        assert_eq!(start.fail(&failure, &mut text), 1);
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            format!(
+                "error[node.data]: cannot write the data directory {shown}: x\nfix: y\n"
+            )
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn line_gives_a_data_directory_that_is_not_utf8_lossily() {
