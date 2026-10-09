@@ -14,7 +14,7 @@ use env::files::{Error, Files, Mode};
 mod kept;
 
 /// A 64 MiB ext4 filesystem on a loop device in a directory of its own, unmounted and
-/// removed when it drops.
+/// removed when it drops, except while the thread panics.
 struct Small(PathBuf);
 
 impl Small {
@@ -40,9 +40,12 @@ impl Small {
 
 impl Drop for Small {
     fn drop(&mut self) {
-        // Lazy: when a test panics, its files thread may still hold the mount.
-        check(sudo("umount").arg("-l").arg(self.mount()));
-        std::fs::remove_dir_all(&self.0).unwrap();
+        // While the thread panics, a command can block and a second panic aborts the
+        // test binary.
+        if !std::thread::panicking() {
+            check(sudo("umount").arg(self.mount()));
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
     }
 }
 
