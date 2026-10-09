@@ -90,7 +90,8 @@
   a defect, and panics (`laptop.architect-2`, 2026-10-09T21:40:46Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089720287). A
   change of state waits until the home applied the state before it, or until `cancel`
-  is cancelled, so no state replaces a state that the home did not apply. After
+  is cancelled, so no state replaces a state that the home did not apply. A start
+  whose wait a cancel ends writes nothing, and no run starts. After
   `Failure::Removed` or `home::Error::Disk`, no change of state waits
   (`laptop.architect-2`, 2026-10-09T21:46:07Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089790301).
