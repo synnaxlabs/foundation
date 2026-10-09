@@ -81,8 +81,8 @@ pub struct Received<'a> {
 pub enum Ended {
     /// The shard's buffer failed.
     Buffer(env::files::Error),
-    /// A complete reader missed a frame ([`Mode::Complete`]), or a named one resumed
-    /// at a held position, as [`Config::name`] states.
+    /// A complete reader missed a frame: [`Mode::Complete`] and [`Config::name`] state
+    /// when.
     Behind,
     /// A channel of the reader was removed from the definitions.
     Removed(channel::Key),
