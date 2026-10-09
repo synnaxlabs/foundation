@@ -31,9 +31,7 @@ pub(crate) fn packages(metadata: &Value) -> Result<Vec<select::Package>, String>
 /// It uses rustup and the nightly in `rust-toolchain-nightly`. It fails when a crate
 /// fails or runs no tests.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
-    let pin = root.join("rust-toolchain-nightly");
-    let nightly = std::fs::read_to_string(&pin)
-        .map_err(|e| vec![format!("{}: {e}", pin.display())])?;
+    let nightly = crate::nightly(root).map_err(|e| vec![e])?;
     let metadata = crate::metadata(root).map_err(|e| vec![e])?;
     let packages = packages(&metadata).map_err(|e| vec![e])?;
     if packages.is_empty() {
@@ -43,7 +41,7 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for flags in PASSES {
         for package in &packages {
-            let output = command(root, nightly.trim(), package, flags)
+            let output = command(root, &nightly, package, flags)
                 .stderr(Stdio::inherit())
                 .output()
                 .map_err(|e| vec![format!("rustup: {e}")])?;

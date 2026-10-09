@@ -135,6 +135,14 @@ fn metadata(root: &Path) -> Result<Value, String> {
     serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
+/// The toolchain in `rust-toolchain-nightly` at `root`, which Miri and cargo-fuzz use.
+fn nightly(root: &Path) -> Result<String, String> {
+    let pin = root.join("rust-toolchain-nightly");
+    let nightly =
+        std::fs::read_to_string(&pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+    Ok(nightly.trim().to_string())
+}
+
 /// A command that runs the cargo that runs this task.
 fn cargo() -> Command {
     #[expect(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
