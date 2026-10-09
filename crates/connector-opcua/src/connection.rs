@@ -804,6 +804,11 @@ unsafe fn state<'a>(state: *mut c_void) -> &'a State {
 
 /// The hook of `openConnection` for a client: connects to `host` on `port`, and gives
 /// `OPENING` before it returns.
+///
+/// # Safety
+///
+/// `state` is the state of `shim_cm_new`, and `host` points at `host.length` readable
+/// bytes, or has length 0.
 unsafe extern "C" fn open(
     state: *mut c_void,
     host: Bytes,
@@ -852,6 +857,11 @@ unsafe extern "C" fn open(
 ///
 /// When the manager has no listener or gave it to an earlier listen open, or when the
 /// listener is not on `port`. A panic in a hook aborts.
+///
+/// # Safety
+///
+/// `state` is the state of `shim_cm_new`, and `host` points at `host.length` readable
+/// bytes, or has length 0.
 unsafe extern "C" fn listen(
     state: *mut c_void,
     host: Bytes,
@@ -891,6 +901,11 @@ unsafe extern "C" fn listen(
 
 /// The hook of `sendWithConnection`: takes `buffer`, and queues it while the
 /// connection is open. A send past [`SENDS`] closes the connection.
+///
+/// # Safety
+///
+/// `state` is the state of `shim_cm_new`, and `buffer` points at a buffer of
+/// `allocNetworkBuffer`, which the hook takes.
 unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> u32 {
     // SAFETY: C passes the state of `shim_cm_new`.
     let state = unsafe { self::state(state) };
@@ -921,6 +936,10 @@ unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> 
 
 /// The hook of `closeConnection`: stops reads, writes what waits, and gives `CLOSING`
 /// at the next run of the loop.
+///
+/// # Safety
+///
+/// `state` is the state of `shim_cm_new`.
 unsafe extern "C" fn close(state: *mut c_void, id: usize) -> u32 {
     // SAFETY: C passes the state of `shim_cm_new`.
     let state = unsafe { self::state(state) };
@@ -937,6 +956,10 @@ unsafe extern "C" fn close(state: *mut c_void, id: usize) -> u32 {
 }
 
 /// The delayed callback that gives each queued `CLOSING`.
+///
+/// # Safety
+///
+/// `application` is the state of the manager.
 unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
     // SAFETY: `new` sets the application to the state.
     let state = unsafe { self::state(application) };
