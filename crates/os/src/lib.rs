@@ -5,8 +5,9 @@
 //! # Panics in shards and threads
 //!
 //! A panic ends its shard or dedicated thread only where panics unwind, as in tests. A
-//! release build aborts the process at a panic. Tokio catches a panic in the poll or
-//! the drop of a task that code spawns with `tokio::spawn`, or on a shard with
+//! release build aborts the process at a panic. As anywhere in Rust, a panic in a drop
+//! during the unwind of a panic aborts the process. Tokio catches a panic in the poll
+//! or the drop of a task that code spawns with `tokio::spawn`, or on a shard with
 //! `tokio::task::spawn_local`, not through [`env::tasks::Tasks`], and the shard or
 //! thread runs on. Tokio drops such a task during the unwind of a panic in its poll, so
 //! a panic in that drop aborts the process. A panic in the drop of the payload of a
