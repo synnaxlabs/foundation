@@ -681,6 +681,9 @@ mod tests {
                 from_requester(&server, &encode_put(put(7, 16))),
                 Ok(Event::Put(put(7, 16)))
             );
+            let mut body = put(7, 16).body();
+            assert_eq!(body.take(&[0; 16]), Ok([0; 16].as_slice()));
+            assert_eq!(body.end(), Ok(()));
             assert_eq!(
                 from_requester(&server, &encode_put(put(7, 17))),
                 Err(Error::TooLarge { len: 17, max: 16 })
@@ -788,6 +791,9 @@ mod tests {
                 from_server(&requester, &encode_reply(chunk(7, 16))),
                 Ok(Event::Reply(chunk(7, 16)))
             );
+            let mut body = chunk(7, 16).body();
+            assert_eq!(body.take(&[0; 16]), Ok([0; 16].as_slice()));
+            assert_eq!(body.end(), Ok(()));
             assert_eq!(
                 from_server(&requester, &encode_reply(chunk(7, 17))),
                 Err(Error::TooLarge { len: 17, max: 16 })
