@@ -14,7 +14,10 @@ use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
-use crate::{Definition, Entry, Found, KINDS, channel, checked, placement, sort, span};
+use crate::{
+    Definition, Entry, Found, KINDS, channel, checked, placement, private_key, sort,
+    span, subject,
+};
 
 pub use codec::Error;
 
@@ -83,23 +86,37 @@ pub fn plan(
 }
 
 /// Checks `definitions`, the definitions of a spec by tree key, with `members` and
-/// `kinds` as [`plan`] takes them: `kinds` accepts the kind and the config of each
-/// connector, then each rule of `plan` from `config.unplaced` to
-/// `config.unknown-node`. Run it on the result of [`Plan::definitions`] before an
-/// apply, since a plan file that `plan` did not make can hold what `plan` refuses.
+/// `kinds` as [`plan`] takes them. Run it on the result of [`Plan::definitions`] before
+/// an apply, since a plan file that `plan` did not make can hold what `plan` refuses.
 ///
 /// # Errors
 ///
-/// The diagnostics of `kinds` for each connector whose kind or config it refuses.
-/// Else each problem of those rules of [`plan`], with no span.
+/// The problems of the first stage that has any. Only a problem in a connector config
+/// has a span: the span that the config holds.
+///
+/// 1. `config.private-key` for each string of a definition that holds a private key.
+/// 2. The diagnostics of `kinds` for each connector whose kind or config it refuses,
+///    then `config.duplicate-name` and `config.subject-is-connector` as [`crate::check`]
+///    gives them.
+/// 3. Each problem of the rules of [`plan`] from `config.unplaced` to
+///    `config.unknown-node`.
 pub fn check(
     definitions: &BTreeMap<Name, definition::Definition>,
     members: &BTreeSet<Name>,
     kinds: &Table,
 ) -> Result<(), Vec<Diagnostic>> {
-    let writes = writes(definitions, kinds)?;
-    let model = Model::definitions(definitions, &writes);
+    let alarms = private_key::in_definitions(definitions);
+    if !alarms.is_empty() {
+        return Err(alarms);
+    }
     let mut diagnostics = Vec::new();
+    let writes = writes(definitions, kinds, &mut diagnostics);
+    diagnostics.extend(crate::repeated(definitions));
+    diagnostics.extend(subject::connectors(definitions));
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    let model = Model::definitions(definitions, &writes);
     rules(&model, members, &mut diagnostics);
     if diagnostics.is_empty() {
         Ok(())
@@ -409,17 +426,15 @@ struct Writer<'a> {
     writes: &'a [Name],
 }
 
-/// What each connector of `definitions` writes to the mesh, by tree key.
-///
-/// # Errors
-///
-/// The diagnostics of `kinds` for each connector whose kind or config it refuses.
+/// What each connector of `definitions` writes to the mesh, by tree key. It adds to
+/// `diagnostics` the diagnostics of `kinds` for each connector whose kind or config it
+/// refuses.
 fn writes(
     definitions: &BTreeMap<Name, definition::Definition>,
     kinds: &Table,
-) -> Result<BTreeMap<Name, Vec<Name>>, Vec<Diagnostic>> {
+    diagnostics: &mut Vec<Diagnostic>,
+) -> BTreeMap<Name, Vec<Name>> {
     let mut writes = BTreeMap::new();
-    let mut diagnostics = Vec::new();
     for (name, definition) in definitions {
         let definition::Definition::Connector(connector) = definition else {
             continue;
@@ -432,11 +447,7 @@ fn writes(
             Err(found) => diagnostics.extend(found),
         }
     }
-    if diagnostics.is_empty() {
-        Ok(writes)
-    } else {
-        Err(diagnostics)
-    }
+    writes
 }
 
 /// Runs each rule of [`plan`] after `config.wrong-channel` on `model`, and gives each

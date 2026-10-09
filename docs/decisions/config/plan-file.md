@@ -60,12 +60,14 @@
   the `changes: Vec<Change>` field and `Change::name` of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688.
   `config::plan::check(definitions, members, kinds)` checks the definitions after the
-  plan, with no span. It holds: the kind table accepts the kind and the config of each
-  connector, then `config.unplaced`, `config.connector-home`, `config.split-placement`,
-  `config.writer-nodes`, and `config.unknown-node`. #2013 PR 2 makes
-  `spec::access::Policy::new` refuse an empty `allow`, so `Plan::decode` refuses it, and
-  adds `config.duplicate-name`, `config.subject-is-connector`, and `config.private-key`
-  to `check`. #2013 PR 3 makes apply call it after `definitions` and before
+  plan. It gives the first stage with problems: `config.private-key` for
+  each string of a definition; then, together, what the kind table refuses in the kind
+  and config of each connector, `config.duplicate-name`, and
+  `config.subject-is-connector`; then `config.unplaced`, `config.connector-home`,
+  `config.split-placement`, `config.writer-nodes`, and `config.unknown-node`. Only a
+  problem in a connector config has a span: the span that the config holds.
+  `spec::access::Policy::new` refuses an empty `allow`, so `Plan::decode` refuses it.
+  #2013 PR 3 makes apply call it after `definitions` and before
   `Mesh::apply`, with the members and the kind table of the node that applies, as both
   can change after `plan`. Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
   (https://github.com/synnaxlabs/foundation/issues/2013). The rules are in `config`

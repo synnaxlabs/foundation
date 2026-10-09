@@ -155,6 +155,66 @@ fn checked<'a>(
     }
 }
 
+/// `config.duplicate-name` at each tree key of `definitions` that repeats an earlier
+/// one, in name order, in another ASCII case.
+pub(crate) fn repeated(
+    definitions: &BTreeMap<Name, spec::definition::Definition>,
+) -> Vec<Diagnostic> {
+    let mut firsts: BTreeMap<Box<str>, (Label, Kind)> = BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    for (key, definition) in definitions {
+        let kind = definition.kind();
+        let label = Label {
+            text: label(kind, key).as_str().into(),
+            span: None,
+        };
+        let lower: Box<str> = key.as_str().to_ascii_lowercase().into();
+        match firsts.get(&lower) {
+            Some((first, earlier)) => {
+                diagnostics.push(duplicate((&label, kind), (first, *earlier)));
+            }
+            None => {
+                firsts.insert(lower, (label, kind));
+            }
+        }
+    }
+    diagnostics
+}
+
+/// `config.duplicate-name` at `label`, whose tree key repeats the earlier `first` in
+/// another ASCII case.
+fn duplicate(
+    (label, later): (&Label, Kind),
+    (first, earlier): (&Label, Kind),
+) -> Diagnostic {
+    let (earlier, keyword) = (earlier.as_str(), later.as_str());
+    let blocks = if earlier == keyword {
+        format!("`{keyword}`")
+    } else {
+        format!("`{earlier}` and `{keyword}`")
+    };
+    let mut diagnostic = Diagnostic::new(
+        DUPLICATE_NAME,
+        label.span,
+        format!(
+            "the name {:?} repeats the earlier `{earlier}` name {:?}",
+            label.text, first.text
+        ),
+        format!("Give each {blocks} block a name that differs by more than case"),
+    );
+    diagnostic.notes.extend(first.span.map(|span| Note {
+        span,
+        text: "the earlier name".into(),
+    }));
+    diagnostic
+}
+
+/// The label of the definition of `kind` at tree key `key`, or `key` when it has no
+/// label form.
+pub(crate) fn label(kind: Kind, key: &Name) -> Name {
+    kind.label(key).unwrap_or_else(|| key.clone())
+}
+
 /// Sorts `diagnostics` by the [`order`] of each span.
 fn sort(diagnostics: &mut [Diagnostic]) {
     diagnostics.sort_by_key(|diagnostic| order(diagnostic.span));
@@ -258,28 +318,8 @@ impl<'a> Found<'a> {
             labels.sort_by_key(|(label, _)| order(label.span));
             let (first, earlier) = labels[0];
             for &(label, later) in &labels[1..] {
-                let (earlier, keyword) = (earlier.as_str(), later.as_str());
-                let blocks = if earlier == keyword {
-                    format!("`{keyword}`")
-                } else {
-                    format!("`{earlier}` and `{keyword}`")
-                };
-                let mut diagnostic = Diagnostic::new(
-                    DUPLICATE_NAME,
-                    label.span,
-                    format!(
-                        "the name {:?} repeats the earlier `{earlier}` name {:?}",
-                        label.text, first.text
-                    ),
-                    format!(
-                        "Give each {blocks} block a name that differs by more than case"
-                    ),
-                );
-                diagnostic.notes.extend(first.span.map(|span| Note {
-                    span,
-                    text: "the earlier name".into(),
-                }));
-                self.diagnostics.push(diagnostic);
+                self.diagnostics
+                    .push(duplicate((label, later), (first, earlier)));
             }
         }
     }

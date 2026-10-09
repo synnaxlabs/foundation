@@ -1,18 +1,24 @@
 //! The rules of `config::check` on names and private keys, which `config::plan::check`
 //! holds too.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::slice;
 
+use document::Source;
 use document::encoding::Checked;
-use spec::access::{Action, Authority};
-use spec::channel::{Channel, Kind as Channel};
+use spec::access::Action;
+use spec::channel::{Data, Kind as ChannelKind};
+use spec::data_type::DataType;
 use spec::definition::{Definition as Stored, Kind};
 use spec::time::{self, Peers};
+use spec::unit::Unit;
 use spec::{compression, connector, node_settings, placement, region, retention};
+use types::authority::Authority;
 use types::byte;
 use types::channel::Key;
 use types::ed25519::PrivateKey;
 use types::name::{Name, Selector};
+use types::sample::{self, Scalar};
 
 use super::{Problem, documents, kinds, name, problems, read, unreachable};
 
@@ -59,7 +65,9 @@ fn writer(label: &str) -> (Name, Stored) {
 }
 
 fn writer_text(label: &str) -> String {
-    format!("connector {label:?} {{\n  kind = \"writer\"\n  node = \"n\"\n  writes = []\n}}\n")
+    format!(
+        "connector {label:?} {{\n  kind = \"writer\"\n  node = \"n\"\n  writes = []\n}}\n"
+    )
 }
 
 fn placement(label: &str, select: &[&str], nodes: placement::Nodes) -> (Name, Stored) {
@@ -112,14 +120,17 @@ fn alarm() -> Problem {
 #[test]
 fn refuses_tree_keys_that_differ_only_in_case_as_check_of_the_files_does() {
     let expected = duplicate("w", "connector", "W", "`connector`");
-    assert_eq!(checked([writer("W"), writer("w")]), [expected.clone()]);
+    assert_eq!(
+        checked([writer("W"), writer("w")]),
+        slice::from_ref(&expected)
+    );
     let texts = [writer_text("W"), writer_text("w")];
     assert_eq!(checked_files(&[&texts[0], &texts[1]]), [expected]);
 }
 
 #[test]
 fn refuses_the_name_of_a_channel_and_a_connector_that_differ_only_in_case() {
-    let index = Channel::Index {
+    let index = ChannelKind::Index {
         error: None,
         control: None,
     };
@@ -128,7 +139,8 @@ fn refuses_the_name_of_a_channel_and_a_connector_that_differ_only_in_case() {
         kind: index,
     });
     let found = checked([(name("Plant.x"), channel), writer("plant.x")]);
-    let expected = duplicate("plant.x", "channel", "Plant.x", "`channel` and `connector`");
+    let expected =
+        duplicate("plant.x", "channel", "Plant.x", "`channel` and `connector`");
     assert_eq!(found, [expected]);
 }
 
@@ -145,7 +157,10 @@ fn refuses_the_labels_of_two_placements_that_differ_only_in_case() {
 fn refuses_a_subject_at_the_name_of_a_connector_in_any_case_as_check_of_the_files_does()
 {
     let expected = named_connector("W");
-    assert_eq!(checked([writer("w"), subject("W")]), [expected.clone()]);
+    assert_eq!(
+        checked([writer("w"), subject("W")]),
+        slice::from_ref(&expected)
+    );
     let subject = "subject \"W\" {\n  keys = \"ssh-ed25519 \
                    AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg \
                    alice@laptop\"\n}\n";
@@ -174,19 +189,35 @@ fn gives_the_kind_name_and_subject_problems_together_and_no_rule_of_plan() {
     assert_eq!(found, expected);
 }
 
+fn access(subjects: &[&str], select: &[&str]) -> (Name, Stored) {
+    let allow = [Action::Read].into_iter().collect();
+    let policy = spec::access::Policy::new(
+        selector(subjects),
+        selector(select),
+        allow,
+        Authority(0),
+    );
+    (
+        key(Kind::Access, "x"),
+        Stored::Access(policy.expect("a policy")),
+    )
+}
+
+/// A data channel at `x` in the unit `unit`.
+fn measured(unit: &str) -> (Name, Stored) {
+    let numbers = DataType::Sample(sample::Type::Scalar(Scalar::F64));
+    let unit = Some(Unit::new(unit).expect("a unit"));
+    let data = Data::new(Key::from_u128(1), None, numbers, unit).expect("a channel");
+    let channel = spec::channel::Channel {
+        key: Key::from_u128(2),
+        kind: ChannelKind::Data(data),
+    };
+    (name("x"), Stored::Channel(channel))
+}
+
 /// One definition for each string that a definition holds, with [`MARK`] in that
 /// string alone.
 fn marked() -> Vec<(Name, Stored)> {
-    let access = |subjects: &[&str], select: &[&str]| {
-        let allow = [Action::Read].into_iter().collect();
-        let policy = spec::access::Policy::new(
-            selector(subjects),
-            selector(select),
-            allow,
-            Authority(0),
-        );
-        (key(Kind::Access, "x"), Stored::Access(policy.expect("a policy")))
-    };
     let settings = |select: &[&str]| {
         let disk = Some(byte::Size::from_bytes(1));
         let policy = node_settings::Policy::new(selector(select), disk, None);
@@ -217,6 +248,7 @@ fn marked() -> Vec<(Name, Stored)> {
         access(&[MARK], &["x"]),
         access(&["x"], &[MARK]),
         access(&["x"], &["x.*", &exclude]),
+        measured(MARK),
         connector("x", MARK, "n", ""),
         connector("x", "writer", MARK, "writes = []"),
         connector("x", "writer", "n", "note = \"-----BEGIN PRIVATE KEY-----\""),
@@ -251,8 +283,20 @@ fn marked() -> Vec<(Name, Stored)> {
 fn gives_only_one_private_key_problem_for_a_mark_in_any_string_of_a_definition() {
     for definition in marked() {
         let at = format!("{definition:?}");
-        assert_eq!(checked([definition, connector("y", "nothing", "n", "")]), [alarm()], "{at}");
+        let mut found = checked([definition, connector("y", "nothing", "n", "")]);
+        for problem in &mut found {
+            problem.1 = None;
+        }
+        assert_eq!(found, [alarm()], "{at}");
     }
+}
+
+#[test]
+fn gives_a_private_key_problem_in_a_connector_config_at_its_span() {
+    let found = checked([connector("x", "writer", "n", "note = \"PRIVATE KEY\"")]);
+    let mut expected = alarm();
+    expected.1 = Some((Source(0), 7));
+    assert_eq!(found, [expected]);
 }
 
 #[test]
