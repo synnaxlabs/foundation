@@ -2816,8 +2816,26 @@ mod port {
             assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
         }
 
-        /// A file of another length, tag, or checksum stops the node, which keeps the
-        /// file.
+        /// A `node.key` with no bytes is a key not yet written.
+        #[test]
+        fn a_node_makes_a_key_over_an_empty_file() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            sim.run_on(&host, |host, _| async move {
+                let files = host.files();
+                let mode = env::files::Mode::Create { len: 0 };
+                let file = files.open(Path::new(FILE), mode).await.expect("opens");
+                file.sync().await.expect("syncs");
+                files.sync_dir(Path::new("")).await.expect("syncs");
+            })
+            .expect("the run ends");
+            assert_eq!(read(&mut sim, &host), Vec::<u8>::new());
+            assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
+            assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
+        }
+
+        /// A file of another length that is not 0, or of another tag or checksum, stops
+        /// the node, which keeps the file.
         #[test]
         fn a_key_that_is_not_valid_stops_the_node() {
             let mut tag = own();
