@@ -54,16 +54,15 @@
   with its `Display` as the message and the fix ``Make a plan with `foundation plan`,
   and apply it with no edits``. A node with no spec in use or with `Spec::behind` set
   gives `ops.behind`, status 1, after the decode and before the base compare: the
-  message names the newest pointer and one line for its `Cause`, and the fix is
-  `Fix the cause, then plan again`. One private
-  function of `ops` reads `Mesh::spec` and gives the spec in use or this error, for
-  each caller. A plan whose base is not the spec in use, before the proposal or after
-  another change applies first, is `ops.stale-plan`, status 1, fix `Plan again`. Each
-  other error of `Mesh::apply` is `ops.apply`, status 1, with its `Display` as the
-  message and the fix `Fix the cause in the message, then plan and apply again`. There
-  is no `ops.reserved-change`: `Plan::definitions` refuses a change at a reserved label
-  (FIRST ADMIN). `ops.behind` and the `ops.apply` fix decided by `laptop.architect-2`
-  (2026-10-08T23:51:37Z, items 1 and 2 of
+  message names the newest pointer and one line for its `Cause`, and the fix is `Fix the
+  cause, then plan again`. One private function of `ops` reads `Mesh::spec` and gives
+  the spec in use or this error, for each caller. A plan whose base is not the spec in
+  use, before the proposal or after another change applies first, is `ops.stale-plan`,
+  status 1, fix `Plan again`. Each other error of `Mesh::apply` is `ops.apply`, status
+  1, with its `Display` as the message and the fix `Fix the cause in the message, then
+  plan and apply again`. There is no `ops.reserved-change`: `Plan::definitions` refuses
+  a change at a reserved label (FIRST ADMIN). `ops.behind` and the `ops.apply` fix
+  decided by `laptop.architect-2` (2026-10-08T23:51:37Z, items 1 and 2 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913). The
   order and the codes `ops.stale-plan` and `ops.apply` are steps 3 and 4 of
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586, approved
