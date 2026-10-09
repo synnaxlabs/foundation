@@ -36,7 +36,7 @@ use types::node;
 use types::time::{Interval, Stamp};
 
 use super::{BUSY, Error};
-use crate::common::{self, Fields, Writer};
+use crate::common::{Fields, Writer, body};
 use crate::header::MALFORMED;
 
 const HELLO: u8 = 4;
@@ -375,14 +375,14 @@ impl Response {
 
 /// The rest of the body of one request or response.
 #[derive(Debug)]
-pub struct Body(common::Body);
+pub struct Body(body::Count);
 
 impl Body {
     fn new(length: u64) -> Self {
         assert_body(length);
         let remain = usize::try_from(length)
             .expect("invariant: a usize holds a body of at most 16 MiB");
-        Self(common::Body::new(remain))
+        Self(body::Count::new(remain))
     }
 
     /// Takes the next message of the body and gives its bytes.
@@ -411,10 +411,7 @@ impl Body {
     ///
     /// [`Error::Unfinished`] when bytes of the body remain.
     pub fn end(&self) -> Result<(), Error> {
-        match self.0.remain() {
-            0 => Ok(()),
-            remain => Err(Error::Unfinished { remain }),
-        }
+        Ok(self.0.end()?)
     }
 }
 

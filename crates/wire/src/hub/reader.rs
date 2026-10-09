@@ -1,5 +1,5 @@
 use super::{BEHIND, Error, HEAD, Head, Mode, OPENED, Open, Reply, ends, rest_of_run};
-use crate::common;
+use crate::common::body;
 
 /// The decoder at the reader's node: it takes each message from the home, in order,
 /// and checks the order and the runs of the session.
@@ -17,7 +17,7 @@ enum Next {
     Head,
     Ended,
     Ends { remain: u32 },
-    Body(common::Body),
+    Body(body::Count),
 }
 
 /// A message from the home, decoded.
@@ -91,7 +91,7 @@ impl Reader {
                 let remain = rest_of_run(remain, ends.len())?;
                 let next = match (remain, ends.last_end()) {
                     (0, Some(0)) => Next::Head,
-                    (0, Some(end)) => Next::Body(common::Body::new(body_len(end))),
+                    (0, Some(end)) => Next::Body(body::Count::new(body_len(end))),
                     _ => Next::Ends { remain },
                 };
                 let last = remain == 0;

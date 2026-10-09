@@ -37,7 +37,7 @@ pub use home::{FromReader, Home};
 pub use reader::{FromHome, Reader};
 use types::frame::{Path, Range};
 
-use crate::common::{self, Fields, Writer};
+use crate::common::{Fields, Writer, body};
 
 const LATEST: u8 = 1;
 const COMPLETE: u8 = 2;
@@ -572,11 +572,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<common::Refusal> for Error {
-    fn from(refusal: common::Refusal) -> Self {
-        match refusal {
-            common::Refusal::Empty => Self::Empty,
-            common::Refusal::Over { len, remain } => Self::Body { len, remain },
+impl From<body::Error> for Error {
+    fn from(error: body::Error) -> Self {
+        match error {
+            body::Error::Empty => Self::Empty,
+            body::Error::Over { len, remain } => Self::Body { len, remain },
+            body::Error::Unfinished { remain } => Self::Unfinished { remain },
         }
     }
 }

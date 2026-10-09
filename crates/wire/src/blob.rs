@@ -31,7 +31,7 @@ use std::fmt;
 
 use types::digest::Digest;
 
-use crate::common::{self, Fields, Writer};
+use crate::common::{Fields, Writer, body};
 use crate::header;
 
 const GET: u8 = 1;
@@ -332,12 +332,12 @@ fn fits(len: u32, max: usize) -> Result<(), Error> {
 
 /// The rest of the body of one put or chunk.
 #[derive(Debug)]
-pub struct Body(common::Body);
+pub struct Body(body::Count);
 
 impl Body {
     fn new(len: u32) -> Self {
         let len = usize::try_from(len).expect("invariant: a usize holds a u32");
-        Self(common::Body::new(len))
+        Self(body::Count::new(len))
     }
 
     /// Takes the next message of the body and gives its bytes.
@@ -363,10 +363,7 @@ impl Body {
     ///
     /// [`Error::Unfinished`] when bytes of the body remain.
     pub fn end(&self) -> Result<(), Error> {
-        match self.0.remain() {
-            0 => Ok(()),
-            remain => Err(Error::Unfinished { remain }),
-        }
+        Ok(self.0.end()?)
     }
 }
 
@@ -454,11 +451,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<common::Refusal> for Error {
-    fn from(refusal: common::Refusal) -> Self {
-        match refusal {
-            common::Refusal::Empty => Self::Empty,
-            common::Refusal::Over { len, remain } => Self::Body { len, remain },
+impl From<body::Error> for Error {
+    fn from(error: body::Error) -> Self {
+        match error {
+            body::Error::Empty => Self::Empty,
+            body::Error::Over { len, remain } => Self::Body { len, remain },
+            body::Error::Unfinished { remain } => Self::Unfinished { remain },
         }
     }
 }
