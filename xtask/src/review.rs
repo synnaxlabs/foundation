@@ -491,7 +491,8 @@ fn options() -> Options<'static> {
 struct Shown<'a> {
     /// The round number of the first top-level heading that has one ([`number`]). When
     /// the comment is not old and has none, that of the comment as [`unblocked`] reads
-    /// it, since GitHub reads some HTML blocks as text and can show a heading in them.
+    /// it, since GitHub starts HTML blocks at other lines than comrak, and can show a
+    /// heading that comrak hides.
     number: Option<String>,
     /// Each top-level block after the heading: the index in `text` of a paragraph, or
     /// `None` for any other block. The footnotes come last, as GitHub shows them.
@@ -764,7 +765,10 @@ fn unblocked(body: &str) -> Option<String> {
         }
         let name = rest.strip_prefix("</").or_else(|| rest.strip_prefix('<'));
         let renamed = name.and_then(|name| {
-            let (from, to) = RENAMED.iter().find(|(from, _)| opens(name, from))?;
+            let (from, to) = RENAMED.iter().find(|(from, _)| {
+                name.get(..from.len())
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case(from))
+            })?;
             Some((name, from, to))
         });
         match renamed {
@@ -785,24 +789,9 @@ fn unblocked(body: &str) -> Option<String> {
 /// Each tag name that starts an HTML block of type 6 in one of the two specs only, and
 /// a name of the same length that does the same in comrak. GitHub's older spec lists
 /// `source` and not `search`. `xearch` is in no list, so comrak starts a block there
-/// only by type 7, as GitHub does at `search`.
+/// only by type 7, as GitHub does at `search`. No list holds a longer name that starts
+/// with one of these, so a longer name may be renamed too.
 const RENAMED: [(&str, &str); 2] = [("source", "option"), ("search", "xearch")];
-
-/// The characters that end the name of a tag that starts an HTML block of type 6, other
-/// than `/>`.
-const ENDS: [char; 6] = [' ', '\t', '\n', '\u{b}', '\u{c}', '>'];
-
-/// Whether `text`, the text after the `<` or `</` of a tag, starts with `name`, of
-/// ASCII letters, in any case, and then ends the name as the start of an HTML block of
-/// type 6 does.
-fn opens(text: &str, name: &str) -> bool {
-    text.get(..name.len())
-        .is_some_and(|tag| tag.eq_ignore_ascii_case(name))
-        && {
-            let rest = &text[name.len()..];
-            rest.is_empty() || rest.starts_with(ENDS) || rest.starts_with("/>")
-        }
-}
 
 /// The round number of `heading`: the text after `Review round` when it is a heading
 /// of level 2 whose first line of text as GitHub shows it ([`texts`]) is `Review
