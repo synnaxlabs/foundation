@@ -3069,7 +3069,7 @@ mod port {
             }
             assert_eq!(
                 Error::Key.to_string(),
-                "the file node.key in the data directory is not a node key; restore \
+                "the file `node.key` in the data directory is not a node key; restore \
                  it from a backup of this node"
             );
         }
@@ -5304,7 +5304,7 @@ mod name {
         assert_eq!(read(&mut sim, &host), None);
         assert_eq!(
             Error::Unnamed.to_string(),
-            "the data directory holds no node; give the new node a name"
+            "the data directory holds no node name; give the node a name"
         );
     }
 
@@ -5433,8 +5433,8 @@ mod name {
         }
         assert_eq!(
             Error::Name.to_string(),
-            "the file `name` in the data directory is not a node name; restore it from \
-             a backup of this node"
+            "the file `name` in the data directory is not a node name; remove it, and \
+             start the node with its name"
         );
     }
 

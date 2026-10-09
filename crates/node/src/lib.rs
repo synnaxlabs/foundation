@@ -1052,15 +1052,15 @@ impl fmt::Display for Error {
                 write!(f, "cannot open the node's chunk store: {error}")
             }
             Self::Key => f.write_str(
-                "the file node.key in the data directory is not a node key; restore it \
+                "the file `node.key` in the data directory is not a node key; restore it \
                  from a backup of this node",
             ),
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }
             Self::Name => f.write_str(
-                "the file `name` in the data directory is not a node name; restore it \
-                 from a backup of this node",
+                "the file `name` in the data directory is not a node name; remove it, and \
+                 start the node with its name",
             ),
             Self::Renamed { stored, given } => write!(
                 f,
@@ -1068,7 +1068,7 @@ impl fmt::Display for Error {
                  {stored}, or another data directory"
             ),
             Self::Unnamed => f.write_str(
-                "the data directory holds no node; give the new node a name",
+                "the data directory holds no node name; give the node a name",
             ),
         }
     }
