@@ -22,7 +22,6 @@ use types::channel::Key;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
-use types::sample::Type;
 
 use channel::Channel;
 pub use link::{Link, Served};
@@ -95,8 +94,8 @@ struct State {
     home: ::home::Shard,
     interner: Interner,
     channels: hash::Map<Name, Channel>,
-    /// The index and sample type of each channel in `channels`, by key.
-    defined: hash::Map<Key, (Key, Type)>,
+    /// Each channel in `channels`, by key.
+    defined: hash::Map<Key, Channel>,
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
@@ -454,8 +453,7 @@ impl State {
     /// Makes `channel` known to sessions as `name`.
     fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
         let channel = Channel(channel.clone());
-        self.defined
-            .insert(channel.key(), (channel.index(), channel.sample()));
+        self.defined.insert(channel.key(), channel.clone());
         self.channels.insert(name.clone(), channel);
     }
 
@@ -502,8 +500,7 @@ impl State {
                 if key == index {
                     return slot;
                 }
-                let (_, sample) = self.defined[&key];
-                assigned.data(key, sample)
+                assigned.data(key, self.defined[&key].sample())
             })
             .collect()
     }
