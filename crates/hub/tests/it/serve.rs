@@ -391,7 +391,7 @@ fn keeps_an_open_session_through_a_call_with_the_same_definitions() {
 /// Runs a session whose home removes the channel `value` (key 2) once `SETTLE` passes,
 /// and gives what `serve` returned, or `None` when it did not return.
 fn removed<P>(
-    seed: u64,
+    n: u64,
     peer: impl FnOnce(Peer) -> P + Send + 'static,
 ) -> Option<Result<(), serve::Error>>
 where
@@ -408,7 +408,7 @@ where
         *kept.lock().expect("not poisoned") =
             Some(link.serve(incoming).await.map(drop));
     };
-    session(seed, Class::Complete, false, home, peer);
+    session(n, Class::Complete, false, home, peer);
     result.lock().expect("not poisoned").take()
 }
 
