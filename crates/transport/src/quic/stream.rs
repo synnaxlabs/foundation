@@ -3464,12 +3464,6 @@ mod tests {
             assert_eq!(share.order(), Order::RANK);
         }
 
-        /// A peer sees the cap of `Latest`
-        /// (`latest_after_a_light_load_goes_at_most_one_window_ahead`), but not the cap
-        /// of `Complete`. While `Complete` waits, admission starts no `Latest`
-        /// message, and `Complete` stops competing one window of `Latest` bytes after
-        /// its last take. So `Latest` takes too few bytes against it to reach the cap:
-        /// at a window of 131072 B, the loads tried reach 210548 of the 393216 B cap.
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
@@ -8058,9 +8052,9 @@ mod tests {
         }
 
         /// Sends a light load of `light` against a backlog of the other class of the
-        /// share for 1000 [`STEP`]s, then backlogs both for 600. Gives the bytes of
-        /// `light` that the server read in the second phase past its share, and the
-        /// peer window.
+        /// share for 1000 [`STEP`]s, then backlogs both for 600. Gives how far `light`
+        /// went ahead in the second phase, and the peer window: the bytes of `light`
+        /// that the server read past the share of the bytes it read of the other.
         fn ahead_after_a_light_load(shard: &Shard, light: Class) -> (isize, usize) {
             let mut pair = connected(shard);
             let heavy = other(light).expect("a class of the share");
@@ -8092,10 +8086,9 @@ mod tests {
             }
             let [_, latest, complete, _] =
                 [0, 1, 2, 3].map(|rank| read[rank] - before[rank]);
-            let total = latest + complete;
             let ahead = match light {
-                Class::Latest => latest.cast_signed() - (total / 4).cast_signed(),
-                _ => complete.cast_signed() - (3 * total / 4).cast_signed(),
+                Class::Latest => latest.cast_signed() - (complete / 3).cast_signed(),
+                _ => complete.cast_signed() - (3 * latest).cast_signed(),
             };
             let window = shard.config(pair::SERVER_KEY, Span::SECOND).window_bytes;
             (ahead, window)
