@@ -88,7 +88,8 @@ struct StartArgs {
     name: Option<Name>,
 }
 
-/// The input of each operation that is not CLI only. Clap and serde both name a variant in kebab case.
+/// The input of each operation that is not CLI only. Clap and serde both name a
+/// variant in kebab case.
 #[derive(Subcommand, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Request {
