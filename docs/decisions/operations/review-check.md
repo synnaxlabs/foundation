@@ -36,17 +36,17 @@
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6074014717). In a
   round posted after the cutoff with no such heading, it is the first such heading in
   the comment read with each line of each HTML block that starts with `<` after its
-  indent read as text, since GitHub reads some of these blocks as text and can show a
-  heading in them. The fields are the first top-level block after it, and the end lines
-  are the last one, each when it is a paragraph. A code block, an HTML block, a list, a
-  quote, or a table is not a
-  paragraph, so a list after the `Hot path:` line fails. A footnote with no reference
-  is not shown, so its lines do not count, and of the footnotes of one label only the
-  first is shown. The footnotes are the last blocks, as GitHub shows them. A round
-  comment posted after the cutoff fails when it holds raw
-  HTML outside a code span or a code block: an HTML block or inline HTML as `comrak`
-  reads it, or a line of text whose source, after the indent and the marks of quotes,
-  list items, and footnote labels, starts with `<` and a letter, `!`, `/`, or `?` and
+  indent read as a line of a paragraph, as GitHub reads `<search`, since GitHub reads
+  some of these blocks as text and can show a heading in them. The fields are the first
+  top-level block after it, and the end lines are the last one, each when it is a
+  paragraph. A code block, an HTML block, a list, a quote, or a table is not a
+  paragraph, so a list after the `Hot path:` line fails. A footnote with no reference is
+  not shown, so its lines do not count, and of the footnotes of one label only the first
+  is shown. The footnotes are the last blocks, as GitHub shows them. A round comment
+  posted after the cutoff fails when it holds raw HTML outside a code span or a code
+  block: an HTML block or inline HTML as `comrak` reads it, or a line of text whose
+  source, after the indent and the marks of quotes, list items, and footnote labels,
+  starts with `<` and a letter, `!`, `/`, or `?` and
   that is not an autolink, also when the line starts inside a code span, a link, or a
   link definition. GitHub reads some of these lines in a different way, and an open
   `<!--` or `<details>` hides the text after it. A footnote label here is `[^`, one or
