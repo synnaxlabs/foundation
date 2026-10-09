@@ -34,11 +34,14 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
   With PR 4d-b of #340, the state holds the region (the mesh and an `Rc` of the
   shard's transport), and holds no session: the transport keeps the one session to
-  each node (ONE SESSION PER PEER). When the session of a remote reader closes with
-  `Code(0)` before the home's `Opened`, it lost the tie-break of ONE SESSION PER PEER,
-  and the reader dials once more. A remote reader holds the state, so it counts as
-  a session of the hub. Decided by `laptop.architect`: the region
-  (2026-10-08T20:07:32Z,
+  each node (ONE SESSION PER PEER). When that session closes with `Code(0)` before the
+  home's `Opened`, as a session that loses the tie-break of ONE SESSION PER PEER does,
+  the task dials once more and opens on the session that this dial gives. The home never
+  served an open on the losing session: the lower node holds its streams until it closes
+  it. Amended by `laptop.architect` (2026-10-09T09:00:46Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101). A remote
+  reader holds the state, so it counts as a session of the hub. Decided by
+  `laptop.architect`: the region (2026-10-08T20:07:32Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), and no
   session in the hub (2026-10-08T21:19:24Z,
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471).

@@ -613,8 +613,8 @@ async fn dial(
 /// Opens a stream of `class` to `home`, and opens the session of `open` on `set` with
 /// `decoder`. A reply that breaks HUB WIRE, or a pool with no block for a message,
 /// stops the stream with its refusal. A session that closes with `Code(0)` before
-/// `Opened` lost the tie-break of ONE SESSION PER PEER, so the open runs once more on
-/// the session that the next dial gives.
+/// `Opened`, as one that loses the tie-break of ONE SESSION PER PEER does, gets one
+/// more open on the session that the next dial gives.
 async fn connect(
     state: &Rc<RefCell<State>>,
     home: types::node::Key,
