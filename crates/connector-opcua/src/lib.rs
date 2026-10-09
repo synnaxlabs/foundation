@@ -38,7 +38,6 @@ mod compiler;
 
 #[cfg(test)]
 mod tests {
-    use std::panic::AssertUnwindSafe;
     use std::path::Path;
 
     use super::child;
@@ -149,8 +148,9 @@ mod tests {
         for (vars, expected) in cases {
             let (mut plain, mut sanitized) =
                 (builds("/missing/clang"), builds("/missing/clang"));
-            let asan = sanitized.sanitize(env(vars));
-            assert_eq!(asan, expected.contains(&address[0]), "{vars:?}");
+            assert_eq!(sanitized.sanitize(env(vars)), Ok(()), "{vars:?}");
+            let asan = expected.contains(&address[0]);
+            assert_eq!(sanitized.asan, asan, "{vars:?}");
             let pairs = [
                 (&mut sanitized.library, &mut plain.library),
                 (&mut sanitized.shim, &mut plain.shim),
@@ -175,6 +175,14 @@ mod tests {
         );
     }
 
+    /// The error of `sanitize` on the sanitizer `name`.
+    fn refusal(name: &str) -> String {
+        format!(
+            "connector-opcua: the C does not build with the sanitizer `{name}` of the \
+             Rust build; it follows only `address` and `leak`"
+        )
+    }
+
     #[test]
     fn sanitize_refuses_a_sanitizer_that_the_c_does_not_follow() {
         for (sanitize, name) in [
@@ -188,17 +196,12 @@ mod tests {
             let (mut plain, mut sanitized) =
                 (builds("/missing/gcc"), builds("/missing/gcc"));
             let vars = [(SANITIZE, sanitize), FUZZING];
-            let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                sanitized.sanitize(env(&vars))
-            }));
-            let message = panic.expect_err(sanitize).downcast::<String>();
             assert_eq!(
-                *message.expect(sanitize),
-                format!(
-                    "connector-opcua: the C does not build with the sanitizer `{name}` \
-                     of the Rust build; it follows only `address` and `leak`"
-                )
+                sanitized.sanitize(env(&vars)),
+                Err(refusal(name)),
+                "{sanitize}"
             );
+            assert!(!sanitized.asan, "{sanitize}");
             let tool = child::tool(&mut sanitized.library, TARGET);
             assert_eq!(tool.path(), Path::new("/missing/gcc"));
             assert_eq!(args(&tool), args(&child::tool(&mut plain.library, TARGET)));
@@ -211,7 +214,8 @@ mod tests {
             [(&[(SANITIZE, "address")], true), (&[FUZZING], false)];
         for (vars, asan) in cases {
             let mut builds = builds("/missing/gcc");
-            assert_eq!(builds.sanitize(env(vars)), asan, "{vars:?}");
+            assert_eq!(builds.sanitize(env(vars)), Ok(()), "{vars:?}");
+            assert_eq!(builds.asan, asan, "{vars:?}");
             for build in [&mut builds.library, &mut builds.shim] {
                 assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
             }
@@ -222,12 +226,52 @@ mod tests {
     fn sanitize_keeps_gcc_when_the_c_has_no_sanitizer() {
         for sanitize in ["", "leak"] {
             let mut builds = builds("/missing/gcc");
-            assert!(!builds.sanitize(env(&[(SANITIZE, sanitize)])), "{sanitize}");
+            let vars = [(SANITIZE, sanitize)];
+            assert_eq!(builds.sanitize(env(&vars)), Ok(()), "{sanitize}");
+            assert!(!builds.asan, "{sanitize}");
             for build in [&mut builds.library, &mut builds.shim] {
                 let path = child::tool(build, TARGET).path().to_owned();
                 assert_eq!(path, Path::new("/missing/gcc"), "{sanitize}");
             }
         }
+    }
+
+    /// Checks `configure` with a `CC` like MSVC, and does nothing outside a child
+    /// process.
+    #[test]
+    fn configure_in_this_environment() {
+        if !child::running() {
+            return;
+        }
+        let configure = |vars| {
+            let builds = compiler::configure(Path::new("/copy"), "", "a.c", env(vars));
+            builds.map(|builds| builds.asan)
+        };
+        assert_eq!(
+            configure(&[]),
+            Err("connector-opcua: the compiler /missing/cl.exe is like MSVC; flags.txt \
+                 holds GCC driver flags, which it does not read, so it cannot build \
+                 open62541"
+                .to_string())
+        );
+        assert_eq!(configure(&[(SANITIZE, "address")]), Ok(true));
+        assert_eq!(configure(&[FUZZING]), Ok(false));
+        assert_eq!(configure(&[(SANITIZE, "thread")]), Err(refusal("thread")));
+    }
+
+    /// `configure` checks the compiler that `sanitize` picks, so a sanitizer moves a
+    /// `CC` like MSVC to clang, which builds.
+    #[test]
+    fn configure_checks_the_compiler_after_sanitize() {
+        child::run(
+            "tests::configure_in_this_environment",
+            &[
+                ("CC", "/missing/cl.exe"),
+                ("TARGET", TARGET),
+                ("HOST", TARGET),
+                ("OPT_LEVEL", "0"),
+            ],
+        );
     }
 
     /// The directories that `-I` gives in `args`.
@@ -246,7 +290,7 @@ mod tests {
             return;
         }
         let copy = Path::new("/copy");
-        let compiler::Builds { library, shim } =
+        let compiler::Builds { library, shim, .. } =
             compiler::builds(copy, "-Ideps\n-Iinclude\n-std=c99", "a.c\nsrc/b.c");
         assert_eq!(
             library.get_files().collect::<Vec<_>>(),

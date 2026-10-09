@@ -33,19 +33,20 @@ fn build() {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     };
-    let mut builds = compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
     #[expect(
         clippy::disallowed_methods,
         reason = "cargo gives a build script the cfgs of its target only in the \
                   environment"
     )]
-    let asan = builds.sanitize(|name| std::env::var(name).ok());
+    let env = |name: &str| std::env::var(name).ok();
+    let compiler::Builds {
+        mut library,
+        shim,
+        asan,
+    } = compiler::configure(&copy, &read("flags.txt"), &read("sources.txt"), env)
+        .unwrap_or_else(|e| panic!("{e}"));
     if asan {
         println!("cargo::rustc-cfg=asan");
-    }
-    let compiler::Builds { mut library, shim } = builds;
-    if let Err(e) = compiler::check(&library.get_compiler()) {
-        panic!("{e}");
     }
     // The copy and the shim call each other, so they share one archive: a linker that
     // reads each archive once, such as GNU ld, finds no order of two that links.
