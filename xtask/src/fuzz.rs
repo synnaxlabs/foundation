@@ -274,9 +274,10 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                 problems.push(format!(
                     "fuzz/Cargo.toml may not build `{}` `{}` of `{}` from the copy \
                      `{}`: the requirement meets the copy and another package of its \
-                     name that fuzz/ builds. Give fuzz/Cargo.toml the \
-                     [patch.crates-io] table of the root Cargo.toml, and narrow the \
-                     requirement so that only the copy meets it.",
+                     name that fuzz/ builds. If fuzz/Cargo.toml does not have the \
+                     [patch.crates-io] table of the root Cargo.toml, give it that \
+                     table. If it has the table, change the requirements of fuzz/ so \
+                     that this requirement does not also meet the other package.",
                     copy.name,
                     requirement["req"].as_str().unwrap_or_default(),
                     dependent.id,
@@ -611,9 +612,10 @@ mod tests {
         format!(
             "fuzz/Cargo.toml may not build `noq-proto` `^1.3` of `{TYPES}` from the \
              copy `/w/patches/noq-proto/Cargo.toml`: the requirement meets the copy \
-             and another package of its name that fuzz/ builds. Give fuzz/Cargo.toml \
-             the [patch.crates-io] table of the root Cargo.toml, and narrow the \
-             requirement so that only the copy meets it."
+             and another package of its name that fuzz/ builds. If fuzz/Cargo.toml \
+             does not have the [patch.crates-io] table of the root Cargo.toml, give it \
+             that table. If it has the table, change the requirements of fuzz/ so that \
+             this requirement does not also meet the other package."
         )
     }
 
@@ -638,9 +640,10 @@ mod tests {
         format!(
             "fuzz/Cargo.toml may not build `p` `{req}` of `{dependent}` from the copy \
              `{}/patches/p/Cargo.toml`: the requirement meets the copy and another \
-             package of its name that fuzz/ builds. Give fuzz/Cargo.toml the \
-             [patch.crates-io] table of the root Cargo.toml, and narrow the \
-             requirement so that only the copy meets it.",
+             package of its name that fuzz/ builds. If fuzz/Cargo.toml does not have \
+             the [patch.crates-io] table of the root Cargo.toml, give it that table. \
+             If it has the table, change the requirements of fuzz/ so that this \
+             requirement does not also meet the other package.",
             crate::fixture().join("patched").display()
         )
     }
