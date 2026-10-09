@@ -266,10 +266,8 @@
   between a home check and the carry. The home check of the open ends only after a pass
   over each index that waited for no home, because a home can move while the open waits
   for another (#2164) (PR #2161, rounds 1 to 3, approved by `laptop.architect`,
-  2026-10-09T17:29:07Z:
-  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085920028, and for
-  #2164 at 2026-10-09T17:31:46Z:
-  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085961760).
+  2026-10-09T17:50:57Z:
+  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6086275768).
   Supersedes "in the loop of `Writer::open`, before its second `resolve`" of item 1 of
   https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720.
   A task gets mesh time from `writer::Writer::now`, which gives `home::Shard::now`
