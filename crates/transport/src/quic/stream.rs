@@ -7574,26 +7574,45 @@ mod tests {
             });
         }
 
-        /// Runs a `Complete` and a held `Latest` with paired credit, then a pause in
-        /// which only `Latest` sends `alone` bytes in whole messages, and returns the
-        /// credit after the pause and the bytes `Complete` then sends ahead of one
-        /// `Latest` sample.
-        fn ahead_after_a_pause(shard: &Shard, alone: usize) -> (isize, usize) {
-            let (paused, ahead, _) =
-                ahead_of_a_reader(shard, alone, MESSAGE_MAX / 4, 1);
-            (paused, ahead)
+        /// What [`lead`] measured after the pause.
+        struct Lead {
+            /// The bytes that `Complete` was owed as the pause ended. STREAM WIRE
+            /// states the lead from this credit, which no read count shows.
+            credit: usize,
+            /// The bytes of `Complete` that noq-proto took before the first byte of
+            /// the `Latest` sample. The share counts what noq-proto took, and a
+            /// server read counts only whole messages, so this reads the streams.
+            ahead: usize,
+            /// The most bytes of `Complete` that noq-proto took in one [`STEP`].
+            took: usize,
+            /// The most bytes the server read at once: the largest step of credit
+            /// that its reads give.
+            step: usize,
+            /// The bytes of `Complete` that the server read from the pause until
+            /// then.
+            read: usize,
         }
 
-        /// As [`ahead_after_a_pause`], with messages of `size` bytes, and a server
-        /// that reads each `lag` [`STEP`]s after the pause. Also returns the most
-        /// bytes the server read at once after the pause: the largest step of credit
-        /// that its reads give.
-        fn ahead_of_a_reader(
+        /// As [`lead`], with one `Complete` stream, messages of a quarter of
+        /// [`MESSAGE_MAX`], a prompt server, and a `Latest` sample on `try_write`.
+        fn ahead_after_a_pause(shard: &Shard, alone: usize) -> Lead {
+            lead(shard, alone, MESSAGE_MAX / 4, 1, 1, false)
+        }
+
+        /// Runs `streams` `Complete` streams and a held `Latest` with paired credit,
+        /// then a pause in which only `Latest` sends `alone` bytes in whole messages
+        /// of `size` bytes. Then it backlogs each `Complete` stream with messages of
+        /// `size` bytes, and gives `Latest` one sample, with `write` when `blocking`
+        /// and with `try_write` at each [`STEP`] if not, while the server reads each
+        /// `lag` steps. It measures until noq-proto takes the sample.
+        fn lead(
             shard: &Shard,
             alone: usize,
             size: usize,
             lag: usize,
-        ) -> (isize, usize, usize) {
+            streams: usize,
+            blocking: bool,
+        ) -> Lead {
             let mut pair = narrow(shard);
             let (mut receivers, mut read) = (Vec::new(), [0; 4]);
             let big = shard.block(&vec![1; MESSAGE_MAX]);
@@ -7604,17 +7623,19 @@ mod tests {
             let written =
                 pair::write(&mut pair.client.endpoint, now, &latest, &mut Some(big));
             assert_eq!(written, Ok(Poll::Pending));
-            let mut complete = open_sender(&mut pair, Class::Complete);
+            let mut completes: Vec<_> = (0..streams)
+                .map(|_| open_sender(&mut pair, Class::Complete))
+                .collect();
             let small = shard.block(&[2; 1000]);
-            let written = pair::write(
-                &mut pair.client.endpoint,
-                now,
-                &complete,
-                &mut Some(small),
-            );
-            assert_eq!(written, Ok(Poll::Pending));
+            for complete in &completes {
+                let mut slot = Some(small.clone());
+                let written =
+                    pair::write(&mut pair.client.endpoint, now, complete, &mut slot);
+                assert_eq!(written, Ok(Poll::Pending));
+            }
             for _ in 0..20 {
-                let senders = [&latest, &catch_up, &complete];
+                let senders: Vec<_> =
+                    [&latest, &catch_up].into_iter().chain(&completes).collect();
                 flush(&mut pair, &mut receivers, &mut read, &senders);
             }
             let message = shard.block(&vec![1; size]);
@@ -7633,14 +7654,29 @@ mod tests {
             }
             pair.run(RUN);
             take(&mut pair, &mut receivers, &mut read);
-            let paused = owed(&mut pair);
+            let credit = usize::try_from(owed(&mut pair)).expect("`Complete` is owed");
+            let start = read[Class::Complete.rank()];
             let sample = shard.block(&[2; 1000]);
             let mut pending = Some(sample.clone());
-            let mut ahead = refill(&mut pair, &mut complete, &message);
-            ahead -= held(&mut pair, complete.key());
-            let mut step = 0;
+            let mut ahead = 0;
+            for complete in &mut completes {
+                ahead += refill(&mut pair, complete, &message);
+                ahead -= held(&mut pair, complete.key());
+            }
+            let (mut took, mut step) = (0, 0);
             for steps in 1.. {
-                send(&mut pair, &mut latest, &mut pending);
+                if blocking {
+                    let now = pair.now();
+                    let written = pair::write(
+                        &mut pair.client.endpoint,
+                        now,
+                        &latest,
+                        &mut pending,
+                    );
+                    assert!(written.is_ok(), "{written:?}");
+                } else {
+                    send(&mut pair, &mut latest, &mut pending);
+                }
                 pair.run(STEP);
                 if steps % lag == 0 {
                     let before: usize = read.iter().sum();
@@ -7650,18 +7686,28 @@ mod tests {
                 if pending.is_none() && held(&mut pair, latest.key()) < sample.len() {
                     break;
                 }
-                let before = held(&mut pair, complete.key());
-                let taken = refill(&mut pair, &mut complete, &message);
-                ahead += before + taken - held(&mut pair, complete.key());
+                let mut stepped = 0;
+                for complete in &mut completes {
+                    let before = held(&mut pair, complete.key());
+                    let taken = refill(&mut pair, complete, &message);
+                    stepped += before + taken - held(&mut pair, complete.key());
+                }
+                took = took.max(stepped);
+                ahead += stepped;
             }
-            (paused, ahead, step)
+            Lead {
+                credit,
+                ahead,
+                took,
+                step,
+                read: read[Class::Complete.rank()] - start,
+            }
         }
 
         #[test]
         fn complete_after_a_silent_pause_goes_ahead_by_its_credit_and_one_message() {
             testing::run(1, |shard| {
-                let (paused, ahead) = ahead_after_a_pause(shard, 0);
-                let credit = usize::try_from(paused).expect("`Complete` is owed");
+                let Lead { credit, ahead, .. } = ahead_after_a_pause(shard, 0);
                 assert!(credit > NARROW, "{credit} of {NARROW}");
                 let bound = credit + MESSAGE_MAX / 4;
                 assert!(ahead <= bound, "{ahead} of {bound}");
@@ -7674,9 +7720,13 @@ mod tests {
         fn complete_after_a_pause_goes_ahead_by_its_credit_and_one_step_of_credit() {
             testing::run(1, |shard| {
                 for (size, lag) in [(1000, 1), (1000, 50), (MESSAGE_MAX, 50)] {
-                    let (paused, ahead, step) =
-                        ahead_of_a_reader(shard, 2 * NARROW, size, lag);
-                    let credit = usize::try_from(paused).expect("`Complete` is owed");
+                    let Lead {
+                        credit,
+                        ahead,
+                        step,
+                        ..
+                    } = lead(shard, 2 * NARROW, size, lag, 1, false);
+                    assert!(credit <= NARROW, "{credit} of {NARROW}; {size} B");
                     let bound = credit + step + size;
                     assert!(ahead <= bound, "{ahead} of {bound}; {size} B, lag {lag}");
                 }
@@ -7684,12 +7734,39 @@ mod tests {
         }
 
         #[test]
-        fn complete_after_latest_sends_in_a_pause_goes_about_one_window_ahead() {
+        fn complete_after_latest_sent_alone_goes_ahead_by_its_credit_and_a_step() {
             testing::run(1, |shard| {
-                let bound = NARROW + 2 * (MESSAGE_MAX / 4);
                 for windows in 1..=4 {
-                    let (paused, ahead) = ahead_after_a_pause(shard, windows * NARROW);
-                    assert!(ahead <= bound, "{ahead} of {bound}; owed {paused}");
+                    let Lead {
+                        credit,
+                        ahead,
+                        took,
+                        ..
+                    } = ahead_after_a_pause(shard, windows * NARROW);
+                    assert!(credit <= NARROW, "{credit} of {NARROW}; {windows}");
+                    let bound = credit + took + MESSAGE_MAX / 4;
+                    assert!(ahead <= bound, "{ahead} of {bound}; {windows}");
+                }
+            });
+        }
+
+        /// Once the credit of `Complete` ends, the turn puts `Latest` first, and
+        /// only the first stream in turn writes. Room that a `Complete` message
+        /// frees also goes to the waiting `Latest` first. So for any count of
+        /// `Complete` streams, only the rest of the message in hand passes the credit.
+        #[test]
+        fn complete_streams_go_ahead_of_a_held_latest_by_their_credit_and_one_message()
+        {
+            testing::run(1, |shard| {
+                let loads = [(1, MESSAGE_MAX), (4, MESSAGE_MAX / 2), (4, MESSAGE_MAX)];
+                for (streams, size) in loads {
+                    let Lead { credit, ahead, .. } =
+                        lead(shard, 2 * NARROW, size, 1, streams, true);
+                    let bound = credit + size;
+                    assert!(
+                        ahead <= bound,
+                        "{ahead} of {bound}; {streams} of {size} B"
+                    );
                 }
             });
         }
@@ -7803,10 +7880,14 @@ mod tests {
         fn complete_after_latest_sends_less_than_a_window_in_a_pause_keeps_its_credit()
         {
             testing::run(1, |shard| {
-                let (paused, ahead) = ahead_after_a_pause(shard, 1);
+                let Lead {
+                    credit,
+                    ahead,
+                    read,
+                    ..
+                } = ahead_after_a_pause(shard, 1);
                 let bound = NARROW + MESSAGE_MAX / 4;
-                assert!(ahead > bound, "{ahead} of {bound}");
-                let credit = usize::try_from(paused).expect("`Complete` is owed");
+                assert!(read > bound, "{read} of {bound}");
                 assert!(credit > NARROW, "{credit} of {NARROW}");
                 assert!(ahead >= credit, "{ahead} of {credit}");
             });
