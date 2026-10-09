@@ -9,6 +9,73 @@ use std::process::{Command, Stdio};
 /// pick a merge driver that hides a conflict.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// What [`History::change`] reads as a change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// Code: a `.rs` line that, trimmed, is not empty and does not start with `//`,
+    /// and each line of a `Cargo.toml` or `Cargo.lock`.
+    Code,
+    /// A public item or a decision: each line of a file under `docs/decisions/`, and,
+    /// in a `.rs` file under `crates/<crate>/src/`, a line that starts with `pub `
+    /// after its indent, or a `///` line of the item after it when that item does.
+    Public,
+}
+
+impl Kind {
+    /// Whether a change to `path`, a path as `git` gives it, can be of this kind.
+    fn path(self, path: &str) -> bool {
+        match self {
+            Kind::Code => code_path(path),
+            Kind::Public => {
+                path.starts_with("docs/decisions/")
+                    || path
+                        .strip_prefix("crates/")
+                        .and_then(|p| p.split_once('/'))
+                        .is_some_and(|(_, p)| p.starts_with("src/") && rust_path(p))
+            }
+        }
+    }
+
+    /// The pathspecs of `path`.
+    fn globs(self) -> &'static [&'static str] {
+        match self {
+            Kind::Code => &[
+                ":(glob)**/*.rs",
+                ":(glob)**/Cargo.toml",
+                ":(glob)**/Cargo.lock",
+            ],
+            Kind::Public => {
+                &[":(glob)docs/decisions/**", ":(glob)crates/*/src/**/*.rs"]
+            }
+        }
+    }
+
+    /// Whether line `index` of `lines`, the text of the file `path`, is of this kind.
+    fn counts(self, path: &str, lines: &[&str], index: usize) -> bool {
+        let rust = rust_path(path);
+        match self {
+            Kind::Code => code(rust, lines[index]),
+            Kind::Public => !rust || public(lines, index),
+        }
+    }
+
+    /// The lines of this kind, as a phrase names them.
+    fn lines(self) -> &'static str {
+        match self {
+            Kind::Code => "code",
+            Kind::Public => "a public item or a decision",
+        }
+    }
+
+    /// A file of this kind, as a phrase names it.
+    fn file(self) -> &'static str {
+        match self {
+            Kind::Code => "code file",
+            Kind::Public => "public file",
+        }
+    }
+}
+
 /// The history of a git repository, and the branch that PRs in it merge into.
 pub(crate) struct History<'a> {
     root: &'a Path,
@@ -55,24 +122,23 @@ impl<'a> History<'a> {
         Ok(true)
     }
 
-    /// The first line of code that `from..end` adds or removes, as a phrase: "changes
-    /// code at `<file>:<line>`". A line of a `.rs` file is code unless, trimmed, it is
-    /// empty or starts with `//`; each line of a `Cargo.toml` or `Cargo.lock` is
-    /// code. A moved file counts as removed and added.
+    /// The first line of `kind` that `from..end` adds or removes, as a phrase:
+    /// "changes code at `<file>:<line>`" or "changes a public item or a decision at
+    /// `<file>:<line>`". A moved file counts as removed and added.
     ///
     /// A merge of a commit on the base on the first-parent chain of `end` counts only
-    /// by its resolution: a `.rs`, `Cargo.toml`, or `Cargo.lock` file that
-    /// `git merge-tree` finds a conflict in between its parents gives "resolves a
-    /// conflict in `<file>` in `<merge>`". Else the change is read to `end` from the
-    /// tree that `git merge-tree` makes of `from` and the newest base commit that `end`
-    /// holds, not from `from`: the base's code does not count, and text of the range
-    /// that the base moves into a code file does. A code file that this tree has a
-    /// conflict in gives "has a conflict in `<file>` between its start and the base",
-    /// so a conflict that leaves no markers fails closed too. A path that is not code,
-    /// that `from` changes since its merge base with that base commit, as the merge
-    /// reads it, and that the merge that makes this tree moves into a code file by its
-    /// own rename detection gives "the base moves `<old>`, which the PR changes, into
-    /// the code file `<new>`". An `end` that holds more than one newest base commit
+    /// by its resolution: a file of `kind` that `git merge-tree` finds a conflict in
+    /// between its parents gives "resolves a conflict in `<file>` in `<merge>`". Else
+    /// the change is read to `end` from the tree that `git merge-tree` makes of `from`
+    /// and the newest base commit that `end` holds, not from `from`: the base's lines
+    /// do not count, and text of the range that the base moves into a file of `kind`
+    /// does. A file of `kind` that this tree has a conflict in gives "has a conflict in
+    /// `<file>` between its start and the base", so a conflict that leaves no markers
+    /// fails closed too. A path not of `kind`, that `from` changes since its merge base
+    /// with that base commit, as the merge reads it, and that the merge that makes this
+    /// tree moves into a file of `kind` by its own rename detection gives "the base
+    /// moves `<old>`, which the PR changes, into the code file `<new>`", or "the public
+    /// file" for [`Kind::Public`]. An `end` that holds more than one newest base commit
     /// gives "holds the base at more than one newest commit: `<commit>`, `<commit>`".
     ///
     /// The line number is in `end` for an added line, and in `from` or that tree for
@@ -86,8 +152,9 @@ impl<'a> History<'a> {
     ///
     /// A failed `git` command, also when the base ref does not exist, or a changed
     /// path that is not UTF-8.
-    pub(crate) fn code_change(
+    pub(crate) fn change(
         &self,
+        kind: Kind,
         from: &str,
         end: &str,
     ) -> Result<Option<String>, String> {
@@ -113,7 +180,7 @@ impl<'a> History<'a> {
             };
             let merge = line.split(' ').next().unwrap_or_default();
             let merged = self.merged(first, second)?;
-            if let Some(path) = merged.code_conflict() {
+            if let Some(path) = merged.conflict(kind) {
                 return Ok(Some(format!(
                     "resolves a conflict in `{path}` in `{merge}`"
                 )));
@@ -129,64 +196,73 @@ impl<'a> History<'a> {
             )));
         };
         let merged = self.merged(&from_sha, newest)?;
-        if let Some(path) = merged.code_conflict() {
+        if let Some(path) = merged.conflict(kind) {
             return Ok(Some(format!(
                 "has a conflict in `{path}` between its start and the base"
             )));
         }
-        if let Some(moved) = self.moved_into_code(&from_sha, newest, &merged.tree)? {
+        if let Some(moved) = self.moved_into(kind, &from_sha, newest, &merged.tree)? {
             return Ok(Some(moved));
         }
-        self.first_change(&merged.tree, &end_sha)
+        self.first_change(kind, &merged.tree, &end_sha)
     }
 
-    /// The first line of code that the change from the tree-ish `old` to `new` adds
-    /// or removes, as `code_change` gives it.
+    /// The first line of `kind` that the change from the tree-ish `old` to `new` adds
+    /// or removes, as `change` gives it.
     ///
     /// # Errors
     ///
     /// A failed `git` command, or a changed path that is not UTF-8.
-    fn first_change(&self, old: &str, new: &str) -> Result<Option<String>, String> {
-        let globs = [
-            "--",
-            ":(glob)**/*.rs",
-            ":(glob)**/Cargo.toml",
-            ":(glob)**/Cargo.lock",
-        ];
-        for entry in self.diff(old, new, &globs)? {
+    fn first_change(
+        &self,
+        kind: Kind,
+        old: &str,
+        new: &str,
+    ) -> Result<Option<String>, String> {
+        for entry in self.diff(old, new, &[&["--"], kind.globs()].concat())? {
             let path = std::str::from_utf8(&entry.path).map_err(|e| {
                 format!(
                     "git diff: the path `{}` is not UTF-8: {e}",
                     String::from_utf8_lossy(&entry.path)
                 )
             })?;
-            if let Some(line) =
-                self.first_code(&entry.old, &entry.new, rust_path(path))?
-            {
-                return Ok(Some(format!("changes code at `{path}:{line}`")));
+            if let Some(line) = self.first_line(kind, &entry.old, &entry.new, path)? {
+                return Ok(Some(format!(
+                    "changes {} at `{path}:{line}`",
+                    kind.lines()
+                )));
             }
         }
         Ok(None)
     }
 
-    /// The line number of the first line of code that a change from the blob `old` to
-    /// the blob `new` adds or removes, in `new` for an added line and in `old` for a
-    /// removed one. A blob of zeros is a file that does not exist. `rust` tells
-    /// whether the file is a `.rs` file.
-    fn first_code(
+    /// The line number of the first line of `kind` that a change from the blob `old`
+    /// to the blob `new` of the file `path` adds or removes, in `new` for an added line
+    /// and in `old` for a removed one. A blob of zeros is a file that does not exist.
+    fn first_line(
         &self,
+        kind: Kind,
         old: &str,
         new: &str,
-        rust: bool,
+        path: &str,
     ) -> Result<Option<u32>, String> {
         let absent = |blob: &str| blob.bytes().all(|b| b == b'0');
-        if absent(old) || absent(new) {
-            let blob = if absent(old) { new } else { old };
+        let text = |blob: &str| -> Result<String, String> {
+            if absent(blob) {
+                return Ok(String::new());
+            }
             let text = self.output(&["cat-file", "blob", blob])?;
-            let text = String::from_utf8_lossy(&text);
+            Ok(String::from_utf8_lossy(&text).into_owned())
+        };
+        let (old_text, new_text) = (text(old)?, text(new)?);
+        let old_lines: Vec<_> = old_text.lines().collect();
+        let new_lines: Vec<_> = new_text.lines().collect();
+        let counts = |lines: &[&str], n: u32| kind.counts(path, lines, n as usize - 1);
+        if absent(old) || absent(new) {
+            let lines = if absent(old) { &new_lines } else { &old_lines };
             return Ok((1..)
-                .zip(text.lines())
-                .find(|(_, l)| code(rust, l))
+                .zip(0..lines.len())
+                .find(|&(_, i)| kind.counts(path, lines, i))
                 .map(|(n, _)| n));
         }
         let diff = self.git(&[
@@ -207,13 +283,13 @@ impl<'a> History<'a> {
                 hunk = true;
                 (old, new) = starts(header)
                     .ok_or_else(|| format!("git diff: a bad hunk header `{line}`"))?;
-            } else if hunk && let Some(text) = line.strip_prefix('-') {
-                if code(rust, text) {
+            } else if hunk && line.starts_with('-') {
+                if counts(&old_lines, old) {
                     return Ok(Some(old));
                 }
                 old += 1;
-            } else if hunk && let Some(text) = line.strip_prefix('+') {
-                if code(rust, text) {
+            } else if hunk && line.starts_with('+') {
+                if counts(&new_lines, new) {
                     return Ok(Some(new));
                 }
                 new += 1;
@@ -294,18 +370,21 @@ impl<'a> History<'a> {
 
     /// Reports whether `merge` has the tree that a merge of `first` and `second`
     /// makes with no conflict, and the merge moves no text of `first` into a code
-    /// file (`moved_into_code`).
+    /// file (`moved_into`).
     fn clean(&self, merge: &str, first: &str, second: &str) -> Result<bool, String> {
         let merged = self.merged(first, second)?;
         let tree = self.git(&["rev-parse", &format!("{merge}^{{tree}}")])?;
         Ok(merged.clean
             && merged.tree == tree
-            && self.moved_into_code(first, second, &merged.tree)?.is_none())
+            && self
+                .moved_into(Kind::Code, first, second, &merged.tree)?
+                .is_none())
     }
 
     /// The phrase "the base moves `<old>`, which the PR changes, into the code file
-    /// `<new>`" for the first path `<old>` of `changed(first, second)` that their
-    /// merge, with the tree `tree`, moves into the code file `<new>`. The moves are the
+    /// `<new>`", as `change` gives it for `kind`, for the first path `<old>` of
+    /// `changed(kind, first, second)` that their merge, with the tree `tree`, moves into
+    /// the file `<new>` of `kind`. The moves are the
     /// merge's own: `second` is merged again with a copy of `first` that gives each
     /// such path a probe text of its own, and the probe text is read in the code files
     /// that the two merges make differently.
@@ -313,8 +392,9 @@ impl<'a> History<'a> {
     /// # Errors
     ///
     /// A failed `git` command.
-    fn moved_into_code(
+    fn moved_into(
         &self,
+        kind: Kind,
         first: &str,
         second: &str,
         tree: &str,
@@ -323,13 +403,13 @@ impl<'a> History<'a> {
         if self.ancestor(second, first)? {
             return Ok(None);
         }
-        let Some(probe) = self.probe(first, second)? else {
+        let Some(probe) = self.probe(kind, first, second)? else {
             return Ok(None);
         };
         let probed = self.merged(&probe.commit, second)?.tree;
         for entry in self.diff(tree, &probed, &[])? {
             let new = String::from_utf8_lossy(&entry.path);
-            if !code_path(&new) {
+            if !kind.path(&new) {
                 continue;
             }
             let text = self.output(&["cat-file", "blob", &entry.new])?;
@@ -343,23 +423,29 @@ impl<'a> History<'a> {
             });
             if let Some(old) = old {
                 return Ok(Some(format!(
-                    "the base moves `{old}`, which the PR changes, into the code file \
-                     `{new}`"
+                    "the base moves `{old}`, which the PR changes, into the {} \
+                     `{new}`",
+                    kind.file()
                 )));
             }
         }
         Ok(None)
     }
 
-    /// A copy of `first` in which each path of `changed(first, second)` holds the
+    /// A copy of `first` in which each path of `changed(kind, first, second)` holds the
     /// probe text `<PROBE> <n>`, where `paths[n]` is that path. `None` when no such
     /// path exists.
     ///
     /// # Errors
     ///
     /// A failed `git` command.
-    fn probe(&self, first: &str, second: &str) -> Result<Option<Probe>, String> {
-        let changed = self.changed(first, second)?;
+    fn probe(
+        &self,
+        kind: Kind,
+        first: &str,
+        second: &str,
+    ) -> Result<Option<Probe>, String> {
+        let changed = self.changed(kind, first, second)?;
         if changed.is_empty() {
             return Ok(None);
         }
@@ -378,7 +464,7 @@ impl<'a> History<'a> {
         }))
     }
 
-    /// The mode and path of each file that is not code and that `first` changes since
+    /// The mode and path of each file not of `kind` that `first` changes since
     /// its merge base with `second`, as a merge of the two reads that base. A file
     /// that `first` moves since that base is in too, which changes no result: no file
     /// of the base has its path, so the base cannot move it into a code file.
@@ -388,6 +474,7 @@ impl<'a> History<'a> {
     /// A failed `git` command.
     fn changed(
         &self,
+        kind: Kind,
         first: &str,
         second: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -409,7 +496,7 @@ impl<'a> History<'a> {
             let stage = String::from_utf8_lossy(parts.next().unwrap_or_default());
             let path = parts.next().unwrap_or_default();
             if let [mode, _, "2"] = stage.split(' ').collect::<Vec<_>>()[..]
-                && !code_path(&String::from_utf8_lossy(path))
+                && !kind.path(&String::from_utf8_lossy(path))
             {
                 changed.push((mode.to_string(), path.to_vec()));
             }
@@ -611,7 +698,7 @@ impl<'a> History<'a> {
     }
 }
 
-/// The first word of each line of probe text that `History::moved_into_code` writes.
+/// The first word of each line of probe text that `History::moved_into` writes.
 const PROBE: &str = "xtask-review-probe";
 
 /// One entry of `git diff --raw`.
@@ -650,11 +737,11 @@ struct Merged {
 }
 
 impl Merged {
-    /// The first conflicted path that is a code path.
-    fn code_conflict(&self) -> Option<&str> {
+    /// The first conflicted path of `kind`.
+    fn conflict(&self, kind: Kind) -> Option<&str> {
         self.conflicts
             .iter()
-            .find(|p| code_path(p))
+            .find(|p| kind.path(p))
             .map(String::as_str)
     }
 }
@@ -722,6 +809,33 @@ fn command(root: &Path) -> Command {
 fn code(rust: bool, text: &str) -> bool {
     let text = text.trim();
     !rust || !(text.is_empty() || text.starts_with("//"))
+}
+
+/// Whether line `index` of `lines`, the text of a `.rs` file, starts with `pub `
+/// after its indent, or is a `///` line of the item after it when that item does.
+/// Attributes, comments, and blank lines between them do not end the doc.
+fn public(lines: &[&str], index: usize) -> bool {
+    let item = |line: &str| line.trim_start().starts_with("pub ");
+    if !lines[index].trim_start().starts_with("///") {
+        return item(lines[index]);
+    }
+    // The brackets that an attribute left open, so its later lines are skipped.
+    let mut open = 0_i64;
+    for line in &lines[index + 1..] {
+        let line = line.trim();
+        if open > 0 || line.starts_with("#[") {
+            for c in line.chars() {
+                match c {
+                    '[' => open += 1,
+                    ']' => open -= 1,
+                    _ => {}
+                }
+            }
+        } else if !(line.is_empty() || line.starts_with("//")) {
+            return item(line);
+        }
+    }
+    false
 }
 
 /// The first old and new line numbers of a hunk header `-<a>[,<n>] +<b>[,<m>] @@`.

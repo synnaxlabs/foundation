@@ -15,8 +15,10 @@ use crate::field;
 
 mod history;
 
-/// The first change of code in a range `<from>..<end>`, as a phrase, or `None`.
-type CodeChange<'a> = &'a dyn Fn(&str, &str) -> Result<Option<String>, String>;
+use history::Kind;
+
+/// The first change of a kind in a range `<from>..<end>`, as a phrase, or `None`.
+type Change<'a> = &'a dyn Fn(Kind, &str, &str) -> Result<Option<String>, String>;
 
 /// The account that posts each round comment and each director verdict. Comments by
 /// other accounts never count.
@@ -79,6 +81,10 @@ const END: [&str; 3] = ["Deferred", "Public surface", "Hot path"];
 /// lines: it needs no end lines, and an earlier free-form one passes. It still needs
 /// `performance` when a `Hot path:` line names a function.
 const CUTOFF: &str = "2026-10-08T03:00:00Z";
+
+/// A later round posted at or after this UTC time names `architecture` when its range
+/// changes a public item or a decision ([`Kind::Public`]).
+const PUBLIC: &str = "2026-10-08T21:09:27Z";
 
 /// The record of a PR that the check reads.
 #[derive(Debug)]
@@ -150,7 +156,7 @@ pub(crate) fn run(root: &Path, pr: &str, head: &str) -> ExitCode {
             &record,
             head,
             &|end| history.reaches(end, head),
-            &|from, end| history.code_change(from, end),
+            &|kind, from, end| history.change(kind, from, end),
         )
     });
     exit(found)
@@ -178,13 +184,13 @@ fn exit(found: Result<Vec<String>, String>) -> ExitCode {
 /// `reaches` reports whether a commit (a SHA or its prefix) reaches `head` through
 /// clean merges of the base. A later round may skip `breaker` when the range of the
 /// last round changes no code; an earlier round's skip is taken as written.
-/// `code_change` gives the first code change in a range, with a merge of the base read
-/// by its resolution, as a phrase, or `None` (`History::code_change`).
+/// `change` gives the first change of a kind in a range, with a merge of the base read
+/// by its resolution, as a phrase, or `None` (`History::change`).
 fn problems(
     record: &Record,
     head: &str,
     reaches: &dyn Fn(&str) -> Result<bool, String>,
-    code_change: CodeChange<'_>,
+    change: Change<'_>,
 ) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     let rounds: Vec<_> = record
@@ -193,7 +199,7 @@ fn problems(
         .filter(|c| c.author == BOT)
         .filter_map(|c| {
             let old = c.created.as_str() < CUTOFF;
-            round(&c.body, old).map(|round| (old, round))
+            round(&c.body, old).map(|round| (c, old, round))
         })
         .collect();
     if rounds.is_empty() {
@@ -202,11 +208,12 @@ fn problems(
              {FORMAT}"
         ));
     }
-    for (i, (old, parsed)) in rounds.iter().enumerate() {
+    for (i, (comment, old, parsed)) in rounds.iter().enumerate() {
         let last = i + 1 == rounds.len();
         match &parsed.round {
             Ok(round) => {
-                problems.extend(unnamed(round, &record.files, last, code_change)?);
+                let public = comment.created.as_str() >= PUBLIC;
+                problems.extend(unnamed(round, &record.files, last, public, change)?);
             }
             Err(e) => {
                 if !*old || last || e.binding {
@@ -217,6 +224,7 @@ fn problems(
         problems.extend(parsed.performance.clone());
     }
     if let Some((
+        _,
         _,
         Parsed {
             round: Ok(round), ..
@@ -249,13 +257,16 @@ fn problems(
 
 /// The problems with the reviewers that `round` names for a PR that changes `files`.
 /// A later round may skip `breaker` when its range changes no code, which only the
-/// `last` round checks with `code_change`: a rebase can drop the range of an earlier
-/// round from the clone, but the last round's end must reach the head.
+/// `last` round checks with `change`: a rebase can drop the range of an earlier round
+/// from the clone, but the last round's end must reach the head. A later round that
+/// is `public` (posted at or after [`PUBLIC`]) and names no `architecture` fails when
+/// its range changes a public item or a decision.
 fn unnamed(
     round: &Round,
     files: &[String],
     last: bool,
-    code_change: CodeChange<'_>,
+    public: bool,
+    change: Change<'_>,
 ) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     let mut missing: Vec<&str> = required(round, files)
@@ -264,7 +275,7 @@ fn unnamed(
         .collect();
     if round.number > 1 && round.breakerless && missing.contains(&"breaker") {
         missing.retain(|name| *name != "breaker");
-        if last && let Some(change) = code_change(&round.from, &round.end)? {
+        if last && let Some(change) = change(Kind::Code, &round.from, &round.end)? {
             problems.push(format!(
                 "review round {} skips `breaker`, but its range {change}.",
                 round.number
@@ -276,6 +287,16 @@ fn unnamed(
             "review round {} names no {}, which this round requires.",
             round.number,
             missing.join(", ")
+        ));
+    }
+    if round.number > 1
+        && public
+        && !round.reviewers.contains("architecture")
+        && let Some(change) = change(Kind::Public, &round.from, &round.end)?
+    {
+        problems.push(format!(
+            "review round {} names no `architecture`, but its range {change}.",
+            round.number
         ));
     }
     Ok(problems)

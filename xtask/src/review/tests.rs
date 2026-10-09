@@ -64,14 +64,25 @@ fn record(comments: Vec<Comment>) -> Record {
 /// The start of the range of `ROUND`, which changes only comment lines.
 const COMMENTS: &str = "38cba24f";
 
+/// The start of a range that changes a public item.
+const SURFACE: &str = "5a6b7c8d";
+
 fn check(record: &Record) -> Vec<String> {
     // A commit reaches the head only when it is a prefix of it.
     problems(
         record,
         HEAD,
         &|end| Ok(HEAD.starts_with(end)),
-        &|from, _| {
-            Ok((from != COMMENTS).then(|| "changes code at `a.rs:2`".to_string()))
+        &|kind, from, _| {
+            Ok(match kind {
+                Kind::Code => {
+                    (from != COMMENTS).then(|| "changes code at `a.rs:2`".to_string())
+                }
+                Kind::Public => (from == SURFACE).then(|| {
+                    "changes a public item or a decision at `crates/a/src/lib.rs:1`"
+                        .to_string()
+                }),
+            })
         },
     )
     .unwrap()
@@ -1190,10 +1201,12 @@ fn a_red_team_pr_with_no_oracle_label_needs_no_approval() {
 fn returns_a_failure_to_read_history() {
     let failed = |_: &str| Err("git rev-parse: bad".to_string());
     assert_eq!(
-        problems(&record(vec![bot(ROUND)]), HEAD, &failed, &|_, _| Ok(None)),
+        problems(&record(vec![bot(ROUND)]), HEAD, &failed, &|_, _, _| Ok(
+            None
+        )),
         Err("git rev-parse: bad".to_string())
     );
-    let failed = |_: &str, _: &str| Err("git diff: bad".to_string());
+    let failed = |_: Kind, _: &str, _: &str| Err("git diff: bad".to_string());
     assert_eq!(
         problems(&record(vec![bot(ROUND)]), HEAD, &|_| Ok(true), &failed),
         Err("git diff: bad".to_string())
@@ -2269,4 +2282,47 @@ fn fails_end_lines_in_a_quote_or_a_list() {
             "{nested}"
         );
     }
+}
+
+/// A comment by the bot, posted when a later round must name `architecture` for a
+/// public change.
+fn public(body: &str) -> Comment {
+    Comment {
+        created: PUBLIC.to_string(),
+        ..bot(body)
+    }
+}
+
+#[test]
+fn a_later_round_that_changes_a_public_item_needs_architecture() {
+    let round = later("reviewer, breaker").replace(COMMENTS, SURFACE);
+    let unnamed = |n: u32| {
+        format!(
+            "review round {n} names no `architecture`, but its range changes a public \
+             item or a decision at `crates/a/src/lib.rs:1`."
+        )
+    };
+    assert_eq!(check(&record(vec![public(&round)])), vec![unnamed(3)]);
+    let named = later("reviewer, architecture, breaker").replace(COMMENTS, SURFACE);
+    assert_eq!(check(&record(vec![public(&named)])), Vec::<String>::new());
+    let before = Comment {
+        created: "2026-10-08T21:09:26Z".to_string(),
+        ..bot(&round)
+    };
+    assert_eq!(check(&record(vec![before])), Vec::<String>::new());
+    let private = later("reviewer, breaker");
+    assert_eq!(check(&record(vec![public(&private)])), Vec::<String>::new());
+    let earlier = round.replace("round 3", "round 2");
+    assert_eq!(
+        check(&record(vec![public(&earlier), public(&private)])),
+        vec![unnamed(2)]
+    );
+    let first = round.replace("round 3", "round 1");
+    assert_eq!(
+        check(&record(vec![public(&first)])),
+        vec![
+            "review round 1 names no architecture, which this round requires."
+                .to_string()
+        ]
+    );
 }

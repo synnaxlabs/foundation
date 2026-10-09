@@ -40,7 +40,9 @@ impl Repo {
 
     /// Writes `text` to `file` and commits it on the current branch.
     fn commit(&self, file: &str, text: &str) -> String {
-        std::fs::write(self.dir.join(file), text).unwrap();
+        let path = self.dir.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
         self.git(&["add", file]);
         self.git(&["commit", "--quiet", "-m", file]);
         self.head()
@@ -103,7 +105,11 @@ impl Repo {
     }
 
     fn code_change(&self, from: &str, end: &str) -> Result<Option<String>, String> {
-        History::new(&self.dir, "main").code_change(from, end)
+        History::new(&self.dir, "main").change(Kind::Code, from, end)
+    }
+
+    fn public_change(&self, from: &str, end: &str) -> Result<Option<String>, String> {
+        History::new(&self.dir, "main").change(Kind::Public, from, end)
     }
 }
 
@@ -1823,4 +1829,133 @@ fn a_start_with_an_early_commit_time_reads() {
     let end = repo.head();
     assert_eq!(repo.code_change(&from, &end), Ok(None));
     assert_eq!(repo.reaches(&from, &end), Ok(true));
+}
+
+/// The phrase of a public change at `at`.
+fn public(at: &str) -> String {
+    format!("changes a public item or a decision at `{at}`")
+}
+
+#[test]
+fn a_pub_line_or_the_doc_of_a_pub_item_is_public() {
+    let (repo, _) = Repo::with_pr("public-lines");
+    let lib = "crates/a/src/lib.rs";
+    let from = repo.commit(lib, "fn a() {}\n");
+    let private =
+        repo.commit(lib, "/// A.\nfn a() {}\n\n// B.\npub(crate) fn b() {}\n");
+    assert_eq!(repo.public_change(&from, &private), Ok(None));
+    assert_eq!(
+        repo.code_change(&from, &private),
+        Ok(Some(format!("changes code at `{lib}:5`")))
+    );
+    let item = repo.commit(lib, "fn a() {}\n    pub c: u8,\n");
+    assert_eq!(
+        repo.public_change(&private, &item),
+        Ok(Some(public(&format!("{lib}:2"))))
+    );
+    let documented = "fn a() {}\n/// C.\n#[expect(\n    x,\n    reason = \"y\"\n)]\n\n#[must_use]\npub fn c() {}\n";
+    let from = repo.commit(lib, "fn a() {}\n#[expect(\n    x,\n    reason = \"y\"\n)]\n\n#[must_use]\npub fn c() {}\n");
+    let doc = repo.commit(lib, documented);
+    assert_eq!(
+        repo.public_change(&from, &doc),
+        Ok(Some(public(&format!("{lib}:2"))))
+    );
+    assert_eq!(
+        repo.public_change(&doc, &from),
+        Ok(Some(public(&format!("{lib}:2"))))
+    );
+    let doc = repo.commit(lib, "/// A.\n#[must_use]\nfn a() {}\n");
+    let changed = repo.commit(lib, "/// A, changed.\n#[must_use]\nfn a() {}\n");
+    assert_eq!(repo.public_change(&doc, &changed), Ok(None));
+}
+
+#[test]
+fn a_line_of_a_decision_is_public() {
+    let (repo, end) = Repo::with_pr("public-decision");
+    let decision = repo.commit("docs/decisions/hub/a.md", "\n");
+    assert_eq!(
+        repo.public_change(&end, &decision),
+        Ok(Some(public("docs/decisions/hub/a.md:1")))
+    );
+    assert_eq!(repo.code_change(&end, &decision), Ok(None));
+    let other = repo.commit("docs/claude/a.md", "- **A** A rule.\n");
+    assert_eq!(repo.public_change(&decision, &other), Ok(None));
+}
+
+#[test]
+fn a_pub_line_outside_the_src_of_a_crate_is_not_public() {
+    let (repo, end) = Repo::with_pr("public-outside");
+    for file in [
+        "xtask/src/a.rs",
+        "crates/a/tests/it.rs",
+        "crates/a/benches/a.rs",
+        "crates/a/src/a.md",
+    ] {
+        repo.commit(file, "pub fn a() {}\n");
+    }
+    assert_eq!(repo.public_change(&end, &repo.head()), Ok(None));
+    let nested = repo.commit("crates/a/src/b/c.rs", "pub fn a() {}\n");
+    assert_eq!(
+        repo.public_change(&end, &nested),
+        Ok(Some(public("crates/a/src/b/c.rs:1")))
+    );
+}
+
+#[test]
+fn a_public_change_of_the_base_does_not_count() {
+    let (repo, end) = Repo::with_pr("public-base");
+    repo.advance_main("crates/a/src/lib.rs", "pub fn a() {}\n");
+    repo.advance_main("docs/decisions/a.md", "A.\n");
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(repo.public_change(&end, &repo.head()), Ok(None));
+}
+
+#[test]
+fn a_conflict_counts_only_in_a_public_file() {
+    let files = [
+        ("crates/a/src/lib.rs", true),
+        ("docs/decisions/a.md", true),
+        ("xtask/src/a.rs", false),
+    ];
+    for (n, (file, public)) in files.into_iter().enumerate() {
+        let (repo, _) = Repo::with_pr(&format!("public-conflict-{n}"));
+        let end = repo.commit(file, "fn a() {}\n");
+        repo.advance_main(file, "fn b() {}\n");
+        let merge = repo
+            .command()
+            .args(["merge", "--no-edit", "origin/main"])
+            .output()
+            .unwrap();
+        assert_eq!(merge.status.code(), Some(1), "{merge:?}");
+        std::fs::write(repo.dir.join(file), "fn a() {}\n").unwrap();
+        repo.git(&["commit", "--quiet", "--all", "--no-edit"]);
+        let merge = repo.head();
+        let found =
+            public.then(|| format!("resolves a conflict in `{file}` in `{merge}`"));
+        assert_eq!(repo.public_change(&end, &merge), Ok(found), "{file}");
+    }
+}
+
+#[test]
+fn text_of_the_pr_that_the_base_moves_into_a_public_file_counts() {
+    let (repo, _) = Repo::with_pr("public-moved");
+    let text = "A decision.\nIt has lines.\nIt has more lines.\n";
+    repo.advance_main("docs/a.md", text);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    let from = repo.commit("docs/a.md", &format!("{text}One more.\n"));
+    repo.git(&["switch", "--quiet", "main"]);
+    std::fs::create_dir_all(repo.dir.join("docs/decisions")).unwrap();
+    repo.git(&["mv", "docs/a.md", "docs/decisions/a.md"]);
+    repo.git(&["commit", "--quiet", "-m", "move"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["switch", "--quiet", "pr"]);
+    repo.git(&["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(
+        repo.public_change(&from, &repo.head()),
+        Ok(Some(
+            "the base moves `docs/a.md`, which the PR changes, into the public \
+             file `docs/decisions/a.md`"
+                .to_string()
+        ))
+    );
 }

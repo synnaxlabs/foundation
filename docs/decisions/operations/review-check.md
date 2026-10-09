@@ -131,7 +131,19 @@
   by the director at 2026-10-07T14:50:33Z
   (https://github.com/synnaxlabs/foundation/pull/1193#issuecomment-6040535575), fixed by
   #1451. An earlier round's skip is taken as written, since a rebase can drop its range
-  from the clone. An earlier round in the fixed format that does not parse fails. A
+  from the clone. A later round posted at or after 2026-10-08T21:09:27Z (`PUBLIC` in
+  `xtask/src/review.rs`, when #1993 put the rule on `main`) that does not name
+  `architecture` fails when its range changes a public item or a decision: a line of a
+  file under `docs/decisions/`, or, in a `.rs` file under `crates/<crate>/src/`, a line
+  that starts with `pub ` after its indent, or a `///` line of the item after it when
+  that item does. Attributes, comments, and blank lines between a `///` line and its
+  item are skipped. Each later round is checked, not only the last, and a range that
+  names no commit fails. The range is read as for code: the base's lines do not count,
+  a conflict in such a file, in a merge of the base in the range or between its start
+  and the base, counts, and so does a path that the PR changed and the base moves into
+  such a file. Stated by the director at 2026-10-09T00:48:08Z
+  (https://github.com/synnaxlabs/foundation/issues/1206#issuecomment-6071964465, item
+  2). An earlier round in the fixed format that does not parse fails. A
   red-team `oracle` PR also needs ``Director: approved at `<sha>` `` at the head. The
   status is `success` on `merge_group`. Decided by the director on #1169
   (https://github.com/synnaxlabs/foundation/issues/1169#issuecomment-6032179989) and in
