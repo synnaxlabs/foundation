@@ -50,9 +50,11 @@ exclude_re = [
   # `rows` fills bits 0 to 15 and `columns << 16` bits 16 to 31, so `|` and `^` give
   # the same `n`.
   'crates/home/src/stored\.rs:.*replace \| with \^ in codes',
-  # The oracle of the `node_identity` fuzz target and of the property tests. It panics
-  # only when `decode` is wrong, and the mutants of `decode` show that it does.
+  # The oracle of the `node_identity` fuzz target and of the property tests, and the
+  # entry of the target. Each panics only when `decode` is wrong, and the mutants of
+  # `decode` show that `check` does.
   'crates/node/src/identity\.rs:.*replace check with \(\)',
+  'crates/node/src/fuzz\.rs:.*replace identity with \(\)',
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
