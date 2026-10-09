@@ -229,7 +229,8 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/` and
 /// that the `root` graph does not build, and for each requirement on crates.io in the
 /// `fuzz` graph that a copy that the `root` graph builds meets, and that resolves to
-/// another package. Cargo applies a patch to each such requirement. It fails on an edge
+/// another package. An edge pairs with each requirement that names it and that its
+/// release meets. Cargo applies a patch to each such requirement. It fails on an edge
 /// of the `fuzz` graph that no requirement names.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
@@ -267,6 +268,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             if dependency.copied {
                 continue;
             }
+            let release = dependency.release()?;
             for requirement in named {
                 if requirement["source"].as_str() != Some(CRATES_IO) {
                     continue;
@@ -278,6 +280,9 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                         dependent.id, dependency.name
                     )
                 })?;
+                if !parsed.matches(&release) {
+                    continue;
+                }
                 let Some((copy, _)) = built.iter().find(|(copy, version)| {
                     copy.name == dependency.name && parsed.matches(version)
                 }) else {
@@ -615,6 +620,11 @@ mod tests {
     }
 
     #[test]
+    fn passes_a_release_that_a_second_requirement_of_the_same_name_meets() {
+        assert_eq!(patched("twice"), Ok(Vec::new()));
+    }
+
+    #[test]
     fn refuses_a_release_of_the_series_of_the_copy_under_a_second_name() {
         let dependent = format!(
             "path+file://{}#0.0.0",
@@ -749,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn names_an_unknown_package_and_a_bad_version_of_a_copy_or_requirement() {
+    fn names_an_unknown_package_and_a_bad_version_or_requirement() {
         let unknown = fuzz(&[types()], &[(TYPES, "registry+x#gone@1.0.0")]);
         assert_eq!(
             unpatched(&root(), &unknown),
@@ -757,6 +767,17 @@ mod tests {
                 "the resolve of fuzz/Cargo.lock has no package `registry+x#gone@1.0.0`"
                     .to_string()
             )
+        );
+        let needing = needs(types(), "noq-proto", "1");
+        let mut bad = fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        bad["packages"][1]["version"] = json!("one");
+        assert_eq!(
+            unpatched(&self::root(), &bad),
+            Err(format!(
+                "`{}` has the version `one`: unexpected character 'o' while parsing \
+                 major version number",
+                id("1.3.0")
+            ))
         );
         let mut root = root();
         root["packages"][0]["version"] = json!("one");
