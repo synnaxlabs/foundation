@@ -67,9 +67,9 @@ impl fmt::Debug for Tasks {
     }
 }
 
-/// What [`Tasks`] runs its tasks on. `os` and `sim` implement it for a shard. Any other
-/// implementation passes each task to one of theirs, as a driver that counts tasks
-/// does.
+/// What [`Tasks`] runs its tasks on. `os` and `sim` implement it for a shard. A driver
+/// that counts tasks passes each task to one of theirs. A driver of a test or a
+/// benchmark may keep each task for its caller to poll.
 ///
 /// ```
 /// fn wrap(driver: impl env::tasks::Driver + 'static) -> env::tasks::Tasks {
