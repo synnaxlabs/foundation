@@ -83,6 +83,7 @@ pub use client::Client;
 pub use code::Code;
 pub use error::Error;
 pub use port::Port;
+pub use quic::Ended;
 pub use session::{Peer, Session};
 
 use table::Table;
@@ -108,7 +109,7 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// accepted with `Code(0)`, and the sessions it gave stay open. It refuses each dial
 /// from a peer until each of its connections drained: each session ended, and each
 /// handshake in flight finished or timed out. Then it frees its [`port::Part`], so a
-/// later dial gets no answer.
+/// later dial gets no answer, and [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
@@ -232,6 +233,24 @@ impl Transport {
     pub fn status(&self) -> Status {
         self.carrier.status()
     }
+
+    /// Gives a future that resolves once this transport has freed its
+    /// [`port::Part`]: after the transport dropped and each connection drained, or
+    /// once the socket broke. A session that a caller still holds keeps it pending.
+    /// The future holds no part of the transport, so the caller can drop the transport
+    /// and then wait.
+    ///
+    /// ```
+    /// async fn stop(transport: transport::Transport) {
+    ///     let ended = transport.ended();
+    ///     drop(transport);
+    ///     ended.await;
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ended(&self) -> Ended {
+        self.carrier.ended()
+    }
 }
 
 /// What a [`Transport`] counted since [`Transport::new`].
@@ -351,6 +370,7 @@ impl Config {
 mod tests {
     use std::net::SocketAddr;
     use std::num::NonZeroUsize;
+    use std::pin::pin;
     use std::rc::Rc;
 
     use block::{Heap, Pool};
@@ -640,6 +660,49 @@ mod tests {
             node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
             let dialed = carrier.connect(SERVER.public(), at).await;
             assert_eq!(dialed.err(), Some(Error::TimedOut));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_resolves_once_the_dropped_transport_drained_and_frees_the_port() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let session = transport.accept().await.expect("a session");
+            let mut ended = pin!(transport.ended());
+            assert_eq!(testing::poll_once(ended.as_mut()).await, None);
+            drop(transport);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            // The connection drains for 3 PTO after the close.
+            assert_eq!(testing::poll_once(ended.as_mut()).await, None);
+            let in_use = env::net::Error::AddressInUse { local: at };
+            assert_eq!(Port::bind(&node.net(), at).err(), Some(in_use));
+            ended.await;
+            assert_eq!(Port::bind(&node.net(), at).err(), None);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_resolves_once_the_socket_breaks() {
+        let (mut sim, _, server) = testing::nodes(0);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            let at = testing::address(&node);
+            let mut ended = pin!(transport.ended());
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(testing::poll_once(ended.as_mut()).await, None);
+            node.fail_udp(at);
+            ended.await;
+            assert_eq!(Port::bind(&node.net(), at).err(), None);
+            drop(transport);
         });
         assert_eq!(sim.run(), Ok(()));
     }

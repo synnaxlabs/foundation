@@ -4,6 +4,7 @@ mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
+mod end;
 #[cfg_attr(
     not(feature = "fuzzing"),
     expect(unreachable_pub, reason = "only the fuzzing feature exports it")
@@ -43,6 +44,7 @@ use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Dialer, Session};
+pub use self::end::Ended;
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
 pub(crate) use self::settings::{Role, Setup};
