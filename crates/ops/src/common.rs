@@ -100,14 +100,24 @@ pub(crate) fn placed_site() -> String {
     format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
-pub(crate) const NODE: node::Key = node::Key::from_u128(1);
-pub(crate) const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
+pub(crate) const NODE: node::Key = key(1);
+pub(crate) const PRIVATE_KEY: PrivateKey = private_key(1);
 pub(crate) const ADMIN: PrivateKey = PrivateKey([7; 32]);
 pub(crate) const PORT: u16 = 7000;
 
-/// The record of the member `name` at the key `n`, whose private key is `[n; 32]`.
+/// The key of the member `n`.
+const fn key(n: u8) -> node::Key {
+    node::Key::from_u128(n as u128)
+}
+
+/// The private key of the member `n`.
+const fn private_key(n: u8) -> PrivateKey {
+    PrivateKey([n; 32])
+}
+
+/// The record of the member `n`, named `name`.
 pub(crate) fn create_member(n: u8, name: &str) -> Member {
-    let private_key = PrivateKey([n; 32]);
+    let private_key = private_key(n);
     let card = Card {
         name: self::name(name),
         public_key: private_key.public(),
@@ -116,7 +126,7 @@ pub(crate) fn create_member(n: u8, name: &str) -> Member {
         version: 1,
     };
     Member {
-        card: card::Signed::sign(node::Key::from_u128(n.into()), card, &private_key),
+        card: card::Signed::sign(key(n), card, &private_key),
         admission: [0; 64],
         ephemeral: None,
         status: Status::new([].into()).expect("a status"),
