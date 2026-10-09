@@ -144,6 +144,8 @@
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471). The
   removal of `reader::Error::Remote` in 6069259471 supersedes it in
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273.
+  `laptop.architect` approved `reader::Ended::Credit` (2026-10-09T03:26:05Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073648189).
   The remote reader costs `complete wait` +2 ns (27 to 29 ns, +7.4%) and
   `complete grant` +2 ns (64 to 66 ns, +3.1%) on a quiet host
   (https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069990547), with no
