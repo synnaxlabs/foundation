@@ -100,7 +100,7 @@ mod tests {
 
     /// The name in the file of `bytes`.
     fn read(bytes: &[u8; LEN]) -> Result<Option<Name>, Error> {
-        decode(&sector::held(bytes, TAG))
+        decode(&sector::written(bytes, TAG).map_or(Held::Foreign, Held::Written))
     }
 
     #[test]
@@ -125,6 +125,11 @@ mod tests {
         assert_eq!(read(&bytes).unwrap(), Some(name));
     }
 
+    #[test]
+    fn zero_bytes_are_not_a_name() {
+        assert!(matches!(read(&[0; LEN]), Err(Error::Name)));
+    }
+
     proptest! {
         /// Each byte that changes in the file of a name makes the file one that a
         /// node did not write.
@@ -145,7 +150,6 @@ mod tests {
         fn other_bytes_are_not_a_name(bytes in prop::array::uniform32(any::<u8>())) {
             let mut file = [0; LEN];
             file[..32].copy_from_slice(&bytes);
-            prop_assume!(file != [0; LEN]);
             prop_assert!(matches!(read(&file), Err(Error::Name)));
         }
     }

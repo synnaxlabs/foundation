@@ -5452,7 +5452,7 @@ mod name {
     }
 
     /// A file of another length that is not 0, or that `encode` does not give, is
-    /// not a name.
+    /// not a name: also one whose padding is not zero, under a checksum that holds.
     #[test]
     fn a_file_that_no_node_wrote_stops_the_node_which_keeps_it() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -5461,9 +5461,13 @@ mod name {
         let kept = read(&mut sim, &host).expect("the file");
         let mut changed = kept.clone();
         changed[20] ^= 1;
+        let mut padded = kept.clone();
+        padded[22] = b'x';
+        let checksum = crc32c::crc32c(&padded[..LEN - 4]).to_le_bytes();
+        padded[LEN - 4..].copy_from_slice(&checksum);
         let short = kept[..LEN - 1].to_vec();
         let long = [kept, vec![0]].concat();
-        for bytes in [short, long, changed] {
+        for bytes in [short, long, changed, padded] {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = super::host(&mut sim, 2);
             write(&mut sim, &host, FILE, bytes.clone());
@@ -5508,9 +5512,40 @@ mod name {
         }
     }
 
+    /// The error of a start whose shard 0 cannot make its directory.
+    fn shard_dir_failed() -> Error {
+        Error::Buffer {
+            core: 0,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: PathBuf::from("shard-0"),
+                operation: env::files::Operation::CreateDir,
+                code: 5,
+            }),
+        }
+    }
+
+    /// A first start that fails after the claim, before any other sync of the data
+    /// directory, has made the name durable.
+    #[test]
+    fn a_first_start_makes_the_name_durable() {
+        for seed in 0..8 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("shard-0"), env::files::Operation::CreateDir);
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(shard_dir_failed()), "seed {seed}");
+            sim.crash(&host, sim::Crash::Power);
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")), "{seed}");
+        }
+    }
+
     /// A process crash can leave a name that a read sees but a power cut loses. The
-    /// next start makes it durable. Takes the first crash time, on seeds 0 to 7, at
-    /// which a read sees the name, and checks that a power cut then can lose it.
+    /// claim of the next start makes it durable, also when the start fails after it.
+    /// Takes the first crash time, on seeds 0 to 7, at which a read sees the name,
+    /// and checks that a power cut then can lose it.
     #[test]
     fn a_later_start_makes_the_name_durable() {
         let mut lost = 0;
@@ -5539,7 +5574,9 @@ mod name {
                 lost += 1;
             }
             let (mut sim, host, _) = crashed(seed, after);
-            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            host.fail_file(Path::new("shard-0"), env::files::Operation::CreateDir);
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(shard_dir_failed()), "seed {seed} at {after:?}");
             sim.crash(&host, sim::Crash::Power);
             let found = resolve(&mut sim, &host, None);
             assert_eq!(found, Ok(name("edge")), "seed {seed} at {after:?}");
