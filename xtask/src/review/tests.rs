@@ -1580,6 +1580,12 @@ fn fails_a_paragraph_that_comrak_places_in_the_wrong_lines() {
     let wide =
         ROUND.replace("weakening.\n\n", "weakening.\n\n[r]: u\n\u{e9}\n\\\\x\n\n");
     assert_eq!(check(&record(vec![bot(&wide)])), vec![misplaced("[r]: u")]);
+    // The one paragraph after the heading is both the fields and the end lines.
+    let alone = bot("## Review round 3\n\n[r]: https://x.y\nz");
+    assert_eq!(
+        check(&record(vec![alone])),
+        vec![misplaced("[r]: https://x.y")]
+    );
 }
 
 #[test]
@@ -1822,12 +1828,24 @@ fn reads_only_a_top_level_round_heading() {
 }
 
 #[test]
-fn reads_an_old_round_with_html_as_before() {
+fn an_old_round_reads_no_hot_path_after_other_text_on_its_line() {
+    // A `2.` item cannot interrupt a paragraph, so GitHub shows `2. Hot path: send`.
+    let round =
+        old("## Review round 1\n\nConfirmed a finding.\n\nSee\n2. Hot path: `send`");
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn reads_an_old_round_with_html_or_a_bracket_as_before() {
     let fields =
         "Reviewers: reviewer, architecture, breaker\nRange: `a..b`\nFindings: 2";
     let html = old(&format!("## Review round 1\n\n{fields}\n\n<div>"));
     let hidden = old("<search\n## Review round 1\n\nHot path: `send`");
-    for before in [html, hidden] {
+    let bracket = old(&format!("## Review round 1\n\n{fields}\n\na [^x\nb]"));
+    for before in [html, hidden, bracket] {
         assert_eq!(
             check(&record(vec![before, bot(ROUND)])),
             Vec::<String>::new()
