@@ -108,14 +108,14 @@ command outside that worktree. Remove each worktree when its agent returns
    architect. So does an answer that accepts a regression over 5% (P1). An answer to a
    run that cannot show the 5% check links the comment with the numbers of the rerun of
    BENCH BASELINES (`docs/decisions/testing/bench-baselines.md`), never a queued run,
-   does what an amendment of that record asks in place of the rerun, or is a PR that an
-   amendment of that record lets merge with no rerun. An answer that leaves a rule of
-   `CLAUDE.md` or `docs/claude/` unmet, and a dispute about what such a rule means, go
-   to `laptop.director`: link its ruling. A refusal that names a trigger for later work
-   is a deferral: file its issue with the trigger, or write the trigger in the decisions
-   entry that the ruling cites. So is an answer that a later PR does the work, also a
-   later PR of the same issue. When the trigger is the work of another open issue or PR,
-   also comment the deferral issue and its trigger on that issue or PR.
+   does what an amendment of that record asks in place of the rerun, or names the
+   amendment of that record that lets its PR merge with no rerun. An answer that leaves
+   a rule of `CLAUDE.md` or `docs/claude/` unmet, and a dispute about what such a rule
+   means, go to `laptop.director`: link its ruling. A refusal that names a trigger for
+   later work is a deferral: file its issue with the trigger, or write the trigger in
+   the decisions entry that the ruling cites. So is an answer that a later PR does the
+   work, also a later PR of the same issue. When the trigger is the work of another open
+   issue or PR, also comment the deferral issue and its trigger on that issue or PR.
 
 ## Rating
 

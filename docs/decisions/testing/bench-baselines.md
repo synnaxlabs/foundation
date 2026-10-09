@@ -36,9 +36,9 @@
   still needs the P1 judgment. `scripts/bench-host.sh` passes these flags after the item
   of #1139
   (https://github.com/synnaxlabs/foundation/issues/1139#issuecomment-6074402988). The
-  two-host carrier bench builds as `bench/carrier/run.sh` does, until a carrier result
-  over 5% is one that the P1 judgment does not find in the code of the PR: then the
-  script builds with the same flags. Decided by `laptop.director`, 2026-10-09T02:44:36Z:
+  two-host carrier bench builds as `bench/carrier/run.sh` does. A carrier result over
+  5% that the P1 judgment does not find in the code of the PR is the trigger for a
+  change of the script. Decided by `laptop.director`, 2026-10-09T02:44:36Z:
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937, with its
   scope at 2026-10-09T02:50:37Z:
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073252079.
