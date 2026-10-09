@@ -166,12 +166,22 @@ impl Disk {
 
     /// The inode that `path` names, when it names one.
     pub(crate) fn inode(&self, path: &Path) -> Option<u64> {
+        self.lookup(path).ok()?.2
+    }
+
+    /// The directory of `path`, its last name, and the inode of that entry, if any.
+    /// An empty path gives code 21, as the data directory is not a file.
+    fn lookup<'a>(
+        &self,
+        path: &'a Path,
+    ) -> Result<(u64, &'a OsStr, Option<u64>), Cause> {
         let segments = segments(path);
-        let (name, parent) = segments.split_last()?;
-        match &self.inodes[&self.dir(parent).ok()?] {
-            Inode::Dir(dir) => dir.entries.get(*name).copied(),
-            Inode::File(_) => unreachable!("invariant: `dir` gives a directory"),
-        }
+        let (name, parent) = segments.split_last().ok_or(Cause::Code(DIRECTORY))?;
+        let dir = self.dir(parent)?;
+        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
+            unreachable!("invariant: inode {dir} is a directory");
+        };
+        Ok((dir, name, entries.get(*name).copied()))
     }
 
     /// Directory `key`.
@@ -338,15 +348,8 @@ impl Disk {
     /// The directory and the name of the entry at `path`, a path of a handle of file
     /// `inode`. `NotFound` when the entry no longer names it.
     fn entry<'a>(&self, inode: u64, path: &'a Path) -> Result<(u64, &'a OsStr), Cause> {
-        let segments = segments(path);
-        let (name, parent) = segments
-            .split_last()
-            .expect("invariant: a handle names a file");
-        let dir = self.dir(parent)?;
-        match &self.inodes[&dir] {
-            Inode::Dir(entries) if entries.entries.get(*name) == Some(&inode) => {
-                Ok((dir, name))
-            }
+        match self.lookup(path)? {
+            (dir, name, Some(found)) if found == inode => Ok((dir, name)),
             _ => Err(Cause::NotFound),
         }
     }
@@ -496,17 +499,11 @@ impl Disk {
     /// What an open of `path` by `mode` finds, with each fault it gives before it
     /// takes space.
     fn target<'a>(&self, path: &'a Path, mode: Mode) -> Result<Target<'a>, Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
-            return Err(Cause::Code(DIRECTORY));
-        };
-        let dir = self.dir(parent)?;
-        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
-            unreachable!("invariant: inode {dir} is a directory");
-        };
-        let inode = match (entries.get(*name), mode) {
+        let slashed = slashed(path);
+        let (dir, name, found) = self.lookup(path)?;
+        let inode = match (found, mode) {
             (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
-            (Some(&inode), _) => inode,
+            (Some(inode), _) => inode,
             (None, Mode::Create { len }) => return Ok(Target::New { dir, name, len }),
             (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };

@@ -234,7 +234,7 @@ impl Files {
         }
         let mut at = Monotonic(now.0.saturating_add(delay));
         if let Some(path) = call.changes(&path) {
-            at = at.max(self.left(node, path));
+            at = at.max(self.dropped_end(node, path));
         }
         self.queue.insert((at, key));
         let flight = Flight {
@@ -254,7 +254,7 @@ impl Files {
     /// The end of the last call on `path` of `node` that a dropped future or handle
     /// left to run, or zero. A call on `path` uses it, or the file that it names, or a
     /// file that a rename to it moves there.
-    fn left(&self, node: usize, path: &Path) -> Monotonic {
+    fn dropped_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let dropped: Vec<_> = (self.queue.iter().rev())
             .map(|(at, key)| (*at, &self.flights[key]))
