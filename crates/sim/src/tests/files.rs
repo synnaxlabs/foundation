@@ -1148,6 +1148,41 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_removed_file() {
     }
 }
 
+/// What a create of `a` gives after a drop of a write handle with a write in flight,
+/// whose file a durable `Files::remove` of `a` unlinked first, and then a rename of
+/// the handle of another file from `c` to `d`. The write holds the 600 KiB of the old
+/// file until it ends.
+fn create_after_dropped_handle_of_removed_file_and_rename(
+    value: u64,
+) -> Result<(), Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        let mut other = create(&node, "c", KIB).await;
+        let file = create(&node, "a", 600 * KIB).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(path).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        let parts = [block(&pool, &[1; 512])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(file);
+        other.rename(Path::new("d")).await.unwrap();
+        files
+            .open(path, Mode::Create { len: 600 * KIB })
+            .await
+            .map(drop)
+    })
+}
+
+#[test]
+fn a_rename_moves_only_the_calls_of_its_file() {
+    for value in 0..64 {
+        let made = create_after_dropped_handle_of_removed_file_and_rename(value);
+        assert_eq!(made, Ok(()), "value {value}");
+    }
+}
+
 /// What a write open of `a` gives after the drop of a handle with two writes in
 /// flight.
 fn open_after_two_dropped_writes(value: u64) -> Option<Error> {
