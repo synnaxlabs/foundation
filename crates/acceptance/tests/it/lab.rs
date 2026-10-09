@@ -48,6 +48,9 @@ pub(crate) struct Lab {
     stores: BTreeMap<String, Influx>,
     /// The samples written, by channel.
     written: BTreeMap<String, Written>,
+    /// The simulation ran, or holds a task of a test, so a [`Lab::start`] would run
+    /// it.
+    ran: bool,
 }
 
 /// A simulated InfluxDB store and the names of the connector that writes to it.
@@ -153,6 +156,7 @@ impl Lab {
             members: Vec::new(),
             stores: BTreeMap::new(),
             written: BTreeMap::new(),
+            ran: false,
         }
     }
 
@@ -161,12 +165,13 @@ impl Lab {
     ///
     /// # Panics
     ///
-    /// After the first [`Lab::run`], as the write of the key runs the simulation to
-    /// its end, and a node that runs never ends.
+    /// After the first [`Lab::run`] or a task of a test, as the write of the key runs
+    /// the simulation to its end: a node or a task then runs before its time, or never
+    /// ends.
     pub(crate) fn start(&mut self, name: &str) -> Node {
         assert!(
-            self.members.iter().all(|member| member.node.is_none()),
-            "lab failure: `start` after the first run"
+            !self.ran,
+            "lab failure: `start` after the first run or a task"
         );
         let byte = u8::try_from(self.members.len() + 1)
             .expect("lab failure: at most 255 nodes");
@@ -493,6 +498,7 @@ impl Lab {
     ///
     /// When a task panics or the run takes too many steps.
     pub(crate) fn run(&mut self, span: Duration) {
+        self.ran = true;
         self.boot();
         let nanos = i64::try_from(span.as_nanos()).expect("span fits in a Span");
         if let Err(e) = self.sim.run_for(Span::from_nanos(nanos)) {
@@ -531,8 +537,9 @@ impl Lab {
 }
 
 /// The names that `dir` of `node`'s data directory holds at 1 s, or the error of the
-/// list. Call it after each [`Lab::start`] and before the first [`Lab::run`].
-fn listed(lab: &Lab, node: Node, dir: &'static str) -> Arc<Mutex<Option<Listed>>> {
+/// list. Call it after each [`Lab::start`].
+fn listed(lab: &mut Lab, node: Node, dir: &'static str) -> Arc<Mutex<Option<Listed>>> {
+    lab.ran = true;
     let host = lab.members[node.0].host.clone();
     let out = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&out);
@@ -556,7 +563,7 @@ fn a_mesh_founds_one_region_of_its_nodes_at_the_first_run() {
     let mut lab = Lab::new(1);
     let (a, b, c) = (lab.start("a"), lab.start("b"), lab.start("c"));
     lab.mesh(&[a, b]);
-    let meshes = [a, b, c].map(|node| listed(&lab, node, "mesh"));
+    let meshes = [a, b, c].map(|node| listed(&mut lab, node, "mesh"));
     lab.run(Duration::from_secs(2));
     // A node gives no read of its region, so the test reads what `mesh` stored.
     let founding = lab.members[a.0].region.clone().unwrap();
@@ -606,12 +613,38 @@ fn a_mesh_after_the_first_run_panics() {
 }
 
 #[test]
-#[should_panic(expected = "lab failure: `start` after the first run")]
+#[should_panic(expected = "lab failure: `start` after the first run or a task")]
 fn a_start_after_the_first_run_panics() {
     let mut lab = Lab::new(1);
     lab.start("a");
     lab.run(Duration::from_millis(1));
     lab.start("b");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run or a task")]
+fn a_start_after_a_run_of_no_node_panics() {
+    let mut lab = Lab::new(1);
+    lab.run(Duration::from_millis(1));
+    lab.start("a");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run or a task")]
+fn a_start_after_a_listed_task_panics() {
+    let mut lab = Lab::new(1);
+    let a = lab.start("a");
+    listed(&mut lab, a, "mesh");
+    lab.start("b");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run or a task")]
+fn a_start_after_a_chatter_task_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    chatter(&mut lab, a, b);
+    lab.start("c");
 }
 
 #[test]
@@ -667,8 +700,9 @@ fn nodes_start_run_and_stop() {
 }
 
 /// Sends one datagram every 100 ms, from 50 ms to 2,950 ms, from `node` to `peer`,
-/// and counts the datagrams that reach `node`.
-fn chatter(lab: &Lab, node: Node, peer: Node) -> Arc<AtomicU64> {
+/// and counts the datagrams that reach `node`. Call it after each [`Lab::start`].
+fn chatter(lab: &mut Lab, node: Node, peer: Node) -> Arc<AtomicU64> {
+    lab.ran = true;
     let at = |n: Node| SocketAddr::new(lab.members[n.0].host.addresses()[0], 9000);
     let host = &lab.members[node.0].host;
     let (mut sender, mut receiver) = host
@@ -723,7 +757,7 @@ fn chatter(lab: &Lab, node: Node, peer: Node) -> Arc<AtomicU64> {
 fn a_cut_drops_datagrams_both_ways_until_heal() {
     let mut lab = Lab::new(1);
     let (a, b) = (lab.start("a"), lab.start("b"));
-    let (at_a, at_b) = (chatter(&lab, a, b), chatter(&lab, b, a));
+    let (at_a, at_b) = (chatter(&mut lab, a, b), chatter(&mut lab, b, a));
     let counts = || [&at_a, &at_b].map(|c| c.load(Ordering::Relaxed));
     lab.run(Duration::from_secs(1));
     assert_eq!(counts(), [10, 10], "before the cut");
