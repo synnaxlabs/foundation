@@ -169,9 +169,10 @@ struct Sender {
     writer: Option<Writer>,
 }
 
-/// The descriptor of one sender. It has a registration for writable only while the
-/// OS send buffer is full: Linux wakes each such registration of a socket for each
-/// datagram that any descriptor of the socket sends.
+/// The descriptor of one sender. It has a registration for writable from its first
+/// poll, or from `EAGAIN`, until the send ends, and after a send that its caller drops
+/// while it waits, until the next send ends: Linux wakes each such registration of a
+/// socket for each datagram that any descriptor of the socket sends.
 struct Writer {
     /// A registration of `fd`. It drops first, so it never outlives `fd`.
     full: Option<AsyncFd<RawFd>>,
