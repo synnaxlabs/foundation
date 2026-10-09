@@ -278,6 +278,22 @@ mod tests {
     }
 
     #[test]
+    fn gives_the_reader_of_the_mesh_time_it_gives() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let (now, read) = sim
+            .run_on(&node, |node, tasks| async move {
+                let (_, _, now, reader) = shard(env(&node, tasks)).await;
+                let mesh = reader.now().mesh.expect("mesh time");
+                let midpoint = mesh.earliest.nanos().midpoint(mesh.latest.nanos());
+                (now, Stamp::from_nanos(midpoint))
+            })
+            .expect("the run ends");
+
+        assert_eq!(read, now);
+    }
+
+    #[test]
     fn starts_the_commit_of_a_lone_frame_10_ms_after_its_write() {
         let elapsed = run(
             sim::node::Config::default(),
