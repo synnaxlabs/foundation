@@ -16,5 +16,5 @@
   and binds no TCP. A `local` field in `client::Config` comes when a program must send
   from a known port or bind one address family. Until then, on a host booted with
   `ipv6.disable=1`, the bind fails with `Error::Network`. Decided by
-  `laptop.architect-2` (#1888, 2026-10-09):
+  `laptop.architect-2` (#1888, 2026-10-09T01:15:58Z):
   https://github.com/synnaxlabs/foundation/issues/1888#issuecomment-6072258451.

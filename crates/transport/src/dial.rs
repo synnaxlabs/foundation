@@ -160,7 +160,7 @@ impl Dial<'_> {
 
 /// Where a datagram to `remote` goes, or `None` when its port is 0 or its IP is
 /// unspecified. An IPv4-mapped IP becomes IPv4, the form in which a socket at `[::]`
-/// gives the source of each reply: a mapped remote would see each reply come from an
+/// gives the source of each reply: a mapped remote would make each reply come from an
 /// unknown peer.
 fn route(remote: SocketAddr) -> Option<SocketAddr> {
     let remote = SocketAddr::new(remote.ip().to_canonical(), remote.port());
