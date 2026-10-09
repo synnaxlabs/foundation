@@ -2782,8 +2782,8 @@ fn takes_the_target_of_a_unit_from_the_first_connector_that_a_placement_wins_for
 fn reports_the_splits_at_one_placement_in_unit_order() {
     let refused = writers(
         &["a", "b"],
-        &["\"a.time\"", "\"b.time\""],
-        &(placement("p", "\"a.time\", \"b.time\"", "n")
+        &["\"x.time\"", "\"w.time\""],
+        &(placement("p", "\"x.time\", \"w.time\"", "n")
             + &placement("q", "\"a\", \"b\"", "n")),
     );
     let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
@@ -2798,5 +2798,5 @@ fn reports_the_splits_at_one_placement_in_unit_order() {
              wins for the connector `{connector}`"
         )
     };
-    assert_eq!(found, [split("a.time", "a"), split("b.time", "b")]);
+    assert_eq!(found, [split("x.time", "a"), split("w.time", "b")]);
 }
