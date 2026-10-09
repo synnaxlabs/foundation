@@ -146,31 +146,10 @@ where
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
-        let mut accepted = 0;
-        while let Ok(mut incoming) = session.accept().await {
-            accepted += 1;
-            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
-            tasks.spawn(async move {
-                header(&mut incoming).await;
-                let got = answer(link.serve(incoming), &clock).await;
-                kept.lock().expect("not poisoned").push(got);
-            });
-        }
+        let accepted = Rc::new(Cell::new(0));
+        serve_each(&session, &link, &tasks, &node, &kept, &accepted).await;
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
-        // The end of this future drops each serve task that has not yet recorded.
-        let deadline = node.clock().now() + Span::SECOND;
-        loop {
-            let recorded = kept.lock().expect("not poisoned").len();
-            if recorded == accepted {
-                break;
-            }
-            let now = node.clock().now();
-            assert!(
-                now < deadline,
-                "{recorded} of {accepted} serve tasks recorded"
-            );
-            node.clock().sleep(Span::MICROSECOND).await;
-        }
+        recorded(&node, &kept, accepted.get()).await;
         drop((link, test));
     };
     run_program_on(seed, wire, home, program);
@@ -204,34 +183,13 @@ where
         for _ in 0..count {
             let session = transport.accept().await.expect("a session");
             let link = test.hub.link(session.clone());
-            let (tasks, kept, accepted, clock) = (
-                tasks.clone(),
-                Arc::clone(&kept),
-                Rc::clone(&accepted),
-                node.clock(),
-            );
-            ends.push(session.clone());
-            tasks.clone().spawn(async move {
-                while let Ok(mut incoming) = session.accept().await {
-                    accepted.set(accepted.get() + 1);
-                    let (link, kept, clock) =
-                        (link.clone(), Arc::clone(&kept), clock.clone());
-                    tasks.spawn(async move {
-                        header(&mut incoming).await;
-                        let got = answer(link.serve(incoming), &clock).await;
-                        kept.lock().expect("not poisoned").push(got);
-                    });
-                }
-            });
+            tasks.spawn(serve_each(&session, &link, &tasks, &node, &kept, &accepted));
+            ends.push(session);
         }
         for session in ends {
             session.closed().await;
         }
-        let deadline = node.clock().now() + Span::SECOND;
-        while kept.lock().expect("not poisoned").len() < accepted.get() {
-            assert!(node.clock().now() < deadline, "each serve task records");
-            node.clock().sleep(Span::MICROSECOND).await;
-        }
+        recorded(&node, &kept, accepted.get()).await;
         drop(test);
     };
     run_program(seed, home, move |node, tasks, at| async move {
@@ -247,6 +205,63 @@ where
         node.clock().sleep(Span::MILLISECOND).await;
     });
     std::mem::take(&mut *served.lock().expect("not poisoned"))
+}
+
+/// What `serve` gave for each stream, in the order they ended.
+type Kept = Arc<Mutex<Vec<Result<Got, serve::Error>>>>;
+
+/// Serves each stream of `session` on `link` in its own task through [`answer`], and
+/// pushes what it gives to `kept`. Counts each stream in `accepted`. Ends when the
+/// session ends.
+fn serve_each(
+    session: &Session,
+    link: &hub::Link,
+    tasks: &env::tasks::Tasks,
+    node: &sim::node::Node,
+    kept: &Kept,
+    accepted: &Rc<Cell<usize>>,
+) -> impl Future<Output = ()> + 'static {
+    let (session, link, tasks, clock, kept, accepted) = (
+        session.clone(),
+        link.clone(),
+        tasks.clone(),
+        node.clock(),
+        Arc::clone(kept),
+        Rc::clone(accepted),
+    );
+    async move {
+        while let Ok(mut incoming) = session.accept().await {
+            accepted.set(accepted.get() + 1);
+            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), clock.clone());
+            tasks.spawn(async move {
+                header(&mut incoming).await;
+                let got = answer(link.serve(incoming), &clock).await;
+                kept.lock().expect("not poisoned").push(got);
+            });
+        }
+    }
+}
+
+/// Waits until `kept` holds what `serve` gave for each of `accepted` streams. The end
+/// of the home's future drops each serve task that has not yet recorded.
+///
+/// # Panics
+///
+/// When a second passes first.
+async fn recorded(node: &sim::node::Node, kept: &Kept, accepted: usize) {
+    let deadline = node.clock().now() + Span::SECOND;
+    loop {
+        let recorded = kept.lock().expect("not poisoned").len();
+        if recorded == accepted {
+            break;
+        }
+        let now = node.clock().now();
+        assert!(
+            now < deadline,
+            "{recorded} of {accepted} serve tasks recorded"
+        );
+        node.clock().sleep(Span::MICROSECOND).await;
+    }
 }
 
 /// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
