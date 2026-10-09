@@ -79,10 +79,8 @@
   the `Request`, before it allocates or reads a byte of the body, and the reservation
   ends when the caller sends or drops its `Reply`. After that, the caller holds the
   body. A body that does not fit stops with `BUSY` (`serve::Error::Bodies`), and the
-  link takes its next request. A stalled request holds its reservation until its stream
-  or session ends; only an admitted subject can do this. Lost: pool blocks for a body,
-  which take the blocks that live writes need; a cap on links as the bound, 16 MiB times
-  the links. Decided by `laptop.architect` (2026-10-08T21:34:56Z,
+  link takes its next request. Lost: pool blocks for a body, which take the blocks that
+  live writes need; a cap on links as the bound, 16 MiB times the links. Decided by `laptop.architect` (2026-10-08T21:34:56Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483); the
   names, and the drop of the node bound, by `laptop.architect` (2026-10-09T03:49:08Z,
   https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6073876384).
