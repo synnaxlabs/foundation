@@ -2,4 +2,9 @@ ops.argument	Match the arguments to the operation in `foundation docs`
 ops.unknown-operation	Use a name from `foundation docs`
 ops.input	Give standard input a source that can be read
 ops.output	Give standard output a destination that can be written
+ops.bad-plan	Make a plan with `foundation plan`, and apply it with no edits
+ops.behind	Fix the cause, then plan again
+ops.stale-plan	Plan again
+ops.apply	Fix the cause in the message, then plan and apply again
 ops.unknown-extension	Use a file that ends in `.hcl`
+ops.path-not-utf8	Rename the file to a UTF-8 name

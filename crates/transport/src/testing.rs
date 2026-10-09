@@ -2,7 +2,7 @@
 //! or a session on each.
 
 use std::future::poll_fn;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
@@ -27,6 +27,8 @@ pub(crate) const MESSAGE_BYTES_MAX: usize = 1 << 16;
 
 /// The UDP port of [`address`].
 pub(crate) const PORT: u16 = 4433;
+/// The first port that a bind of port 0 takes under `sim`.
+pub(crate) const FREE: u16 = 49152;
 
 /// The key of the client node of [`sessions`].
 pub(crate) const CLIENT: PrivateKey = PrivateKey([1; 32]);
@@ -96,6 +98,7 @@ impl Shard {
     /// A config for a program on this shard.
     pub(crate) fn client(&self) -> client::Config {
         client::Config {
+            net: self.net.clone(),
             clock: self.clock.clone(),
             entropy: self.entropy.clone(),
             tasks: self.tasks.clone(),
@@ -147,6 +150,11 @@ pub(crate) fn address(node: &Node) -> SocketAddr {
     SocketAddr::new(node.addresses()[0], PORT)
 }
 
+/// Port `port` at `[::]`.
+pub(crate) fn any(port: u16) -> SocketAddr {
+    SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
+}
+
 /// The one part of a port bound at `at`.
 pub(crate) fn part(net: &Net, at: SocketAddr) -> port::Part {
     let port = Port::bind(net, at).expect("a port");
@@ -185,15 +193,21 @@ pub(crate) fn start<F: Future<Output = ()> + 'static>(
 ///
 /// When [`Transport::new`] refuses `config`, with its error.
 pub(crate) fn setup(config: &Config) -> quic::Setup {
-    let config = Config {
+    copy(config)
+        .setup()
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// A config equal to `config`.
+fn copy(config: &Config) -> Config {
+    Config {
         private_key: config.private_key.clone(),
         clock: config.clock.clone(),
         entropy: config.entropy.clone(),
         tasks: config.tasks.clone(),
         pool: Rc::clone(&config.pool),
         ..*config
-    };
-    config.setup().unwrap_or_else(|error| panic!("{error}"))
+    }
 }
 
 /// Starts a shard on `node` that runs `main` with a QUIC carrier for `key` at
@@ -221,6 +235,21 @@ pub(crate) fn transport<F: Future<Output = ()> + 'static>(
         let transport = Transport::new(config, part).expect("a transport");
         main(transport, node).await;
     });
+}
+
+/// `count` transports on `node` with the limits of `config`, each with its own key
+/// and port from [`PORT`] up, so that each makes its own session to one peer.
+pub(crate) fn transports(config: &Config, node: &Node, count: u8) -> Vec<Transport> {
+    (0..count)
+        .map(|index| {
+            let config = Config {
+                private_key: PrivateKey([10 + index; 32]),
+                ..copy(config)
+            };
+            let at = SocketAddr::new(node.addresses()[0], PORT + u16::from(index));
+            Transport::new(config, part(&node.net(), at)).expect("a transport")
+        })
+        .collect()
 }
 
 /// Runs `test` on one shard of a sim run made from `value`, and gives its result.

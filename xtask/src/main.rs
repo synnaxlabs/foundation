@@ -6,6 +6,7 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod fuzz;
 mod globals;
 mod map;
 mod miri;
@@ -15,7 +16,7 @@ mod review;
 mod select;
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use serde_json::Value;
@@ -33,12 +34,17 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
+        ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
+        ["fuzz", seconds] => fuzz::seconds(seconds)
+            .map_err(|e| vec![e])
+            .and_then(|seconds| fuzz::run(root, seconds)),
         ["open62541"] => open62541::check(root),
         ["open62541", tag] => open62541::run(root, open62541::URL, tag),
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
                 "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
+                 cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>"
             );
@@ -81,7 +87,7 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
             problems.push(format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
                  with its layer, its job, and its allowed dependencies, matching the \
-                 crate map in docs/decisions.md."
+                 crate map in docs/decisions/crate-map.md."
             ));
             continue;
         };
@@ -122,17 +128,59 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
     )
 }
 
-/// Runs `cargo metadata` on the workspace at `root`.
+/// Runs `cargo metadata` on the members of the workspace at `root`.
 fn metadata(root: &Path) -> Result<Value, String> {
+    metadata_with(root, &["--no-deps"])
+}
+
+/// The resolved dependency graph of the workspace at `dir`. It fails when the lock of
+/// the workspace is stale.
+fn graph(dir: &Path) -> Result<Value, String> {
+    metadata_with(dir, &["--locked"])
+}
+
+/// Runs `cargo metadata` with `flags` on the workspace at `dir`.
+fn metadata_with(dir: &Path, flags: &[&str]) -> Result<Value, String> {
     let output = cargo()
-        .current_dir(root)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(dir)
+        .args(["metadata", "--format-version", "1"])
+        .args(flags)
         .output()
         .map_err(|e| format!("cargo metadata: {e}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
+}
+
+/// The toolchain in `rust-toolchain-nightly` of a workspace, which Miri and cargo-fuzz
+/// use.
+struct Nightly {
+    root: PathBuf,
+    pin: String,
+}
+
+impl Nightly {
+    /// A command that runs cargo of this toolchain through rustup, at the workspace
+    /// root.
+    fn cargo(&self) -> Command {
+        let mut command = Command::new("rustup");
+        command
+            .current_dir(&self.root)
+            .args(["run", &self.pin, "cargo"]);
+        command
+    }
+}
+
+/// The toolchain in `rust-toolchain-nightly` of the workspace at `root`.
+fn nightly(root: &Path) -> Result<Nightly, String> {
+    let pin = root.join("rust-toolchain-nightly");
+    let nightly =
+        std::fs::read_to_string(&pin).map_err(|e| format!("{}: {e}", pin.display()))?;
+    Ok(Nightly {
+        root: root.to_path_buf(),
+        pin: nightly.trim().to_string(),
+    })
 }
 
 /// A command that runs the cargo that runs this task.
@@ -144,7 +192,7 @@ fn cargo() -> Command {
 
 /// The test workspace in `xtask/fixture`.
 #[cfg(test)]
-fn fixture() -> std::path::PathBuf {
+fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture")
 }
 
@@ -153,12 +201,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nightly_runs_cargo_of_the_pin_at_the_root() {
+        let cargo = nightly(&fixture()).unwrap().cargo();
+        let args: Vec<_> = cargo.get_args().collect();
+        assert_eq!(cargo.get_program(), "rustup");
+        assert_eq!(args, ["run", "nightly-2000-01-01", "cargo"]);
+        assert_eq!(cargo.get_current_dir(), Some(fixture().as_path()));
+    }
+
+    #[test]
+    fn nightly_names_a_missing_pin() {
+        let root = fixture().join("stale");
+        assert_eq!(
+            nightly(&root).err(),
+            Some(format!(
+                "{}: No such file or directory (os error 2)",
+                root.join("rust-toolchain-nightly").display()
+            ))
+        );
+    }
+
+    #[test]
     fn layers_reports_crates_missing_from_the_map() {
         let missing = |name| {
             format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
                  with its layer, its job, and its allowed dependencies, matching the \
-                 crate map in docs/decisions.md."
+                 crate map in docs/decisions/crate-map.md."
             )
         };
         assert_eq!(

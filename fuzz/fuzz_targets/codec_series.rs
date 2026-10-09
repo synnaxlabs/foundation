@@ -5,6 +5,7 @@
 //! the encoded series.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 use types::sample::Type;
@@ -13,7 +14,7 @@ fuzz_target!(|bytes: &[u8]| {
     let [scalar, low, high, series @ ..] = bytes else {
         return;
     };
-    let scalar = fuzz::scalar(*scalar);
+    let scalar = fuzz::codec::scalar(*scalar);
     let count = usize::from(u16::from_le_bytes([*low, *high]));
     let data_type = Type::Scalar(scalar);
     let mut out = vec![0; count * scalar.width()];
@@ -22,7 +23,11 @@ fuzz_target!(|bytes: &[u8]| {
         assert_eq!(len, out.len(), "validate gives another length");
     }
     let decoded = codec::decode(data_type, count, series, &mut out);
-    assert_eq!(validated.map(|_| ()), decoded, "validate and decode disagree");
+    assert_eq!(
+        validated.map(|_| ()),
+        decoded,
+        "validate and decode disagree"
+    );
     let mut decoder = codec::Decoder::new(scalar, count, series);
     let mut vector = vec![0; codec::VECTOR_LEN * scalar.width()];
     let mut joined = Vec::new();

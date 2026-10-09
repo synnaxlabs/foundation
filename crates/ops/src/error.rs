@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::path::PathBuf;
 
-use document::diagnostic::Code;
+use document::Span;
+use document::diagnostic::{Code, Diagnostic};
+use mesh::used::{Behind, Cause};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -10,6 +13,10 @@ const ARGUMENT: Code = Code::new("ops.argument");
 const UNKNOWN: Code = Code::new("ops.unknown-operation");
 const INPUT: Code = Code::new("ops.input");
 const OUTPUT: Code = Code::new("ops.output");
+const BAD_PLAN: Code = Code::new("ops.bad-plan");
+const BEHIND: Code = Code::new("ops.behind");
+const STALE_PLAN: Code = Code::new("ops.stale-plan");
+const APPLY: Code = Code::new("ops.apply");
 
 /// Why a command line did not run to its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,13 +34,31 @@ pub(crate) enum Error {
     Output { message: String },
     /// The config files have problems: at least one.
     Config(Vec<Problem>),
+    /// The plan file holds no plan that `plan` makes.
+    Plan(config::plan::Error),
+    /// The node does not use the newest spec, so it can neither plan nor apply.
+    Behind(Box<Behind>),
+    /// The spec in use is at `pointer`, not at `base`, the spec that the plan changes.
+    Stale {
+        base: spec::Pointer,
+        pointer: spec::Pointer,
+    },
+    /// The region did not apply the plan.
+    Apply(mesh::Error),
 }
 
 impl Error {
     pub(crate) fn status(&self) -> u8 {
         match self {
-            Self::Argument { .. } | Self::Unknown { .. } | Self::Config(_) => 2,
-            Self::Input { .. } | Self::Output { .. } => 1,
+            Self::Argument { .. }
+            | Self::Unknown { .. }
+            | Self::Config(_)
+            | Self::Plan(_) => 2,
+            Self::Input { .. }
+            | Self::Output { .. }
+            | Self::Behind(_)
+            | Self::Stale { .. }
+            | Self::Apply(_) => 1,
         }
     }
 
@@ -59,6 +84,17 @@ impl Error {
             Self::Output { .. } => (
                 OUTPUT,
                 "Give standard output a destination that can be written".to_owned(),
+            ),
+            Self::Plan(_) => (
+                BAD_PLAN,
+                "Make a plan with `foundation plan`, and apply it with no edits"
+                    .to_owned(),
+            ),
+            Self::Behind(_) => (BEHIND, "Fix the cause, then plan again".to_owned()),
+            Self::Stale { .. } => (STALE_PLAN, "Plan again".to_owned()),
+            Self::Apply(_) => (
+                APPLY,
+                "Fix the cause in the message, then plan and apply again".to_owned(),
             ),
         };
         Cow::Owned(vec![Problem {
@@ -111,6 +147,25 @@ pub(crate) struct Problem {
 }
 
 impl Problem {
+    /// The problem of `diagnostic`, whose spans are in the files at `paths`, by
+    /// source.
+    pub(crate) fn of(diagnostic: Diagnostic, paths: &[PathBuf]) -> Self {
+        Self {
+            code: diagnostic.code.as_str().to_owned(),
+            message: diagnostic.message,
+            fix: diagnostic.fix,
+            place: diagnostic.span.map(|span| Place::of(span, paths)),
+            notes: diagnostic
+                .notes
+                .into_iter()
+                .map(|note| Note {
+                    text: note.text,
+                    place: Place::of(note.span, paths),
+                })
+                .collect(),
+        }
+    }
+
     /// `error[<code>]: <message>`, its place, `fix: <fix>`, then each note and its
     /// place, with `escape` on each text.
     fn text(&self, escape: fn(&str) -> String) -> String {
@@ -144,14 +199,32 @@ pub(crate) struct Note {
 /// scalar values, as rustc does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Place {
-    /// The path of the file, as the user or a directory listing gave it, as
-    /// `Path::display` writes it: each part that is not UTF-8 is U+FFFD, so two paths
-    /// can give one text.
+    /// The exact path, as the user or a directory listing gave it. A path that is not
+    /// UTF-8 gives `ops.path-not-utf8` instead.
     pub(crate) file: String,
     /// The line, from 1.
     pub(crate) line: u32,
     /// The column, from 1, in Unicode scalar values.
     pub(crate) column: u32,
+}
+
+impl Place {
+    /// The start of `span`, in the file at `paths` of its source.
+    pub(crate) fn of(span: Span, paths: &[PathBuf]) -> Self {
+        let path = usize::try_from(span.source().0)
+            .ok()
+            .and_then(|source| paths.get(source))
+            .expect("invariant: a span is in a file of the plan");
+        let start = span.start();
+        Self {
+            file: path
+                .to_str()
+                .expect("invariant: `read` refuses a path that is not UTF-8")
+                .to_owned(),
+            line: start.line + 1,
+            column: start.column + 1,
+        }
+    }
 }
 
 /// `  --> <file>:<line>:<column>`, as rustc writes a place, and a new line.
@@ -177,6 +250,35 @@ impl fmt::Display for Error {
                 [one] => f.write_str(&one.message),
                 _ => write!(f, "the config files have {} problems", problems.len()),
             },
+            Self::Plan(error) => error.fmt(f),
+            Self::Behind(behind) => {
+                let Behind { pointer, cause } = &**behind;
+                write!(f, "the node does not use the newest spec, at {pointer}: ")?;
+                match cause {
+                    Cause::Read(error) => write!(f, "its tree does not read: {error}"),
+                    Cause::Problems(problems) => {
+                        f.write_str("it has problems at this build: ")?;
+                        for (i, problem) in problems.iter().enumerate() {
+                            let between = if i == 0 { "" } else { "; " };
+                            write!(f, "{between}{problem}")?;
+                        }
+                        Ok(())
+                    }
+                    Cause::Blob(error) => {
+                        write!(f, "a call of the store failed: {error}")
+                    }
+                    Cause::Files(error) => write!(
+                        f,
+                        "the file of the pointer in use was not made durable: {error}"
+                    ),
+                }
+            }
+            Self::Stale { base, pointer } => write!(
+                f,
+                "the spec changed: the spec is at {pointer}, not at the base {base} \
+                 of the plan"
+            ),
+            Self::Apply(error) => error.fmt(f),
         }
     }
 }

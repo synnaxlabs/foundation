@@ -3,85 +3,21 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use connector::cancel;
-use connector::kind::{self, Channels, Context, Table};
+use connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Document, Position, Source, Span};
+use document::{Position, Source, Span};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
+use spec::subject::Subject;
 use types::channel::Key;
 use types::name::Name;
 use types::sample;
 
 use super::{Output, plan};
+use crate::common::{PLANT, Reader, SITE, files, front_ends, hcl, name, placed_site};
 use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd};
-
-const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
-const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
-
-/// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
-/// each attribute, so it stands in for each kind of the fixtures.
-struct Reader;
-
-impl kind::Kind for Reader {
-    type Config = Vec<Name>;
-
-    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
-        let reads = config
-            .blocks
-            .iter()
-            .filter(|block| &*block.keyword == "read");
-        Ok(reads
-            .map(|block| block.labels[0].text.parse().expect("a name"))
-            .collect())
-    }
-
-    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
-        Ok(Channels {
-            reads: Vec::new(),
-            writes: writes.clone(),
-        })
-    }
-
-    fn discover(
-        &self,
-        _: &cancel::Token,
-    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
-        std::future::ready(Ok(Vec::new()))
-    }
-
-    fn run(
-        &self,
-        _: Context<Vec<Name>>,
-    ) -> impl Future<Output = Result<(), kind::Error>> {
-        std::future::ready(Ok(()))
-    }
-}
-
-fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
-}
-
-fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
-    BTreeMap::from([("hcl", FrontEnd { read: hcl })])
-}
-
-fn name(text: &str) -> Name {
-    text.parse().expect("a name")
-}
-
-fn files(files: &[(&str, &str)]) -> Vec<File> {
-    files
-        .iter()
-        .map(|(path, text)| File {
-            path: PathBuf::from(path),
-            text: (*text).to_owned(),
-        })
-        .collect()
-}
 
 fn empty() -> spec::Pointer {
     spec::Pointer {
@@ -104,6 +40,7 @@ fn run(
         &front_ends(),
         &kinds,
     )
+    .map(|(output, _)| output)
 }
 
 fn problems(texts: &[(&str, &str)]) -> Error {
@@ -119,11 +56,6 @@ fn channel(key: u128, kind: channel::Kind) -> Definition {
         key: Key::from_u128(key),
         kind,
     })
-}
-
-/// `site.hcl` with a placement that homes its index on `edge`.
-fn placed_site() -> String {
-    format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
 const INDEX: channel::Kind = channel::Kind::Index {
@@ -233,10 +165,12 @@ fn refuses_a_file_that_no_front_end_reads() {
     assert_eq!(
         problems.text(),
         "\
-error[ops.unknown-extension]: no config syntax reads \"plant.yaml\"
+error[ops.unknown-extension]: no config syntax reads this file
+  --> plant.yaml:1:1
 fix: Use a file that ends in `.hcl`
 
-error[ops.unknown-extension]: no config syntax reads \"plant\"
+error[ops.unknown-extension]: no config syntax reads this file
+  --> plant:1:1
 fix: Use a file that ends in `.hcl`
 "
     );
@@ -245,14 +179,16 @@ fix: Use a file that ends in `.hcl`
         serde_json::json!({ "errors": [
             {
                 "code": "ops.unknown-extension",
-                "message": "no config syntax reads \"plant.yaml\"",
+                "message": "no config syntax reads this file",
                 "fix": "Use a file that ends in `.hcl`",
+                "place": { "file": "plant.yaml", "line": 1, "column": 1 },
                 "notes": [],
             },
             {
                 "code": "ops.unknown-extension",
-                "message": "no config syntax reads \"plant\"",
+                "message": "no config syntax reads this file",
                 "fix": "Use a file that ends in `.hcl`",
+                "place": { "file": "plant", "line": 1, "column": 1 },
                 "notes": [],
             },
         ]})
@@ -263,10 +199,10 @@ fix: Use a file that ends in `.hcl`
 fn names_each_extension_of_the_table_in_the_fix() {
     let mut front_ends = front_ends();
     front_ends.insert("toml", FrontEnd { read: hcl });
-    let two = front_end::unknown(&PathBuf::from("plant.json"), &front_ends);
+    let two = front_end::unknown(Source(0), &front_ends);
     assert_eq!(two.fix, "Use a file that ends in `.hcl` or `.toml`");
     front_ends.insert("yaml", FrontEnd { read: hcl });
-    let diagnostic = front_end::unknown(&PathBuf::from("plant.json"), &front_ends);
+    let diagnostic = front_end::unknown(Source(0), &front_ends);
     assert_eq!(
         diagnostic.fix,
         "Use a file that ends in `.hcl`, `.toml`, or `.yaml`"
@@ -386,7 +322,8 @@ error[hcl.syntax]: the file needs a key, a block, or the end of the body here
   --> bad.hcl:2:1
 fix: Write it here, or correct the text here or before it
 
-error[ops.unknown-extension]: no config syntax reads \"x.yaml\"
+error[ops.unknown-extension]: no config syntax reads this file
+  --> x.yaml:1:1
 fix: Use a file that ends in `.hcl`
 "
     );
@@ -409,6 +346,7 @@ fn gives_the_json_of_a_change_and_a_removal() {
     ]);
     let planned = run(&[("site.hcl", &placed_site())], &applied).expect("a plan");
     let json = json(&planned);
+    assert_eq!(json["homes"], serde_json::json!({ "site.time": "edge" }));
     let changes = &json["changes"];
     assert_eq!(
         *changes,
@@ -434,19 +372,6 @@ fn gives_the_json_of_a_change_and_a_removal() {
 }
 
 #[test]
-#[should_panic(expected = "invariant: `node` gives a front end")]
-fn refuses_an_empty_table_of_front_ends() {
-    drop(plan(
-        &[],
-        empty(),
-        &BTreeMap::new(),
-        &BTreeSet::new(),
-        &BTreeMap::new(),
-        &Table::new(),
-    ));
-}
-
-#[test]
 fn names_one_problem_or_the_count_and_exits_with_2() {
     let wrong = PLANT.replacen("data_type", "datatype", 1);
     let two = problems(&[("plant.hcl", &wrong)]);
@@ -456,7 +381,7 @@ fn names_one_problem_or_the_count_and_exits_with_2() {
     );
     assert_eq!(
         problems(&[("x.yaml", "")]).to_string(),
-        "no config syntax reads \"x.yaml\""
+        "no config syntax reads this file"
     );
 }
 
@@ -504,20 +429,27 @@ fn escapes_a_control_character_in_the_text_of_a_problem() {
 }
 
 #[test]
-fn quotes_a_path_that_no_front_end_reads() {
+fn escapes_the_place_of_a_file_that_no_front_end_reads() {
     assert_eq!(
         problems(&[("a\\\u{202e}\u{2028}b.yaml", "")]).text(),
-        "error[ops.unknown-extension]: no config syntax reads \
-         \"a\\\\\\u{202e}\\u{2028}b.yaml\"\n\
+        "error[ops.unknown-extension]: no config syntax reads this file\n  \
+         --> a\\\\\\u{202e}\\u{2028}b.yaml:1:1\n\
          fix: Use a file that ends in `.hcl`\n"
     );
+}
+
+#[test]
+fn gives_the_exact_path_in_the_json_of_a_place() {
+    let path = "a\u{1b}\\\u{202e}.hcl";
+    let problems = problems(&[(path, "channel {\n")]);
+    assert_eq!(problems.json()["errors"][0]["place"]["file"], path);
 }
 
 #[test]
 fn picks_the_front_end_by_the_text_after_the_last_dot() {
     let placed = placed_site();
     let planned = run(&[("site.v2.hcl", &placed)], &BTreeMap::new()).expect("a plan");
-    assert_eq!(planned.added, 3);
+    assert_eq!(planned.counts.added, 3);
 }
 
 #[test]
@@ -525,10 +457,12 @@ fn gives_two_paths_that_differ_two_texts() {
     let problems = problems(&[("a\\n.yaml", ""), ("a\n.yaml", "")]);
     assert_eq!(
         problems.text(),
-        "error[ops.unknown-extension]: no config syntax reads \"a\\\\n.yaml\"\n\
+        "error[ops.unknown-extension]: no config syntax reads this file\n  \
+         --> a\\\\n.yaml:1:1\n\
          fix: Use a file that ends in `.hcl`\n\
          \n\
-         error[ops.unknown-extension]: no config syntax reads \"a\\n.yaml\"\n\
+         error[ops.unknown-extension]: no config syntax reads this file\n  \
+         --> a\\n.yaml:1:1\n\
          fix: Use a file that ends in `.hcl`\n"
     );
 }
@@ -544,9 +478,9 @@ fn bytes(paths: &[&[u8]], text: &str) -> Vec<File> {
 }
 
 #[test]
-fn quotes_each_byte_of_a_path_that_is_not_utf8() {
+fn refuses_a_path_that_is_not_utf8_before_its_extension() {
     let error = plan(
-        &bytes(&[b"a\xff.yaml", b"a\xfe.yaml"], ""),
+        &bytes(&[b"a\xff.hcl", b"a\xfe.hcl", b"a\xff.yaml"], &placed_site()),
         empty(),
         &BTreeMap::new(),
         &BTreeSet::new(),
@@ -556,33 +490,25 @@ fn quotes_each_byte_of_a_path_that_is_not_utf8() {
     .expect_err("problems");
     assert_eq!(
         error.text(),
-        "error[ops.unknown-extension]: no config syntax reads \"a\\xFF.yaml\"\n\
-         fix: Use a file that ends in `.hcl`\n\
-         \n\
-         error[ops.unknown-extension]: no config syntax reads \"a\\xFE.yaml\"\n\
-         fix: Use a file that ends in `.hcl`\n"
+        "\
+error[ops.path-not-utf8]: the path \"a\\xFF.hcl\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+
+error[ops.path-not-utf8]: the path \"a\\xFE.hcl\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+
+error[ops.path-not-utf8]: the path \"a\\xFF.yaml\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+"
     );
 }
 
 #[test]
-fn reads_a_name_that_is_not_utf8_by_its_extension() {
-    let placed = placed_site();
-    let planned = plan(
-        &bytes(&[b"\xff.hcl"], &placed),
-        empty(),
-        &BTreeMap::new(),
-        &BTreeSet::from([name("edge")]),
-        &front_ends(),
-        &Table::new(),
-    )
-    .expect("a plan");
-    assert_eq!(planned.added, 3);
-}
-
-#[test]
-fn places_a_path_that_is_not_utf8_as_display_writes_it() {
+fn gives_a_path_that_is_not_utf8_in_file_order_with_the_other_problems() {
+    let mut files = files(&[("a.hcl", "channel {\n"), ("a.txt", "")]);
+    files.insert(1, bytes(&[b"a\xff.hcl"], "").remove(0));
     let error = plan(
-        &bytes(&[b"a\xe2\x82.hcl", b"a\xff\xfe.hcl"], "{"),
+        &files,
         empty(),
         &BTreeMap::new(),
         &BTreeSet::new(),
@@ -590,12 +516,124 @@ fn places_a_path_that_is_not_utf8_as_display_writes_it() {
         &Table::new(),
     )
     .expect_err("problems");
-    let Error::Config(problems) = error else {
-        panic!("a config error");
-    };
-    let files: Vec<&str> = problems
-        .iter()
-        .map(|problem| problem.place.as_ref().expect("a place").file.as_str())
-        .collect();
-    assert_eq!(files, ["a\u{fffd}.hcl", "a\u{fffd}\u{fffd}.hcl"]);
+    assert_eq!(
+        error.text(),
+        "\
+error[hcl.syntax]: the file needs a key, a block, or the end of the body here
+  --> a.hcl:2:1
+fix: Write it here, or correct the text here or before it
+
+error[ops.path-not-utf8]: the path \"a\\xFF.hcl\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+
+error[ops.unknown-extension]: no config syntax reads this file
+  --> a.txt:1:1
+fix: Use a file that ends in `.hcl`
+"
+    );
+}
+
+/// Lines that `ssh-keygen -t ed25519` wrote, and the fingerprint that
+/// `ssh-keygen -lf` gives for each.
+const ALICE: &str = concat!(
+    "ssh-ed25519 ",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg",
+    " alice@laptop",
+);
+const ALICE_FINGERPRINT: &str = "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc";
+const BOB: &str = concat!(
+    "ssh-ed25519 ",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6",
+    " bob@site",
+);
+const BOB_FINGERPRINT: &str = "SHA256:yrQ4K597Aogzr4Zp1m1So77Lh8tM3HApOLoy0kzzo3k";
+/// The 32 bytes of the key of `BOB`.
+const BOB_KEY: [u8; 32] = [
+    253, 16, 48, 49, 70, 56, 119, 210, 245, 116, 123, 213, 165, 114, 10, 251, 62, 66,
+    115, 80, 224, 21, 235, 30, 207, 93, 24, 48, 243, 236, 166, 58,
+];
+
+/// A subject labeled `carol` with Bob's key, then Alice's.
+fn carol() -> String {
+    format!("subject \"carol\" {{\n  keys = [\"{BOB}\", \"{ALICE}\"]\n}}\n")
+}
+
+/// The applied subject labeled `alice`, with the key `bytes`.
+fn applied_subject(bytes: [u8; 32]) -> BTreeMap<Name, Definition> {
+    let key = types::ed25519::PublicKey::new(bytes).expect("a key");
+    let subject = Subject::new(vec![key]).expect("a subject");
+    BTreeMap::from([(name("alice.@subject"), Definition::Subject(subject))])
+}
+
+#[test]
+fn shows_the_fingerprint_of_each_key_of_a_subject_by_its_bytes() {
+    let planned =
+        run(&[("people.hcl", &carol())], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        format!(
+            "\
++ subject carol
+    key {ALICE_FINGERPRINT}
+    key {BOB_FINGERPRINT}
+- subject alice
+    key {BOB_FINGERPRINT}
+1 to add, 0 to change, 1 to remove.
+"
+        )
+    );
+}
+
+#[test]
+fn gives_the_fingerprints_of_a_subject_after_the_apply_or_before_a_removal() {
+    let planned =
+        run(&[("people.hcl", &carol())], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        json(&planned)["changes"],
+        serde_json::json!([
+            {
+                "action": "add",
+                "kind": "subject",
+                "name": "carol",
+                "place": { "file": "people.hcl", "line": 1, "column": 9 },
+                "fingerprints": [ALICE_FINGERPRINT, BOB_FINGERPRINT],
+            },
+            {
+                "action": "remove",
+                "kind": "subject",
+                "name": "alice",
+                "fingerprints": [BOB_FINGERPRINT],
+            },
+        ])
+    );
+}
+
+#[test]
+fn gives_the_fingerprints_of_a_change_after_the_apply() {
+    let alice = format!("subject \"alice\" {{\n  keys = [\"{ALICE}\"]\n}}\n");
+    let planned =
+        run(&[("people.hcl", &alice)], &applied_subject(BOB_KEY)).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        format!(
+            "\
+~ subject alice
+    key {ALICE_FINGERPRINT}
+0 to add, 1 to change, 0 to remove.
+"
+        )
+    );
+}
+
+#[test]
+fn gives_no_fingerprints_for_another_kind() {
+    let planned =
+        run(&[("site.hcl", &placed_site())], &BTreeMap::new()).expect("a plan");
+    let json = json(&planned);
+    let changes = json["changes"].as_array().expect("changes");
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.get("fingerprints").is_none())
+    );
 }

@@ -736,6 +736,11 @@ impl Budget {
         }
     }
 
+    /// The claims that queued for room since this budget was made.
+    fn queued(&self) -> u64 {
+        self.tickets.iter().sum()
+    }
+
     /// Whether a claim of `class` holds room, taken or not.
     fn holds(&self, class: Class) -> bool {
         self.held[class.rank()] + self.given[class.rank()] > 0
@@ -1087,6 +1092,11 @@ impl Sending {
 }
 
 impl Streams {
+    /// The messages that waited for room in the send budget.
+    pub(super) fn budget_waits(&self) -> u64 {
+        self.sending.budget.queued()
+    }
+
     /// The streams of a connection that refuses a message over `bytes_max`, with a
     /// window of `window_bytes`.
     pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
@@ -2823,6 +2833,7 @@ mod tests {
         assert!(budget.charge(stream(1), 2, &mut b, Order::RANK));
         assert!(budget.charge(stream(2), 7, &mut c, Order::RANK));
         assert!(!budget.charge(stream(3), 5, &mut d, Order::RANK));
+        assert_eq!(budget.queued(), 2);
         assert_eq!(release(&mut budget, &mut b, Order::RANK), []);
         let woken = release(&mut budget, &mut c, Order::RANK);
         assert_eq!(woken, [stream(3)]);
@@ -2844,6 +2855,7 @@ mod tests {
         for (index, claim) in (1..).zip(rest) {
             assert!(!budget.charge(stream(index), 3, claim, Order::RANK));
         }
+        assert_eq!(budget.queued(), 4);
         let woken = release(&mut budget, a, Order::RANK);
         assert_eq!(woken, [stream(2), stream(4), stream(3)]);
     }
@@ -2858,6 +2870,7 @@ mod tests {
         assert!(!budget.charge(stream(2), 5, &mut large, Order::RANK));
         assert!(!budget.charge(stream(3), 1, &mut small, Order::RANK));
         assert!(!budget.charge(stream(4), 1, &mut catch_up, Order::RANK));
+        assert_eq!(budget.queued(), 3);
         assert_eq!(release(&mut budget, &mut second, Order::RANK), []);
         let woken = release(&mut budget, &mut first, Order::RANK);
         assert_eq!(woken, [stream(2), stream(3), stream(4)]);
@@ -3208,6 +3221,45 @@ mod tests {
                     read.iter().filter(|&&(at, _)| at == id).cloned().collect();
                 assert_eq!(at, [(id, expected)]);
             }
+        });
+    }
+
+    #[test]
+    fn each_message_that_waits_for_send_budget_room_counts_once() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let waited = pair.client.endpoint.budget_waits();
+            let second = open_sender(&mut pair, Class::Complete);
+            let third = open_sender(&mut pair, Class::Complete);
+            let fourth = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            // The second takes room at once, and the third and fourth wait for it.
+            let messages = [
+                (&second, vec![0xb; 100]),
+                (&third, vec![0xc; MESSAGE_MAX]),
+                (&fourth, vec![0xd]),
+            ];
+            for (sender, message) in messages {
+                let message = shard.block(&message);
+                let written = pair::write(
+                    &mut pair.client.endpoint,
+                    now,
+                    sender,
+                    &mut Some(message),
+                );
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
+            let mut senders = [first, second, third, fourth];
+            exchange(&mut pair, &mut senders, 10 * RUN);
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
+            let (now, key) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, key, Code(1));
+            pair.run(10 * RUN);
+            assert!(pair.client.endpoint.drained());
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
         });
     }
 
@@ -3683,7 +3735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_sender_that_the_peer_stops_gives_no_event() {
+    fn a_reset_sender_that_the_peer_stops_gives_only_its_freed_stream() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -3695,7 +3747,10 @@ mod tests {
             pair.client.endpoint.reset(now, &mut sender, Code(9));
             pair.server.endpoint.stop(now, receiver, Code(9));
             pair.run(RUN);
-            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&available]);
         });
     }
 
@@ -4177,11 +4232,13 @@ mod tests {
             let id = sender.key().id;
             let now = pair.now();
             pair.client.endpoint.reset(now, &mut sender, Code(9));
-            // The stop goes before the client's reset arrives, and the link loses it.
+            // The stop goes before the client's reset arrives. The link loses it and
+            // the next datagram, the `MAX_STREAMS` of the stream that the reset frees,
+            // so the resent stop comes after the reset's ACK.
             let over = VarInt::from_u64(1 << 32).expect("a varint");
             let stopped = pair.server.connection().recv_stream(id).stop(over);
             stopped.expect("stopped");
-            pair.server.drops = 1;
+            pair.server.drops = 2;
             pair.run(Duration::ZERO);
             assert_ignored_late_stop(&mut pair, false, id);
         });
@@ -4472,7 +4529,11 @@ mod tests {
             let writable = Event::Writable {
                 stream: sender.key(),
             };
-            assert_eq!(events(&pair.client).last(), Some(&&writable));
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            let given = events(&pair.client);
+            assert_eq!(given[given.len() - 2..], [&writable, &available]);
             let now = pair.now();
             for _ in 0..2 {
                 let written = pair::write(
@@ -4540,6 +4601,108 @@ mod tests {
                 .streams()
                 .remote_open_streams(Dir::Uni);
             assert_eq!(open, 0);
+        });
+    }
+
+    /// The count of `MAX_STREAMS` frames for one-way streams that the server sent.
+    fn announced(pair: &mut Pair) -> u64 {
+        pair.server.connection().stats().frame_tx.max_streams_uni
+    }
+
+    /// Ends the client's `sender`, whose stream the server holds in `incoming`, and
+    /// reads it to its end on the server, which frees the stream.
+    fn end(pair: &mut Pair, sender: &mut Sender, incoming: &mut [Incoming]) {
+        let finished = pair.client.endpoint.finish(pair.now(), sender);
+        assert_eq!(finished, Ok(()));
+        pair.run(RUN);
+        let id = sender.key().id;
+        let at = |incoming: &&mut Incoming| incoming.receiver.key().id == id;
+        let incoming = incoming.iter_mut().find(at).expect("an incoming stream");
+        let now = pair.now();
+        let read = drain(&mut pair.server, now, &mut incoming.receiver);
+        assert_eq!(read, (vec![b"a".to_vec()], true));
+        pair.run(RUN);
+    }
+
+    /// Opens `n` streams from the client, each with "a", and accepts each on the
+    /// server.
+    fn open(pair: &mut Pair, shard: &Shard, n: u32) -> (Vec<Sender>, Vec<Incoming>) {
+        let now = pair.now();
+        let senders = (0..n)
+            .map(|_| {
+                let mut sender = open_sender(pair, Class::Complete);
+                write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+                sender
+            })
+            .collect();
+        pair.run(RUN);
+        let server = key(&pair.server);
+        let incoming = iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+        (senders, incoming)
+    }
+
+    /// Opens a stream from the client with no wait.
+    fn try_open(pair: &mut Pair) -> Option<Sender> {
+        let (now, key) = (pair.now(), key(&pair.client));
+        pair.client.endpoint.open_sender(now, key, Class::Complete)
+    }
+
+    #[test]
+    fn each_freed_stream_at_the_limit_gives_a_max_streams_frame_with_or_without_a_wait()
+    {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (mut senders, mut incoming) =
+                open(&mut pair, shard, testing::STREAMS_MAX);
+            let before = announced(&mut pair);
+            end(&mut pair, &mut senders[0], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 1, "a free, and no wait");
+            assert!(try_open(&mut pair).is_some());
+            assert!(try_open(&mut pair).is_none());
+            pair.run(RUN);
+            assert_eq!(announced(&mut pair), before + 1, "no stream is free");
+            end(&mut pair, &mut senders[1], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 2, "a wait, then a free");
+            assert!(try_open(&mut pair).is_some());
+        });
+    }
+
+    #[test]
+    fn each_freed_stream_below_the_limit_gives_a_max_streams_frame() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (mut senders, mut incoming) = open(&mut pair, shard, 2);
+            let before = announced(&mut pair);
+            for (ended, sender) in (1..).zip(&mut senders) {
+                end(&mut pair, sender, &mut incoming);
+                assert_eq!(announced(&mut pair), before + ended);
+            }
+        });
+    }
+
+    #[test]
+    fn a_burst_of_freed_streams_gives_one_max_streams_frame() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (mut senders, mut incoming) =
+                open(&mut pair, shard, testing::STREAMS_MAX);
+            let before = announced(&mut pair);
+            for sender in &mut senders[..2] {
+                let finished = pair.client.endpoint.finish(pair.now(), sender);
+                assert_eq!(finished, Ok(()));
+            }
+            pair.run(RUN);
+            let now = pair.now();
+            for incoming in &mut incoming[..2] {
+                let read = drain(&mut pair.server, now, &mut incoming.receiver);
+                assert_eq!(read, (vec![b"a".to_vec()], true));
+            }
+            pair.run(RUN);
+            assert_eq!(announced(&mut pair), before + 1);
+            for _ in 0..2 {
+                assert!(try_open(&mut pair).is_some());
+            }
+            assert!(try_open(&mut pair).is_none());
         });
     }
 
@@ -5695,8 +5858,11 @@ mod tests {
             let writable = |sender: &Sender| Event::Writable {
                 stream: sender.key(),
             };
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
             let given = events(&pair.client).split_off(seen);
-            assert_eq!(given, [&writable(&second), &writable(&first)]);
+            assert_eq!(given, [&writable(&second), &writable(&first), &available]);
         });
     }
 
@@ -5805,7 +5971,10 @@ mod tests {
             let woken = Event::Writable {
                 stream: sender.key(),
             };
-            assert_eq!(events(&pair.client).split_off(seen), [&woken]);
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&woken, &available]);
         });
     }
 

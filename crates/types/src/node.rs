@@ -8,6 +8,17 @@ use std::fmt;
 pub struct Key(u128);
 
 impl Key {
+    /// Makes a UUIDv7 key from a time and random bits. It keeps the time in whole
+    /// milliseconds and uses the low 74 bits of `random`.
+    ///
+    /// # Panics
+    ///
+    /// When `time` is before the Unix epoch.
+    #[must_use]
+    pub fn v7(time: crate::time::Stamp, random: u128) -> Self {
+        Self(crate::uuid::v7(time, random))
+    }
+
     /// Wraps a key's 128 bits.
     #[must_use]
     pub const fn from_u128(bits: u128) -> Self {
@@ -102,6 +113,25 @@ mod tests {
 
     use super::*;
     use crate::common::bytes;
+    use crate::time::Stamp;
+
+    #[test]
+    fn makes_the_rfc_example() {
+        let time = Stamp::from_nanos(0x017f_22e2_79b0 * 1_000_000);
+        let random = 0xcc3 << 62 | 0x18c4_dc0c_0c07_398f;
+        assert_eq!(
+            Key::v7(time, random).to_string(),
+            "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a key is made after the Unix epoch, not at -1 ns"
+    )]
+    fn panics_before_the_epoch() {
+        let _key = Key::v7(Stamp::from_nanos(-1), 0);
+    }
 
     /// p - 1, little-endian.
     fn p_minus_one() -> [u8; 32] {

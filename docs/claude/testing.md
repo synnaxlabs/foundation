@@ -7,22 +7,25 @@ names rule N in `docs/research/r16-rust-guides.md`.
 
 Every component gets clock, network, disk, and randomness as inputs (`env`). Production
 passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
-clock, the network, the disk, or a random source directly. Clippy's
-`disallowed-methods` list in `clippy.toml` enforces this. Only `os` implements the
-`env` seams and calls the OS, sockets included.
+clock, the network, the disk, or a random source directly. Clippy's `disallowed-methods`
+list in `clippy.toml` enforces this. Only `os` implements the `env` seams and calls the
+OS, sockets included. Some tests must reach the OS, such as a test of `os`, a process
+test (Process tests), and a test that bounds its own run time or reads a file of the
+repository. Each call of such a test that the list bans carries
+`#[expect(clippy::disallowed_methods, reason = "...")]` with its reason.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
 behavior. Never print a pointer. No `thread_local!` state. Four exceptions: TLS draws
-its own randomness from aws-lc (TLS RANDOMNESS in `docs/decisions.md`). `sim::Sim::new`
-reads `Instant::now` once as the epoch of the run, and only differences from it are
-read. The `hyper` server of HTTP SIM SERVER reads OS time into a `thread_local!` on each
-poll, only for the `date` header, which is off. It gets no `timer`, so no read changes
-what it does (the person,
+its own randomness from aws-lc (TLS RANDOMNESS in
+`docs/decisions/transport/tls-randomness.md`). `sim::Sim::new` reads `Instant::now` once
+as the epoch of the run, and only differences from it are read. The `hyper` server of
+HTTP SIM SERVER reads OS time into a `thread_local!` on each poll, only for the `date`
+header, which is off. It gets no `timer`, so no read changes what it does (the person,
 https://github.com/synnaxlabs/foundation/issues/1151#issuecomment-6042756353,
 2026-10-07T17:04:29Z). The random state `UA_rng` of the open62541 copy is one per
 thread, so `connector-opcua` sets its start value on each thread that calls open62541
-(OPEN62541 SOURCE in `docs/decisions.md`).
+(OPEN62541 SOURCE in `docs/decisions/connectors/open62541-source.md`).
 
 ## Layers
 
@@ -54,12 +57,34 @@ not touched pages (#803,
 https://github.com/synnaxlabs/foundation/issues/803#issuecomment-6009258555,
 2026-10-06T04:20:13Z). CI keeps it until each runner host has the cgroup cap (#899). An
 assertion through a private field or call, or a compare of the `Debug` string of the
-type under test, is never the only kill. `.cargo/mutants.toml` lists the few functions
-it skips. Each entry is as narrow as one function. Its comment says why no caller or
-peer can see the mutant, or names the test that kills it in a job that the mutants run
-does not see (Miri, loom, another OS). A mutant that a test could kill but none does
-links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
-`rust-toolchain-nightly`, that only those gates use.
+type under test, other than in the test of a hand-written `Debug` impl itself, is never
+the only kill. `.cargo/mutants.toml` lists the few functions it skips. Each entry is as
+narrow as one function. Its comment says why no caller or peer can see the mutant, or
+names the test that kills it in a job that the mutants run does not see (Miri, loom,
+another OS). A mutant made by hand that `cargo mutants` never makes, and that only
+such an assertion kills, gets no entry, since one matches nothing. The doc of that test
+says why no caller or peer can see the mutant, and the round comment links that doc. A
+mutant that a test could kill but none does links its open issue. Miri and cargo-fuzz
+run on one pinned nightly, named in `rust-toolchain-nightly`, that only those gates use.
+
+## Process tests
+
+A process test starts the `foundation` binary. It checks the wiring of the `os` seams
+and what a user sees (exit codes, standard output and error, `foundation status`), not
+logic that a simulated test can reach.
+
+- It lives in `crates/node/tests/it/`: Cargo sets `CARGO_BIN_EXE_foundation` only for
+  the integration tests and benchmarks of `node`.
+- It takes its clock from `os`, so the `disallowed-methods` list holds for it too.
+- A test that starts a node makes its own temporary data directory with `std::fs`, as
+  the tests of `os` do, and removes it at the end.
+- Each listener of the node binds port 0 on loopback, and the test reads the port it
+  got. No fixed port, and nothing outside loopback.
+- Each wait (for output, for an exit, for a condition) ends at a deadline, and a missed
+  deadline fails with the state it saw. Never a fixed sleep.
+- The test ends each process it starts, also when it fails.
+- A defect that a process test finds gets its regression test in simulation when the
+  seams of `sim` can make it happen.
 
 ## Fuzzing
 
@@ -67,8 +92,13 @@ links its open issue. Miri and cargo-fuzz run on one pinned nightly, named in
   workspace members, because it needs nightly. Each decoder of outside input has one
   target, named `<crate>_<decoder>`, such as `spec_tree`.
 - Inputs live in `oracles/fuzz/<target>/`. A crash becomes a permanent input there.
+- A PR that adds a target adds inputs that reach each state of its decoder. A PR that
+  adds or changes an arm that a target reaches adds an input that reaches it, and never
+  defers it: a fuzz input needs no approval.
 - Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
   the ARM runner, which is idle at night.
+- `cargo xtask fuzz [seconds]` runs every target on the pinned nightly, with its
+  inputs in `oracles/fuzz/`.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
@@ -78,9 +108,14 @@ again once to prove that the failure replays (r16 59).
 
 - **A bug fix starts with a failing regression test.** Show it fails for the reason you
   diagnosed, then fix the code. A fix of a test that fails only sometimes is a bug fix
-  too: a regression test that the PR commits makes the cause happen on each run. A
-  failure that a session makes only outside the committed tests, such as in the
-  breaker's worktree, does not count as its regression test.
+  too: a regression test that the PR commits makes the cause happen on each run. When
+  the crate's architect rules that the code is correct in each order of a race, and only
+  a hook that only tests use could force the order, the defect is the test. Then the
+  fixed test passes in each order and still fails when its defect happens in the order
+  that reaches it, and the PR links the failing runs. A race in production code still
+  needs a test that makes it happen on each run. A failure that a session makes only
+  outside the committed tests, such as in the breaker's worktree, does not count as its
+  regression test.
 - **Test what the change is for.** When a change exists to remove work (a clock read, a
   copy, an allocation, a round trip), a test counts that work and fails when the change
   is reverted.
@@ -100,6 +135,9 @@ again once to prove that the failure replays (r16 59).
 - **Assert through the public calls of the type.** A read of a private field, or a
   compare of the `Debug` string of the type under test, checks private state: a new
   field breaks the test while the behavior stays. Use one only with a written reason.
+  The output of a hand-written `Debug` impl is the behavior of that impl, and `fmt` is
+  its public call: a compare of that output, as the test of that impl, needs no reason,
+  and may be the only kill of its mutants.
 - **Test-only constructors and hooks sit behind the `sim` feature**, also a hook that
   only a bench or a fuzz target uses. A crate has no second test feature (r16 57), so
   one check can find a `default` feature that turns on a hook (#1570, `laptop.director`,
@@ -114,8 +152,22 @@ again once to prove that the failure replays (r16 59).
 - **No tautological tests.** Never repeat the implementation's formula or assert that
   a constant equals itself. Assert properties: order, round trip, bounds (r16 56).
 - **No `#[ignore]`.** A known bug is a test that asserts today's wrong result, with a
-  comment and an issue link (r16 53). One exception: an `acceptance` scenario waiting on
-  a surface is `#[ignore = "waits on #<n>"]`.
+  comment and an issue link (r16 53). Two exceptions. A scenario in `acceptance` that
+  cannot run yet is `#[ignore = "waits on #<n>"]`, with each open issue that it waits
+  on. So is a test in `crates/node/tests/it/` that runs the `foundation` binary as the
+  acceptance scenario of an open milestone, as its plan issue names it, and cannot run
+  yet. The PR that closes such an issue removes it from each reason, and removes the
+  `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
+  runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
+  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason. A test
+  of a behavior that differs by OS checks it on each OS that the crate builds for: with
+  `#[cfg(target_os = ...)]` on its expected value, as `UNLINK_DIRECTORY` in
+  `crates/os/tests/it/files.rs` does, or with one test for each OS. A behavior has no
+  test on another OS only when that OS does not have it, when no test can fix its value
+  there (a count that a kernel buffer sets), or when its test needs an item that exists
+  on one OS to cause the case, such as a seccomp filter. A test whose code calls such an
+  item does not compile on another OS, so it is `#[cfg(target_os = ...)]`, not the
+  `cfg_attr` form above.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
@@ -143,8 +195,12 @@ again once to prove that the failure replays (r16 59).
   integration binary per crate: `tests/it/main.rs` with modules, never many `tests/*.rs`
   files (r16 49). A counting allocator is global, so each type of it gets one more
   binary with no harness, for example `tests/alloc` (`counting::Allocator`) or
-  `tests/memory` (`counting::Bytes`). Helpers that binaries share go in
-  `tests/common/mod.rs`.
+  `tests/memory` (`counting::Bytes`). A test that changes or counts state of the whole
+  process (the descriptor table, the thread count, a resource limit, a seccomp filter,
+  the first-lookup state of the C library) gets a binary of its own with that one test,
+  as a counting allocator does. Its module doc names that state. Helpers that binaries
+  share go in `tests/common/`: `mod.rs`, and a file for a helper that only some binaries
+  use, which each of them mounts with `#[path]`.
 
 ## Oracles
 
@@ -154,7 +210,9 @@ conformance suites, and fuzz inputs. Committed proptest failure files
 Agents add to them freely and never weaken them. Weakening means a removed test or
 assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input or
 proptest failure file. A change to the bytes of a fuzz input deletes the old input: keep
-the old file and add the new bytes as a new file. Each target's corpus,
+the old file and add the new bytes as a new file. A PR that changes the byte form of a
+target adds, for each input that decoded on `main` and no longer does, a new file with
+the same content in the new form, and a test that decodes it. Each target's corpus,
 `oracles/fuzz/<target>/`, is its own oracle, and only a byte string that `main` held
 counts. When a PR renames or splits a target, an input of its corpus may move to the
 corpus of each target that replaces it. Such a move, or a move inside one corpus, keeps
@@ -175,6 +233,6 @@ An oracle test target is a `[[test]]` target whose root is under `oracles/`.
 `cargo xtask oracles` fails when no oracle test target compiles a `.rs` file under
 `oracles/`, or when an oracle test target runs no tests.
 
-Each PR description has an oracle section that lists changes under `oracles/`
-and flags any weakening. A fresh adversarial reviewer checks each flagged change and
-argues for fixing the code instead.
+Each PR description has an oracle section that lists each change under `oracles/` and to
+a `proptest-regressions/` file, and flags any weakening. A fresh adversarial reviewer
+checks each flagged change and argues for fixing the code instead.

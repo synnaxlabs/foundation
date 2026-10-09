@@ -1,23 +1,26 @@
 //! A TCP listener: the kernel's socket, polled through Tokio.
 
+use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::task::{Context, Poll, ready};
 
 use env::net::{Error, listener, tcp};
-use rustix::fs::OFlags;
-use rustix::io::{Errno, FdFlags};
-use rustix::net::{AddressFamily, SocketType, ipproto, sockopt};
-use tokio::net::{TcpListener, TcpStream};
+use rustix::io::Errno;
+use rustix::net::{SocketType, ipproto, sockopt};
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 
 use super::socket::Socket;
 use super::stream::Stream;
-use super::{apply, canonical, errno, io_error};
+use super::{apply, bind, canonical, from_io, in_use, io_error};
 
 /// A listening socket.
 pub(super) struct Listener {
-    socket: Socket<std::net::TcpListener, TcpListener>,
+    socket: Socket<std::net::TcpListener, AsyncFd<std::net::TcpListener>>,
     local: SocketAddr,
+    /// Set again on each accepted stream.
+    options: tcp::Options,
 }
 
 impl Listener {
@@ -28,31 +31,37 @@ impl Listener {
         let local = config.local;
         let fd = socket(local).map_err(io_error)?;
         sockopt::set_socket_reuseaddr(&fd, true).map_err(io_error)?;
-        // Each accepted stream inherits the options, and Linux sizes the window of
-        // each stream from the buffers of the listener.
+        // The window scale of each accepted stream comes from the receive buffer of
+        // the listener. macOS does not copy it to the stream, so `accepted` sets each
+        // option again.
         apply(fd.as_fd(), &config.options).map_err(io_error)?;
         bind(fd.as_fd(), local)?;
         listen(fd.as_fd(), local, config.backlog)?;
         let listener = std::net::TcpListener::from(fd);
-        let local = listener.local_addr().map_err(|e| io_error(errno(&e)))?;
+        let local = listener.local_addr().map_err(|e| from_io(&e))?;
         Ok(Self {
-            socket: Socket::Idle(listener),
+            socket: Socket::new(listener),
             local: canonical(local),
+            options: config.options,
         })
     }
-}
 
-/// `EADDRINUSE` on `local` is `AddressInUse`.
-fn in_use(local: SocketAddr) -> impl Fn(Errno) -> Error {
-    move |code| match code {
-        Errno::ADDRINUSE => Error::AddressInUse { local },
-        code => io_error(code),
+    /// A stream the kernel accepted from `peer`, with the options of the listener.
+    fn accepted(
+        &self,
+        stream: std::net::TcpStream,
+        peer: SocketAddr,
+    ) -> Result<Stream, Error> {
+        let local = stream.local_addr().map_err(|e| from_io(&e))?;
+        Stream::new(
+            stream,
+            canonical(local),
+            canonical(peer),
+            &self.options,
+            None,
+        )
+        .map_err(io_error)
     }
-}
-
-/// Binds `fd` to `local`.
-fn bind(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
-    rustix::net::bind(fd, &local).map_err(in_use(local))
 }
 
 /// Makes `fd`, bound to `local`, listen. Linux lets two `SO_REUSEADDR` sockets bind
@@ -67,23 +76,63 @@ fn listen(fd: BorrowedFd<'_>, local: SocketAddr, backlog: u32) -> Result<(), Err
 /// Linux the `writev` of Tokio sends no `MSG_NOSIGNAL`, and the `SIGPIPE` ignore that
 /// std sets at startup does that.
 pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
-    let family = match address {
-        SocketAddr::V4(_) => AddressFamily::INET,
-        SocketAddr::V6(_) => AddressFamily::INET6,
-    };
-    let fd = rustix::net::socket(family, SocketType::STREAM, Some(ipproto::TCP))?;
-    rustix::io::fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
-    rustix::fs::fcntl_setfl(&fd, OFlags::NONBLOCK)?;
+    let fd = super::socket(address, SocketType::STREAM, ipproto::TCP)?;
     #[cfg(target_os = "macos")]
     sockopt::set_socket_nosigpipe(&fd, true)?;
     Ok(fd)
 }
 
-/// A stream the kernel accepted, with the options of the listener inherited.
-fn accepted(stream: TcpStream, peer: SocketAddr) -> Result<Stream, Error> {
-    let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
-    let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    Stream::new(stream, canonical(local), canonical(peer)).map_err(io_error)
+impl Drop for Listener {
+    fn drop(&mut self) {
+        if let Some(fd) = self.socket.fd() {
+            stop(fd);
+        }
+    }
+}
+
+/// Stops the listen of `fd`. A child that another thread spawns holds a copy of the
+/// socket until its exec. On Linux a shutdown stops the listen of each copy, so a
+/// connect is refused at once. macOS gives `ENOTCONN` for a shutdown of a listener.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(unused_variables, reason = "macOS has no call that stops the listen")
+)]
+fn stop(fd: BorrowedFd<'_>) {
+    #[cfg(target_os = "linux")]
+    match rustix::net::shutdown(fd, rustix::net::Shutdown::Read) {
+        // An operator aborted the socket (`ss -K`), or a stop came before: the listen
+        // is stopped.
+        Ok(()) | Err(Errno::NOTCONN) => {}
+        Err(e) => panic!("invariant: the listener {fd:?} shuts down: {e:?}"),
+    }
+}
+
+/// Registers `listener` with the I/O driver of this thread. A failed registration
+/// stops the listen before the socket closes.
+fn register(
+    listener: std::net::TcpListener,
+) -> io::Result<AsyncFd<std::net::TcpListener>> {
+    AsyncFd::try_with_interest(listener, Interest::READABLE).map_err(|failed| {
+        let (listener, error) = failed.into_parts();
+        stop(listener.as_fd());
+        error
+    })
+}
+
+/// Accepts one stream, non-blocking and closed on exec, or registers `cx` for the next.
+fn accept(
+    listener: &AsyncFd<std::net::TcpListener>,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<(std::net::TcpStream, SocketAddr)>> {
+    loop {
+        let mut ready = ready!(listener.poll_read_ready(cx))?;
+        if let Ok(accepted) = ready.try_io(|listener| listener.get_ref().accept()) {
+            return Poll::Ready(accepted.and_then(|(stream, peer)| {
+                stream.set_nonblocking(true)?;
+                Ok((stream, peer))
+            }));
+        }
+    }
 }
 
 impl listener::Driver for Listener {
@@ -97,11 +146,10 @@ impl listener::Driver for Listener {
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         let listener = self
             .socket
-            .live("listener", TcpListener::from_std)
+            .live("TCP listener", register)
             .map_err(io_error)?;
-        let (stream, peer) =
-            ready!(listener.poll_accept(cx)).map_err(|e| io_error(errno(&e)))?;
-        let stream = accepted(stream, peer)?;
+        let (stream, peer) = ready!(accept(listener, cx)).map_err(|e| from_io(&e))?;
+        let stream = self.accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
 }
@@ -109,6 +157,10 @@ impl listener::Driver for Listener {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::num::NonZeroUsize;
+
+    use rustix::fs::OFlags;
+    use rustix::io::FdFlags;
 
     use super::*;
 
@@ -120,7 +172,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 16,
             recv_buffer_bytes: 1 << 15,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: true,
         }
     }
@@ -168,14 +220,27 @@ mod tests {
             options: options(),
         };
         let listener = Listener::listen(&config).unwrap();
-        let _client = std::net::TcpStream::connect(listener.local).unwrap();
+        let _client =
+            std::net::TcpStream::connect(listener::Driver::local(&listener)).unwrap();
+        // The test accepts on the descriptor, so a copy of it reads the options that
+        // `accepted` sets.
         let fd = listener.socket.fd().unwrap();
-        let accepted = rustix::net::accept(fd).unwrap();
+        // macOS can queue the connection after `connect` returns.
+        rustix::fs::fcntl_setfl(fd, OFlags::empty()).unwrap();
+        let fd = rustix::net::accept(fd).unwrap();
+        let peer = rustix::net::getpeername(&fd).unwrap().unwrap();
+        // A copy of the descriptor sees the options of the socket.
+        let accepted = rustix::io::dup(&fd).unwrap();
+        let peer = peer.try_into().unwrap();
+        let _stream = listener.accepted(fd.into(), peer).unwrap();
         let kept = super::super::tests::kept;
-        assert_eq!(
-            sockopt::socket_send_buffer_size(&accepted),
-            Ok(kept(1 << 16))
-        );
+        let sent = sockopt::socket_send_buffer_size(&accepted).unwrap();
+        if cfg!(target_os = "macos") {
+            // macOS rounds it up to whole segments, of at most 16 KiB on loopback.
+            assert!((1 << 16..(1 << 16) + (1 << 14)).contains(&sent), "{sent}");
+        } else {
+            assert_eq!(sent, kept(1 << 16));
+        }
         assert_eq!(
             sockopt::socket_recv_buffer_size(&accepted),
             Ok(kept(1 << 15))
@@ -204,13 +269,18 @@ mod tests {
             assert_eq!(sockopt::socket_nosigpipe(&fd), Ok(true));
         }
 
+        /// The kernel binds a socket only to an address of its own family.
+        fn bound(address: SocketAddr) -> SocketAddr {
+            let fd = super::socket(address).unwrap();
+            rustix::net::bind(&fd, &address).unwrap();
+            SocketAddr::try_from(rustix::net::getsockname(&fd).unwrap()).unwrap()
+        }
+
         #[test]
         fn follows_the_family_of_the_address() {
             let v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0);
-            let fd = super::socket(v6).unwrap();
-            assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET6));
-            let fd = super::socket(loopback()).unwrap();
-            assert_eq!(sockopt::socket_domain(&fd), Ok(AddressFamily::INET));
+            assert!(bound(v6).is_ipv6());
+            assert!(bound(loopback()).is_ipv4());
         }
     }
 }

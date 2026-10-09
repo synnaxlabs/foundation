@@ -4,10 +4,11 @@
 mod access;
 mod channel;
 mod connector;
+mod duplicate;
 mod node_settings;
-mod openssh;
+pub mod openssh;
 mod placement;
-mod plan;
+pub mod plan;
 mod private_key;
 mod retention;
 mod subject;
@@ -15,22 +16,19 @@ mod subject;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
-use document::diagnostic::{Code, Diagnostic, Note};
+use document::diagnostic::{Code, Diagnostic};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
 use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-pub use plan::{Change, Plan, plan};
-
-const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
-/// The check of one kind of block: its definition, or `None` after it reports why the
-/// block gives none.
-type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
+/// The check of one kind of block, with its tree key when its label gives one: its
+/// definition, or `None` after it reports why the block gives none.
+type Check = fn(&mut Found<'_>, &Block, Option<&Name>) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
 const KINDS: [(Kind, Check); 7] = [
@@ -79,9 +77,10 @@ pub struct Entry {
 /// A problem with no span has no defined place in that order. A value that a reader
 /// or a definition refuses gives only its first problem. A definition is checked as a
 /// whole (a policy's budgets, for example) only when each of its attributes is known
-/// and reads, and the ones it needs are there. A block inside a policy or a subject
-/// does not stop that check: neither holds a block, so each block inside one is a
-/// separate problem.
+/// and reads, and the ones it needs are there. A block directly inside a definition
+/// other than a `connector` does not stop that check: only a connector's kind reads
+/// blocks, so each such block is one problem, and nothing inside it but a private key
+/// is checked.
 /// A bad `kind` of channel hides the problems of each other attribute that a kind of
 /// channel knows. A `kind` of connector that is missing, is not a name, or is not in
 /// `kinds` hides each problem of the connector's config, and so does a config nested
@@ -113,8 +112,7 @@ fn checked<'a>(
         connectors: BTreeMap::new(),
         kinds,
         blocks: BTreeMap::new(),
-        writers: Vec::new(),
-        nodes: Vec::new(),
+        writes: BTreeMap::new(),
     };
     let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
     connectors.sort_by_key(|(_, label)| order(label.span));
@@ -136,7 +134,8 @@ fn checked<'a>(
                 continue;
             };
             let key = found.key(block, *kind);
-            let definition = check_block(&mut found, block);
+            let name = key.as_ref().map(|(name, _)| name);
+            let definition = check_block(&mut found, block, name);
             if let (Some((key, label_span)), Some(definition)) = (key, definition) {
                 let entry = Entry {
                     definition,
@@ -147,14 +146,20 @@ fn checked<'a>(
             }
         }
     }
-    found.repeats();
+    let repeats = duplicate::in_labels(&mut found.labels);
+    found.diagnostics.extend(repeats);
     if found.diagnostics.is_empty() {
-        found.writers.sort_by_key(|writer| order(writer.at));
         Ok(found)
     } else {
         sort(&mut found.diagnostics);
         Err(found.diagnostics)
     }
+}
+
+/// The label of the definition of `kind` at tree key `key`, or `key` when it has no
+/// label form.
+pub(crate) fn label(kind: Kind, key: &Name) -> Name {
+    kind.label(key).unwrap_or_else(|| key.clone())
 }
 
 /// Sorts `diagnostics` by the [`order`] of each span.
@@ -186,9 +191,8 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// Each label of each tree key so far, with the kind of its block, by the key in
-    /// lowercase, so that keys that differ only in case collide.
-    labels: BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>,
+    /// Each label of each tree key so far.
+    labels: duplicate::Labels<'a>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The label of the first connector in [`order`] that a `connector` block in any
@@ -198,22 +202,9 @@ struct Found<'a> {
     kinds: &'a Table,
     /// The block of each entry, by tree key.
     blocks: BTreeMap<Name, &'a Block>,
-    /// Each connector whose kind accepts its config, by the [`order`] of its node once
-    /// the check passes.
-    writers: Vec<Writer>,
-    /// Each node that a checked `placement` block names, with its span.
-    nodes: Vec<(Name, Option<Span>)>,
-}
-
-/// A connector, as the kind of its block checks it.
-#[derive(Debug)]
-struct Writer {
-    /// The node that runs it.
-    node: Name,
-    /// Where the block names the node.
-    at: Option<Span>,
-    /// The channels that it writes to the mesh.
-    writes: Vec<Name>,
+    /// The channels that each connector writes to the mesh, as its kind checks them, by
+    /// tree key.
+    writes: BTreeMap<Name, Vec<Name>>,
 }
 
 /// A problem that is already in the diagnostics.
@@ -260,43 +251,8 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        self.labels
-            .entry(key.as_str().to_ascii_lowercase().into())
-            .or_default()
-            .push((label, kind));
+        duplicate::add(&mut self.labels, &key, label, kind);
         Some((key, label.span))
-    }
-
-    /// Reports each label of a tree key after the first in [`order`].
-    fn repeats(&mut self) {
-        for labels in self.labels.values_mut() {
-            labels.sort_by_key(|(label, _)| order(label.span));
-            let (first, earlier) = labels[0];
-            for &(label, later) in &labels[1..] {
-                let (earlier, keyword) = (earlier.as_str(), later.as_str());
-                let blocks = if earlier == keyword {
-                    format!("`{keyword}`")
-                } else {
-                    format!("`{earlier}` and `{keyword}`")
-                };
-                let mut diagnostic = Diagnostic::new(
-                    DUPLICATE_NAME,
-                    label.span,
-                    format!(
-                        "the name {:?} repeats the earlier `{earlier}` name {:?}",
-                        label.text, first.text
-                    ),
-                    format!(
-                        "Give each {blocks} block a name that differs by more than case"
-                    ),
-                );
-                diagnostic.notes.extend(first.span.map(|span| Note {
-                    span,
-                    text: "the earlier name".into(),
-                }));
-                self.diagnostics.push(diagnostic);
-            }
-        }
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -383,6 +339,7 @@ fn span(block: &Block, key: &str) -> Option<Span> {
 
 #[cfg(test)]
 mod tests {
+    use document::diagnostic::Note;
     use document::value::Kind;
     use document::{Attribute, Map, Position, Source};
     use proptest::prelude::*;
@@ -477,14 +434,19 @@ mod tests {
     }
 
     /// Asserts that each of two blocks inside a `keyword` block with `attributes` adds
-    /// one `document.unknown-block` diagnostic to what `check` gives without them.
+    /// one `document.unknown-block` diagnostic to what `check` gives without them, and
+    /// that an attribute or a block inside each adds none.
     fn assert_inner_blocks_refused(keyword: &str, attributes: &[(&str, Kind)]) {
         let mut policy = block(0, 0, keyword, &["edge"], attributes);
         let mut expected = check(&[document(vec![policy.clone()])])
             .err()
             .unwrap_or_default();
         for (offset, inner) in [(90, "inner"), (95, "other")] {
-            policy.body.blocks.push(block(0, offset, inner, &[], &[]));
+            let mut inner_block =
+                block(0, offset, inner, &[], &[("size", string("1"))]);
+            let deeper = block(0, offset + 1, "deeper", &[], &[]);
+            inner_block.body.blocks.push(deeper);
+            policy.body.blocks.push(inner_block);
             expected.push(refused(
                 "document.unknown-block",
                 at(0, offset),
@@ -821,26 +783,12 @@ mod tests {
     }
 
     #[test]
-    fn checks_the_budgets_of_a_policy_that_holds_a_block() {
-        let mut policy = settings(0, 0, "a", &[("select", string("site_a.*"))]);
-        policy.body.blocks.push(block(0, 50, "inner", &[], &[]));
-        assert_eq!(
-            check(&[document(vec![policy])]),
-            Err(vec![
-                refused(
-                    "document.missing-attribute",
-                    at(0, 0),
-                    "the `node_settings` block has no `disk` or `pool`",
-                    NO_BUDGET_FIX,
-                ),
-                refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `node_settings` block cannot hold the `inner` block",
-                    "Remove it",
-                ),
-            ])
-        );
+    fn refuses_a_block_inside_each_kind_but_a_connector() {
+        for (kind, _) in KINDS {
+            if kind != definition::Kind::Connector {
+                assert_inner_blocks_refused(kind.as_str(), &[]);
+            }
+        }
     }
 
     #[test]
@@ -856,6 +804,7 @@ mod tests {
             vec![select(), ("disk", string("nope"))],
             vec![select(), ("pool", Kind::Integer(7))],
             vec![select(), ("disk", string("0B"))],
+            vec![select(), ("disk", string("1GiB")), ("size", string("1GiB"))],
         ];
         for attributes in cases {
             assert_inner_blocks_refused("node_settings", &attributes);
@@ -1394,51 +1343,6 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_block_inside_a_placement() {
-            let [mut documents] =
-                placement(&[("select", string("edge.*")), ("home", string("edge"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `placement` block cannot hold the `inner` block",
-                    "Remove it",
-                )])
-            );
-        }
-
-        #[test]
-        fn checks_a_placement_that_holds_a_block_as_a_whole() {
-            let [mut documents] = placement(&[("select", string("edge.*"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "config.empty-placement",
-                        at(0, 0),
-                        "the `placement` block names no home, no standby, and no copy",
-                        "Name a `home`, a `standby`, or a node in `copies`",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_an_attribute_that_a_placement_does_not_have() {
             let attributes = [
                 ("select", string("edge.*")),
@@ -1453,36 +1357,6 @@ mod tests {
                     "`node` is not an attribute of the `placement` block",
                     "Use `select`, `home`, `standby`, or `copies`, or remove it",
                 )])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_placement_with_an_unknown_attribute() {
-            let [mut documents] = placement(&[
-                ("select", string("edge.*")),
-                ("home", string("edge")),
-                ("node", string("edge")),
-            ]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.unknown-attribute",
-                        at(0, 14),
-                        "`node` is not an attribute of the `placement` block",
-                        "Use `select`, `home`, `standby`, or `copies`, or remove it",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `placement` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
             );
         }
 
@@ -1503,6 +1377,7 @@ mod tests {
                     ("home", string("n_1")),
                     ("standby", string("n_1")),
                 ],
+                vec![select(), ("home", string("edge")), ("node", string("edge"))],
             ];
             for attributes in cases {
                 assert_inner_blocks_refused("placement", &attributes);
@@ -1652,82 +1527,6 @@ mod tests {
         }
 
         #[test]
-        fn checks_a_retention_that_holds_a_block_as_a_whole() {
-            let [mut documents] =
-                retention(&[("select", string("edge.**")), ("keep", string("-1s"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.negative-span",
-                        at(0, 13),
-                        "the span -1s is below zero",
-                        "Write a span of zero or more",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_retention() {
-            let [mut documents] =
-                retention(&[("select", string("edge.**")), ("keep", string("3d"))]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![refused(
-                    "document.unknown-block",
-                    at(0, 50),
-                    "the `retention` block cannot hold the `inner` block",
-                    "Remove it",
-                )])
-            );
-        }
-
-        #[test]
-        fn refuses_a_block_inside_a_retention_with_an_unknown_attribute() {
-            let [mut documents] = retention(&[
-                ("select", string("edge.**")),
-                ("keep", string("3d")),
-                ("hold", string("1d")),
-            ]);
-            documents.blocks[0]
-                .body
-                .blocks
-                .push(block(0, 50, "inner", &[], &[]));
-            assert_eq!(
-                check(&[documents]),
-                Err(vec![
-                    refused(
-                        "document.unknown-attribute",
-                        at(0, 14),
-                        "`hold` is not an attribute of the `retention` block",
-                        "Use `select` or `keep`, or remove it",
-                    ),
-                    refused(
-                        "document.unknown-block",
-                        at(0, 50),
-                        "the `retention` block cannot hold the `inner` block",
-                        "Remove it",
-                    ),
-                ])
-            );
-        }
-
-        #[test]
         fn refuses_a_block_inside_a_retention_with_any_attributes() {
             let select = || ("select", string("edge.**"));
             let cases = [
@@ -1739,6 +1538,7 @@ mod tests {
                 vec![select(), ("keep", Kind::Integer(3))],
                 vec![select(), ("keep", string("nope"))],
                 vec![select(), ("keep", string("-3d"))],
+                vec![select(), ("keep", string("3d")), ("hold", string("1d"))],
             ];
             for attributes in cases {
                 assert_inner_blocks_refused("retention", &attributes);
@@ -1795,7 +1595,8 @@ mod tests {
                 selector(&["edge.**"]),
                 actions.iter().copied().collect(),
                 Authority(authority),
-            );
+            )
+            .unwrap();
             let entry = Entry {
                 definition: Definition::Spec(definition::Definition::Access(policy)),
                 label_span: at(0, 1),
@@ -1977,15 +1778,38 @@ mod tests {
 
         #[test]
         fn refuses_an_empty_allow() {
-            assert_eq!(
-                check(&access(&attributes(list(vec![]), None))),
-                Err(vec![refused(
-                    "config.empty-allow",
-                    at(0, 15),
-                    "the `allow` list holds no action",
-                    "Add one or more actions, such as \"read\"",
-                )])
-            );
+            for authority in [None, Some(3)] {
+                assert_eq!(
+                    check(&access(&attributes(list(vec![]), authority))),
+                    Err(vec![refused(
+                        "config.empty-allow",
+                        at(0, 15),
+                        "the `allow` list holds no action",
+                        "Add one or more actions, such as \"read\"",
+                    )]),
+                    "{authority:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_empty_allow_only_when_each_other_attribute_reads() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes[0].1 = Kind::Integer(5);
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.bad-selector"]));
+        }
+
+        #[test]
+        fn refuses_an_empty_allow_only_when_each_attribute_is_known() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes.push(("deny", string("write")));
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.unknown-attribute"]));
         }
 
         #[test]
@@ -2072,6 +1896,10 @@ mod tests {
             assert_inner_blocks_refused(
                 "access",
                 &self::attributes(string("read"), None),
+            );
+            assert_inner_blocks_refused(
+                "access",
+                &self::attributes(string("read"), Some(5)),
             );
         }
 
@@ -2675,6 +2503,14 @@ mod tests {
             assert_inner_blocks_refused("channel", &[("kind", string("index"))]);
             assert_inner_blocks_refused("channel", &[("kind", string("stream"))]);
             assert_inner_blocks_refused("channel", &[("data_type", string("f64"))]);
+            assert_inner_blocks_refused(
+                "channel",
+                &[
+                    ("data_type", string("bool")),
+                    ("index", string("edge")),
+                    ("unit", string("V")),
+                ],
+            );
         }
 
         #[test]
@@ -2931,6 +2767,8 @@ mod tests {
                 string(bare),
                 string(&format!("  {ALICE}\n")),
                 string(&format!("{bare} a comment with words")),
+                string(&ALICE.replace(' ', "\t")),
+                string(&ALICE.replace(' ', "  ")),
                 list(&[string(ALICE)]),
             ];
             for keys in cases {
@@ -2938,6 +2776,15 @@ mod tests {
                 assert_eq!(check(&documents), Ok(keyed(&[ALICE_KEY])), "{keys:?}");
             }
             assert_eq!(ed25519(ALICE_KEY).split(' ').nth(1), bare.split(' ').nth(1));
+        }
+
+        #[test]
+        fn gives_the_fingerprint_that_ssh_keygen_gives() {
+            let key = PublicKey::new(ALICE_KEY).expect("a key");
+            assert_eq!(
+                crate::openssh::fingerprint(key),
+                "SHA256:AaHjcjahcS7PIOJwyahzFqtJH7PJ8NKy89OZdEKcurc"
+            );
         }
 
         #[test]
@@ -3088,6 +2935,29 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_private_key_in_a_block_inside_a_definition() {
+            let mut policy = settings(
+                0,
+                0,
+                "edge",
+                &[("select", string("edge")), ("disk", string("1GiB"))],
+            );
+            let private = string("-----BEGIN OPENSSH PRIVATE KEY-----");
+            let inner = block(0, 90, "inner", &[], &[("note", private)]);
+            policy.body.blocks.push(inner);
+            assert_eq!(
+                check(&[document(vec![policy])]),
+                Err(vec![refused(
+                    "config.private-key",
+                    at(0, 101),
+                    "the value is a private key, which must never be in a file",
+                    "Remove the private key from this file now, and use the one line \
+                     of its `.pub` file",
+                )])
+            );
+        }
+
+        #[test]
         fn refuses_a_key_of_another_algorithm_by_its_name() {
             let cases = [
                 "ssh-rsa",
@@ -3173,6 +3043,20 @@ mod tests {
                 assert_eq!(
                     check(&documents),
                     Err(vec![bad(at(0, 11), message)]),
+                    "{keys:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_key_length_longer_than_the_key() {
+            let start = &b"\0\0\0\x0bssh-ed25519\0\0\0"[..];
+            for length in [0x21, 0xff] {
+                let blob = [start, &[length], &ALICE_KEY].concat();
+                let keys = string(&line("ssh-ed25519", &blob));
+                assert_eq!(
+                    check(&subject(&[("keys", keys.clone())])),
+                    Err(vec![bad(at(0, 11), NOT_ED25519)]),
                     "{keys:?}"
                 );
             }

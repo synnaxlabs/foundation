@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::task::Waker;
 
 use types::time::{Monotonic, Span, Stamp};
@@ -107,7 +107,7 @@ impl Node {
     ///   last connect, from 49152. A listen conflicts only with other listens.
     /// - A peer sends at most `recv_buffer_bytes` past the bytes read, and a stream
     ///   holds at most `send_buffer_bytes` that its peer has not received. A write
-    ///   after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
+    ///   of bytes after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
     /// - TCP panics on a link with loss, on `delayed` sends, on a connect to an
     ///   address that no node has, and on a connect to a full backlog.
     /// - A socket half, a stream, or a listener panics when it polls outside the
@@ -214,6 +214,16 @@ impl Node {
     #[must_use]
     pub fn files(&self) -> env::files::Files {
         env::files::Files::new(self.0.clone())
+    }
+
+    /// The path of each file descriptor that the node closed or dropped, in order,
+    /// since the run started: the path of its open, or of the last rename that it made,
+    /// with only its names. A crash closes each descriptor of the node, a leaked one
+    /// too. Those that the drops of its futures close come first, in the order of the
+    /// drops. The leaked ones come last, in the order that their opens started.
+    #[must_use]
+    pub fn file_closes(&self) -> Vec<PathBuf> {
+        lock(&self.0.shared).files().closes(self.0.node)
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with

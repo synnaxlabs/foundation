@@ -1,5 +1,6 @@
 //! Copies a release of open62541 into `patches/open62541/`, and checks a copy: each
-//! C file that our options compile and each header that it includes.
+//! C file that our options compile, each header that it includes, and each file of
+//! [`EXTRA`].
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -19,7 +20,7 @@ const DEST: &str = "patches/open62541";
 /// are ours, and no feature the connector does not use.
 const OPTIONS: [&str; 11] = [
     "-DUA_ARCHITECTURE=none",
-    "-DUA_MULTITHREADING=100",
+    "-DUA_MULTITHREADING=0",
     "-DUA_ENABLE_ENCRYPTION=OFF",
     "-DUA_ENABLE_PUBSUB=OFF",
     "-DUA_ENABLE_XML_ENCODING=OFF",
@@ -57,14 +58,22 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
+/// The release files that the copy holds and the library of our options does not
+/// compile. A `.c` file goes in `sources.txt`, so it builds with `flags.txt`.
+const EXTRA: [&str; 2] = [
+    // The timer of the event loop, which takes the time as an input.
+    "arch/common/timer.c",
+    // The shim includes it to hold a `UA_Timer` in the loop.
+    "arch/common/timer.h",
+];
+
 /// The flags of the upstream compile, other than `-D`, `-I`, and `-std`, that change
 /// the code. `flags.txt` keeps them.
-const CODE_FLAGS: [&str; 8] = [
+const CODE_FLAGS: [&str; 7] = [
     "-fno-strict-aliasing",
     "-fexceptions",
     "-ffunction-sections",
     "-fdata-sections",
-    "-pthread",
     "-fno-unwind-tables",
     "-fno-asynchronous-unwind-tables",
     "-fno-math-errno",
@@ -83,16 +92,14 @@ const LEFT_OUT: [&str; 4] = [
 
 /// The system headers that a file of the copy may include: the C standard library and
 /// the POSIX headers of the plugins. A header that one of them includes is not checked.
-const SYSTEM_HEADERS: [&str; 18] = [
+const SYSTEM_HEADERS: [&str; 16] = [
     "ctype.h",
     "errno.h",
     "float.h",
     "inttypes.h",
     "limits.h",
-    "pthread.h",
     "signal.h",
     "stdarg.h",
-    "stdatomic.h",
     "stdbool.h",
     "stddef.h",
     "stdint.h",
@@ -106,17 +113,17 @@ const SYSTEM_HEADERS: [&str; 18] = [
 
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
 /// replaces `patches/open62541/` with its compiled sources, the headers in the clone
-/// that they include, `LICENSE`, `sources.txt` (each `.c` file), `flags.txt` (the
-/// `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each compile), and `VERSION`
-/// (tag and commit).
+/// that they include, each file of [`EXTRA`], `LICENSE`, `sources.txt` (each `.c`
+/// file), `flags.txt` (the `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each
+/// compile), and `VERSION` (tag and commit).
 /// Then it gives what [`check`] gives for the new copy. Needs Linux, `git`, `cmake`,
 /// Python 3, GCC as `cc`, and GNU `objdump`.
 ///
 /// # Errors
 ///
 /// A step that fails, a flag of a compile that is neither [`kept`] nor [`left_out`],
-/// and each error of [`check`]. On an error,
-/// `patches/open62541/` does not change.
+/// a file of [`EXTRA`] that the release does not have or the library holds, and each
+/// error of [`check`]. On an error, `patches/open62541/` does not change.
 pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
     let work = root.join("target/open62541");
     let (src, build, stage) = (work.join("src"), work.join("build"), work.join("copy"));
@@ -188,9 +195,9 @@ fn compile(
 
 /// What a built clone gives to the copy.
 struct Found {
-    /// Each (from, to): each source of the library and each header in the clone that
-    /// it includes. A header outside the clone is left out, and [`check`] fails on
-    /// one that a source needs.
+    /// Each (from, to): each source of the library, each header in the clone that
+    /// it includes, and each file of [`EXTRA`]. A header outside the clone is left
+    /// out, and [`check`] fails on one that a source needs.
     files: BTreeSet<(PathBuf, PathBuf)>,
     /// The `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each compile, with
     /// each `-I` relative to the copy.
@@ -222,6 +229,20 @@ fn collect(trees: &Trees<'_>) -> Result<Found, String> {
             }
         }
         files.insert((entry.source, file));
+    }
+    for extra in EXTRA {
+        let from = trees.src.join(extra);
+        if files.iter().any(|(_, to)| to == Path::new(extra)) {
+            return Err(format!(
+                "{extra}: EXTRA lists it, and the library already holds it"
+            ));
+        }
+        if !from.is_file() {
+            return Err(format!(
+                "{extra}: EXTRA lists it, and the release has no such file"
+            ));
+        }
+        files.insert((from, PathBuf::from(extra)));
     }
     Ok(Found {
         files,
@@ -1402,7 +1423,8 @@ End of search list.
 
     /// A project with the layout of open62541: the `open62541` library from two
     /// object libraries, with a call of a clock function at each place that
-    /// [`CLOCK_CALLS`] lists, a generated header, and a header that is not UTF-8.
+    /// [`CLOCK_CALLS`] lists, a generated header, a header that is not UTF-8, and each
+    /// file of [`EXTRA`], which the library does not compile.
     fn create_project(repo: &Path) {
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
         let util = "#include \"open62541/config.h\"\n".to_owned()
@@ -1442,6 +1464,8 @@ End of search list.
                 ),
                 ("plugins/ua_log_stdout.c", &calls(&["UA_Log_Stdout_log"])),
                 ("tools/tool.c", "int main(void) { return 0; }\n"),
+                ("arch/common/timer.c", "#include \"timer.h\"\nint timer;\n"),
+                ("arch/common/timer.h", "#include <stdio.h>\n"),
             ],
         );
         let clock = b"/* Andr\xe9 */\nlong long UA_DateTime_now(void);\n";
@@ -1492,6 +1516,8 @@ End of search list.
             [
                 "LICENSE",
                 "VERSION",
+                "arch/common/timer.c",
+                "arch/common/timer.h",
                 "flags.txt",
                 "include/clock.h",
                 "plugins/ua_config_default.c",
@@ -1505,8 +1531,9 @@ End of search list.
         let read = |path| std::fs::read_to_string(dest.join(path)).unwrap();
         assert_eq!(
             read("sources.txt"),
-            "plugins/ua_config_default.c\nplugins/ua_log_stdout.c\n\
-             src/util/ua_encryptedsecret.c\nsrc/util/ua_util.c\n"
+            "arch/common/timer.c\nplugins/ua_config_default.c\n\
+             plugins/ua_log_stdout.c\nsrc/util/ua_encryptedsecret.c\n\
+             src/util/ua_util.c\n"
         );
         assert_eq!(
             read("flags.txt"),
@@ -1517,13 +1544,55 @@ End of search list.
         let commit = exec(git.arg("-C").arg(&repo).args(["rev-parse", "v1"])).unwrap();
         assert_eq!(read("VERSION"), format!("v1\n{commit}\n"));
         #[expect(clippy::disallowed_methods, reason = "a test reads its files")]
-        for path in ["src/util/ua_util.c", "include/clock.h"] {
+        for path in [
+            "src/util/ua_util.c",
+            "include/clock.h",
+            "arch/common/timer.h",
+        ] {
             assert_eq!(
                 std::fs::read(dest.join(path)).unwrap(),
                 std::fs::read(repo.join(path)).unwrap()
             );
         }
         assert_eq!(check(&root), Ok(()));
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_refuses_a_release_with_no_file_of_extra() {
+        let (root, repo, result) = run_on("extra", |repo| {
+            std::fs::remove_file(repo.join("arch/common/timer.h")).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "arch/common/timer.h: EXTRA lists it, and the release has no such \
+                 file"
+                    .to_owned()
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    fn run_refuses_a_file_of_extra_that_the_library_holds() {
+        let (root, repo, result) = run_on("stale", |repo| {
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap()
+                + "target_sources(open62541-plugins PRIVATE arch/common/timer.c)\n";
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "arch/common/timer.c: EXTRA lists it, and the library already holds it"
+                    .to_owned()
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
@@ -1775,7 +1844,7 @@ End of search list.
         append("src/util/ua_encryptedsecret.c", "#include <time.h>\n");
         append(
             "src/util/ua_util.c",
-            "#include <pthread.h>\n#include <time.h>\n",
+            "#include <sys/socket.h>\n#include <sys/types.h>\n",
         );
         assert_eq!(
             check(&root),
@@ -1783,7 +1852,7 @@ End of search list.
                 "src/util/ua_encryptedsecret.c: includes the system header `time.h`, \
                  which SYSTEM_HEADERS does not list"
                     .to_owned(),
-                "src/util/ua_util.c: includes the system header `time.h`, which \
+                "src/util/ua_util.c: includes the system header `sys/types.h`, which \
                  SYSTEM_HEADERS does not list"
                     .to_owned(),
             ])
@@ -1843,6 +1912,7 @@ End of search list.
         let mut cc = Command::new("cc");
         cc.current_dir(&copy)
             .args(flags.lines())
+            .arg("-pthread")
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/open62541/rng.c"))
             .arg(&library)
             .arg("-o")

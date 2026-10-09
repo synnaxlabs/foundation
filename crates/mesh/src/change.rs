@@ -1,6 +1,6 @@
 //! The change records that move the region state, each with one byte form.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use spec::Pointer;
@@ -37,7 +37,8 @@ pub(crate) enum Change {
         /// What the ticket admits.
         options: Options,
     },
-    /// Moves the spec pointer from `base` to version `base.version + 1` at `root`.
+    /// Moves the spec pointer from `base` to [`pointer`] of `base`, `root`, and
+    /// `homes`, and gives each index of `homes` that has no home its listed one.
     Spec {
         /// The pointer that the change was made on.
         base: Pointer,
@@ -49,6 +50,9 @@ pub(crate) enum Change {
         /// The voters whose durable put of the chunks the proposer counted, at most
         /// [`HOLDERS_MAX`].
         holders: BTreeSet<node::Key>,
+        /// The home of each index that had no home in the proposer's state, at most
+        /// [`HOMES_MAX`]. At the apply, an index with a home keeps it.
+        homes: BTreeMap<channel::Key, node::Key>,
     },
 }
 
@@ -68,6 +72,25 @@ pub(crate) struct Join {
     pub(crate) status: Status,
 }
 
+/// The pointer after a `Spec` change of `base`, `root`, and `homes` applies: `base`
+/// when `root` is the root of `base` and `homes` is empty, as such a change changes
+/// nothing, and else version `base.version + 1` at `root`.
+///
+/// # Panics
+///
+/// When the pointer moves and `base.version` is `u64::MAX`.
+pub(crate) fn pointer(
+    base: Pointer,
+    root: Digest,
+    homes: &BTreeMap<channel::Key, node::Key>,
+) -> Pointer {
+    if root == base.root && homes.is_empty() {
+        base
+    } else {
+        base.next(root)
+    }
+}
+
 const HOME: u8 = 1;
 const JOIN: u8 = 2;
 const TICKET: u8 = 3;
@@ -80,6 +103,10 @@ pub(crate) const CHUNKS_MAX: usize = 1024;
 /// The most holders of one `Spec` change, so that a change with [`CHUNKS_MAX`]
 /// chunks stays at about 33 KiB.
 pub(crate) const HOLDERS_MAX: usize = 64;
+
+/// The most homes of one `Spec` change, so that a change at each bound stays at about
+/// 50 KiB.
+pub(crate) const HOMES_MAX: usize = 512;
 
 impl Change {
     /// Adds the one byte form of the change to `out`: a kind byte, then the body of
@@ -94,12 +121,13 @@ impl Change {
     ///   presence byte.
     /// - Spec: the base version (8 bytes), the base root, the new root, the count of
     ///   chunks (2 bytes), each chunk digest in rising order, the count of holders (2
-    ///   bytes), and each holder's key in rising order. A digest is its 32 bytes.
+    ///   bytes), each holder's key in rising order, the count of homes (2 bytes), and
+    ///   each index and its home in rising index order. A digest is its 32 bytes.
     ///
     /// # Panics
     ///
-    /// When a `Spec` change lists more than [`CHUNKS_MAX`] chunks, or more than
-    /// [`HOLDERS_MAX`] holders.
+    /// When a `Spec` change lists more than [`CHUNKS_MAX`] chunks, more than
+    /// [`HOLDERS_MAX`] holders, or more than [`HOMES_MAX`] homes.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Self::Home { index, home } => {
@@ -128,6 +156,7 @@ impl Change {
                 root,
                 chunks,
                 holders,
+                homes,
             } => {
                 out.push(SPEC);
                 out.extend(base.version.to_le_bytes());
@@ -148,6 +177,15 @@ impl Change {
                 out.extend(count.to_le_bytes());
                 for &holder in holders {
                     put_key(holder, out);
+                }
+                let count = u16::try_from(homes.len())
+                    .ok()
+                    .filter(|_| homes.len() <= HOMES_MAX)
+                    .expect("invariant: a spec change has at most HOMES_MAX homes");
+                out.extend(count.to_le_bytes());
+                for (&index, &home) in homes {
+                    put_channel(index, out);
+                    put_key(home, out);
                 }
             }
         }
@@ -230,11 +268,27 @@ fn take_spec(bytes: &mut &[u8]) -> Option<Change> {
         }
         holders.insert(holder);
     }
+    let count = usize::from(u16::from_le_bytes(take(bytes)?));
+    if count > HOMES_MAX {
+        return None;
+    }
+    let mut homes = BTreeMap::new();
+    for _ in 0..count {
+        let index = take_channel(bytes)?;
+        if homes
+            .last_key_value()
+            .is_some_and(|(&last, _)| last >= index)
+        {
+            return None;
+        }
+        homes.insert(index, take_key(bytes)?);
+    }
     Some(Change::Spec {
         base,
         root,
         chunks,
         holders,
+        homes,
     })
 }
 
@@ -303,8 +357,8 @@ mod tests {
 
     use super::*;
     use crate::common::{
-        digest, home, index, join, name, options, public, record, spec, status_bytes,
-        with_status,
+        digest, home, index, join, key, name, options, public, record, spec,
+        status_bytes, with_status,
     };
 
     fn encoded(change: &Change) -> Vec<u8> {
@@ -367,8 +421,59 @@ mod tests {
         expected.extend([9; 32]);
         expected.extend([1, 0]);
         expected.extend(1_u128.to_le_bytes());
+        expected.extend([0, 0]);
         assert_eq!(encoded(&spec(7, 1, 2, &[3, 9])), expected);
         assert_eq!(encoded(&spec(0, 1, 2, &[]))[73..77], [0, 0, 1, 0]);
+        let mut homed = spec(7, 1, 2, &[3, 9]);
+        let Change::Spec { homes, .. } = &mut homed else {
+            unreachable!()
+        };
+        *homes = [(index(9), key(2)), (index(5), key(3))].into();
+        expected.truncate(expected.len() - 2);
+        expected.extend([2, 0]);
+        expected.extend(5_u128.to_le_bytes());
+        expected.extend(3_u128.to_le_bytes());
+        expected.extend(9_u128.to_le_bytes());
+        expected.extend(2_u128.to_le_bytes());
+        assert_eq!(encoded(&homed), expected);
+    }
+
+    #[test]
+    fn a_spec_change_whose_homes_do_not_strictly_rise_does_not_decode() {
+        for indexes in [[5_u128, 5], [9, 5]] {
+            let mut bytes = encoded(&spec(7, 1, 2, &[3]));
+            bytes.truncate(bytes.len() - 2);
+            bytes.extend(2_u16.to_le_bytes());
+            for index in indexes {
+                bytes.extend(index.to_le_bytes());
+                bytes.extend(1_u128.to_le_bytes());
+            }
+            let length = bytes.len();
+            let error = Change::decode(&bytes).unwrap_err();
+            assert_eq!(error, Malformed::Body { kind: 4, length });
+        }
+    }
+
+    #[test]
+    fn a_spec_change_with_more_than_512_homes_does_not_decode() {
+        let change = homed(HOMES_MAX);
+        let mut bytes = encoded(&change);
+        assert_eq!(Change::decode(&bytes), Ok(change));
+        let at = bytes.len() - HOMES_MAX * 32 - 2;
+        bytes[at..at + 2].copy_from_slice(&513_u16.to_le_bytes());
+        bytes.extend(u128::MAX.to_le_bytes());
+        bytes.extend(1_u128.to_le_bytes());
+        let length = bytes.len();
+        assert_eq!(
+            Change::decode(&bytes),
+            Err(Malformed::Body { kind: 4, length })
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: a spec change has at most HOMES_MAX homes")]
+    fn encode_of_a_spec_change_with_more_than_512_homes_panics() {
+        encoded(&homed(HOMES_MAX.checked_add(1).unwrap()));
     }
 
     #[test]
@@ -380,6 +485,7 @@ mod tests {
             for holder in holders {
                 bytes.extend(holder.to_le_bytes());
             }
+            bytes.extend([0, 0]);
             let length = bytes.len();
             let error = Change::decode(&bytes).unwrap_err();
             assert_eq!(error, Malformed::Body { kind: 4, length });
@@ -394,7 +500,7 @@ mod tests {
             for chunk in chunks {
                 bytes.extend([chunk; 32]);
             }
-            bytes.extend([0, 0]);
+            bytes.extend([0; 4]);
             let length = bytes.len();
             let error = Change::decode(&bytes).unwrap_err();
             assert_eq!(error, Malformed::Body { kind: 4, length });
@@ -407,7 +513,8 @@ mod tests {
         let mut bytes = encoded(&change);
         assert_eq!(Change::decode(&bytes), Ok(change));
         bytes[73..75].copy_from_slice(&1025_u16.to_le_bytes());
-        bytes.extend([0xff; 32]);
+        let end = 75 + CHUNKS_MAX * 32;
+        bytes.splice(end..end, [0xff; 32]);
         let length = bytes.len();
         assert_eq!(
             Change::decode(&bytes),
@@ -428,9 +535,10 @@ mod tests {
         let change = held(HOLDERS_MAX);
         let mut bytes = encoded(&change);
         assert_eq!(Change::decode(&bytes), Ok(change));
-        let at = bytes.len() - HOLDERS_MAX * 16 - 2;
+        let at = bytes.len() - HOLDERS_MAX * 16 - 4;
         bytes[at..at + 2].copy_from_slice(&65_u16.to_le_bytes());
-        bytes.extend(u128::MAX.to_le_bytes());
+        let end = bytes.len() - 2;
+        bytes.splice(end..end, u128::MAX.to_le_bytes());
         let length = bytes.len();
         assert_eq!(
             Change::decode(&bytes),
@@ -447,15 +555,32 @@ mod tests {
     }
 
     #[test]
-    fn a_spec_change_at_both_bounds_fits_in_34_kib() {
+    fn a_spec_change_at_each_bound_fits_in_50_kib() {
         let mut change = many(CHUNKS_MAX);
-        let Change::Spec { holders, .. } = &mut change else {
+        let Change::Spec { holders, homes, .. } = &mut change else {
             unreachable!()
         };
         *holders = (0..u128::try_from(HOLDERS_MAX).unwrap())
             .map(node::Key::from_u128)
             .collect();
-        assert_eq!(encoded(&change).len(), 33_869);
+        *homes = homes_of(HOMES_MAX);
+        assert_eq!(encoded(&change).len(), 50_255);
+    }
+
+    /// A spec change with no chunk and `count` homes.
+    fn homed(count: usize) -> Change {
+        let mut change = many(0);
+        let Change::Spec { homes, .. } = &mut change else {
+            unreachable!()
+        };
+        *homes = homes_of(count);
+        change
+    }
+
+    /// `count` homes, each of a distinct index on node 1.
+    fn homes_of(count: usize) -> BTreeMap<channel::Key, node::Key> {
+        let indexes = 0..u128::try_from(count).unwrap();
+        indexes.map(|at| (index(at), key(1))).collect()
     }
 
     /// A spec change with no chunk and `count` holders.
@@ -487,6 +612,7 @@ mod tests {
             root: digest(2),
             chunks,
             holders: BTreeSet::new(),
+            homes: BTreeMap::new(),
         }
     }
 
@@ -609,16 +735,23 @@ mod tests {
             any::<[u8; 32]>(),
             prop::collection::btree_set(any::<[u8; 32]>(), 0..4),
             prop::collection::btree_set(any::<u128>(), 0..4),
+            prop::collection::btree_map(any::<u128>(), any::<u128>(), 0..4),
         )
-            .prop_map(|(version, base, root, chunks, holders)| Change::Spec {
-                base: Pointer {
-                    version,
-                    root: Digest(base),
+            .prop_map(
+                |(version, base, root, chunks, holders, homes)| Change::Spec {
+                    base: Pointer {
+                        version,
+                        root: Digest(base),
+                    },
+                    root: Digest(root),
+                    chunks: chunks.into_iter().map(Digest).collect(),
+                    holders: holders.into_iter().map(node::Key::from_u128).collect(),
+                    homes: homes
+                        .into_iter()
+                        .map(|(i, h)| (index(i), node::Key::from_u128(h)))
+                        .collect(),
                 },
-                root: Digest(root),
-                chunks: chunks.into_iter().map(Digest).collect(),
-                holders: holders.into_iter().map(node::Key::from_u128).collect(),
-            });
+            );
         prop_oneof![homes, joins, tickets, specs]
     }
 

@@ -22,6 +22,7 @@ use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
+use types::name::Name;
 use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -39,6 +40,7 @@ use crate::status::{self, Status};
 pub use end::Ended;
 use end::Spawner;
 use send::Senders;
+use used::{Opening, Used};
 
 mod apply;
 mod end;
@@ -46,6 +48,7 @@ mod home;
 mod propose;
 mod send;
 mod stream;
+mod used;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -131,9 +134,17 @@ impl fmt::Debug for Mesh {
 
 impl Mesh {
     /// Reads the log from `config.dir`, starts the group as a follower, and spawns
-    /// its task on `config.tasks`. Homes are known again when this node applies the
-    /// log, after it hears the leader. It puts each chunk of the founding tree in
-    /// `config.store`.
+    /// its task on `config.tasks`. It puts each chunk of the founding tree in
+    /// `config.store`. It reads the spec of the newest pointer that a file in
+    /// `<config.dir>/spec` names, or the founding spec when there is no file, and
+    /// removes the file of each older pointer. A spec that does not read or has
+    /// problems is not an error: the node then uses no spec, and [`Mesh::spec`] gives
+    /// the cause in `behind`.
+    ///
+    /// At each open, its state starts at the founding: `pointer` gives version 0, and a
+    /// watch gives each home of `config.founding.homes`. The state moves on when this
+    /// node applies the log, after it hears the leader. Until then, a watch can give a
+    /// founding home that the log moved, as at a follower behind the leader.
     ///
     /// The group sends its messages on a session to each member. It dials a member at
     /// the addresses of its card, at the first message for it, and again after the
@@ -143,14 +154,17 @@ impl Mesh {
     ///
     /// - [`Error::Member`] when the region cannot hold one of
     ///   `config.founding.members`, or two name one node.
-    /// - [`Error::NotMember`] when `config.founding.members` lacks this node or a
-    ///   voter.
+    /// - [`Error::NotMember`] when `config.founding.members` lacks this node, a voter,
+    ///   or the node of a home.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.founding.members`.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
+    /// - [`Error::Files`] when a call on `<config.dir>/spec` or its files fails, and
+    ///   [`Error::Stray`] when that directory holds a file that does not name a
+    ///   pointer.
     ///
     /// # Panics
     ///
@@ -184,50 +198,41 @@ impl Mesh {
             members,
             voters,
             definitions,
+            homes,
         } = config.founding;
         let tree = spec::region::tree(&mut chunks, &definitions);
-        let state = region::State::new(prefix, members, tree.root, voters.clone())
-            .map_err(Error::Member)?;
+        let state =
+            region::State::new(prefix, members, tree.root, voters.clone(), homes)
+                .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
         let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
+        let files = config.files.clone();
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
+        let used = used::open(Opening {
+            files: &files,
+            dir: &config.dir,
+            store: &config.store,
+            prefix: state.prefix(),
+            root: tree.root,
+            definitions,
+            chunks,
+        })
+        .await?;
         let unapplied = written(&stored.entries).collect();
-        let start = Start {
-            hard: stored.hard,
-            voters: Voters {
-                incoming: voters,
-                outgoing: BTreeSet::new(),
-            },
-            entries: stored.entries,
-            applied: 0,
-        };
-        let fixed = raft::Config {
-            key: config.key,
-            election_ticks: ELECTION_TICKS,
-            heartbeat_ticks: HEARTBEAT_TICKS,
-        };
-        let group = Rc::new(RefCell::new(Group {
-            raft: Raft::new(fixed, start)?,
-            state,
-            queues: BTreeMap::new(),
-            sessions: BTreeMap::new(),
-            stopped: Rc::default(),
-            task: None,
-            watches: BTreeMap::new(),
-            proposals: Vec::new(),
-            slots: 0,
-            unapplied,
-            synced: Position::default(),
-            waits: None,
-            fresh: Vec::new(),
-            starter: None,
-            applied: Applied::default(),
-            calls: BTreeMap::new(),
-        }));
+        let raft = follower(config.key, stored, voters)?;
+        let group = Group::new(raft, state, unapplied, used);
+        let group = Rc::new(RefCell::new(group));
         let weak = Rc::downgrade(&group);
         let spawner = Spawner::new(config.tasks);
+        spawner.spawn(used::keep(
+            Weak::clone(&weak),
+            Rc::clone(&config.store),
+            files,
+            config.dir,
+            config.clock.clone(),
+        ));
         spawner.spawn(run(
             weak,
             log,
@@ -243,12 +248,6 @@ impl Mesh {
             clock: config.clock,
             entropy: config.entropy,
         })
-    }
-
-    /// This node: [`Config::key`].
-    #[must_use]
-    pub fn key(&self) -> node::Key {
-        self.group.borrow().raft.key()
     }
 
     /// Gives a future that resolves once each task of the mesh has ended: the group's
@@ -281,6 +280,21 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The name of each member in this node's view of the region. No two members share a
+    /// name. It answers also after the group stops, from the view at the stop.
+    #[must_use]
+    pub fn names(&self) -> BTreeSet<Name> {
+        self.group.borrow().state.names()
+    }
+
+    /// The key of the member whose card holds `public_key` in this node's view of the
+    /// region, or `None` when no member holds it. At most one member holds a key. It
+    /// answers also after the group stops, from the view at the stop.
+    #[must_use]
+    pub fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
+        self.group.borrow().state.holder(public_key)
     }
 
     /// The spec pointer in this node's applied state. It answers also after the group
@@ -585,9 +599,9 @@ impl fmt::Debug for Watch {
 impl Watch {
     /// The first call returns the home of the index at once. Each later call waits
     /// until the home differs from the one it last returned, and returns the newest:
-    /// two changes between calls give one result. `None` means that no applied entry
-    /// set a home for the index. It is never `None` after a home, because no change
-    /// clears a home.
+    /// two changes between calls give one result. `None` means that the index has no
+    /// home in this node's state: no founding home and no applied entry gives one. It
+    /// is never `None` after a home, because no change clears a home.
     ///
     /// # Errors
     ///
@@ -653,11 +667,40 @@ struct Group {
     // The task of `Senders::run`, while it waits for a new queue.
     starter: Option<Waker>,
     applied: Applied,
-    // The task of each call that waits for the outcome of a try of its proposal.
+    // The task of each call that waits for the outcome of a try of its proposal, or
+    // for a read of the spec.
     calls: BTreeMap<u64, Waker>,
+    used: Used,
 }
 
 impl Group {
+    fn new(
+        raft: Raft,
+        state: region::State,
+        unapplied: BTreeMap<u64, Written>,
+        used: Used,
+    ) -> Self {
+        Self {
+            raft,
+            state,
+            queues: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            stopped: Rc::default(),
+            task: None,
+            watches: BTreeMap::new(),
+            proposals: Vec::new(),
+            slots: 0,
+            unapplied,
+            synced: Position::default(),
+            waits: None,
+            fresh: Vec::new(),
+            starter: None,
+            applied: Applied::default(),
+            calls: BTreeMap::new(),
+            used,
+        }
+    }
+
     // The public key of `key` in the applied state, else in the joins of the log
     // as `raft` holds it. When those name two public keys, the joins below the
     // first configuration entry whose incoming half names `key` decide: the leader
@@ -804,7 +847,7 @@ impl Group {
         for Entry { at, data } in committed {
             let applied = match data {
                 Data::Bytes(bytes) => match Change::decode(&bytes) {
-                    Ok(change) => self.state.apply(change),
+                    Ok(change) => self.apply_change(change),
                     // Every node of this build judges a body the same way.
                     Err(Malformed::Body { kind, length }) => {
                         Err(Refused::Body { kind, length })
@@ -815,12 +858,12 @@ impl Group {
                 },
                 Data::Voters(change) => {
                     self.state.set_voters(change.voters);
-                    Ok(None)
+                    Ok(false)
                 }
-                Data::Empty => Ok(None),
+                Data::Empty => Ok(false),
             };
             // A refused change is a no-op on every node.
-            if let Ok(Some(_)) = applied {
+            if let Ok(true) = applied {
                 self.wake_watches();
             }
             self.applied.push(at, applied.map(|_| ()));
@@ -829,9 +872,23 @@ impl Group {
         Ok(())
     }
 
+    // Applies `change`, and gives the task of the spec in use each pointer that moves.
+    fn apply_change(&mut self, change: Change) -> Result<bool, Refused> {
+        let listed = match &change {
+            Change::Spec { chunks, .. } => Some(chunks.clone()),
+            Change::Home { .. } | Change::Join(_) | Change::Ticket { .. } => None,
+        };
+        let applied = self.state.apply(change)?;
+        if let Some(listed) = listed {
+            self.used.committed(self.state.pointer(), listed);
+        }
+        Ok(applied)
+    }
+
     fn stop(&mut self, stopped: Stopped) {
         self.stopped.get_or_init(|| stopped);
         self.wake();
+        self.used.wake();
         self.end_senders();
         self.wake_watches();
         self.wake_calls();
@@ -858,6 +915,7 @@ impl Drop for Group {
     // that each mesh dropped.
     fn drop(&mut self) {
         self.wake();
+        self.used.wake();
         self.end_senders();
         self.wake_watches();
     }
@@ -922,6 +980,29 @@ enum Written {
     Named(BTreeSet<node::Key>),
 }
 
+// Starts the group as a follower on the log that `stored` holds, with `voters`.
+fn follower(
+    key: node::Key,
+    stored: log::Stored,
+    voters: BTreeSet<node::Key>,
+) -> Result<Raft, Error> {
+    let start = Start {
+        hard: stored.hard,
+        voters: Voters {
+            incoming: voters,
+            outgoing: BTreeSet::new(),
+        },
+        entries: stored.entries,
+        applied: 0,
+    };
+    let fixed = raft::Config {
+        key,
+        election_ticks: ELECTION_TICKS,
+        heartbeat_ticks: HEARTBEAT_TICKS,
+    };
+    Ok(Raft::new(fixed, start)?)
+}
+
 // Each join and configuration entry of `entries`, with its index.
 fn written(entries: &[Entry]) -> impl Iterator<Item = (u64, Written)> {
     entries.iter().filter_map(|entry| {
@@ -961,8 +1042,8 @@ fn request(body: &Body) -> bool {
     }
 }
 
-// Checks that `own` and each of `voters` are members of `state`, and that
-// `private_key` is the key of `own`.
+// Checks that `own`, each of `voters`, and the node of each home are members of
+// `state`, and that `private_key` is the key of `own`.
 fn check_members(
     state: &region::State,
     own: node::Key,
@@ -976,8 +1057,8 @@ fn check_members(
         }
         Some(_) => {}
     }
-    let mut voters = voters.iter();
-    if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
+    let mut others = voters.iter().copied().chain(state.homes());
+    if let Some(key) = others.find(|&key| state.member(key).is_none()) {
         return Err(Error::NotMember(key));
     }
     Ok(())
@@ -1146,6 +1227,7 @@ mod tests {
     use crate::region::Unfit;
     use crate::status::Many;
     use crate::ticket::Options;
+    use crate::used::{Behind, Spec};
 
     const IDS: [u8; 3] = [1, 2, 3];
     const PORT: u16 = 7000;
@@ -1154,6 +1236,8 @@ mod tests {
     /// The idle time of each transport.
     const IDLE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
     const INDEX: channel::Key = channel::Key::from_u128(7);
+    /// An index that a spec change can add after `INDEX`.
+    const SECOND: channel::Key = channel::Key::from_u128(8);
 
     /// What each node's watch gave, in order.
     type Homes = BTreeMap<u8, Vec<Option<node::Key>>>;
@@ -1164,6 +1248,7 @@ mod tests {
         root: Digest,
         chunks: BTreeSet<Digest>,
         holders: BTreeSet<node::Key>,
+        homes: BTreeMap<channel::Key, node::Key>,
     }
 
     /// What the voters of a cluster did and what they do next.
@@ -1187,6 +1272,8 @@ mod tests {
         hidden: Option<u8>,
         /// The records of those members on each node, at the same time.
         records: BTreeMap<u8, BTreeMap<u8, Member>>,
+        /// The home of `SECOND` on each node, at the same time.
+        seconds: BTreeMap<u8, Option<node::Key>>,
         /// The region state of each node, at the same time.
         states: BTreeMap<u8, region::State>,
         /// The spec pointer of each node, at the same time.
@@ -1211,6 +1298,36 @@ mod tests {
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
+        /// The definitions whose tree each node puts in its store next.
+        puts: BTreeMap<u8, BTreeMap<Name, Definition>>,
+        /// What the spec in use of each node was at its last read.
+        specs: BTreeMap<u8, Seen>,
+    }
+
+    /// The spec in use of a node at a read, and what the task of the spec held.
+    #[derive(Debug, PartialEq)]
+    struct Seen {
+        pointer: Option<Pointer>,
+        definitions: BTreeMap<Name, Definition>,
+        behind: Option<Behind>,
+        /// The newest committed pointer that the task did not use. No public call
+        /// shows it.
+        newest: Option<Pointer>,
+        /// The chunks of the tree in use, as `Debug` gives them: `Chunks` has no `Eq`.
+        chunks: String,
+    }
+
+    impl Seen {
+        fn new(mesh: &Mesh, spec: Spec) -> Self {
+            let group = mesh.group.borrow();
+            Self {
+                pointer: spec.pointer,
+                definitions: (*spec.definitions).clone(),
+                behind: spec.behind,
+                newest: group.used.newest.as_ref().map(|newest| newest.pointer),
+                chunks: format!("{:?}", group.used.chunks),
+            }
+        }
     }
 
     fn seconds(count: i64) -> Span {
@@ -1264,6 +1381,7 @@ mod tests {
                 members: common::create_members(members),
                 voters: voters.iter().map(|&id| key(id)).collect(),
                 definitions: BTreeMap::new(),
+                homes: BTreeMap::new(),
             },
             files: node.files(),
             dir: PathBuf::new(),
@@ -1559,10 +1677,37 @@ mod tests {
                 root,
                 chunks,
                 holders,
+                homes,
             } = spec;
-            let result = mesh.settle_spec(base, root, chunks, holders).await;
+            let result = mesh.settle_spec(base, root, chunks, holders, homes).await;
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
+        }
+    }
+
+    /// Puts in the store of node `id` each chunk of the tree of the definitions that
+    /// the board gives it.
+    async fn store(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let Some(definitions) = board.lock().unwrap().puts.remove(&id) else {
+                continue;
+            };
+            let mut chunks = Chunks::default();
+            let update = spec::region::tree(&mut chunks, &definitions);
+            let digests = &update.chunks;
+            put(&mesh.store, &mesh.pool, &chunks, digests)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Reads the spec in use of node `id` once per tick, and puts it on the board.
+    async fn read(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
+        loop {
+            clock.sleep(TICK).await;
+            let seen = Seen::new(&mesh, mesh.spec().await.unwrap());
+            board.lock().unwrap().specs.insert(id, seen);
         }
     }
 
@@ -1688,6 +1833,14 @@ mod tests {
         tasks.spawn(async move {
             configure(configuring, clock, id, configurations).await;
         });
+        let (storing, clock, puts) = (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            store(storing, clock, id, puts).await;
+        });
+        let (reading, clock, specs) = (mesh.clone(), node.clock(), Arc::clone(board));
+        tasks.spawn(async move {
+            read(reading, clock, id, specs).await;
+        });
     }
 
     async fn voter(
@@ -1730,7 +1883,9 @@ mod tests {
                 .collect();
             // No call of `Mesh` gives the use count of a ticket.
             let state = mesh.group.borrow().state.clone();
+            let second = mesh.watch(SECOND).next().await.unwrap();
             let mut board = board.lock().unwrap();
+            board.seconds.insert(id, second);
             board.states.insert(id, state);
             board.pointers.insert(id, mesh.pointer());
             board.homes.entry(id).or_default().push(home);
@@ -1863,6 +2018,7 @@ mod tests {
             root: common::digest(byte),
             chunks: [common::digest(byte)].into(),
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         let changes = [change(1), change(2), home(1)];
         cluster.script_each(&changes.map(|change| encoded(&change)));
@@ -1903,6 +2059,7 @@ mod tests {
             root: common::digest(1),
             chunks,
             holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
         };
         cluster.script_each(&[encoded(&change), encoded(&home(1))]);
         cluster.start_voter(1);
@@ -1935,8 +2092,9 @@ mod tests {
         assert_eq!(cluster.take(), (Vec::new(), homes));
     }
 
+    // The others reach node 3 on the sessions that it dialed.
     #[test]
-    fn the_other_voters_agree_when_the_card_of_a_voter_has_no_address() {
+    fn each_voter_agrees_when_the_card_of_a_voter_has_no_address() {
         let mut cluster = Cluster::new(5);
         cluster.board.lock().unwrap().hidden = Some(3);
         cluster.script(home);
@@ -1946,15 +2104,24 @@ mod tests {
         let &[leader] = led.as_slice() else {
             panic!("the group took a proposal from each of {led:?}");
         };
-        let home = |id| match id {
-            3 => (id, vec![None]),
-            _ => (id, vec![None, Some(key(leader))]),
-        };
-        assert_eq!(homes, IDS.map(home).into());
+        let homes_of = |id| (id, vec![None, Some(key(leader))]);
+        assert_eq!(homes, IDS.map(homes_of).into());
     }
 
     #[test]
     fn a_leader_with_no_quorum_commits_nothing_and_takes_the_home_of_the_next() {
+        cut_leader(5);
+    }
+
+    #[test]
+    fn a_leader_cut_off_for_36_s_takes_the_home_of_the_next_5_s_after_the_heal() {
+        cut_leader(36);
+    }
+
+    /// Cuts the leader off for `cut` seconds while the others commit the home of the
+    /// next leader, heals the links, and checks that the old leader has that home 5 s
+    /// later.
+    fn cut_leader(cut: i64) {
         let mut cluster = Cluster::new(2);
         cluster.script(home);
         cluster.start();
@@ -1964,22 +2131,23 @@ mod tests {
         for other in IDS.into_iter().filter(|&id| id != old) {
             cluster.link(old, other, 1.0);
         }
-        cluster.script(|id| home(10 + id));
-        cluster.run(seconds(5));
+        cluster.script(|id| home(id.checked_add(10).unwrap()));
+        cluster.run(seconds(cut));
         let (led, homes) = cluster.take();
         let &[first, new] = led.as_slice() else {
             panic!("the group took a proposal from each of {led:?}");
         };
         assert_eq!(first, old);
         assert_ne!(new, old);
-        let mut expected = each(&[Some(key(10 + new))]);
+        let next = new.checked_add(10).unwrap();
+        let mut expected = each(&[Some(key(next))]);
         expected.remove(&old);
         assert_eq!(homes, expected);
         for other in IDS.into_iter().filter(|&id| id != old) {
             cluster.link(old, other, 0.0);
         }
         cluster.run(seconds(5));
-        let healed = BTreeMap::from([(old, vec![Some(key(10 + new))])]);
+        let healed = BTreeMap::from([(old, vec![Some(key(next))])]);
         assert_eq!(cluster.take(), (Vec::new(), healed));
     }
 
@@ -2014,25 +2182,45 @@ mod tests {
         healed.expect("the follower has no home 100 s after the heal")
     }
 
-    // The bound is the 5 s that the leader of the test above gets after its heal. The
-    // measured wait is at most 1 s, and a longer cut can give a longer wait (#1415).
-    #[test]
-    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+    /// Checks that a follower cut off for `cut` seconds has the home 5 s after the
+    /// links heal, the bound that the leader of the test above gets, in 4 runs.
+    fn follower_heals(cut: i64) {
         for run in 0..4 {
-            let waited = follower_heal_ms(run, 5);
+            let waited = follower_heal_ms(run, cut);
             assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
         }
     }
 
-    // The cut is longer than the idle time of a session, 60 s, so each session of
-    // the follower timed out, and the dial that follows is 2 s old at the heal. The
-    // measured wait is at most 1.5 s, and an older dial can wait longer (#1415).
+    #[test]
+    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(5);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_46_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(46);
+    }
+
+    // A cut longer than the idle time of a session, 60 s, times out each session of
+    // the follower, so a dial in the cut carries the heal.
     #[test]
     fn a_follower_cut_off_for_62_s_has_the_home_5_s_after_the_links_heal() {
-        for run in 0..4 {
-            let waited = follower_heal_ms(run, 62);
-            assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
-        }
+        follower_heals(62);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_68_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(68);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_104_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(104);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_110_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(110);
     }
 
     /// Runs `body` on the one node of a run.
@@ -2271,6 +2459,16 @@ mod tests {
             let cause = Unknown::Kind { kind: 9 };
             let stopped = Stopped::Change { at: bad, cause };
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+            assert_eq!(mesh.holder(public(1)), Some(key(1)));
+        });
+    }
+
+    #[test]
+    fn names_gives_the_name_of_each_founding_member() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let names = IDS.map(|id| format!("plant.node{id}").parse().unwrap());
+            assert_eq!(mesh.names(), BTreeSet::from(names));
         });
     }
 
@@ -2384,6 +2582,7 @@ mod tests {
 
     mod apply;
     mod home;
+    mod in_use;
     mod send;
     mod serve;
 
@@ -2895,10 +3094,10 @@ mod tests {
             });
         }
 
-        // Members 2 and 4 share one public key. Node 2 is a voter, and node 4 is
-        // not.
+        // Members 2 and 4 would share one public key, so that a message of node 4
+        // could pass the sender check under the key of voter 2.
         #[test]
-        fn not_voter_names_no_key_that_a_voter_holds() {
+        fn a_member_with_the_public_key_of_a_voter_does_not_start() {
             solo(|node, tasks| async move {
                 let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
                 let mut card = common::member(2).card.card().clone();
@@ -2908,12 +3107,8 @@ mod tests {
                     card,
                     ..common::member(4)
                 });
-                let mesh = Mesh::start(config).await.unwrap();
-                let heartbeat = message(4, 1, Body::Heartbeat { commit: 0 });
-                let refused = mesh.receive(public(2), heartbeat);
-                assert_eq!(refused, Err(Error::NotVoter { from: key(4) }));
-                let answer = mesh.answer(public(2), home(2)).await;
-                assert_eq!(answer, Ok(Message::NotLeader { leader: None }));
+                let held = Unfit::Held { key: key(2) };
+                assert_eq!(Mesh::start(config).await.err(), Some(Error::Member(held)));
             });
         }
 
@@ -3215,6 +3410,35 @@ mod tests {
                 entries: ready.entries,
                 commit: 0,
             }
+        }
+
+        /// Until the apply refuses a join of node 4 whose card holds the public key
+        /// of voter 2, a request of node 4 under that key passes the sender check and
+        /// names node 4. After it, node 4 has no key, and the message is spoofed.
+        #[test]
+        fn a_join_with_the_public_key_of_a_voter_names_its_node_until_it_applies() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let card = card::Card {
+                    public_key: public(2),
+                    ..common::member(4).card.card().clone()
+                };
+                let twin = card::Signed::sign(key(4), card, &common::private(2));
+                let joins = [ticket(), join_with(&twin, 7, Stamp::EPOCH), join(5)];
+                write(&mesh, changes(&joins)).await;
+                let request = message(4, 1, Body::Heartbeat { commit: 0 });
+                let refused = Err(Error::NotVoter { from: key(4) });
+                assert_eq!(mesh.receive(public(2), request), refused);
+                let commit = proven(2, 1, Body::Heartbeat { commit: 3 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::MILLISECOND).await;
+                assert_eq!(mesh.member(key(4)), None);
+                assert_eq!(mesh.holder(public(2)), Some(key(2)));
+                assert_eq!(mesh.holder(public(5)), Some(key(5)));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Err(Error::Spoofed { from: key(4) });
+                assert_eq!(mesh.receive(public(2), reply), spoofed);
+            });
         }
 
         pub(super) fn changes(changes: &[Change]) -> Vec<Data> {
@@ -5208,42 +5432,51 @@ mod tests {
     }
 
     #[test]
-    fn key_gives_this_node_while_another_node_leads() {
+    fn open_refuses_the_first_founding_home_at_a_node_that_is_not_a_member() {
         solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
-            assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
-            let leader = Some(key(2));
-            let follows = Error::Raft(raft::Error::NotLeader { leader });
-            assert_eq!(mesh.propose(home(3)).await, Err(follows));
-            assert_eq!(mesh.key(), key(1));
+            let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
+            config.founding.homes = BTreeMap::from([
+                (channel::Key::from_u128(4), key(2)),
+                (channel::Key::from_u128(5), key(9)),
+                (channel::Key::from_u128(6), key(8)),
+            ]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(9))));
         });
     }
 
     #[test]
-    fn key_gives_this_node_after_it_votes_for_another_node() {
+    fn open_refuses_a_voter_that_is_not_a_member_before_a_founding_home() {
         solo(|node, tasks| async move {
-            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-            let grant = common::signature(3, Grant::PreVote, 2);
-            let proof = Proof {
-                grant: Grant::PreVote,
-                candidate: key(2),
-                voters: [(key(2), None), (key(3), Some(grant))].into(),
+            let mut config = config(&node, &tasks, 1, &[1, 2], &IDS).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(3))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_this_node_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[2, 3], &[2, 3]).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(1))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_wrong_private_key_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = Config {
+                key: key(1),
+                ..config(&node, &tasks, 2, &IDS, &[]).await
             };
-            let last = Position::default();
-            let mut ready = Ready {
-                messages: vec![raft::Message {
-                    proof: Some(proof),
-                    ..message(2, 1, Body::Vote { last })
-                }],
-                ..Ready::default()
-            };
-            common::signer(2).sign(&mut ready);
-            let vote = ready.messages.remove(0);
-            assert_eq!(mesh.receive(public(2), vote), Ok(()));
-            let granted = common::granted(1, Grant::Vote, 2);
-            assert_eq!(mesh.outgoing(key(2)).await, Ok(granted));
-            assert_eq!(mesh.key(), key(1));
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
         });
     }
 
@@ -5590,7 +5823,8 @@ mod tests {
         });
     }
 
-    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
+    /// The drop of the last mesh stops each wait for a dial, and `ended` does not wait
+    /// for the dial.
     #[test]
     fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
         for seed in 0..32 {
@@ -5653,7 +5887,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-            let kept = (names(&[BLOB, "region"]), names(&[LOG]));
+            let kept = (names(&[BLOB, "region"]), names(&[LOG, used::SPEC]));
             assert_eq!(listed, kept, "seed {seed}");
         }
     }

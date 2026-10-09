@@ -24,9 +24,9 @@ pub struct Env {
     pub tasks: env::tasks::Tasks,
 }
 
-/// A shard on the ring in `shard-0` of `env.files`, its interner, and the mesh time
-/// once the clock has one: the midpoint of the clock's interval, as the shard stamps
-/// it.
+/// A shard on the ring in `shard-0` of `env.files`, its interner, the mesh time once
+/// the clock has one (the midpoint of the clock's interval, as the shard stamps it),
+/// and the reader of that time.
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
@@ -37,7 +37,7 @@ pub struct Env {
 /// # Panics
 ///
 /// When the ring does not open.
-pub async fn shard(env: Env) -> (Shard, Interner, Stamp) {
+pub async fn shard(env: Env) -> (Shard, Interner, Stamp, clock::Reader) {
     let config = block::Config { budget: 1 << 23 };
     let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
     let (clock, mesh) = clock::Clock::new(env.clock.clone());
@@ -69,7 +69,7 @@ pub async fn shard(env: Env) -> (Shard, Interner, Stamp) {
     loop {
         if let Some(now) = mesh.now().mesh {
             let midpoint = now.earliest.nanos().midpoint(now.latest.nanos());
-            return (shard, interner, Stamp::from_nanos(midpoint));
+            return (shard, interner, Stamp::from_nanos(midpoint), mesh);
         }
         env.clock.sleep(Span::from_nanos(1)).await;
     }
@@ -102,7 +102,7 @@ mod tests {
         let mut sim = sim::Sim::new(sim::Config::default());
         let node = sim.node(config);
         sim.run_on(&node, |node, tasks| async move {
-            let (shard, interner, now) = shard(env(&node, tasks)).await;
+            let (shard, interner, now, _) = shard(env(&node, tasks)).await;
             body(node, shard, interner, now).await
         })
         .expect("the run ends")
@@ -219,7 +219,7 @@ mod tests {
         let node = sim.node(sim::node::Config::default());
         let commits = sim
             .run_on(&node, |node, tasks| async move {
-                let (mut shard, mut interner, now) =
+                let (mut shard, mut interner, now, _) =
                     shard(env(&node, tasks.clone())).await;
                 let (writer, set) = open_writer(&mut shard, &mut interner);
                 let mut stamp = now.nanos();
@@ -230,7 +230,7 @@ mod tests {
                 let ended = shard.committed();
                 drop(shard);
                 ended.await.expect("the buffer ends");
-                let (mut shard, mut interner, _) =
+                let (mut shard, mut interner, _, _) =
                     super::shard(env(&node, tasks)).await;
                 let (writer, set) = open_writer(&mut shard, &mut interner);
                 let mut commits = 0;
