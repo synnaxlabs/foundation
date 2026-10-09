@@ -1613,6 +1613,30 @@ fn a_crash_closes_a_leaked_file_and_gives_its_path() {
         crash_after(&mut sim, &node, crash, |node| async move {
             Box::leak(Box::new(create(&node, "a", 0).await));
         });
+        crash_after(&mut sim, &node, crash, |_| async {});
         assert_eq!(node.file_closes(), [PathBuf::from("a")], "{crash:?}");
+    }
+}
+
+#[test]
+fn a_file_dropped_before_its_dropped_rename_ends_gives_the_path_of_its_open() {
+    for seed in 0..8 {
+        let (mut sim, node) = disk(seed);
+        crash_after(&mut sim, &node, Crash::Process, |node| async move {
+            let mut file = create(&node, "a", KIB).await;
+            let mut rename = Box::pin(file.rename(Path::new("b")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+            drop(rename);
+            drop(file);
+        });
+        let listed = sim
+            .run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
+        assert_eq!(listed, [Path::new("b")], "seed {seed}");
+        assert_eq!(node.file_closes(), [PathBuf::from("a")], "seed {seed}");
     }
 }

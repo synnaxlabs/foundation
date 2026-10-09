@@ -1598,7 +1598,7 @@ fn the_node_gives_the_path_of_each_file_that_it_closed_in_order() {
     sim.run_on(&node, |node, _| async move {
         let a = create(&node, "a", 0).await;
         let mut b = create(&node, "./b", 0).await;
-        b.rename(Path::new("c")).await.unwrap();
+        b.rename(Path::new("./c")).await.unwrap();
         let d = create(&node, "d", 0).await;
         b.close().await;
         drop(a);
@@ -1677,4 +1677,22 @@ fn a_dropped_rename_that_ends_gives_the_path_of_the_rename() {
         assert_eq!(names, [Path::new("b")], "value {value}");
         assert_eq!(node.file_closes(), [PathBuf::from("b")], "value {value}");
     }
+}
+
+#[test]
+fn a_failed_rename_keeps_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    node.fail_file(Path::new("a"), Operation::Rename);
+    sim.run_on(&node, |node, _| async move {
+        let mut file = create(&node, "a", 0).await;
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(io("a", Operation::Rename, 5)));
+        drop(file);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), [PathBuf::from("a")]);
 }
