@@ -45,6 +45,7 @@ use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use types::channel::{self, Slot, Slots};
 use types::frame;
+use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
 const BLOCK: usize = 4096;
@@ -625,7 +626,7 @@ impl Shard {
         let buffer = Buffer::open(config, &mut table).await?;
         let mut slots: Vec<Slot> =
             (0..INDEXES).map(|index| table.index(key(index))).collect();
-        let edited: Vec<Slot> = (0..=table.data(SPARE).get())
+        let edited: Vec<Slot> = (0..=table.data(SPARE, Type::Scalar(Scalar::U8)).get())
             .map(Slot::new)
             .filter(|slot| !slots.contains(slot))
             .collect();

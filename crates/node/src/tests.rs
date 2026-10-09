@@ -1602,7 +1602,7 @@ mod home {
             let mut interner = next.await.expect("the open gives the interner");
             let (index, values) = (Key::from_u128(1), Key::from_u128(2));
             let slot = interner.slots().index(index);
-            interner.slots().data(values);
+            interner.slots().data(values, Type::Scalar(Scalar::I64));
             let set = interner.intern(&[Group {
                 index,
                 data: &[(values, Type::Scalar(Scalar::I64))],
@@ -2903,6 +2903,17 @@ mod port {
     mod key {
         use super::*;
         use crate::identity::{FILE, LEN};
+
+        /// Through the public fuzz entry, which panics when the decode is wrong.
+        #[cfg(feature = "sim")]
+        #[test]
+        fn a_key_decodes_and_a_key_with_another_tag_does_not() {
+            let mut body = [7; 64];
+            body[..16].copy_from_slice(b"foundation/key/1");
+            crate::fuzz::identity(&body);
+            body[0] ^= 1;
+            crate::fuzz::identity(&body);
+        }
 
         /// The bytes of `node.key` on `host`.
         fn read(sim: &mut sim::Sim, host: &sim::node::Node) -> Vec<u8> {

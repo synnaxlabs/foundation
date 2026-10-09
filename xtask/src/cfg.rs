@@ -8,7 +8,8 @@ use crate::{build, field, select};
 /// Builds the tests of each workspace crate whose source names `name` in a `cfg`, in
 /// release mode with `--cfg <name>`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each
 /// test executable that compiled a file that names `name` in a `cfg`. It passes when
-/// no crate does. It prints the output of each executable when it ends.
+/// no crate does. It prints the output of each executable when it ends. It does not use
+/// a `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` of the caller.
 pub(crate) fn test(root: &Path, name: &str) -> Result<(), Vec<String>> {
     let problems = problems(root, name).map_err(|e| vec![e])?;
     if problems.is_empty() {
