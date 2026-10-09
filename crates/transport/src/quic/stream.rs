@@ -7420,10 +7420,10 @@ mod tests {
                 testing::run(1, move |shard| {
                     let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
                     let (connected, _) = pair.client.events[0];
-                    let due = connected + Duration::from_secs(2);
                     let now = Duration::from_nanos(pair.now().0);
-                    pair.run(due - Duration::from_millis(50) - now);
-                    let wake = pair::at(due + late);
+                    let before = connected + Duration::from_millis(1_950);
+                    pair.run(before.checked_sub(now).expect("a run after now"));
+                    let wake = pair::at(connected + Duration::from_secs(2) + late);
                     pair.client.endpoint.timeout(wake);
                     let deadline = pair.client.endpoint.deadline();
                     assert!(
