@@ -78,15 +78,9 @@
   each string of a definition; then, together, what the kind table refuses in the kind
   and config of each connector, `config.duplicate-name`, and
   `config.subject-is-connector`; then `config.unplaced`, `config.connector-home`,
-  `config.split-placement`, `config.writer-nodes`, and `config.unknown-node`. A message
-  of a later stage can quote a string of a definition, so no later stage runs on a key.
-  The problems of the second stage each read one definition or one name. The plan rules
-  read the kind of each connector and each name, so an unknown kind or a duplicate name
-  gives false problems there. Lost: one stage with all problems. The stages: decided by
-  `laptop.architect-2`, 2026-10-09T01:57:07Z
-  (https://github.com/synnaxlabs/foundation/pull/2067#issuecomment-6072680913).
+  `config.split-placement`, `config.writer-nodes`, and `config.unknown-node`.
   `spec::access::Policy::new` refuses an empty `allow`, so `Plan::decode` refuses it.
-  #2013 PR 3 makes apply call it after `definitions` and before
+  #2013 PR 3 makes apply call `check` after `definitions` and before
   `Mesh::apply`, with the members and the kind table of the node that applies, as both
   can change after `plan`. Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
   (https://github.com/synnaxlabs/foundation/issues/2013). The rules are in `config`
@@ -95,4 +89,10 @@
   an empty `allow` refused in `spec`: `laptop.architect-2`, 2026-10-09T00:48:39Z
   (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
   This changes the first-writer order of
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143.
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143. A message
+  of a later stage can quote a string of a definition, so no later stage runs on a key.
+  The problems of the second stage each read one definition or one name. The plan rules
+  read the kind of each connector and each name, so an unknown kind or a duplicate name
+  gives false problems there. Lost: one stage with all problems. The stages: decided by
+  `laptop.architect-2`, 2026-10-09T01:57:07Z
+  (https://github.com/synnaxlabs/foundation/pull/2067#issuecomment-6072680913).
