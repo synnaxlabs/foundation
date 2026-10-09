@@ -38,12 +38,15 @@ fn command(nightly: &Toolchain, host: &str) -> Command {
     let mut command = nightly.cargo();
     // With `--target`, the build scripts and macros build with no sanitizer. The
     // flags go in `target.<host>`, which joins the `target-cpu` of
-    // `.cargo/config.toml`, where `RUSTFLAGS` would drop it.
+    // `.cargo/config.toml`, where `RUSTFLAGS` would drop it. Cargo takes either
+    // variable of the caller in place of `target.<host>`, so both go.
     command
         .args(["test", "-p", CRATE, "--features", "sim"])
         .args(["--target", host, "--target-dir", "target/sanitizers"])
         .arg("--config")
         .arg(format!("target.{host}.rustflags=[\"-Zsanitizer=address\"]"))
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         // `alloc::tests` asks for blocks too large to give, and checks the null.
         .env("ASAN_OPTIONS", "allocator_may_return_null=1");
     command
@@ -80,10 +83,14 @@ mod tests {
         let envs: Vec<_> = command.get_envs().collect();
         assert_eq!(
             envs,
-            [(
-                "ASAN_OPTIONS".as_ref(),
-                Some("allocator_may_return_null=1".as_ref())
-            )]
+            [
+                (
+                    "ASAN_OPTIONS".as_ref(),
+                    Some("allocator_may_return_null=1".as_ref())
+                ),
+                ("CARGO_ENCODED_RUSTFLAGS".as_ref(), None),
+                ("RUSTFLAGS".as_ref(), None),
+            ]
         );
     }
 }
