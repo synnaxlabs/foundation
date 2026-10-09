@@ -67,9 +67,9 @@ impl Files {
     /// - [`Error::NotFound`] when the file is not there and `mode` is not
     ///   [`Mode::Create`].
     /// - [`Error::Busy`] when `mode` is not [`Mode::Read`] and a live handle holds
-    ///   the file with [`Mode::Write`] or [`Mode::Create`], or a handle in another
-    ///   process does. A write open first waits for each call on `path` that a
-    ///   dropped future or handle of this `Files` left to run.
+    ///   the file with [`Mode::Write`] or [`Mode::Create`], or a handle of another
+    ///   `Files` or another process does. A write open first waits for each call on
+    ///   `path` that a dropped future or handle of this `Files` left to run.
     /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length that
     ///   is not empty.
     /// - [`Error::Full`] when the disk has no room for the file that
@@ -486,9 +486,9 @@ impl File {
     }
 
     /// Removes the file of this handle from its directory, then closes the handle as
-    /// [`File::close`]. Until the remove ends, a write open of the path in another
-    /// process gives [`Error::Busy`]. A write open of this `Files` waits for it, also
-    /// after a drop of the future. A drop of the future can stop the
+    /// [`File::close`]. Until the remove ends, a write open of the path from another
+    /// `Files` or another process gives [`Error::Busy`]. A write open of this `Files`
+    /// waits for it, also after a drop of the future. A drop of the future can stop the
     /// remove before it starts; the file then stays, and the handle closes. The
     /// removal is not durable until [`Files::sync_dir`] on its directory ends. Count
     /// the file's room as used until then.
@@ -774,9 +774,9 @@ pub trait Driver {
     /// leaves no file at `path` and keeps no blocks. Another error can leave an empty
     /// file at `path`, as a crash can. It makes the allocation durable before it ends
     /// (`os`: `fallocate`, then `fsync` the file), so a `sync_dir` alone makes the file
-    /// whole. A write open of a file that a live write handle, or a handle in another
-    /// process, holds gives [`Error::Busy`] before any other check or change of the
-    /// file.
+    /// whole. A write open of a file that a live write handle, or a descriptor of
+    /// another driver or another process, holds gives [`Error::Busy`] before any other
+    /// check or change of the file.
     fn open<'a>(
         &'a self,
         path: &'a Path,
