@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU16;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
@@ -24,13 +24,11 @@ const MAX_LEN: u64 = 16 * 1024;
 
 /// Runs each target of `fuzz/` at `root` for `seconds`, as many at once as the host has
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
-/// `oracles/fuzz/<target>`. It fails when `fuzz/Cargo.lock` is stale, when `fuzz/`
-/// does not build each crate that the root `Cargo.toml` patches from its copy, when the
-/// build fails, or when a target fails. cargo-fuzz keeps the input of a crash in
-/// `fuzz/artifacts/<target>/`. It also fails, before any run, when `fuzz/` has no
-/// target, or when a target and the folders of `oracles/fuzz/` do not match.
+/// `oracles/fuzz/<target>`. It fails before the build on each problem that [`targets`]
+/// finds, and then when the build fails or a target fails. cargo-fuzz keeps the input
+/// of a crash in `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
-    patched(root)?;
+    let targets = targets(root)?;
     let nightly = crate::nightly(root).map_err(|e| vec![e])?;
     let built = nightly
         .cargo()
@@ -40,25 +38,10 @@ pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     if !built.success() {
         return Err(vec!["`cargo fuzz build` failed".to_string()]);
     }
-    let listed = nightly
-        .cargo()
-        .args(["fuzz", "list"])
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| vec![format!("rustup: {e}")])?;
-    if !listed.status.success() {
-        return Err(vec!["`cargo fuzz list` failed".to_string()]);
-    }
-    let targets = String::from_utf8_lossy(&listed.stdout);
-    let targets: Vec<&str> = targets.lines().collect();
-    let problems = unmatched(&targets, &folders(&root.join("oracles/fuzz"))?);
-    if !problems.is_empty() {
-        return Err(problems);
-    }
     let next = AtomicUsize::new(0);
     let worker = || {
         let mut problems = Vec::new();
-        while let Some(&target) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
+        while let Some(target) = targets.get(next.fetch_add(1, Ordering::Relaxed)) {
             if let Err(problem) = run_one(root, &nightly, target, seconds) {
                 problems.push(problem);
             }
@@ -200,59 +183,114 @@ fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
     }
 }
 
-/// Checks that `fuzz/Cargo.lock` at `root` is current, and that `fuzz/` builds each
-/// crate that the root `Cargo.toml` patches from its copy in `patches/`.
-fn patched(root: &Path) -> Result<(), Vec<String>> {
+/// The targets of `fuzz/` at `root`, read from its graph with no build. It fails when
+/// `fuzz/Cargo.lock` is stale, on each problem of [`unpatched`], when `fuzz/` has no
+/// target, and when the targets and the folders of `oracles/fuzz/` do not match.
+fn targets(root: &Path) -> Result<Vec<String>, Vec<String>> {
     let graph = |dir: &str| {
         crate::metadata(&root.join(dir), &["--locked"]).map_err(|e| vec![e])
     };
-    let problems = unpatched(&graph(".")?, &graph("fuzz")?).map_err(|e| vec![e])?;
+    let fuzz = graph("fuzz")?;
+    let mut problems = unpatched(&graph(".")?, &fuzz).map_err(|e| vec![e])?;
+    let targets = bins(&fuzz).map_err(|e| vec![e])?;
+    let names: Vec<&str> = targets.iter().map(String::as_str).collect();
+    problems.extend(unmatched(&names, &folders(&root.join("oracles/fuzz"))?));
     if problems.is_empty() {
-        Ok(())
+        Ok(targets)
     } else {
         Err(problems)
     }
+}
+
+/// The name of each bin target of the workspace members of `graph`.
+fn bins(graph: &Value) -> Result<Vec<String>, String> {
+    let members = field::list(graph, "workspace_members")?;
+    let mut bins = Vec::new();
+    for package in field::list(graph, "packages")? {
+        if !members.contains(&package["id"]) {
+            continue;
+        }
+        for target in field::list(package, "targets")? {
+            if field::list(target, "kind")?
+                .iter()
+                .any(|kind| kind == "bin")
+            {
+                bins.push(field::text(target, "name")?.to_string());
+            }
+        }
+    }
+    Ok(bins)
 }
 
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/`, or
 /// that is a release compatible with a copy that the `root` graph builds, when the
 /// `root` graph has no package of its key.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
-    let root_packages = field::list(root, "packages")?;
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
-    let copy = |package: &Value| {
-        field::text(package, "manifest_path")
-            .map(|path| Path::new(path).starts_with(&copies))
-    };
+    let root = Package::all(root, &copies)?;
     let mut problems = Vec::new();
-    for package in field::list(fuzz, "packages")? {
-        let id = field::text(package, "id")?;
-        if root_packages.iter().any(|p| p["id"] == id) {
+    for package in Package::all(fuzz, &copies)? {
+        let Package {
+            id,
+            name,
+            version,
+            manifest,
+            copy,
+        } = package;
+        if root.iter().any(|p| p.id == id) {
             continue;
         }
-        let name = field::text(package, "name")?;
-        let version = field::text(package, "version")?;
-        let manifest = field::text(package, "manifest_path")?;
-        if copy(package)? {
+        if copy {
             problems.push(format!(
                 "fuzz/Cargo.toml builds `{name}` from the copy `{manifest}`, which the \
                  root Cargo.toml does not build. Give fuzz/Cargo.toml the \
                  [patch.crates-io] table of the root Cargo.toml."
             ));
         }
-        for namesake in root_packages.iter().filter(|p| p["name"] == name) {
-            if copy(namesake)? && compatible(version, field::text(namesake, "version")?)
-            {
-                problems.push(format!(
-                    "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the \
-                     copy in patches/ that the root Cargo.toml builds. Give \
-                     fuzz/Cargo.toml the [patch.crates-io] table of the root \
-                     Cargo.toml."
-                ));
-            }
+        if root
+            .iter()
+            .any(|p| p.copy && p.name == name && compatible(version, p.version))
+        {
+            problems.push(format!(
+                "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the copy \
+                 in patches/ that the root Cargo.toml builds. Give fuzz/Cargo.toml the \
+                 [patch.crates-io] table of the root Cargo.toml."
+            ));
         }
     }
     Ok(problems)
+}
+
+/// The fields of a package of `cargo metadata` that [`unpatched`] reads.
+struct Package<'a> {
+    id: &'a str,
+    name: &'a str,
+    version: &'a str,
+    manifest: &'a str,
+    /// Whether the package is a copy under the folder `copies` of [`Package::read`].
+    copy: bool,
+}
+
+impl<'a> Package<'a> {
+    /// Reads each package of `graph`.
+    fn all(graph: &'a Value, copies: &Path) -> Result<Vec<Self>, String> {
+        field::list(graph, "packages")?
+            .iter()
+            .map(|package| Package::read(package, copies))
+            .collect()
+    }
+
+    /// Reads `package`, which is a copy when its manifest is under `copies`.
+    fn read(package: &'a Value, copies: &Path) -> Result<Self, String> {
+        let manifest = field::text(package, "manifest_path")?;
+        Ok(Package {
+            id: field::text(package, "id")?,
+            name: field::text(package, "name")?,
+            version: field::text(package, "version")?,
+            manifest,
+            copy: Path::new(manifest).starts_with(copies),
+        })
+    }
 }
 
 /// Whether `a` and `b` share their leftmost nonzero part, so that one caret requirement
@@ -309,8 +347,31 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_builds_each_patched_crate_of_this_repository_from_its_copy() {
-        assert_eq!(patched(&crate::fixture().join("../..")), Ok(()));
+    fn reads_each_target_of_this_repository() {
+        let root = crate::fixture().join("../..");
+        let mut files: Vec<String> = std::fs::read_dir(root.join("fuzz/fuzz_targets"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                path.file_stem().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+        files.sort_unstable();
+        let mut targets = targets(&root).unwrap();
+        targets.sort_unstable();
+        assert!(targets.contains(&"types_name".to_string()));
+        assert_eq!(targets, files);
+    }
+
+    #[test]
+    fn refuses_a_target_and_a_folder_that_do_not_match() {
+        assert_eq!(
+            targets(&crate::fixture().join("unmatched")),
+            Err(vec![
+                "fuzz target `a` has no inputs in oracles/fuzz/a/".to_string(),
+                "oracles/fuzz/b/ has no fuzz target".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -328,7 +389,7 @@ mod tests {
     #[test]
     fn refuses_a_stale_fuzz_lock() {
         let root = crate::fixture().join("stale");
-        let problems = patched(&root).unwrap_err();
+        let problems = targets(&root).unwrap_err();
         let lock = root.join("fuzz/Cargo.lock");
         let refused = format!(
             "error: cannot update the lock file {} because --locked was passed to \
@@ -419,6 +480,8 @@ mod tests {
         assert!(compatible("1.3.0", "1.4.2"));
         assert!(compatible("0.9.0", "0.9.7"));
         assert!(compatible("0.0.3", "0.0.3"));
+        assert!(compatible("0.0.0", "0.0.0"));
+        assert!(!compatible("0.0.0", "0.0.1"));
         assert!(compatible("1.3.0-alpha.1", "1.0.0"));
         assert!(!compatible("0.9.0", "1.3.0"));
         assert!(!compatible("0.9.0", "0.10.0"));
@@ -436,10 +499,44 @@ mod tests {
             unpatched(&json!({ "packages": [] }), &fuzz(&[])),
             Err("JSON has no string field `workspace_root`".to_string())
         );
-        let nameless = json!({ "id": "x", "manifest_path": "/r/x/Cargo.toml" });
         assert_eq!(
-            unpatched(&root(), &fuzz(&[nameless])),
-            Err("JSON has no string field `name`".to_string())
+            unpatched(&root(), &json!({})),
+            Err("JSON has no array field `packages`".to_string())
+        );
+        for key in ["id", "name", "version", "manifest_path"] {
+            let mut lacking =
+                package("x", "registry+x#x@1.0.0", "/r/x-1.0.0/Cargo.toml");
+            lacking.as_object_mut().unwrap().remove(key);
+            let error = Err(format!("JSON has no string field `{key}`"));
+            assert_eq!(unpatched(&root(), &fuzz(&[lacking.clone()])), error);
+            let mut root = root();
+            root["packages"].as_array_mut().unwrap().push(lacking);
+            assert_eq!(unpatched(&root, &fuzz(&[])), error);
+        }
+    }
+
+    #[test]
+    fn bins_are_the_bin_targets_of_the_members() {
+        let target = |name: &str, kind: &str| json!({ "name": name, "kind": [kind] });
+        let graph = json!({
+            "workspace_members": ["m"],
+            "packages": [
+                { "id": "m", "targets": [target("fuzz", "lib"), target("a", "bin")] },
+                { "id": "d", "targets": [target("tool", "bin")] },
+            ],
+        });
+        assert_eq!(bins(&graph), Ok(vec!["a".to_string()]));
+        assert_eq!(
+            bins(&json!({ "packages": [] })),
+            Err("JSON has no array field `workspace_members`".to_string())
+        );
+        let kindless = json!({
+            "workspace_members": ["m"],
+            "packages": [{ "id": "m", "targets": [{ "name": "a" }] }],
+        });
+        assert_eq!(
+            bins(&kindless),
+            Err("JSON has no array field `kind`".to_string())
         );
     }
 
@@ -597,22 +694,6 @@ mod tests {
                 "oracles/fuzz/gone/ has no fuzz target",
             ]
         );
-    }
-
-    #[test]
-    fn each_fuzz_target_of_this_repository_has_oracle_inputs() {
-        let root = crate::fixture().join("../..");
-        let targets: Vec<String> = std::fs::read_dir(root.join("fuzz/fuzz_targets"))
-            .unwrap()
-            .map(|entry| {
-                let path = entry.unwrap().path();
-                path.file_stem().unwrap().to_string_lossy().into_owned()
-            })
-            .collect();
-        let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-        let folders = folders(&root.join("oracles/fuzz")).unwrap();
-        assert!(folders.contains(&"types_name".to_string()));
-        assert_eq!(unmatched(&targets, &folders), Vec::<String>::new());
     }
 
     #[test]
