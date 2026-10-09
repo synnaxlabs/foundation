@@ -273,7 +273,7 @@
   connection with a warning, also an error of one stream after which the listener stays
   usable, because `env` gives both as `Error::Io`. This holds only while the one server
   is the test server: before a server serves users, the manager must keep listening
-  after an error of one stream. Lost: the manager binds its own listener with
+  after an error of one stream (#2005). Lost: the manager binds its own listener with
   `Net::listen` from the parameters. `address` is a host name and `Net::listen` takes a
   socket address, so the open would resolve in a hook that must give `ESTABLISHED`
   before it returns, and an owner that binds port 0 could not learn the port before it
