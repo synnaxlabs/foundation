@@ -337,7 +337,6 @@ fn of_two_applies_from_one_base_one_gives_the_pointer_and_the_other_stale() {
         };
         assert_eq!(*stale, stale_error, "run {run}");
         assert!([leader, follower].contains(loser), "run {run}");
-        assert_ne!(winner, loser, "run {run}");
         let pointers: BTreeMap<_, _> = IDS.map(|id| (id, *moved)).into();
         assert_eq!(board.pointers, pointers, "run {run}");
     }

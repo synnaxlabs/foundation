@@ -15,8 +15,8 @@ use raft::Voters;
 use spec::definition::Definition;
 
 use crate::bytes::{
-    put_channel, put_count, put_key, put_keys, put_name, take, take_channel, take_count,
-    take_key, take_keys, take_name, take_rising,
+    put_channel, put_count, put_key, put_keys, put_name, take, take_channel,
+    take_count, take_key, take_keys, take_name, take_rising,
 };
 use crate::card;
 use crate::change::{self, Change, Join, Malformed};
@@ -1550,8 +1550,8 @@ mod tests {
         }
     }
 
-    // A founding from a small set of prefixes, members in any order, voters, and
-    // definitions.
+    // A founding from a small set of prefixes, members in any order, voters,
+    // definitions, and homes.
     fn foundings() -> impl Strategy<Value = Founding> {
         let ids = vec![1, 2, 3, 4, 5_u8];
         let labels = vec!["plant.a", "plant.b", "plant.c"];
@@ -1560,8 +1560,9 @@ mod tests {
             prop::sample::subsequence(ids.clone(), 0..=5).prop_shuffle(),
             prop::sample::subsequence(ids, 0..=5),
             prop::sample::subsequence(labels, 0..=3),
+            prop::collection::btree_map(0..4_u128, 1..=5_u128, 0..=4),
         )
-            .prop_map(|(prefix, members, voters, labels)| {
+            .prop_map(|(prefix, members, voters, labels, homes)| {
                 let definitions = (1..).zip(labels).map(|(id, label)| {
                     let key = spec::definition::Kind::Subject.key(label).unwrap();
                     let subject = spec::subject::Subject::new(vec![public(id)]);
@@ -1572,6 +1573,10 @@ mod tests {
                     members: create_members(&members),
                     voters: voters.into_iter().map(node).collect(),
                     definitions: definitions.collect(),
+                    homes: homes
+                        .into_iter()
+                        .map(|(i, h)| (index(i), node::Key::from_u128(h)))
+                        .collect(),
                 }
             })
     }

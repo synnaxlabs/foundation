@@ -4427,14 +4427,14 @@ mod port {
         #[test]
         fn a_restart_with_another_region_stops_the_node() {
             let mut sim = sim::Sim::new(sim::Config::default());
-            let hosts = [host(&mut sim, 2), host(&mut sim, 2)];
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
             let node = start_alone(&hosts[0]);
             assert_eq!(sim.run_for(Span::SECOND), Ok(()));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
             let mut members = pair(&hosts);
-            let node = start(&hosts[0], (OWN, KEY), region(&members));
+            let node = start(&hosts[0], region(&members));
             assert_eq!(sim.run(), Ok(()));
             members.sort_by_key(|member| member.card.key());
             let error = ::mesh::Error::Founding {

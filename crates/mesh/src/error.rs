@@ -289,7 +289,10 @@ fn founded(
                 write!(f, "{founded} another home of index {index}")
             }
             Some((index, Some(_), None)) => {
-                write!(f, "{founded} a home of index {index}, which the config lacks")
+                write!(
+                    f,
+                    "{founded} a home of index {index}, which the config lacks"
+                )
             }
             Some((index, None, _)) => write!(f, "{founded} no home of index {index}"),
             None => write!(f, "{founded} another region"),
