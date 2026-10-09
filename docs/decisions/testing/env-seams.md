@@ -53,8 +53,10 @@
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
   readable at its first poll, in a field of its driver, so no lock is on the receive
-  path. That driver is the receiver's alone, as a sender clone's is: it comes from
-  the bind, beside the socket (`laptop.architect-2`, 2026-10-09 01:42 UTC,
+  path (`laptop.architect-2`, 2026-10-08 19:12 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077).
+  That driver is the receiver's alone, as a sender clone's is: it comes from the
+  bind, beside the socket (`laptop.architect-2`, 2026-10-09 01:42 UTC,
   https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
   Supersedes the `OnceLock` of item 2 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541 and the
