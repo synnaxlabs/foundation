@@ -54,25 +54,30 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     Builds { library, shim }
 }
 
+/// The file that `asan` preprocesses, relative to the crate.
+pub(crate) const PROBE: &str = "build/asan.c";
+
 /// Whether `tool` compiles C with `-fsanitize=address`, by its compiler and its flags,
 /// `CFLAGS` included.
 ///
-/// # Panics
+/// # Errors
 ///
-/// When `tool` cannot preprocess a file.
-pub(crate) fn asan(tool: &Tool) -> bool {
-    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/asan.c");
+/// When `tool` cannot preprocess `PROBE`: the message gives the reason, or the
+/// standard error of `tool`.
+pub(crate) fn asan(tool: &Tool) -> Result<bool, String> {
+    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(PROBE);
     let output = tool.to_command().arg("-E").arg(&probe).output();
-    let output = output.unwrap_or_else(|e| panic!("{}: {e}", tool.path().display()));
-    assert!(
-        output.status.success(),
-        "connector-opcua: {} cannot preprocess {}: {}",
+    let reason = match output {
+        Ok(output) if output.status.success() => {
+            let mut lines = output.stdout.split(|&byte| byte == b'\n');
+            return Ok(lines.any(|line| line.trim_ascii() == b"connector_opcua_asan"));
+        }
+        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+        Err(e) => e.to_string(),
+    };
+    Err(format!(
+        "connector-opcua: {} cannot preprocess {}: {reason}",
         tool.path().display(),
-        probe.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-        .stdout
-        .split(|&byte| byte == b'\n')
-        .any(|line| line.trim_ascii() == b"connector_opcua_asan")
+        probe.display()
+    ))
 }

@@ -34,7 +34,7 @@ mod compiler;
 mod tests {
     use std::path::Path;
 
-    use super::child::{self, configure};
+    use super::child;
     use super::compiler;
 
     /// The target of each build that these tests make.
@@ -43,7 +43,7 @@ mod tests {
     /// Gives the tool that `build` picks for `path`. When `cc` cannot run `path` to
     /// find its family, it takes the family from the name.
     fn tool(mut build: cc::Build, path: &str) -> cc::Tool {
-        configure(build.compiler(path), TARGET).get_compiler()
+        child::tool(build.compiler(path), TARGET)
     }
 
     fn args(tool: &cc::Tool) -> Vec<String> {
@@ -135,55 +135,61 @@ mod tests {
     /// The tool of this process for its own target, with the compiler and the `CFLAGS`
     /// of its environment.
     fn probe() -> cc::Tool {
-        configure(&mut cc::Build::new(), env!("CONNECTOR_OPCUA_TARGET")).get_compiler()
+        child::tool(&mut cc::Build::new(), env!("CONNECTOR_OPCUA_TARGET"))
     }
 
     #[test]
     fn asan_is_true_in_a_child_process() {
         if child::running() {
-            assert!(compiler::asan(&probe()));
+            assert_eq!(compiler::asan(&probe()), Ok(true));
         }
     }
 
     #[test]
     fn asan_is_false_in_a_child_process() {
         if child::running() {
-            assert!(!compiler::asan(&probe()));
+            assert_eq!(compiler::asan(&probe()), Ok(false));
         }
     }
 
+    /// Gives the error of `asan` for `tool` with `reason`.
+    fn cannot_preprocess(tool: &cc::Tool, reason: &str) -> String {
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(compiler::PROBE);
+        format!(
+            "connector-opcua: {} cannot preprocess {}: {reason}",
+            tool.path().display(),
+            probe.display()
+        )
+    }
+
     #[test]
-    fn asan_panics_when_the_tool_cannot_preprocess() {
-        let tool = tool(cc::Build::new(), "false");
-        let panic = std::panic::catch_unwind(|| compiler::asan(&tool)).unwrap_err();
-        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/asan.c");
+    fn asan_fails_when_the_tool_cannot_run() {
+        let tool = tool(cc::Build::new(), "/missing/cc");
+        // ENOENT on Linux and macOS.
+        let reason = std::io::Error::from_raw_os_error(2);
         assert_eq!(
-            panic.downcast_ref::<String>(),
-            Some(&format!(
-                "connector-opcua: false cannot preprocess {}: ",
-                probe.display()
-            ))
+            compiler::asan(&tool),
+            Err(cannot_preprocess(&tool, &reason.to_string()))
         );
     }
 
     #[test]
-    fn asan_panics_with_the_stderr_of_the_tool() {
+    fn asan_fails_when_the_tool_cannot_preprocess() {
+        let tool = tool(cc::Build::new(), "false");
+        assert_eq!(compiler::asan(&tool), Err(cannot_preprocess(&tool, "")));
+    }
+
+    #[test]
+    fn asan_fails_with_the_stderr_of_the_tool() {
         let mut build = cc::Build::new();
         build.flag("--connector-opcua-no-such-flag");
-        let tool = configure(&mut build, env!("CONNECTOR_OPCUA_TARGET")).get_compiler();
-        let panic = std::panic::catch_unwind(|| compiler::asan(&tool)).unwrap_err();
-        let message = panic.downcast_ref::<String>().unwrap();
-        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/asan.c");
-        let prefix = format!(
-            "connector-opcua: {} cannot preprocess {}: ",
-            tool.path().display(),
-            probe.display()
-        );
+        let tool = child::tool(&mut build, env!("CONNECTOR_OPCUA_TARGET"));
+        let message = compiler::asan(&tool).unwrap_err();
         let stderr = message
-            .strip_prefix(&prefix)
+            .strip_prefix(&cannot_preprocess(&tool, ""))
             .unwrap_or_else(|| panic!("{message}"));
         assert!(
-            stderr.contains("--connector-opcua-no-such-flag'"),
+            stderr.contains("--connector-opcua-no-such-flag"),
             "{message}"
         );
     }
