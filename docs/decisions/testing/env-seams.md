@@ -270,9 +270,9 @@
   on it: Linux read it as the host sysctl `net.ipv4.tcp_notsent_lowat`, by default no
   bound, the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per call, and
   `sim` never wrote. No caller gives 0. Decided by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/issues/1940). The Linux text is from the
-  audit of #2044:
-  https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027.
+  (https://github.com/synnaxlabs/foundation/issues/1940). The Linux text:
+  `laptop.director`, 2026-10-09T01:51:29Z
+  (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
   Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on
   exec. On Linux, the call that opens the socket sets that and non-blocking, so a child
   that another thread spawns never holds it. macOS has no such flag, and Tokio sets it
