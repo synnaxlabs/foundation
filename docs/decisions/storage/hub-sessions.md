@@ -263,14 +263,16 @@
   never sees `home::writer::Error::Unsynced`. The wait comes in the loop of the open,
   after it first resolves its channels and before it checks each home, so an unknown
   channel fails at once, the open sees a change of the definitions or of a home during
-  the wait, and the wait never comes between a home check and the carry. A pass of the
-  open that waited for a home checks each home again, because a home can move while the
-  open waits for another (#2164) (PR #2161, rounds 1 and 2, approved by
+  the wait, and the wait never comes between a home check and the carry. The home check
+  of the open ends only after a pass over each index that waited for no home, because a
+  home can move while the open waits for another (#2164) (PR #2161, rounds 1 and 2,
+  approved by
   `laptop.architect`, 2026-10-09T17:29:07Z:
   https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085920028, and for
   #2164 at 2026-10-09T17:31:46Z:
   https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085961760). This
-  changes "before its second `resolve`" of the ruling. A task gets mesh time from
+  keeps "before its second `resolve`" of the ruling, and replaces "before the loop" of
+  round 1. A task gets mesh time from
   `writer::Writer::now`, which gives `home::Shard::now` (HOME CLOCKS) and cannot fail,
   because mesh time stays once known. Lost: `Hub::now() -> Option<Stamp>`, because each
   caller holds a writer and would `expect` mesh time itself. Lost: a `hub::clock` export
