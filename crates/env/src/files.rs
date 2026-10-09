@@ -759,7 +759,7 @@ impl fmt::Display for Operation {
 /// removes files with the rules of the [`Files`] calls; [`Files`] sorts and checks
 /// what it returns. A write open, a remove, and a rename to a path first wait for
 /// each call on the path that a dropped future or descriptor of the driver left to
-/// run.
+/// run, and for each remove through a descriptor.
 ///
 /// ```
 /// fn wrap(driver: impl env::files::Driver + 'static) -> env::files::Files {
