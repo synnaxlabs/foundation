@@ -8,11 +8,15 @@
 
 #[path = "common/children.rs"]
 mod children;
+#[path = "common/sockets.rs"]
+#[expect(dead_code, reason = "this binary only binds and listens")]
+mod sockets;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use children::{BIND, LISTEN, held};
+use children::held;
+use sockets::{BIND, LISTEN};
 
 const OPENERS: usize = 4;
 const CHILDREN: usize = 500;

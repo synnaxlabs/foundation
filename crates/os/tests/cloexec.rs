@@ -8,13 +8,8 @@
 #![cfg(target_os = "linux")]
 #![expect(unsafe_code, reason = "a seccomp filter is an OS call")]
 
-use std::future::poll_fn;
-use std::io::IoSliceMut;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::num::NonZeroUsize;
-
-use env::net::tcp::{self, Listen, Options};
-use env::net::udp::{self, Meta, Transmit};
+#[path = "common/sockets.rs"]
+mod sockets;
 
 /// Makes the OS refuse each `fcntl` of this thread with `F_SETFD`, with `EPERM`.
 fn refuse_setfd() {
@@ -61,47 +56,6 @@ fn each_socket_opens_closed_on_exec_with_no_second_call() {
         .build()
         .expect("a current-thread runtime builds");
     refuse_setfd();
-    let local = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0);
-    let options = Options {
-        send_buffer_bytes: 1 << 16,
-        recv_buffer_bytes: 1 << 16,
-        unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
-        delayed: false,
-    };
     let net = os::net();
-    runtime.block_on(async {
-        let listen = Listen {
-            local,
-            backlog: 1,
-            options,
-        };
-        let mut listener = net.listen(&listen).expect("listen on loopback");
-        let connect = tcp::Config {
-            remote: listener.local(),
-            options,
-        };
-        let _client = net.connect(&connect).await.expect("the listener accepts");
-        let accepted = poll_fn(|cx| listener.poll_accept(cx)).await;
-        let _server = accepted.expect("a stream waits in the backlog");
-        let bind = udp::Config {
-            local,
-            send_buffer_bytes: 1 << 16,
-            recv_buffer_bytes: 1 << 16,
-        };
-        let (mut sender, mut receiver) = net.udp(&bind).expect("bind on loopback");
-        let transmit = Transmit {
-            destination: receiver.local(),
-            source: None,
-            ecn: None,
-            contents: b"x",
-            segment: None,
-        };
-        let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
-        sent.expect("the send");
-        let mut buffer = [0; 8];
-        let mut meta = [Meta::default()];
-        let mut buffers = [IoSliceMut::new(&mut buffer)];
-        let arrived = poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta));
-        assert_eq!(arrived.await, Ok(1));
-    });
+    let _sockets = runtime.block_on(sockets::open(&net));
 }
