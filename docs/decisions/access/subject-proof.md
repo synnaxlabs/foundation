@@ -24,10 +24,11 @@
   signed with another key or for another connection gives `Error::Signature`, and no
   connection check exists. `peer` is the node that carried the hello: this node when the
   program connected to it, else the node whose transport session forwarded it. A hello
-  is live while the latest mesh time is before `expires`, and `expires` may be at most
-  `proof::CAP` (15 minutes) past the latest mesh time. Lost: `access` decodes the
-  signed bytes of the hello itself (design B), because `access` then owns a decoder of
-  outside input and the hello's wire form, which HUB WIRE gives to `wire`; a free
+  is live while the latest mesh time is before `expires`, and the node holds it live
+  until the earlier of `expires` and `proof::CAP` (15 minutes) past the latest mesh time
+  at its admission (`Admitted::ends`). Lost: `access` decodes the signed bytes of the
+  hello itself (design B), because `access` then owns a decoder of outside input and the
+  hello's wire form, which HUB WIRE gives to `wire`; a free
   `verify` of any `&Hello`, which accepts a key that the program picked when a caller
   skips `admit`; and `Error::Connection`, which the signature makes needless. `admit`
   does not check `nonce`: the node that `via` names checks that it is the challenge
@@ -51,3 +52,14 @@
   second timer and a clock input to `hub` for a case that exposes nothing yet. Decided
   by `laptop.architect` at 2026-10-09T01:42:05Z
   (https://github.com/synnaxlabs/foundation/issues/2066#issuecomment-6072526453).
+  Supersedes "past the earliest mesh time" in the doc of `CAP` of
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237. Changed
+  by #2088: the node clamps the life of a hello at the cap, and refuses none. A renewal
+  answers a challenge 5 minutes old, so at a drop of the latest edge of more than 5
+  minutes the cap refused each honest renewal. Now the first renewal after a drop ends
+  the long life of the old hello. Lost: the end of the session at the drop; a cap from
+  the edge of the challenge (two edges); a fresh challenge before each renewal (a wire
+  message for the same result). Decided by `laptop.architect` at 2026-10-09T03:15:58Z
+  (https://github.com/synnaxlabs/foundation/pull/2088#issuecomment-6073528599).
+  Supersedes `Error::Capped` and `CAPPED` of
+  https://github.com/synnaxlabs/foundation/issues/2066#issuecomment-6072526453.
