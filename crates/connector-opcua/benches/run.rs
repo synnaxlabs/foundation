@@ -1,7 +1,8 @@
-//! The time of one run of the open62541 event loop of a client when 1, 100, or 10,000
-//! repeated timers of 1 ms are due, and the time to make and drop a client, its loop,
-//! and 100 timers, each C allocation of which goes through the global allocator. The
-//! client's own timer has an interval of 1 s, so it is due in at most one sample.
+//! The time of one run of the open62541 event loop of a client when 1, 100, 1,000,
+//! 4,000, or 10,000 repeated timers of 1 ms are due, and the time to make and drop a
+//! client, its loop, and 100 timers, each C allocation of which goes through the global
+//! allocator. The client's own timer has an interval of 1 s, so it is due in at most
+//! one sample.
 
 use connector_opcua::bench::Client;
 use divan::Bencher;
@@ -25,7 +26,7 @@ const CLIENTS: usize = 16;
 
 /// One input for each sample: a batch of inputs would move the clock before the first
 /// run, so the later runs of the batch would find no timer due.
-#[divan::bench(args = [1, 100, 10_000], sample_size = 1, sample_count = 1000)]
+#[divan::bench(args = [1, 100, 1_000, 4_000, 10_000], sample_size = 1, sample_count = 1000)]
 fn run(bencher: Bencher<'_, '_>, timers: usize) {
     let (mut sim, clock) = sim();
     let mut clients: Vec<_> = (0..CLIENTS)
