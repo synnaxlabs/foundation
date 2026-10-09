@@ -213,30 +213,37 @@ impl Hub {
         Writer::open(&self.0, config).await
     }
 
-    /// Opens a reader session on `channels`, which share one index. While the mesh
-    /// names no home for the index, it waits for one. At the home of another node,
-    /// each open reader holds one stream of the one session to it, so it also waits
-    /// while that home allows this node no more streams, until another reader there
-    /// drops. It gets each frame of the index, as a view of only `channels` and their
-    /// index. A complete reader gets each live frame written after the returned future
-    /// resolves, until it misses one ([`reader::Mode::Complete`]).
+    /// Opens a reader session on the channels that `config.select` matches, which
+    /// share one index. While the mesh names no home for the index, it waits for one.
+    /// At the home of another node, each open reader holds one stream of the one
+    /// session to it, so it also waits while that home allows this node no more
+    /// streams, until another reader there drops. It gets each frame of the index, as
+    /// a view of only its channels and their index. An unnamed complete reader gets
+    /// each live frame written after the returned future resolves, until it misses one
+    /// ([`reader::Mode::Complete`]). A named reader takes over the open session of its
+    /// subject and name, which ends with [`reader::Ended::Replaced`], and a named
+    /// complete one resumes as [`reader::Config::name`] says.
     ///
     /// # Errors
     ///
-    /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
-    /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
-    /// another index than the first. [`reader::Error::Empty`] for no name. Then
-    /// [`reader::Error::Mesh`] when the mesh stopped. At the home of another node:
-    /// [`reader::Error::Transport`] when the dial or the stream fails,
+    /// [`reader::Error::Empty`] when the selector matches no channel, and
+    /// [`reader::Error::ManyIndexes`] when the channels are on more than one index.
+    /// Then [`reader::Error::Mesh`] when the mesh stopped. A named reader:
+    /// [`reader::Error::Remote`] when the home is another node, and
+    /// [`reader::Error::Unsynced`] before the node has mesh time. At the home of
+    /// another node: [`reader::Error::Transport`] when the dial or the stream fails,
     /// [`reader::Error::Refused`] when the home refuses the session,
     /// [`reader::Error::Message`] for a reply that breaks the hub protocol, and
     /// [`reader::Error::Pool`] when the shard's pool has no block for the open.
+    ///
+    /// # Panics
+    ///
+    /// When `config.hold` is negative, or not zero for an unnamed or latest reader.
     pub async fn reader(
         &self,
-        channels: &[Name],
-        mode: reader::Mode,
+        config: reader::Config,
     ) -> Result<Reader, reader::Error> {
-        Reader::open(&self.0, channels, mode).await
+        Reader::open(&self.0, config).await
     }
 
     /// Sets the access rules that each later hello and request is checked against.
@@ -292,22 +299,43 @@ fn checked<'d>(
 #[derive(Debug)]
 struct Sessions<K>(hash::Map<K, Open>);
 
-/// The channels of an open session, and its removal.
+/// The channels of an open session, and its ending.
 #[derive(Debug)]
 struct Open {
     keys: Vec<Key>,
-    removal: Removal,
+    ending: Ending,
 }
 
-/// The first channel of a session that the hub removed, which the session reads at
-/// each call. It reads no map, so its check costs the same while other sessions end.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Removal(Rc<Cell<Option<Key>>>);
+/// Why the hub ended a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum End {
+    /// The hub removed this channel of the session, its first one removed.
+    Removed(Key),
+    /// A later open of the same named reader took over the session.
+    Replaced,
+}
 
-impl Removal {
-    /// The key of the removed channel, or `None` while each channel stays.
-    pub(crate) fn get(&self) -> Option<Key> {
+/// Why the hub ended a session, which the session reads at each call. It reads no map,
+/// so its check costs the same while other sessions end.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Ending(Rc<Cell<Option<End>>>);
+
+impl Ending {
+    /// Why the hub ended the session, or `None` while it is open.
+    pub(crate) fn get(&self) -> Option<End> {
         self.0.get()
+    }
+
+    /// The channel whose removal ended the session, or `None` while it is open.
+    ///
+    /// # Panics
+    ///
+    /// When a takeover ended it: only the session of a named reader has one.
+    pub(crate) fn removed(&self) -> Option<Key> {
+        self.get().map(|end| match end {
+            End::Removed(key) => key,
+            End::Replaced => panic!("invariant: only a named reader is taken over"),
+        })
     }
 }
 
@@ -319,15 +347,15 @@ impl<K> Default for Sessions<K> {
 
 impl<K: Copy + Ord + Hash> Sessions<K> {
     /// Opens the session `key` on `keys`, so that a removal of one of them ends it.
-    fn add(&mut self, key: K, keys: Box<[Key]>) -> Removal {
-        let removal = Removal::default();
+    fn add(&mut self, key: K, keys: Box<[Key]>) -> Ending {
+        let ending = Ending::default();
         let open = Open {
             keys: keys.into_vec(),
-            removal: removal.clone(),
+            ending: ending.clone(),
         };
         let added = self.0.insert(key, open);
         assert!(added.is_none(), "invariant: each key is added once");
-        removal
+        ending
     }
 
     /// The channels of the open session `key`, to add to.
@@ -352,20 +380,29 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
         self.0.remove(&key).is_some()
     }
 
-    /// Puts the first channel of `removed` in the removal of each session on one of
-    /// them. Returns their keys in order, to close.
+    /// Ends each session on a channel of `removed` with the first such channel.
+    /// Returns their keys in order, to close.
     fn end(&self, removed: &hash::Set<Key>) -> Vec<K> {
         let mut ended: Vec<K> = self
             .0
             .iter()
             .filter_map(|(&key, open)| {
                 let first = open.keys.iter().find(|key| removed.contains(key))?;
-                open.removal.0.set(Some(*first));
+                open.ending.0.set(Some(End::Removed(*first)));
                 Some(key)
             })
             .collect();
         ended.sort_unstable();
         ended
+    }
+}
+
+impl Sessions<::home::reader::Key> {
+    /// Makes the open reader session `key` not open, and ends it with
+    /// [`End::Replaced`].
+    fn replace(&mut self, key: ::home::reader::Key) {
+        let open = self.0.remove(&key).expect("invariant: the session is open");
+        open.ending.0.set(Some(End::Replaced));
     }
 }
 
@@ -408,14 +445,26 @@ impl State {
         }
     }
 
-    /// Closes the reader session `key` at the home, unless a removal closed it.
-    /// Returns its waker, when it waits for a frame.
+    /// Closes the reader session `key` at the home, unless a removal or a takeover
+    /// closed it. Returns its waker, when it waits for a frame.
     fn close_reader(&mut self, key: ::home::reader::Key) -> Option<Waker> {
         let waker = self.wakers.remove(&key);
         if self.readers.remove(key) {
             self.home.close_reader(key);
         }
         waker
+    }
+
+    /// Ends the session that `opened` took over, which the home closed, with
+    /// [`reader::Ended::Replaced`]. Returns the key of the new session.
+    fn take_over<K>(&mut self, opened: ::home::reader::Opened<K>) -> K {
+        if let Some(key) = opened.replaced {
+            self.readers.replace(key);
+            if let Some(waker) = self.wakers.remove(&key) {
+                waker.wake();
+            }
+        }
+        opened.key
     }
 
     /// A block of `len` bytes from the home's pool.
