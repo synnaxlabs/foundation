@@ -276,14 +276,17 @@ fn transport(setup: &Setup) -> TransportConfig {
     transport
 }
 
+/// `idle` as a [`Duration`].
+pub(super) fn idle(idle: Span) -> Duration {
+    let nanos = u64::try_from(idle.nanos()).ok().filter(|&nanos| nanos > 0);
+    Duration::from_nanos(nanos.expect("invariant: a `Setup` has a positive idle"))
+}
+
 /// `idle` in whole milliseconds, rounded up, so at least 1: QUIC counts
 /// milliseconds, and 0 turns the timeout off.
 fn idle_ms(idle: Span) -> u64 {
-    let nanos = u64::try_from(idle.nanos())
-        .ok()
-        .filter(|&nanos| nanos > 0)
-        .expect("invariant: a `Setup` has a positive idle");
-    nanos.div_ceil(1_000_000)
+    let ms = self::idle(idle).as_nanos().div_ceil(1_000_000);
+    u64::try_from(ms).expect("invariant: u64 nanoseconds in milliseconds fit")
 }
 
 /// The key for `label` that signs stateless resets or connection IDs. A node's

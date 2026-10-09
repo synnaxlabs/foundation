@@ -107,8 +107,8 @@ pub(crate) enum Event {
     /// [`Endpoint::accept`] has a stream for `key`.
     Incoming { key: connection::Key },
     /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
-    /// comes first when the peer's hello arrives. A peer whose hello has not arrived
-    /// `idle` after [`Event::Connected`] gets [`Event::Closed`] in its place.
+    /// comes first when the peer's hello arrives. When the peer's hello has not arrived
+    /// `idle` after [`Event::Connected`], the key gets [`Event::Closed`] in its place.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -137,10 +137,7 @@ impl Endpoint {
             pool: Rc::clone(&setup.pool),
             message_bytes_max: setup.message_bytes_max,
             window_bytes: setup.window_bytes,
-            idle: Duration::from_nanos(
-                u64::try_from(setup.idle.nanos())
-                    .expect("invariant: a `Setup` has a positive idle"),
-            ),
+            idle: settings::idle(setup.idle),
             connections: Vec::new(),
             budget_waits: 0,
             serial: 0,
@@ -173,9 +170,8 @@ impl Endpoint {
             .unwrap_or_else(|error| {
                 panic!("a dial fails only on its address: {error}")
             });
-        let idle = self.idle;
         let key = self.insert(handle, |key, streams| {
-            Connection::dialed(key, inner, peer, streams, idle)
+            Connection::dialed(key, inner, peer, streams)
         });
         self.drive(handle, now);
         key
@@ -248,21 +244,9 @@ impl Endpoint {
     pub(crate) fn timeout(&mut self, now: Monotonic) {
         let now = self.instant(now);
         for handle in (0..self.connections.len()).map(ConnectionHandle) {
-            let Some(connection) = &mut self.connections[handle.0] else {
-                continue;
-            };
-            if connection
-                .inner
-                .poll_timeout()
-                .is_some_and(|deadline| deadline <= now)
-            {
-                connection.inner.handle_timeout(now);
-                self.drive(handle, now);
-            }
             if let Some(connection) = &mut self.connections[handle.0]
-                && let Some(closed) = connection.hello_timeout(now)
+                && connection.timeout(now, &mut self.events)
             {
-                self.events.push_back(closed);
                 self.drive(handle, now);
             }
         }
@@ -709,7 +693,8 @@ impl Endpoint {
             entry.is_none(),
             "invariant: noq-proto reuses a drained handle"
         );
-        let streams = Streams::new(self.window_bytes, self.message_bytes_max);
+        let streams =
+            Streams::new(self.window_bytes, self.message_bytes_max, self.idle);
         *entry = Some(connection(key, streams));
         key
     }
@@ -742,9 +727,8 @@ impl Endpoint {
             Some(DatagramEvent::NewConnection(incoming)) => {
                 match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
-                        let idle = self.idle;
                         self.insert(handle, |key, streams| {
-                            Connection::accepted(key, inner, streams, idle)
+                            Connection::accepted(key, inner, streams)
                         });
                         self.drive(handle, now);
                         None

@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::slice;
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use block::Block;
 use bytes::Bytes;
@@ -135,6 +136,8 @@ pub(super) struct Streams {
     greeted: bool,
     /// Until the peer's hello arrives, no stream opens or is accepted.
     peer: hello::Peer,
+    /// How long after the handshake the peer's hello may take.
+    idle: Duration,
     /// Streams the peer opened whose first message has not started to arrive.
     arriving: Vec<Arriving>,
     /// Streams the peer opened that the caller has not accepted, by class byte,
@@ -1092,19 +1095,15 @@ impl Sending {
 }
 
 impl Streams {
-    /// Whether the peer's hello arrived.
-    pub(super) fn welcomed(&self) -> bool {
-        self.peer.hello().is_some()
-    }
-
     /// The messages that waited for room in the send budget.
     pub(super) fn budget_waits(&self) -> u64 {
         self.sending.budget.queued()
     }
 
     /// The streams of a connection that refuses a message over `bytes_max`, with a
-    /// window of `window_bytes`.
-    pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
+    /// window of `window_bytes`, whose peer's hello may take `idle` after the
+    /// handshake.
+    pub(super) fn new(window_bytes: usize, bytes_max: usize, idle: Duration) -> Self {
         Self {
             own: Hello {
                 window_bytes,
@@ -1112,6 +1111,7 @@ impl Streams {
             },
             greeted: false,
             peer: hello::Peer::new(),
+            idle,
             arriving: Vec::new(),
             incoming: Default::default(),
             halves: Map::default(),
@@ -1135,6 +1135,28 @@ impl Streams {
     pub(super) fn end(&self, error: Error) {
         let set = self.closed.set(error);
         assert!(set.is_ok(), "invariant: a connection closes once");
+    }
+
+    /// Starts the wait for the peer's hello at `now`, when the handshake ends.
+    pub(super) fn start(&mut self, now: Instant) {
+        self.peer.wait(now + self.idle);
+    }
+
+    /// When [`Streams::timeout`] must next run, if ever.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.peer.due()
+    }
+
+    /// Checks the wait for the peer's hello at `now`.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault`] when the hello is due by `now` and has not arrived.
+    pub(super) fn timeout(&self, now: Instant) -> Result<(), Fault> {
+        match self.peer.due() {
+            Some(due) if due <= now => Err(Fault("a peer with no hello".to_owned())),
+            Some(_) | None => Ok(()),
+        }
     }
 
     /// Sends this side's hello on `inner`, on this side's first one-way stream, ahead

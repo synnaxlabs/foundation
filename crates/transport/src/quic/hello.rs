@@ -1,6 +1,8 @@
 //! The hello: the limits a node sends on its first one-way stream, which its peer
 //! obeys. It is (id, value) pairs, both QUIC varints, ids strictly increasing.
 
+use std::time::Instant;
+
 use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
 use super::connection::Fault;
@@ -109,6 +111,8 @@ pub(super) enum Peer {
         stream: Option<StreamId>,
         /// The bytes of the hello that arrived.
         bytes: Vec<u8>,
+        /// When the hello is due, from the end of the handshake on.
+        due: Option<Instant>,
     },
     Arrived(Hello),
 }
@@ -119,6 +123,27 @@ impl Peer {
         Self::Waiting {
             stream: None,
             bytes: Vec::new(),
+            due: None,
+        }
+    }
+
+    /// Starts the wait for the hello, which is due at `until`.
+    ///
+    /// # Panics
+    ///
+    /// After the hello arrived.
+    pub(super) fn wait(&mut self, until: Instant) {
+        let Self::Waiting { due, .. } = self else {
+            panic!("invariant: the handshake ends before the hello arrives");
+        };
+        *due = Some(until);
+    }
+
+    /// When the hello is due, while it has not arrived.
+    pub(super) fn due(&self) -> Option<Instant> {
+        match *self {
+            Self::Waiting { due, .. } => due,
+            Self::Arrived(_) => None,
         }
     }
 
@@ -151,7 +176,7 @@ impl Peer {
         inner: &mut noq_proto::Connection,
         event: &StreamEvent,
     ) -> Result<Option<Hello>, Fault> {
-        let Self::Waiting { stream, bytes } = self else {
+        let Self::Waiting { stream, bytes, .. } = self else {
             panic!("invariant: the hello is read until it arrives");
         };
         let id = match (*stream, event) {

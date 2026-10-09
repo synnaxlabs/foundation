@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::mem;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use block::Pool;
 use bytes::Bytes;
@@ -47,10 +47,6 @@ pub(super) struct Connection {
     /// The number of the first packet sent after the last ping, until the peer
     /// acknowledges it or a later one.
     pinged: Option<u64>,
-    /// How long after `Connected` the peer's hello may take.
-    idle: Duration,
-    /// When the peer's hello is due, from `Connected` on.
-    hello_by: Option<Instant>,
     state: State,
 }
 
@@ -66,27 +62,23 @@ enum State {
 }
 
 impl Connection {
-    /// A dial that expects `expected`, whose peer breaks the protocol when its hello
-    /// has not arrived `idle` after `Connected`.
+    /// A dial that expects `expected`.
     pub(super) fn dialed(
         key: Key,
         inner: noq_proto::Connection,
         expected: PublicKey,
         streams: Streams,
-        idle: Duration,
     ) -> Self {
-        Self::new(key, inner, State::Dialing { expected }, streams, idle)
+        Self::new(key, inner, State::Dialing { expected }, streams)
     }
 
-    /// A connection a peer dialed, which breaks the protocol when its hello has not
-    /// arrived `idle` after `Connected`.
+    /// A connection a peer dialed.
     pub(super) fn accepted(
         key: Key,
         inner: noq_proto::Connection,
         streams: Streams,
-        idle: Duration,
     ) -> Self {
-        Self::new(key, inner, State::Accepting, streams, idle)
+        Self::new(key, inner, State::Accepting, streams)
     }
 
     fn new(
@@ -94,7 +86,6 @@ impl Connection {
         inner: noq_proto::Connection,
         state: State,
         streams: Streams,
-        idle: Duration,
     ) -> Self {
         Self {
             key,
@@ -103,36 +94,40 @@ impl Connection {
             streams,
             datagrams: Received::default(),
             pinged: None,
-            idle,
-            hello_by: None,
             state,
         }
     }
 
-    /// When [`Endpoint::timeout`](super::Endpoint::timeout) must next run for it, if
-    /// ever.
+    /// When [`Connection::timeout`] must next run, if ever.
     pub(super) fn deadline(&self) -> Option<Instant> {
-        self.inner
-            .poll_timeout()
-            .into_iter()
-            .chain(self.hello_due())
-            .min()
+        // An ended connection keeps the wait for a hello that never came.
+        let streams = self.streams.deadline().filter(|_| self.connected());
+        self.inner.poll_timeout().into_iter().chain(streams).min()
     }
 
-    /// When the peer's hello is due, while the connection waits for it.
-    fn hello_due(&self) -> Option<Instant> {
-        self.hello_by
-            .filter(|_| self.connected() && !self.streams.welcomed())
-    }
-
-    /// Ends the connection as a fault of the peer's when its hello is due by `now`,
-    /// and gives its [`Event::Closed`].
-    pub(super) fn hello_timeout(&mut self, now: Instant) -> Option<Event> {
-        let due = self.hello_due()?;
-        if due > now {
-            return None;
+    /// Runs a timer due at `now`, and queues in `events` the [`Event::Closed`] of a
+    /// fault that it finds. Gives whether one ran, so that the caller drives the
+    /// connection.
+    pub(super) fn timeout(
+        &mut self,
+        now: Instant,
+        events: &mut VecDeque<Event>,
+    ) -> bool {
+        // noq-proto's run first, so a peer that is silent ends with `TimedOut`.
+        if self.inner.poll_timeout().is_some_and(|due| due <= now) {
+            self.inner.handle_timeout(now);
+            return true;
         }
-        self.fault(now, "a peer with no hello".to_owned())
+        if !self.connected() {
+            return false;
+        }
+        match self.streams.timeout(now) {
+            Ok(()) => false,
+            Err(Fault(reason)) => {
+                events.extend(self.fault(now, reason));
+                true
+            }
+        }
     }
 
     /// Moves the connection's events to `endpoint` and to `events` at `now`, and
@@ -196,7 +191,7 @@ impl Connection {
                     return;
                 }
                 self.state = State::Open;
-                self.hello_by = Some(now + self.idle);
+                self.streams.start(now);
                 let peer = self.peer();
                 events.push_back(Event::Connected { key, peer });
             }
