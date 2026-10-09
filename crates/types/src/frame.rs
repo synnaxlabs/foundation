@@ -877,7 +877,7 @@ mod tests {
     pub(super) fn interner() -> Interner {
         let mut interner = Interner::new();
         for n in 0..1000 {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
         }
         interner
     }
@@ -2109,7 +2109,7 @@ mod tests {
         }]);
         let mut interner = Interner::new();
         for &n in &remote.order {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
         }
         let held = data(&|j| remote.held[j]);
         let reader = interner.intern(&[Group {

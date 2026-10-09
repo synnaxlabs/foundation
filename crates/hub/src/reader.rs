@@ -153,8 +153,8 @@ impl Reader {
             let mut borrowed = state.borrow_mut();
             borrowed.carry(index);
             let assigned = borrowed.interner.slots();
-            let slots: Vec<_> = keys.iter().map(|&key| assigned.assign(key)).collect();
-            (slots, assigned.assign(index))
+            let slots: Vec<_> = keys.iter().map(|&key| assigned.index(key)).collect();
+            (slots, assigned.index(index))
         };
         // A frame without the reader's channels still shows that time moved.
         slots.push(slot);

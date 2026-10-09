@@ -100,7 +100,7 @@ impl Slots {
     /// # Panics
     ///
     /// If the table already assigned 2^32 slots.
-    pub fn assign(&mut self, key: Key) -> Slot {
+    pub fn index(&mut self, key: Key) -> Slot {
         *self.assigned.entry(key).or_insert_with(|| {
             let slot =
                 u32::try_from(self.given).expect("a node assigns at most 2^32 slots");
@@ -109,7 +109,7 @@ impl Slots {
         })
     }
 
-    /// Retires the slot of `key`: the next [`assign`](Self::assign) of `key` gives a
+    /// Retires the slot of `key`: the next [`index`](Self::index) of `key` gives a
     /// slot that no key had.
     pub fn retire(&mut self, key: Key) {
         self.assigned.remove(&key);
@@ -245,25 +245,25 @@ mod tests {
         let mut slots = Slots::new();
         let a = Key::from_u128(7);
         let b = Key::from_u128(3);
-        assert_eq!(slots.assign(a), Slot::new(0));
-        assert_eq!(slots.assign(b), Slot::new(1));
-        assert_eq!(slots.assign(a), Slot::new(0));
-        assert_eq!(slots.assign(Key::from_u128(9)), Slot::new(2));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.index(b), Slot::new(1));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.index(Key::from_u128(9)), Slot::new(2));
     }
 
     #[test]
     fn assigns_a_new_slot_to_a_retired_key() {
         let mut slots = Slots::new();
         let (a, b, c) = (Key::from_u128(7), Key::from_u128(3), Key::from_u128(9));
-        assert_eq!(slots.assign(a), Slot::new(0));
-        assert_eq!(slots.assign(b), Slot::new(1));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.index(b), Slot::new(1));
         slots.retire(a);
-        assert_eq!(slots.assign(a), Slot::new(2));
-        assert_eq!(slots.assign(c), Slot::new(3));
-        assert_eq!(slots.assign(b), Slot::new(1));
+        assert_eq!(slots.index(a), Slot::new(2));
+        assert_eq!(slots.index(c), Slot::new(3));
+        assert_eq!(slots.index(b), Slot::new(1));
         let unassigned = Key::from_u128(5);
         slots.retire(unassigned);
-        assert_eq!(slots.assign(unassigned), Slot::new(4));
+        assert_eq!(slots.index(unassigned), Slot::new(4));
     }
 
     #[test]
@@ -271,6 +271,6 @@ mod tests {
     fn panics_at_the_assign_after_2_32_slots() {
         let mut slots = Slots::new();
         slots.given = 1 << 32;
-        slots.assign(Key::from_u128(7));
+        slots.index(Key::from_u128(7));
     }
 }

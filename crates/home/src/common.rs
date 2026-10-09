@@ -130,7 +130,7 @@ pub(crate) fn key(slot: Slot) -> channel::Key {
 pub(crate) fn create_interner() -> Interner {
     let mut interner = Interner::new();
     for n in 0..64 {
-        interner.slots().assign(key(Slot::new(n)));
+        interner.slots().index(key(Slot::new(n)));
     }
     interner
 }

@@ -572,7 +572,7 @@ mod buffer {
             let index = Key::from_u128(key);
             let entry = Entry {
                 index,
-                slot: slots.assign(index),
+                slot: slots.index(index),
                 path: Stream::Live,
                 first: 0,
                 len: 1,
@@ -1559,8 +1559,8 @@ mod home {
             let mut home = opened.expect("the buffer opens");
             let mut interner = next.await.expect("the open gives the interner");
             let (index, values) = (Key::from_u128(1), Key::from_u128(2));
-            let slot = interner.slots().assign(index);
-            interner.slots().assign(values);
+            let slot = interner.slots().index(index);
+            interner.slots().index(values);
             let set = interner.intern(&[Group {
                 index,
                 data: &[(values, Type::Scalar(Scalar::I64))],

@@ -333,7 +333,7 @@ async fn open(
         borrowed.carry(keys[at]);
         let interner = &mut borrowed.interner;
         keys.iter()
-            .map(|&key| interner.slots().assign(key))
+            .map(|&key| interner.slots().index(key))
             .collect()
     };
     let index = slots[at];
@@ -636,7 +636,7 @@ mod tests {
     fn gives_the_path_range_and_series_count_of_the_frame_in_the_head() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let index = interner.slots().assign(key(1));
+        let index = interner.slots().index(key(1));
         let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
         let head = head(&frame, &set, index, 2);
         assert_eq!(head.path, Path::Live);
@@ -649,7 +649,7 @@ mod tests {
     fn gives_the_range_of_the_index_group_of_the_session() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let [_, _, index, _] = [1, 2, 4, 5].map(|k| interner.slots().assign(key(k)));
+        let [_, _, index, _] = [1, 2, 4, 5].map(|k| interner.slots().index(key(k)));
         let set = interner.intern(&[
             Group {
                 index: key(1),

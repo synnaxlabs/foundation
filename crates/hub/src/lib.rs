@@ -342,7 +342,7 @@ impl State {
         let mut shed: Vec<Key> = before.difference(&after).copied().collect();
         shed.sort_unstable();
         for key in shed {
-            let slot = self.interner.slots().assign(key);
+            let slot = self.interner.slots().index(key);
             self.home.shed(slot);
         }
         let retired: Vec<Key> = self
@@ -408,7 +408,7 @@ impl State {
 
     /// Carries `index` at the home. A later carry does nothing.
     fn carry(&mut self, index: types::channel::Key) {
-        let slot = self.interner.slots().assign(index);
+        let slot = self.interner.slots().index(index);
         self.home.carry(slot);
     }
 

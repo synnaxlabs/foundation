@@ -49,10 +49,10 @@ use crate::{handoff, order, split, stored};
 /// #     let (stamps, values) = (Key::from_u128(1), Key::from_u128(2));
 /// #     let mut slots = Slots::new();
 /// #     let mut interner = Interner::new();
-/// #     let index = slots.assign(stamps);
-/// #     slots.assign(values);
-/// #     interner.slots().assign(stamps);
-/// #     interner.slots().assign(values);
+/// #     let index = slots.index(stamps);
+/// #     slots.index(values);
+/// #     interner.slots().index(stamps);
+/// #     interner.slots().index(values);
 /// #     let set = interner.intern(&[Group {
 /// #         index: stamps,
 /// #         data: &[(values, Type::Scalar(Scalar::I64))],
@@ -1064,7 +1064,7 @@ mod tests {
             };
             let mut assigned = Slots::new();
             for n in 0..slots {
-                assigned.assign(key(Slot::new(n)));
+                assigned.index(key(Slot::new(n)));
             }
             Buffer::open(config, &mut assigned).await.expect("opens")
         }

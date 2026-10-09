@@ -138,11 +138,11 @@ impl Interner {
         let mut channels = Vec::with_capacity(len.strict_add(groups.len()));
         let mut indexes = Vec::with_capacity(groups.len());
         for group in groups {
-            let index = self.slots.assign(group.index);
+            let index = self.slots.index(group.index);
             indexes.push(index);
             channels.push((index, group.index, stamp, index));
             for &(key, data_type) in group.data {
-                channels.push((self.slots.assign(key), key, data_type, index));
+                channels.push((self.slots.index(key), key, data_type, index));
             }
         }
         channels.sort_unstable_by_key(|&(slot, ..)| slot);
@@ -236,7 +236,7 @@ mod tests {
     fn interner(len: u32) -> Interner {
         let mut interner = Interner::new();
         for n in 0..len {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
         }
         interner
     }
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn keeps_a_slot_assigned_before_the_key_set() {
         let mut interner = Interner::new();
-        let early = interner.slots().assign(key(7));
+        let early = interner.slots().index(key(7));
         let set = interner.intern(&[Group {
             index: key(3),
             data: &[(key(7), F64)],
@@ -446,7 +446,7 @@ mod tests {
         };
         assert_eq!(early, slot(0));
         assert_eq!(set.entries(), [known(0, 7, F64), known(1, 3, STAMP)]);
-        assert_eq!(interner.slots().assign(key(3)), slot(1));
+        assert_eq!(interner.slots().index(key(3)), slot(1));
     }
 
     #[test]
@@ -557,20 +557,20 @@ mod tests {
         let entries = set.entries();
         prop_assert!(entries.is_sorted_by(|a, b| a.slot < b.slot));
         for entry in entries {
-            prop_assert_eq!(slots.assign(entry.key), entry.slot);
+            prop_assert_eq!(slots.index(entry.key), entry.slot);
         }
         let total: usize = groups.iter().map(|(_, data)| 1 + data.len()).sum();
         prop_assert_eq!(entries.len(), total);
         prop_assert_eq!(set.groups().len(), groups.len());
         for (index, data) in groups {
-            let at = set.find(slots.assign(*index)).unwrap();
+            let at = set.find(slots.index(*index)).unwrap();
             let group = entries[at].group;
             let numbered = set.groups().iter().position(|&position| position == at);
             prop_assert_eq!(entries[at].data_type, STAMP);
             prop_assert_eq!(set.index(at), at);
             prop_assert_eq!(numbered.and_then(|g| u32::try_from(g).ok()), Some(group));
             for (key, kind) in data {
-                let at_data = set.find(slots.assign(*key)).unwrap();
+                let at_data = set.find(slots.index(*key)).unwrap();
                 prop_assert_eq!(entries[at_data].data_type, *kind);
                 prop_assert_eq!(entries[at_data].group, group);
                 prop_assert_eq!(set.index(at_data), at);
