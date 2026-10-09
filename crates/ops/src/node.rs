@@ -76,9 +76,7 @@ impl Node {
             &self.kinds,
         )
         .map_err(|e| e.json())?;
-        let output = serde_json::to_value(output)
-            .unwrap_or_else(|_| unreachable!("invariant: an output is JSON"));
-        Ok((plan.encode(), output))
+        Ok((plan.encode(), output.json()))
     }
 
     /// Applies the plan file `bytes`, read from `path`, and gives the JSON output that
@@ -88,11 +86,10 @@ impl Node {
     ///
     /// The JSON error that `apply --json` writes.
     pub async fn apply(&self, path: &Path, bytes: &[u8]) -> Result<Value, Value> {
-        let applied = apply::apply(path, bytes, &self.mesh, &self.key)
+        apply::apply(path, bytes, &self.mesh, &self.key)
             .await
-            .map_err(|e| e.json())?;
-        Ok(serde_json::to_value(applied)
-            .unwrap_or_else(|_| unreachable!("invariant: an apply is JSON")))
+            .map(|applied| applied.json())
+            .map_err(|e| e.json())
     }
 }
 

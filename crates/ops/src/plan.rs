@@ -7,6 +7,7 @@ use document::Source;
 use document::diagnostic::Diagnostic;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use spec::definition::{Definition, Kind};
 use types::name::Name;
 
@@ -82,6 +83,11 @@ pub(crate) struct Output {
 }
 
 impl Output {
+    /// The output as JSON.
+    pub(crate) fn json(&self) -> Value {
+        serde_json::to_value(self).expect("invariant: an output is plain JSON data")
+    }
+
     /// One line for each change, with a `key` line under it for each fingerprint, then
     /// the counts.
     #[cfg_attr(
