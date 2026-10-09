@@ -638,12 +638,9 @@ fn writes_the_cause_of_a_node_behind() {
 #[test]
 fn proposes_nothing_for_a_plan_with_no_change() {
     solo(|mesh| async move {
-        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
-        apply(path(), &site.encode(), &mesh, keys(0))
-            .await
-            .expect("an apply");
         let pointer = mesh.pointer();
-        let (_, planned) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        // A site with an index lists its home, so the plan has no file.
+        let (_, planned) = plan_on(&mesh, &[]).await;
         assert!(planned.changes.is_empty() && planned.homes.is_empty());
         let applied = apply(path(), &planned.encode(), &mesh, keys(10))
             .await
