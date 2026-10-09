@@ -46,7 +46,7 @@ case "$*" in
 *)
     mkdir -p "$T/home/.cargo"
     [[ -e $T/home/.cargo/bin ]] || ln -s "$REMOTE" "$T/home/.cargo/bin"
-    # Like `sshd`, it passes no local variable but the switches of a case.
+    # Like `sshd`, it passes only `T` and the switches of a case.
     cd "$T/home" && env -i T="$T" BIG="${BIG:-}" EDGE="${EDGE:-}" LONG="${LONG:-}" \
         FAIL_RUN="${FAIL_RUN:-}" HOME="$T/home" PATH="$REMOTE:/usr/bin:/bin" \
         bash -c "$*" ;;
