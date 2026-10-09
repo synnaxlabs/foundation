@@ -266,12 +266,15 @@
   the wait, and the wait never comes between a home check and the carry. A pass of the
   open that waited for a home checks each home again, because a home can move while the
   open waits for another (#2164) (PR #2161, rounds 1 and 2, approved by
-  `laptop.architect`:
-  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085920028). A task
-  gets mesh time from `writer::Writer::now`, which gives `home::Shard::now` (HOME
-  CLOCKS) and cannot fail, because mesh time stays once known. Lost: `Hub::now() ->
-  Option<Stamp>`, because each caller holds a writer and would `expect` mesh time
-  itself. Lost: a `hub::clock` export of `clock::Reader`, because each task would
-  compute the midpoint again, and a change of the home's rule would make its stamps
-  `Ahead`. Connector time sync adds what it needs with its own caller. Lost: a writer
-  that stamps the frame, because only the caller knows when it read each sample.
+  `laptop.architect`, 2026-10-09T17:29:07Z:
+  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085920028, and for
+  #2164 at 2026-10-09T17:31:46Z:
+  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085961760). This
+  changes "before its second `resolve`" of the ruling. A task gets mesh time from
+  `writer::Writer::now`, which gives `home::Shard::now` (HOME CLOCKS) and cannot fail,
+  because mesh time stays once known. Lost: `Hub::now() -> Option<Stamp>`, because each
+  caller holds a writer and would `expect` mesh time itself. Lost: a `hub::clock` export
+  of `clock::Reader`, because each task would compute the midpoint again, and a change
+  of the home's rule would make its stamps `Ahead`. Connector time sync adds what it
+  needs with its own caller. Lost: a writer that stamps the frame, because only the
+  caller knows when it read each sample.
