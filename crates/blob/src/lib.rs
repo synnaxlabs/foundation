@@ -985,12 +985,8 @@ mod tests {
             }
         }
 
-        // Known bug, https://github.com/synnaxlabs/foundation/issues/1524: a store
-        // dropped with a dropped put's remove in flight loses the remove, and it
-        // unlinks the file of the next store's put after that put returned. The fix
-        // is in `env`: a write open waits for the calls in flight on the path.
         #[test]
-        fn after_a_store_dropped_with_a_remove_in_flight_loses_the_chunk() {
+        fn after_a_store_dropped_with_a_remove_in_flight_keeps_the_chunk() {
             let (mut sim, node) = create_default_node(27104);
             sim.run_on(&node, |node, _| async move {
                 let (digest, block) = chunk(7, 3000);
@@ -1008,17 +1004,16 @@ mod tests {
                 let store = open(&node).await.unwrap();
                 store.put(digest, &block).await.unwrap();
                 node.clock().sleep(Span::SECOND).await;
-                let left: Vec<PathBuf> = Vec::new();
-                assert_eq!(node.files().list(Path::new(DIR)).await.unwrap(), left);
+                let names = node.files().list(Path::new(DIR)).await.unwrap();
+                assert_eq!(names, vec![PathBuf::from(digest.to_string())]);
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
             })
             .unwrap();
         }
 
-        // Known bug, https://github.com/synnaxlabs/foundation/issues/1524: a store
-        // dropped with a dropped put's write in flight loses the close of its file,
-        // and the next store's put of the digest finds the file busy.
         #[test]
-        fn after_a_store_dropped_with_a_write_in_flight_is_busy() {
+        fn after_a_store_dropped_with_a_write_in_flight_puts_the_chunk() {
             let (mut sim, node) = create_default_node(3);
             sim.run_on(&node, |node, _| async move {
                 let (digest, block) = chunk(7, 3000);
@@ -1031,11 +1026,9 @@ mod tests {
                 }
                 drop(store);
                 let store = open(&node).await.unwrap();
-                let error = store.put(digest, &block).await.unwrap_err();
-                assert_eq!(
-                    error,
-                    Error::Files(files::Error::Busy { path: path(digest) })
-                );
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
             })
             .unwrap();
         }
