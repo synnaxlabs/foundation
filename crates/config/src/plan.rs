@@ -306,10 +306,8 @@ struct Model<'a> {
     indexes: Vec<&'a Name>,
     /// The index of each data channel whose index is a channel, by name.
     index_of: BTreeMap<&'a Name, &'a Name>,
-    /// Each connector and its node, in name order.
-    connectors: Vec<(&'a Name, &'a Name)>,
-    /// Each connector that a kind checked, in name order.
-    writers: Vec<Writer<'a>>,
+    /// Each connector, in name order.
+    connectors: Vec<Connector<'a>>,
     /// Each node that a placement names.
     nodes: Vec<(&'a Name, Option<Span>)>,
     /// The span of the label of each definition.
@@ -325,7 +323,6 @@ impl<'a> Model<'a> {
             indexes: Vec::new(),
             index_of: BTreeMap::new(),
             connectors: Vec::new(),
-            writers: Vec::new(),
             nodes: Vec::new(),
             labels: BTreeMap::new(),
             homes: BTreeMap::new(),
@@ -394,8 +391,8 @@ impl<'a> Model<'a> {
                 self.nodes.extend(nodes);
             }
             definition::Definition::Connector(connector) => {
-                self.connectors.push((name, connector.node()));
-                self.writers.push(Writer {
+                self.connectors.push(Connector {
+                    name,
                     node: connector.node(),
                     at: block.and_then(|block| span(block, "node")),
                     writes: writes
@@ -431,7 +428,9 @@ impl<'a> Model<'a> {
 }
 
 /// A connector, as its kind checks its config.
-struct Writer<'a> {
+struct Connector<'a> {
+    /// Its tree key.
+    name: &'a Name,
     /// The node that runs it.
     node: &'a Name,
     /// Where the block names the node.
@@ -530,7 +529,7 @@ fn homes(indexes: BTreeMap<&Name, Index<'_>>) -> BTreeMap<Name, Name> {
 }
 
 /// A connector's key and node, and where [`place`] puts it.
-type Connector<'f> = (&'f Name, &'f Name, Result<Placed<'f>, Tie>);
+type Located<'f> = (&'f Name, &'f Name, Result<Placed<'f>, Tie>);
 
 /// An index, the node of its first writer, where [`place`] puts it, and its nearest
 /// connector.
@@ -538,7 +537,7 @@ type Nearest<'f, 'c> = (
     &'f Name,
     Option<&'f Name>,
     &'f Result<Placed<'f>, Tie>,
-    &'c Connector<'f>,
+    &'c Located<'f>,
 );
 
 /// Places each connector, with its `node` as the writer. Reports
@@ -555,7 +554,8 @@ fn connectors<'f>(
     let connectors: Vec<_> = model
         .connectors
         .iter()
-        .map(|&(name, node)| {
+        .map(|connector| {
+            let Connector { name, node, .. } = *connector;
             let placed = place(name, placements.iter().copied(), Some(node));
             (name, node, placed)
         })
@@ -599,7 +599,7 @@ fn connectors<'f>(
 /// the nearest connector of each index. The fix names each winner, the connector's
 /// first.
 fn moves<'f, 'c>(
-    connectors: &'c [Connector<'f>],
+    connectors: &'c [Located<'f>],
     nearest: &[Nearest<'f, 'c>],
     placements: &[(&'f Name, &'f Policy)],
 ) -> BTreeMap<&'c Name, Fix<'f>> {
@@ -839,7 +839,7 @@ fn writer<'f>(
     index: &Name,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<&'f Name> {
-    let mut writers = model.writers.iter().filter(|writer| {
+    let mut writers = model.connectors.iter().filter(|writer| {
         writer.writes.iter().any(|name| {
             name == index || model.index_of.get(name).copied() == Some(index)
         })
@@ -867,7 +867,10 @@ fn unknown(
     members: &BTreeSet<Name>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let writers = model.writers.iter().map(|writer| (writer.node, writer.at));
+    let writers = model
+        .connectors
+        .iter()
+        .map(|writer| (writer.node, writer.at));
     let placed = model.nodes.iter().copied();
     for (node, at) in writers.chain(placed) {
         if members.contains(node) {
