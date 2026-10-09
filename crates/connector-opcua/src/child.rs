@@ -1,6 +1,6 @@
 //! Runs a test of this binary again in a child process, with the C flags it picks.
 
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// The variable that marks a child process.
 const MARK: &str = "CONNECTOR_OPCUA_CHILD";
@@ -19,6 +19,20 @@ pub(crate) fn running() -> bool {
 /// gets only `PATH` and, as `CC`, the compiler that `cc` picks here without its flags,
 /// so `cflags` is the only C flags that `cc` reads there.
 pub(crate) fn run(name: &str, cflags: Option<&str>) {
+    let output = output(name, cflags.map(|cflags| ("CFLAGS", cflags)));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{name} with CFLAGS={cflags:?}: {stdout}"
+    );
+}
+
+/// Runs the test `name` in a child process, and gives its output. The child gets only
+/// `PATH`, `envs`, and, as `CC`, the compiler that `cc` picks here without its flags.
+pub(crate) fn output<'a>(
+    name: &str,
+    envs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Output {
     let target = env!("CONNECTOR_OPCUA_TARGET");
     let compiler = cc::Build::new()
         .target(target)
@@ -38,14 +52,7 @@ pub(crate) fn run(name: &str, cflags: Option<&str>) {
         .env_clear()
         .env("PATH", path)
         .env("CC", compiler.path())
-        .env(MARK, "1");
-    if let Some(cflags) = cflags {
-        child.env("CFLAGS", cflags);
-    }
-    let output = child.output().unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "{name} with CFLAGS={cflags:?}: {stdout}"
-    );
+        .env(MARK, "1")
+        .envs(envs);
+    child.output().unwrap()
 }
