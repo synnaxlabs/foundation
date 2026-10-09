@@ -15,7 +15,6 @@ use hub::reader::{self, Ended, Mode};
 use spec::data_type::DataType;
 use transport::stream::{Receiver, Sender};
 use transport::{Address, Code, Session, Transport};
-use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{self, Path, Range};
 use types::time::Span;
@@ -26,7 +25,7 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 use super::region::{OTHER, TIME};
 use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
 use super::{
-    AREA, BODY_MAX, I64, POOL, Test, definition, fill, name, samples, write,
+    AREA, BODY_MAX, I64, POOL, Test, VALUE, definition, fill, name, samples, write,
     write_series, write_wide,
 };
 
@@ -1565,9 +1564,11 @@ fn a_reader_whose_frame_is_larger_than_each_block_of_its_pool_stops_the_stream_w
                 panic!("not a frame too large for the pool: {ended:?}");
             };
             let mut interner = Interner::new();
-            let data = [(channel::Key::from_u128(2), I64)];
-            let index = channel::Key::from_u128(1);
-            let set = interner.intern(&[Group { index, data: &data }]);
+            let data = [(VALUE, I64)];
+            let set = interner.intern(&[Group {
+                index: TIME,
+                data: &data,
+            }]);
             let ends = [(0, 8), (1, usize::try_from(BODY).expect("a usize"))];
             let layout = frame::Layout::from_ends(&set, &ends).expect("a layout");
             assert_eq!(requested, layout.block_len());

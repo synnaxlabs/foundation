@@ -73,6 +73,8 @@ const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (4, "value-b", I64, 3),
     (5, "value-c", I64, 1),
 ];
+/// The key of `value` in [`CHANNELS`].
+const VALUE: channel::Key = channel::Key::from_u128(2);
 
 /// What one test gets: a hub on one shard, with [`CHANNELS`] defined.
 struct Test {
