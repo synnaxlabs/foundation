@@ -93,6 +93,6 @@
   of a later stage can quote a string of a definition, so no later stage runs on a key.
   The problems of the second stage each read one definition or one name, and none needs
   another to pass. The plan rules read the kind of each connector and each name, so an
-  unknown kind or a duplicate name gives false problems there. Lost: one stage with all problems. The stages: decided by
-  `laptop.architect-2`, 2026-10-09T01:57:07Z
+  unknown kind or a duplicate name gives false problems there. Lost: one stage with all
+  problems. The stages: decided by `laptop.architect-2`, 2026-10-09T01:57:07Z
   (https://github.com/synnaxlabs/foundation/pull/2067#issuecomment-6072680913).
