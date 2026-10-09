@@ -28,6 +28,11 @@
   how a test outside the copy checks each changed line, for the approval of the
   architect of `connector-opcua` (#435; `laptop.architect-2`, 2026-10-08T11:24:06Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6058789517).
+  #2106 did so for `arch/common/timer.c` of open62541: a hand mutant of each changed
+  line fails a test or the build, except the release form of a `UA_assert` line,
+  which builds to the same code with `UA_DEBUG` off (approved by
+  `laptop.architect-2`, 2026-10-09,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074512538).
   A change of a file that the copy command of a C copy generates (the thread-local
   block of the open62541 `config.h`) is made again after each run of that command, as
   a change of a release file is, and a test fails when it is lost (`laptop.architect-2`,
